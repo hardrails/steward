@@ -14,12 +14,13 @@ import (
 )
 
 type deploymentApplyRequest struct {
-	Generation           uint64 `json:"generation"`
-	ExpectedRevision     uint64 `json:"expected_revision,omitempty"`
-	AgentName            string `json:"agent_name"`
-	BundleDigest         string `json:"bundle_digest"`
-	CapsuleDSSEBase64    string `json:"capsule_dsse_base64"`
-	DelegationDSSEBase64 string `json:"delegation_dsse_base64"`
+	Generation           uint64                                   `json:"generation"`
+	ExpectedRevision     uint64                                   `json:"expected_revision,omitempty"`
+	AgentName            string                                   `json:"agent_name"`
+	BundleDigest         string                                   `json:"bundle_digest"`
+	CapsuleDSSEBase64    string                                   `json:"capsule_dsse_base64"`
+	DelegationDSSEBase64 string                                   `json:"delegation_dsse_base64"`
+	DisruptionBudget     *controlstore.DeploymentDisruptionBudget `json:"disruption_budget,omitempty"`
 }
 
 type deploymentDeleteRequest struct {
@@ -27,24 +28,25 @@ type deploymentDeleteRequest struct {
 }
 
 type deploymentResponse struct {
-	TenantID            string                              `json:"tenant_id"`
-	DeploymentID        string                              `json:"deployment_id"`
-	Generation          uint64                              `json:"generation"`
-	Revision            uint64                              `json:"revision"`
-	AgentName           string                              `json:"agent_name"`
-	BundleDigest        string                              `json:"bundle_digest"`
-	CapsuleDigest       string                              `json:"capsule_digest"`
-	DelegationDigest    string                              `json:"delegation_digest"`
-	DelegationID        string                              `json:"delegation_id"`
-	ControllerKeyID     string                              `json:"controller_key_id"`
-	ClaimGeneration     uint64                              `json:"claim_generation"`
-	AllowedNodeIDs      []string                            `json:"allowed_node_ids"`
-	DelegationExpiresAt string                              `json:"delegation_expires_at"`
-	DesiredState        controlstore.DeploymentDesiredState `json:"desired_state"`
-	Phase               controlstore.DeploymentPhase        `json:"phase"`
-	Instances           []controlstore.DeploymentInstance   `json:"instances"`
-	CreatedAt           string                              `json:"created_at"`
-	UpdatedAt           string                              `json:"updated_at"`
+	TenantID            string                                  `json:"tenant_id"`
+	DeploymentID        string                                  `json:"deployment_id"`
+	Generation          uint64                                  `json:"generation"`
+	Revision            uint64                                  `json:"revision"`
+	AgentName           string                                  `json:"agent_name"`
+	BundleDigest        string                                  `json:"bundle_digest"`
+	CapsuleDigest       string                                  `json:"capsule_digest"`
+	DelegationDigest    string                                  `json:"delegation_digest"`
+	DelegationID        string                                  `json:"delegation_id"`
+	ControllerKeyID     string                                  `json:"controller_key_id"`
+	ClaimGeneration     uint64                                  `json:"claim_generation"`
+	AllowedNodeIDs      []string                                `json:"allowed_node_ids"`
+	DelegationExpiresAt string                                  `json:"delegation_expires_at"`
+	DesiredState        controlstore.DeploymentDesiredState     `json:"desired_state"`
+	DisruptionBudget    controlstore.DeploymentDisruptionBudget `json:"disruption_budget"`
+	Phase               controlstore.DeploymentPhase            `json:"phase"`
+	Instances           []controlstore.DeploymentInstance       `json:"instances"`
+	CreatedAt           string                                  `json:"created_at"`
+	UpdatedAt           string                                  `json:"updated_at"`
 }
 
 type deploymentListResponse struct {
@@ -127,6 +129,7 @@ func (server *Server) deployment(writer http.ResponseWriter, request *http.Reque
 			TenantID: tenantID, ID: deploymentID, Generation: input.Generation,
 			ExpectedRevision: input.ExpectedRevision, AgentName: input.AgentName,
 			BundleDigest: input.BundleDigest, CapsuleDSSE: capsule, DelegationDSSE: delegation,
+			DisruptionBudget: input.DisruptionBudget,
 		}, server.now())
 		if err != nil {
 			server.storeError(writer, err, true)
@@ -181,8 +184,9 @@ func deploymentView(value controlstore.Deployment) (deploymentResponse, error) {
 		AllowedNodeIDs:      append([]string(nil), delegation.NodeIDs...),
 		DelegationExpiresAt: delegation.ExpiresAt,
 		DesiredState:        value.DesiredState, Phase: value.Phase,
-		Instances: append([]controlstore.DeploymentInstance(nil), value.Instances...),
-		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
+		DisruptionBudget: value.DisruptionBudget,
+		Instances:        append([]controlstore.DeploymentInstance(nil), value.Instances...),
+		CreatedAt:        value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}, nil
 }
 

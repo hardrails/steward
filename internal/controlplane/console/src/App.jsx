@@ -906,13 +906,15 @@ function NodeScheduling({scheduling}) {
   );
 }
 
-function NodePlacement({placement}) {
+function NodePlacement({placement, drain}) {
   const mode = placement?.mode || "schedulable";
   const kind = mode === "quarantined" ? "is-danger" : mode === "cordoned" ? "is-warning" : "is-ok";
   return (
     <div>
       <Badge kind={kind}>{mode}</Badge>
+	  {drain ? <Badge kind={drain.state === "active" ? "is-warning" : ""}>drain {drain.state}</Badge> : null}
       {placement?.reason ? <small>{placement.reason}</small> : <small>Accepting eligible work.</small>}
+	  {drain ? <small>{drain.reason} · request {drain.request_id}</small> : null}
       {placement?.changed_at ? <small>In state since {formatTime(placement.changed_at)}</small> : null}
     </div>
   );
@@ -932,7 +934,7 @@ function NodesView({page, tenantID}) {
               <tr key={node.node_id}>
                 <td><strong>{node.node_id}</strong><small>{node.tenant_ids.join(", ")}</small></td>
                 <td><Badge kind={node.state === "active" ? "is-ok" : "is-danger"}>{node.state}</Badge></td>
-                <td><NodePlacement placement={node.placement} /></td>
+                <td><NodePlacement placement={node.placement} drain={node.drain} /></td>
                 <td>{formatTime(node.last_seen_at || node.created_at)}</td>
                 <td><NodeScheduling scheduling={node.scheduling} /></td>
                 <td>

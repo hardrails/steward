@@ -669,6 +669,94 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/drain:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    put:
+      tags: [nodes]
+      operationId: startControlNodeDrain
+      summary: Cordon and evacuate one node within deployment budgets
+      description: |
+        Requires a site-administrator credential. The controller first cordons
+        the node, then moves eligible stateless instances one at a time within
+        each deployment's disruption budget. The request ID makes retries
+        idempotent. Stateful instances remain blocked until a configured
+        snapshot backend can prove portable state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeDrainStartRequest"
+      responses:
+        "200":
+          description: Durable node and drain state after the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDrainChange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [nodes]
+      operationId: cancelControlNodeDrain
+      summary: Stop a node drain from beginning more moves
+      description: |
+        Requires a site-administrator credential and the active request ID.
+        Moves already started continue because a stop or destroy result may be
+        in flight. Cancellation leaves the node cordoned until an explicit
+        uncordon.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeDrainCancelRequest"
+      responses:
+        "200":
+          description: Durable node and cancelled drain state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDrainChange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/nodes/{node_id}/evidence:
     parameters:
       - $ref: "#/components/parameters/NodeID"
@@ -2851,6 +2939,8 @@ components:
           $ref: "#/components/schemas/NodeScheduling"
         placement:
           $ref: "#/components/schemas/NodePlacement"
+        drain:
+          $ref: "#/components/schemas/NodeDrain"
     NodePlacement:
       type: object
       additionalProperties: false
@@ -2887,6 +2977,58 @@ components:
         `cordon` and `quarantine` require `reason`. `uncordon` and
         `unquarantine` reject it.
     NodePlacementChange:
+      type: object
+      additionalProperties: false
+      required: [node, changed]
+      properties:
+        node:
+          $ref: "#/components/schemas/Node"
+        changed:
+          type: boolean
+    NodeDrain:
+      type: object
+      additionalProperties: false
+      required: [request_id, state, reason, requested_at, updated_at]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+        state:
+          type: string
+          enum: [active, completed, cancelled]
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\r\n\x00]+$'
+        requested_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    NodeDrainStartRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, reason]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\r\n\x00]+$'
+    NodeDrainCancelRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+    NodeDrainChange:
       type: object
       additionalProperties: false
       required: [node, changed]
@@ -3061,6 +3203,8 @@ components:
           minLength: 4
           maxLength: 87384
           description: Canonical standard-base64 encoding of the tenant-signed controller delegation DSSE JSON.
+        disruption_budget:
+          $ref: "#/components/schemas/DeploymentDisruptionBudget"
     DeploymentDeleteRequest:
       type: object
       additionalProperties: false
@@ -3088,6 +3232,10 @@ components:
           $ref: "#/components/schemas/Identifier128"
         node_id:
           $ref: "#/components/schemas/Identifier128"
+        placement:
+          $ref: "#/components/schemas/DeploymentPlacementDecision"
+        drain:
+          $ref: "#/components/schemas/DeploymentInstanceDrain"
         instance_id:
           $ref: "#/components/schemas/Identifier256"
         lineage_id:
@@ -3225,10 +3373,82 @@ components:
             `scheduling_observation_unavailable`,
             `placement_constraints_unsatisfied`, `workload_limit_exceeded`, `node_capacity_exhausted`,
             `tenant_capacity_exhausted`, `delegation_expired`,
-            `controller_key_mismatch`, or `invalid_deployment_authority`), or a
+            `drain_disruption_budget_exhausted`,
+            `stateful_drain_unsupported`, `controller_key_mismatch`, or
+            `invalid_deployment_authority`), or a
             bounded terminal Executor error when phase is `failed`. Retryable
             reasons clear when reconciliation can enqueue or observe progress.
         transitioned_at:
+          type: string
+          format: date-time
+    DeploymentDisruptionBudget:
+      type: object
+      additionalProperties: false
+      required: [max_unavailable]
+      properties:
+        max_unavailable:
+          type: integer
+          minimum: 0
+          maximum: 128
+          default: 1
+      description: Maximum replicas this deployment allows a node drain to move concurrently. Zero pauses voluntary movement.
+    DeploymentInstanceDrain:
+      type: object
+      additionalProperties: false
+      required: [request_id, source_node_id, started_at]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+        source_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        started_at:
+          type: string
+          format: date-time
+    DeploymentPlacementDecision:
+      type: object
+      additionalProperties: false
+      required:
+        - node_id
+        - preferred_label_matches
+        - preferred_label_count
+        - same_deployment_in_spread_domain
+        - assigned_workloads
+        - decided_at
+      properties:
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        preferred_label_matches:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9._:/-]+$'
+        preferred_label_count:
+          type: integer
+          minimum: 0
+          maximum: 32
+        spread_by:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:/-]+$'
+        spread_value:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:/-]+$'
+        spread_label_present:
+          type: boolean
+        same_deployment_in_spread_domain:
+          type: integer
+          minimum: 0
+        assigned_workloads:
+          type: integer
+          minimum: 0
+        decided_at:
           type: string
           format: date-time
     Deployment:
@@ -3249,6 +3469,7 @@ components:
         - allowed_node_ids
         - delegation_expires_at
         - desired_state
+        - disruption_budget
         - phase
         - instances
         - created_at
@@ -3295,6 +3516,8 @@ components:
         desired_state:
           type: string
           enum: [running, absent]
+        disruption_budget:
+          $ref: "#/components/schemas/DeploymentDisruptionBudget"
         phase:
           type: string
           enum: [pending, reconciling, ready, stopping, removed, degraded]

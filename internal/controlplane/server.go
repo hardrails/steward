@@ -113,6 +113,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/node-credentials/{credential_id}", server.nodeCredential)
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/placement", server.nodePlacement)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/drain", server.nodeDrain)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures", server.evidenceCaptures)
@@ -414,6 +415,51 @@ func (server *Server) nodePlacement(writer http.ResponseWriter, request *http.Re
 	node, changed, err := server.store.ChangeNodePlacement(
 		identity, request.PathValue("node_id"), input.Action, input.Reason, server.now(),
 	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Node    nodeResponse `json:"node"`
+		Changed bool         `json:"changed"`
+	}{Node: nodeView(node), Changed: changed})
+}
+
+func (server *Server) nodeDrain(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPut && request.Method != http.MethodDelete {
+		methodNotAllowed(writer, http.MethodPut, http.MethodDelete)
+		return
+	}
+	if !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		RequestID string `json:"request_id"`
+		Reason    string `json:"reason,omitempty"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	var node controlstore.Node
+	var changed bool
+	var err error
+	if request.Method == http.MethodPut {
+		node, changed, err = server.store.StartNodeDrain(
+			identity, request.PathValue("node_id"), input.RequestID, input.Reason, server.now(),
+		)
+	} else {
+		if input.Reason != "" {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "drain cancellation does not accept a reason")
+			return
+		}
+		node, changed, err = server.store.CancelNodeDrain(
+			identity, request.PathValue("node_id"), input.RequestID, server.now(),
+		)
+	}
 	if err != nil {
 		server.storeError(writer, err, false)
 		return
@@ -1172,6 +1218,7 @@ type nodeResponse struct {
 	RevokedAt    string                       `json:"revoked_at,omitempty"`
 	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
 	Placement    controlstore.NodePlacement   `json:"placement"`
+	Drain        *controlstore.NodeDrain      `json:"drain,omitempty"`
 }
 
 type nodeListResponse struct {
@@ -1190,6 +1237,7 @@ func nodeView(node controlstore.Node) nodeResponse {
 		CreatedAt: node.CreatedAt, LastSeenAt: node.LastSeenAt, RevokedAt: node.RevokedAt,
 		Scheduling: node.Scheduling,
 		Placement:  controlstore.EffectiveNodePlacement(node),
+		Drain:      node.Drain,
 	}
 }
 

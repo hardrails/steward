@@ -205,11 +205,13 @@ tenant-signed delegation. Tenant keys remain outside Control, and Executor verif
 both signatures and the exact delegated scope before changing Docker. The
 controller schedules only onto recently observed nodes, atomically reserves the
 CPU, memory, process, tenant, and workload-slot limits Executor enforces, and
-reports a stable blocked reason when it cannot proceed. It can replace a
-lease-managed stateless instance after the signed expiry fence, and site
-administrators can durably cordon or quarantine nodes without erasing their
-evidence identity. Stateful migration, disruption budgets, and progressive
-rollouts remain explicit gaps.
+reports a stable blocked reason when it cannot proceed. Tenant-signed soft label
+preferences and one topology spread key influence placement without widening
+hard admission authority, and every decision retains its score inputs. It can
+replace a lease-managed stateless instance after the signed expiry fence. For
+planned work, site administrators can run a restart-safe node drain that cordons
+first and moves stateless instances within each deployment's maximum-unavailable
+budget. Stateful migration and progressive rollouts remain explicit gaps.
 
 Its embedded React console is available at `/console/`. The console keeps the
 operator bearer only in tab memory, loads no remote assets, and never receives

@@ -361,6 +361,9 @@ func (store *Store) ObserveDeploymentCommand(
 			instance.NodeID != instance.Drain.SourceNodeID {
 			instance.Drain = nil
 		}
+		if instance.CommandOperation == "destroy" && deployment.DesiredState == DeploymentAbsent {
+			instance.Drain = nil
+		}
 	} else {
 		instance.Phase = DeploymentInstanceFailed
 		instance.LastError = deploymentCommandError(command)
@@ -436,6 +439,7 @@ func (store *Store) RemovePendingDeploymentInstance(
 		return Deployment{}, false, ErrCapacityExceeded
 	}
 	instance.Phase = DeploymentInstanceRemoved
+	instance.Drain = nil
 	instance.TransitionedAt = canonicalTimestamp(now)
 	deployment.Instances[index] = instance
 	deployment.Revision++

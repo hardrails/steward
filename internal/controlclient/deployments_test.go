@@ -30,14 +30,16 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 		switch {
 		case request.Method == http.MethodPut:
 			var body struct {
-				Generation           uint64 `json:"generation"`
-				ExpectedRevision     uint64 `json:"expected_revision"`
-				CapsuleDSSEBase64    string `json:"capsule_dsse_base64"`
-				DelegationDSSEBase64 string `json:"delegation_dsse_base64"`
+				Generation           uint64                                   `json:"generation"`
+				ExpectedRevision     uint64                                   `json:"expected_revision"`
+				CapsuleDSSEBase64    string                                   `json:"capsule_dsse_base64"`
+				DelegationDSSEBase64 string                                   `json:"delegation_dsse_base64"`
+				DisruptionBudget     *controlstore.DeploymentDisruptionBudget `json:"disruption_budget"`
 			}
 			if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body.Generation != 1 ||
 				body.ExpectedRevision != 7 || body.CapsuleDSSEBase64 != base64.StdEncoding.EncodeToString(capsule) ||
-				body.DelegationDSSEBase64 != base64.StdEncoding.EncodeToString(delegation) {
+				body.DelegationDSSEBase64 != base64.StdEncoding.EncodeToString(delegation) ||
+				body.DisruptionBudget == nil || body.DisruptionBudget.MaxUnavailable != 1 {
 				t.Fatalf("deployment apply body = (%+v, %v)", body, err)
 			}
 			_ = json.NewEncoder(writer).Encode(want)
@@ -70,9 +72,11 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	budget := controlstore.DeploymentDisruptionBudget{MaxUnavailable: 1}
 	applied, err := client.ApplyDeployment(ctx, "tenant-a", "research", DeploymentApply{
 		Generation: 1, ExpectedRevision: 7, AgentName: "research-agent",
 		BundleDigest: want.BundleDigest, CapsuleDSSE: capsule, DelegationDSSE: delegation,
+		DisruptionBudget: &budget,
 	})
 	if err != nil || applied.DeploymentID != "research" {
 		t.Fatalf("apply deployment = (%+v, %v)", applied, err)
@@ -136,6 +140,7 @@ func validClientDeployment() Deployment {
 		DelegationID: "research-authority", ControllerKeyID: "controller-a", ClaimGeneration: 1,
 		AllowedNodeIDs: []string{"node-1"}, DelegationExpiresAt: created.Add(time.Hour).Format(time.RFC3339Nano),
 		DesiredState: controlstore.DeploymentRunning, Phase: controlstore.DeploymentPending,
+		DisruptionBudget: controlstore.DeploymentDisruptionBudget{MaxUnavailable: 1},
 		Instances: []controlstore.DeploymentInstance{{
 			InstanceID: "research-0", LineageID: "research-lineage-0", Generation: 1,
 			Phase: controlstore.DeploymentInstancePending, TransitionedAt: created.Format(time.RFC3339Nano),

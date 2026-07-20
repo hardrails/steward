@@ -100,6 +100,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		DelegationID: delegation.DelegationID, ControllerKeyID: delegation.ControllerKeyID,
 		ClaimGeneration: 1, AllowedNodeIDs: []string{"node-a"}, DelegationExpiresAt: delegation.ExpiresAt,
 		DesiredState: controlstore.DeploymentRunning, Phase: controlstore.DeploymentPending,
+		DisruptionBudget: controlstore.DeploymentDisruptionBudget{MaxUnavailable: 1},
 		Instances: []controlstore.DeploymentInstance{{
 			InstanceID: "auditor-0", LineageID: "auditor-lineage", Generation: 1,
 			Phase: controlstore.DeploymentInstancePending, TransitionedAt: now.Format(time.RFC3339Nano),

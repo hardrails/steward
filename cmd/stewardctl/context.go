@@ -69,6 +69,8 @@ var controlContextCommands = map[string]controlContextCommandSpec{
 	"node uncordon":           {network: true, token: true},
 	"node quarantine":         {network: true, token: true},
 	"node unquarantine":       {network: true, token: true},
+	"node drain":              {network: true, token: true},
+	"node cancel-drain":       {network: true, token: true},
 	"node-credential revoke":  {network: true, token: true},
 	"operations status":       {network: true, token: true, tenant: true},
 	"attention list":          {network: true, token: true, tenant: true},

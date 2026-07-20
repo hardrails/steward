@@ -125,6 +125,21 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 				t.Fatalf("placement request=%+v error=%v", input, err)
 			}
 			_, _ = w.Write([]byte(`{"node":{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z","placement":{"mode":"cordoned","reason":"maintenance","changed_at":"2026-07-13T12:01:00Z"}},"changed":true}`))
+		case "/v1/nodes/node-1/drain":
+			var input struct {
+				RequestID string `json:"request_id"`
+				Reason    string `json:"reason"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.RequestID != "maintenance-1" ||
+				request.Method == http.MethodPut && input.Reason != "kernel upgrade" ||
+				request.Method == http.MethodDelete && input.Reason != "" {
+				t.Fatalf("drain request=%+v method=%s error=%v", input, request.Method, err)
+			}
+			state := "active"
+			if request.Method == http.MethodDelete {
+				state = "cancelled"
+			}
+			_, _ = w.Write([]byte(`{"node":{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z","placement":{"mode":"cordoned","reason":"kernel upgrade","changed_at":"2026-07-13T12:01:00Z"},"drain":{"request_id":"maintenance-1","state":"` + state + `","reason":"kernel upgrade","requested_at":"2026-07-13T12:01:00Z","updated_at":"2026-07-13T12:01:00Z"}},"changed":true}`))
 		case "/v1/node-credentials/node-credential-1":
 			_, _ = w.Write([]byte(`{"credential_id":"node-credential-1","node_id":"node-1","revoked":true}`))
 		default:
@@ -167,6 +182,14 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	if change, err := client.ChangeNodePlacement(ctx, "node-1", controlstore.NodePlacementCordon, "maintenance"); err != nil ||
 		!change.Changed || change.Node.Placement.Mode != controlstore.NodeCordoned {
 		t.Fatalf("placement=%#v error=%v", change, err)
+	}
+	if change, err := client.StartNodeDrain(ctx, "node-1", "maintenance-1", "kernel upgrade"); err != nil ||
+		!change.Changed || change.Node.Drain == nil || change.Node.Drain.State != controlstore.NodeDrainActive {
+		t.Fatalf("start drain=%#v error=%v", change, err)
+	}
+	if change, err := client.CancelNodeDrain(ctx, "node-1", "maintenance-1"); err != nil ||
+		!change.Changed || change.Node.Drain == nil || change.Node.Drain.State != controlstore.NodeDrainCancelled {
+		t.Fatalf("cancel drain=%#v error=%v", change, err)
 	}
 	if revoked, err := client.RevokeNode(ctx, "node-1"); err != nil || revoked.RevokedCredentials != 1 {
 		t.Fatalf("revoked=%#v error=%v", revoked, err)

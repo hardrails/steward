@@ -119,6 +119,20 @@ func TestDeploymentDrainEnforcesBudgetAndAdvancesGenerationAfterRemoval(t *testi
 	if completed, err := fixture.store.CompleteFinishedNodeDrains(startedAt.Add(5 * time.Second)); err != nil || completed != 0 {
 		t.Fatalf("complete with replacement pending = (%d, %v)", completed, err)
 	}
+	absent, changed, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "deployment-a", replaced.Revision,
+		DeploymentAbsent, startedAt.Add(6*time.Second),
+	)
+	if err != nil || !changed {
+		t.Fatalf("remove replacement deployment = (%+v, %v, %v)", absent, changed, err)
+	}
+	removedPending, changed, err := fixture.store.RemovePendingDeploymentInstance(
+		"tenant-a", "deployment-a", replaced.Instances[0].InstanceID,
+		absent.Revision, startedAt.Add(7*time.Second),
+	)
+	if err != nil || !changed || removedPending.Instances[0].Drain != nil {
+		t.Fatalf("remove pending drained replacement = (%+v, %v, %v)", removedPending.Instances[0], changed, err)
+	}
 }
 
 func TestFleetOperationsFormatRejectsLegacySmuggling(t *testing.T) {
@@ -150,5 +164,41 @@ func TestFleetOperationsFormatRejectsLegacySmuggling(t *testing.T) {
 		Mutations: []mutation{{Kind: mutationNode, Node: &node}},
 	}); err == nil {
 		t.Fatal("legacy transaction accepted node drain state")
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	if _, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now.Add(2*time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.mu.Lock()
+	deploymentRaw, err := encodeState(fixture.store.current, fixture.limits.MaxStateBytes)
+	fixture.store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deploymentSnapshot snapshotState
+	if err := json.Unmarshal(deploymentRaw, &deploymentSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	deploymentSnapshot.Version = stateFormatNodePlacementVersion
+	smuggled, err := json.Marshal(deploymentSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(smuggled, fixture.limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot accepted deployment fleet operations state")
+	}
+	deploymentSnapshot.Deployments[0].DisruptionBudget = DeploymentDisruptionBudget{}
+	legacyDeployment, err := json.Marshal(deploymentSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := decodeState(legacyDeployment, fixture.limits.MaxStateBytes)
+	if err != nil || migrated.deployments[deploymentKey("tenant-a", "deployment-a")].DisruptionBudget.MaxUnavailable != 1 {
+		t.Fatalf("legacy deployment budget migration = (%+v, %v)", migrated.deployments, err)
 	}
 }

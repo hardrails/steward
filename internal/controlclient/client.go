@@ -150,9 +150,15 @@ type Node struct {
 	RevokedAt    string                       `json:"revoked_at,omitempty"`
 	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
 	Placement    controlstore.NodePlacement   `json:"placement"`
+	Drain        *controlstore.NodeDrain      `json:"drain,omitempty"`
 }
 
 type NodePlacementChange struct {
+	Node    Node `json:"node"`
+	Changed bool `json:"changed"`
+}
+
+type NodeDrainChange struct {
 	Node    Node `json:"node"`
 	Changed bool `json:"changed"`
 }
@@ -169,27 +175,29 @@ type DeploymentApply struct {
 	BundleDigest     string
 	CapsuleDSSE      []byte
 	DelegationDSSE   []byte
+	DisruptionBudget *controlstore.DeploymentDisruptionBudget
 }
 
 type Deployment struct {
-	TenantID            string                              `json:"tenant_id"`
-	DeploymentID        string                              `json:"deployment_id"`
-	Generation          uint64                              `json:"generation"`
-	Revision            uint64                              `json:"revision"`
-	AgentName           string                              `json:"agent_name"`
-	BundleDigest        string                              `json:"bundle_digest"`
-	CapsuleDigest       string                              `json:"capsule_digest"`
-	DelegationDigest    string                              `json:"delegation_digest"`
-	DelegationID        string                              `json:"delegation_id"`
-	ControllerKeyID     string                              `json:"controller_key_id"`
-	ClaimGeneration     uint64                              `json:"claim_generation"`
-	AllowedNodeIDs      []string                            `json:"allowed_node_ids"`
-	DelegationExpiresAt string                              `json:"delegation_expires_at"`
-	DesiredState        controlstore.DeploymentDesiredState `json:"desired_state"`
-	Phase               controlstore.DeploymentPhase        `json:"phase"`
-	Instances           []controlstore.DeploymentInstance   `json:"instances"`
-	CreatedAt           string                              `json:"created_at"`
-	UpdatedAt           string                              `json:"updated_at"`
+	TenantID            string                                  `json:"tenant_id"`
+	DeploymentID        string                                  `json:"deployment_id"`
+	Generation          uint64                                  `json:"generation"`
+	Revision            uint64                                  `json:"revision"`
+	AgentName           string                                  `json:"agent_name"`
+	BundleDigest        string                                  `json:"bundle_digest"`
+	CapsuleDigest       string                                  `json:"capsule_digest"`
+	DelegationDigest    string                                  `json:"delegation_digest"`
+	DelegationID        string                                  `json:"delegation_id"`
+	ControllerKeyID     string                                  `json:"controller_key_id"`
+	ClaimGeneration     uint64                                  `json:"claim_generation"`
+	AllowedNodeIDs      []string                                `json:"allowed_node_ids"`
+	DelegationExpiresAt string                                  `json:"delegation_expires_at"`
+	DesiredState        controlstore.DeploymentDesiredState     `json:"desired_state"`
+	DisruptionBudget    controlstore.DeploymentDisruptionBudget `json:"disruption_budget"`
+	Phase               controlstore.DeploymentPhase            `json:"phase"`
+	Instances           []controlstore.DeploymentInstance       `json:"instances"`
+	CreatedAt           string                                  `json:"created_at"`
+	UpdatedAt           string                                  `json:"updated_at"`
 }
 
 type DeploymentList struct {
@@ -365,17 +373,19 @@ func (c *Client) ApplyDeployment(
 	}
 	var deployment Deployment
 	err = c.do(ctx, http.MethodPut, path, struct {
-		Generation           uint64 `json:"generation"`
-		ExpectedRevision     uint64 `json:"expected_revision,omitempty"`
-		AgentName            string `json:"agent_name"`
-		BundleDigest         string `json:"bundle_digest"`
-		CapsuleDSSEBase64    string `json:"capsule_dsse_base64"`
-		DelegationDSSEBase64 string `json:"delegation_dsse_base64"`
+		Generation           uint64                                   `json:"generation"`
+		ExpectedRevision     uint64                                   `json:"expected_revision,omitempty"`
+		AgentName            string                                   `json:"agent_name"`
+		BundleDigest         string                                   `json:"bundle_digest"`
+		CapsuleDSSEBase64    string                                   `json:"capsule_dsse_base64"`
+		DelegationDSSEBase64 string                                   `json:"delegation_dsse_base64"`
+		DisruptionBudget     *controlstore.DeploymentDisruptionBudget `json:"disruption_budget,omitempty"`
 	}{
 		Generation: input.Generation, ExpectedRevision: input.ExpectedRevision,
 		AgentName: input.AgentName, BundleDigest: input.BundleDigest,
 		CapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(input.CapsuleDSSE),
 		DelegationDSSEBase64: base64.StdEncoding.EncodeToString(input.DelegationDSSE),
+		DisruptionBudget:     input.DisruptionBudget,
 	}, &deployment, true)
 	if err != nil {
 		return Deployment{}, err
@@ -387,6 +397,13 @@ func (c *Client) ApplyDeployment(
 		deployment.BundleDigest != input.BundleDigest || deployment.CapsuleDigest != dsse.Digest(input.CapsuleDSSE) ||
 		deployment.DelegationDigest != dsse.Digest(input.DelegationDSSE) {
 		return Deployment{}, errors.New("control deployment response changed the requested binding")
+	}
+	expectedBudget := controlstore.DeploymentDisruptionBudget{MaxUnavailable: 1}
+	if input.DisruptionBudget != nil {
+		expectedBudget = *input.DisruptionBudget
+	}
+	if deployment.DisruptionBudget != expectedBudget {
+		return Deployment{}, errors.New("control deployment response changed the requested disruption budget")
 	}
 	return deployment, nil
 }
@@ -486,6 +503,31 @@ func (c *Client) ChangeNodePlacement(
 		Action controlstore.NodePlacementAction `json:"action"`
 		Reason string                           `json:"reason,omitempty"`
 	}{Action: action, Reason: reason}, &change, true)
+	return change, err
+}
+
+func (c *Client) StartNodeDrain(ctx context.Context, nodeID, requestID, reason string) (NodeDrainChange, error) {
+	var change NodeDrainChange
+	err := c.do(ctx, http.MethodPut, "/v1/nodes/"+url.PathEscape(nodeID)+"/drain", struct {
+		RequestID string `json:"request_id"`
+		Reason    string `json:"reason"`
+	}{RequestID: requestID, Reason: reason}, &change, true)
+	if err == nil && (change.Node.NodeID != nodeID || change.Node.Drain == nil ||
+		change.Node.Drain.RequestID != requestID || change.Node.Drain.State != controlstore.NodeDrainActive) {
+		return NodeDrainChange{}, errors.New("control node drain response changed the requested binding")
+	}
+	return change, err
+}
+
+func (c *Client) CancelNodeDrain(ctx context.Context, nodeID, requestID string) (NodeDrainChange, error) {
+	var change NodeDrainChange
+	err := c.do(ctx, http.MethodDelete, "/v1/nodes/"+url.PathEscape(nodeID)+"/drain", struct {
+		RequestID string `json:"request_id"`
+	}{RequestID: requestID}, &change, true)
+	if err == nil && (change.Node.NodeID != nodeID || change.Node.Drain == nil ||
+		change.Node.Drain.RequestID != requestID || change.Node.Drain.State != controlstore.NodeDrainCancelled) {
+		return NodeDrainChange{}, errors.New("control node drain cancellation response changed the requested binding")
+	}
 	return change, err
 }
 
@@ -1075,6 +1117,10 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 		deployment.Generation == 0 || deployment.Revision == 0 || deployment.ClaimGeneration == 0 ||
 		deployment.AllowedNodeIDs == nil || deployment.Instances == nil {
 		return errors.New("control deployment response identity is invalid")
+	}
+	if deployment.DisruptionBudget.MaxUnavailable < 0 ||
+		deployment.DisruptionBudget.MaxUnavailable > len(deployment.Instances) {
+		return errors.New("control deployment response disruption budget is invalid")
 	}
 	for index, nodeID := range deployment.AllowedNodeIDs {
 		if !validEvidenceRouteIdentity(nodeID, 128) || index > 0 && deployment.AllowedNodeIDs[index-1] >= nodeID {

@@ -41,6 +41,7 @@ func TestDeploymentHTTPContractAppliesProjectsListsAndRemoves(t *testing.T) {
 	if created.DeploymentID != "research" || created.Revision != 1 || created.Generation != 1 ||
 		created.DesiredState != controlstore.DeploymentRunning || len(created.Instances) != 1 ||
 		created.ControllerKeyID != "controller-a" || created.CapsuleDigest == "" ||
+		created.DisruptionBudget.MaxUnavailable != 1 ||
 		len(created.AllowedNodeIDs) != 1 || created.AllowedNodeIDs[0] != "node-1" {
 		t.Fatalf("created deployment response = %+v", created)
 	}

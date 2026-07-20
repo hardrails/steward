@@ -57,11 +57,15 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 	flags.StringVar(&tenantID, "tenant-id", "", "alias for -tenant")
 	generation := flags.Uint64("generation", 0, "desired generation; inferred when omitted")
 	revision := flags.Uint64("revision", 0, "last observed revision; fetched when omitted")
+	maxUnavailable := flags.Int("max-unavailable", -1, "maximum replicas a node drain may move at once (default 1)")
 	if err := flags.Parse(hydrated); err != nil {
 		return err
 	}
 	if tenantID == "" || flags.NArg() > 1 || leadingName != "" && flags.NArg() != 0 {
 		return errors.New("agent deployment apply requires a tenant and accepts at most one deployment name")
+	}
+	if *maxUnavailable < -1 {
+		return errors.New("agent deployment apply requires max-unavailable to be zero or greater")
 	}
 	bundleRaw, err := readCLIArtifact(*bundlePath)
 	if err != nil {
@@ -127,10 +131,19 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 			}
 		}
 	}
+	effectiveMaxUnavailable := 1
+	if found {
+		effectiveMaxUnavailable = current.DisruptionBudget.MaxUnavailable
+	}
+	if *maxUnavailable >= 0 {
+		effectiveMaxUnavailable = *maxUnavailable
+	}
+	disruptionBudget := controlstore.DeploymentDisruptionBudget{MaxUnavailable: effectiveMaxUnavailable}
 	deployed, err := client.ApplyDeployment(ctx, tenantID, deploymentID, controlclient.DeploymentApply{
 		Generation: *generation, ExpectedRevision: *revision,
 		AgentName: bundle.Definition.Name, BundleDigest: bundleDigest,
 		CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
+		DisruptionBudget: &disruptionBudget,
 	})
 	if err != nil {
 		return err

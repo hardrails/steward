@@ -220,25 +220,36 @@ Before planned host work, stop new controller placements while existing agents
 continue to run:
 
 ```console
-stewardctl control node cordon -reason "kernel maintenance" node-1
+stewardctl control node drain -reason "kernel maintenance" node-1
 ```
 
-Then use the node-local maintenance workflow before destroying exact runtimes:
+Control returns a generated `request_id`. Keep it if you may need to cancel the
+operation. The drain durably cordons the node, then moves only stateless desired
+deployment instances that have an eligible destination and budget room. A
+replacement is admitted only after the old runtime reports successful destroy,
+and its instance generation advances so delayed commands cannot affect it.
+
+Set the budget when applying a deployment. `1` is the default; `0` pauses
+voluntary movement without changing desired state:
 
 ```console
-sudo -H stewardctl node maintenance drain -reason "kernel maintenance"
-sudo -H stewardctl node maintenance drain -reason "kernel maintenance" -apply
+stewardctl agent deployment apply auditor -tenant acme -max-unavailable 1
 ```
 
-These are separate safety boundaries. The controller cordon prevents another
-deployment from selecting the node. Executor maintenance closes the local race
-between inspecting and destroying runtimes. After the host is healthy, exit
-Executor maintenance first, then restore controller placement:
+Canceling stops new moves. An instance already marked for movement continues
+because a stop or destroy result may already be in flight:
 
 ```console
-sudo -H stewardctl node maintenance exit
-stewardctl control node uncordon node-1
+stewardctl control node cancel-drain \
+  -request-id drain-REPLACE_WITH_RETURNED_ID \
+  node-1
 ```
+
+A completed or cancelled drain leaves the node cordoned. After the host is
+healthy, restore placement explicitly with
+`stewardctl control node uncordon node-1`. The separate node-local maintenance
+workflow remains the gate for package activation and unmanaged exact-runtime
+cleanup; see [Upgrade safely](upgrades.md).
 
 For suspected compromise, use quarantine instead:
 
@@ -261,10 +272,20 @@ To narrow placement, add this optional object to `admission-template.json`:
     "required_labels": [
       {"key": "region", "value": "west"}
     ],
+	"preferred_labels": [
+	  {"key": "disk", "value": "fast"}
+	],
+	"spread_by": "zone",
     "tolerations": ["dedicated"]
   }
 }
 ```
+
+Required labels remain hard eligibility constraints. Preferred labels are soft:
+more exact matches rank ahead of lower load. `spread_by` first prefers nodes
+that report the label, then the topology value with the fewest instances from
+this deployment. The stored instance includes the matched keys, spread value,
+same-domain count, node load, and decision time.
 
 The arrays must be sorted and contain no duplicates. Keys, values, and
 tolerations may contain letters, digits, `.`, `_`, `:`, `/`, and `-`, up to 128

@@ -1,6 +1,6 @@
 # 0037. Keep controller node placement state native and bounded
 
-- Status: Accepted
+- Status: Superseded in part by [0038](0038-native-topology-placement-and-budgeted-drain.md)
 - Date: 2026-07-20
 - Rung: in-house
 
@@ -27,9 +27,10 @@ This state complements, rather than replaces, Executor maintenance. A safe
 planned procedure cordons the controller first and then enters the node-local
 maintenance cordon before destroying exact runtimes.
 
-**Tradeoff:** the narrow state machine fits Steward's signed command and evidence
-boundaries without importing a general scheduler, but it does not provide
-Kubernetes-style eviction, topology spreading, or disruption budgets.
+**Tradeoff at this decision:** the narrow state machine fit Steward's signed
+command and evidence boundaries without importing a general scheduler, but did
+not yet provide Kubernetes-style eviction, topology spreading, or disruption
+budgets. Decision 0038 adds a bounded subset of those operations.
 **Rejected:** requiring Kubernetes or Nomad because Steward must retain a useful
 single-host and air-gapped deployment; using only Executor maintenance because
 the controller would keep scheduling until observation expiry; and revoking the
@@ -38,6 +39,6 @@ evidence and recovery channel.
 
 ## Consequences
 
-The control-store state and transaction formats advance to version 8. Revisit if
-Steward adopts a vetted external scheduler as its required placement authority,
-or if portable state and disruption budgets make controller-driven eviction safe.
+The control-store state and transaction formats advanced to version 8. Decision
+0038 later added stateless controller-driven drain with disruption budgets; a
+portable state backend is still required before stateful evacuation is safe.
