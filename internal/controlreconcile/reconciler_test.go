@@ -397,6 +397,7 @@ func TestSchedulingBlockedReasonMapsStoreFailures(t *testing.T) {
 		{controlstore.ErrNodePlacementUnavailable, controlstore.DeploymentBlockedNoEligibleNode},
 		{controlstore.ErrNodeSchedulingConstraint, controlstore.DeploymentBlockedPlacementConstraints},
 		{controlstore.ErrTenantCapacityExceeded, controlstore.DeploymentBlockedTenantCapacity},
+		{controlstore.ErrTenantQuotaExceeded, controlstore.DeploymentBlockedTenantQuota},
 		{controlstore.ErrWorkloadLimitExceeded, controlstore.DeploymentBlockedWorkloadLimit},
 		{controlstore.ErrNodeCapacityExceeded, controlstore.DeploymentBlockedNodeCapacity},
 		{errors.New("other"), ""},

@@ -889,6 +889,8 @@ func schedulingBlockedReason(err error) controlstore.DeploymentBlockedReason {
 		return controlstore.DeploymentBlockedPlacementConstraints
 	case errors.Is(err, controlstore.ErrTenantCapacityExceeded):
 		return controlstore.DeploymentBlockedTenantCapacity
+	case errors.Is(err, controlstore.ErrTenantQuotaExceeded):
+		return controlstore.DeploymentBlockedTenantQuota
 	case errors.Is(err, controlstore.ErrWorkloadLimitExceeded):
 		return controlstore.DeploymentBlockedWorkloadLimit
 	case errors.Is(err, controlstore.ErrNodeCapacityExceeded):
