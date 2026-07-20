@@ -174,6 +174,35 @@ func TestAgentCreateUsesTheCanonicalInitPath(t *testing.T) {
 	}
 }
 
+func TestAgentCreateDefaultsToSameNamedProjectDirectory(t *testing.T) {
+	root := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	var output bytes.Buffer
+	if err := run([]string{"agent", "create", "auditor", "-runtime", "openclaw"}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "auditor", "Stewardfile.cue"))
+	if err != nil || !bytes.Contains(raw, []byte(`name: "auditor"`)) ||
+		!bytes.Contains(raw, []byte(`engine: "openclaw"`)) {
+		t.Fatalf("Stewardfile=%s err=%v", raw, err)
+	}
+	if strings.Contains(output.String(), `"file":"Stewardfile.cue"`) {
+		t.Fatalf("agent create reported the expert current-directory default: %s", output.String())
+	}
+}
+
 func TestAgentValidateAndForkRejectAmbiguousArguments(t *testing.T) {
 	directory := t.TempDir()
 	existing := filepath.Join(directory, "existing")

@@ -53,8 +53,9 @@ func agentCommand(arguments []string, stdout io.Writer) error {
 }
 
 // agentCreate is the task-led alias for agent init. Keeping the implementation
-// in agentInit ensures the concise and expert surfaces produce byte-identical
-// application definitions.
+// in agentInitWithDefault ensures the concise and expert surfaces produce
+// byte-identical application definitions while letting the concise form create a
+// same-named project directory by default.
 func agentCreate(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 || strings.HasPrefix(arguments[0], "-") {
 		return errors.New("agent create requires an agent name before its flags")
@@ -66,10 +67,14 @@ func agentCreate(arguments []string, stdout io.Writer) error {
 		}
 	}
 	forwarded := append([]string{"-name", name}, arguments[1:]...)
-	return agentInit(forwarded, stdout)
+	return agentInitWithDefault(forwarded, stdout, name)
 }
 
 func agentInit(arguments []string, stdout io.Writer) error {
+	return agentInitWithDefault(arguments, stdout, ".")
+}
+
+func agentInitWithDefault(arguments []string, stdout io.Writer, defaultDirectory string) error {
 	flags := flag.NewFlagSet("agent init", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	engine := flags.String("runtime", "hermes", "hermes or openclaw")
@@ -87,7 +92,7 @@ func agentInit(arguments []string, stdout io.Writer) error {
 	if flags.NArg() > 1 {
 		return errors.New("agent init accepts at most one project directory")
 	}
-	directory := "."
+	directory := defaultDirectory
 	if flags.NArg() == 1 {
 		directory = flags.Arg(0)
 	}
