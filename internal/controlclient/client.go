@@ -141,13 +141,14 @@ type CommandResult struct {
 }
 
 type Node struct {
-	NodeID       string   `json:"node_id"`
-	TenantIDs    []string `json:"tenant_ids"`
-	Capabilities []string `json:"capabilities"`
-	State        string   `json:"state"`
-	CreatedAt    string   `json:"created_at"`
-	LastSeenAt   string   `json:"last_seen_at,omitempty"`
-	RevokedAt    string   `json:"revoked_at,omitempty"`
+	NodeID       string                       `json:"node_id"`
+	TenantIDs    []string                     `json:"tenant_ids"`
+	Capabilities []string                     `json:"capabilities"`
+	State        string                       `json:"state"`
+	CreatedAt    string                       `json:"created_at"`
+	LastSeenAt   string                       `json:"last_seen_at,omitempty"`
+	RevokedAt    string                       `json:"revoked_at,omitempty"`
+	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
 }
 
 type NodeList struct {

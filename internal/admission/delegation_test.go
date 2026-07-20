@@ -184,6 +184,46 @@ func TestDelegatedAdmissionBindsExactCapsule(t *testing.T) {
 	}
 }
 
+func TestCommandDelegationPlacementRequiresCanonicalFiniteConstraints(t *testing.T) {
+	valid := CommandDelegationPlacement{
+		RequiredIsolation: "gvisor",
+		RequiredLabels: []CommandDelegationLabel{
+			{Key: "accelerator", Value: "gpu"},
+			{Key: "region", Value: "west"},
+		},
+		Tolerations: []string{"dedicated", "gpu"},
+	}
+	if !validCommandDelegationPlacement(valid) {
+		t.Fatal("valid placement was rejected")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*CommandDelegationPlacement)
+	}{
+		{"isolation", func(value *CommandDelegationPlacement) { value.RequiredIsolation = "runc" }},
+		{"nil labels", func(value *CommandDelegationPlacement) { value.RequiredLabels = nil }},
+		{"unsorted labels", func(value *CommandDelegationPlacement) {
+			value.RequiredLabels[0], value.RequiredLabels[1] = value.RequiredLabels[1], value.RequiredLabels[0]
+		}},
+		{"empty label", func(value *CommandDelegationPlacement) { value.RequiredLabels[0].Key = "" }},
+		{"invalid label", func(value *CommandDelegationPlacement) { value.RequiredLabels[0].Value = "gpu pool" }},
+		{"nil tolerations", func(value *CommandDelegationPlacement) { value.Tolerations = nil }},
+		{"duplicate toleration", func(value *CommandDelegationPlacement) { value.Tolerations[1] = "dedicated" }},
+		{"empty toleration", func(value *CommandDelegationPlacement) { value.Tolerations[0] = "" }},
+		{"invalid toleration", func(value *CommandDelegationPlacement) { value.Tolerations[0] = "gpu pool" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			candidate.RequiredLabels = append([]CommandDelegationLabel{}, valid.RequiredLabels...)
+			candidate.Tolerations = append([]string{}, valid.Tolerations...)
+			test.mutate(&candidate)
+			if validCommandDelegationPlacement(candidate) {
+				t.Fatal("invalid placement was accepted")
+			}
+		})
+	}
+}
+
 func delegatedCommandForTest(now time.Time, delegationRaw []byte) CommandStatement {
 	return CommandStatement{
 		SchemaVersion: CommandSchemaV2, CommandID: "controller-command-1",

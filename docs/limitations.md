@@ -217,8 +217,12 @@ dispatch, terminal observation, and result storage. It persists the signed task
 bundle before dispatch so recovery reuses the same authority instead of risking a
 duplicate effect.
 
-New placement also requires a recent authenticated node poll. A pending instance
-records `no_eligible_node` when none of its delegated nodes is fresh and capable.
+New placement requires a recent authenticated node poll and scheduling
+observation. A pending instance records `no_eligible_node` when none of its
+delegated nodes is fresh and capable, or
+`scheduling_observation_unavailable` when an otherwise eligible node has no
+current resource profile. Architecture, signed labels, isolation, taints, and
+tolerations are checked before placement.
 A lease-managed stateless instance can be replaced after node loss. Control
 retains the latest signed expiry that Executor could have accepted and waits
 through that time plus the two-minute command clock-skew allowance. Executor
@@ -242,10 +246,12 @@ Before a safe expiry, status reports `awaiting_lease_expiry`. These retryable
 reason codes do not change the instance to a terminal phase, and repeated checks
 do not append repeated durable records.
 
-The current reconciler still does not reserve aggregate resources, preempt
-workloads, perform progressive rollouts, or autoscale. Its least-loaded choice
-uses bounded current inventory, not a capacity reservation. Executor revalidates
-admission and live capacity, so a stale decision fails closed rather than
+The reconciler durably reserves aggregate CPU, memory, process, tenant, and
+workload-slot capacity with admission. It does not schedule disk or persistent
+state bytes, preempt workloads, perform progressive rollouts, or autoscale.
+Docker volumes do not provide a portable hard-quota contract, so stateful
+capacity remains a documented gap. Executor revalidates admission and live
+capacity, so unmanaged containers or a stale decision fail closed rather than
 overruling the node.
 
 `task run` must execute where its Gateway service endpoint is reachable through a

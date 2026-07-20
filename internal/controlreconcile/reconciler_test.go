@@ -195,6 +195,41 @@ func TestConcurrentReconcilersCannotDoubleEnqueueOrWidenAuthority(t *testing.T) 
 	}
 }
 
+func TestReconcilerAtomicallyRechecksCapacityAcrossOneFleetSnapshot(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	observation := testSchedulingObservation("node-1")
+	observation.Policy.Host.Workloads = 1
+	observation.Policy.Tenant.Workloads = 1
+	if _, applied, err := fixture.store.ObserveNodeScheduling(fixture.node, observation, fixture.now); err != nil || !applied {
+		t.Fatalf("tighten scheduling capacity = (%v, %v)", applied, err)
+	}
+	applyControlDeploymentNamed(t, fixture, "alpha", "alpha-0", "alpha-lineage-0", 1)
+	applyControlDeploymentNamed(t, fixture, "beta", "beta-0", "beta-lineage-0", 1)
+	report, err := fixture.reconciler(t).Reconcile(context.Background())
+	if err != nil || report.Enqueued != 1 || report.Blocked != 1 {
+		t.Fatalf("capacity reconciliation = (%+v, %v)", report, err)
+	}
+	snapshot, err := fixture.store.SnapshotDeploymentFleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitting, blocked := 0, 0
+	for _, deployment := range snapshot.Deployments {
+		instance := deployment.Instances[0]
+		if instance.Phase == controlstore.DeploymentInstanceAdmitting {
+			admitting++
+		}
+		if instance.Phase == controlstore.DeploymentInstancePending &&
+			instance.LastError == string(controlstore.DeploymentBlockedNodeCapacity) {
+			blocked++
+		}
+	}
+	status, err := fixture.store.Status()
+	if err != nil || admitting != 1 || blocked != 1 || status.Commands != 1 {
+		t.Fatalf("atomic reservation result = admitting %d blocked %d status %+v err %v", admitting, blocked, status, err)
+	}
+}
+
 func TestReconcilerPersistsStableNodeBlockAndRecoversAfterHeartbeat(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)
@@ -265,7 +300,9 @@ func TestReconcilerIgnoresTerminalInstancesBeforeStaleNodeRecovery(t *testing.T)
 			instance := deployment.Instances[0]
 			instance.NodeID = "node-1"
 			instance.Phase = phase
-			result, err := reconciler.reconcileInstance(snapshot.Nodes, nil, deployment, instance)
+			result, err := reconciler.reconcileInstance(
+				snapshot.Nodes, snapshot.Deployments, nil, deployment, instance,
+			)
 			if err != nil || result != (instanceResult{}) {
 				t.Fatalf("terminal instance entered stale-node recovery = (%+v, %v)", result, err)
 			}
@@ -414,6 +451,7 @@ func TestLeaseManagedLifecycleOperationPlan(t *testing.T) {
 		{name: "admit pending", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstancePending, want: "admit"},
 		{name: "renew before first start", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceStarting, leaseManaged: true, want: "renew"},
 		{name: "start with lease", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceStarting, leaseManaged: true, leaseExpiry: fresh, want: "start"},
+		{name: "renew due before first start", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceStarting, leaseManaged: true, leaseExpiry: due, want: "renew"},
 		{name: "renew due running", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceRunning, leaseManaged: true, leaseExpiry: due, want: "renew"},
 		{name: "renew malformed running", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceRunning, leaseManaged: true, leaseExpiry: "invalid", want: "renew"},
 		{name: "keep fresh running", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceRunning, leaseManaged: true, leaseExpiry: fresh},
@@ -499,7 +537,7 @@ func TestReconcilerClassifiesMalformedAuthorityAndBoundaries(t *testing.T) {
 	if _, err := reconciler.signCommand(deployment, overflow, "node-1", "start", fixture.now); !errors.Is(err, controlstore.ErrCapacityExceeded) {
 		t.Fatalf("command sequence overflow error = %v", err)
 	}
-	if _, err := selectNode(nil, nil, controlstore.Deployment{}, instance, fixture.now, time.Minute); err == nil {
+	if _, err := selectNode(nil, nil, nil, controlstore.Deployment{}, instance, fixture.now, time.Minute); err == nil {
 		t.Fatal("malformed placement authority was accepted")
 	}
 	if eligibleNode(controlstore.Node{Active: true, LastSeenAt: "bad"}, "tenant-a", map[string]struct{}{}, fixture.now, time.Minute) {
@@ -575,6 +613,9 @@ func newControlReconcileFixture(t *testing.T) *reconcileFixture {
 	if deliveries, err := store.PollV4(node, capabilities, now.Add(2*time.Minute), time.Minute, 1); err != nil || len(deliveries) != 0 {
 		t.Fatalf("prime node capabilities = (%+v, %v)", deliveries, err)
 	}
+	if _, _, err := store.ObserveNodeScheduling(node, testSchedulingObservation("node-1"), now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("prime node scheduling = %v", err)
+	}
 	_, controller, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -599,14 +640,38 @@ func (fixture *reconcileFixture) reconciler(t *testing.T) *Reconciler {
 }
 
 func applyControlDeployment(t *testing.T, fixture *reconcileFixture, generation uint64) {
+	applyControlDeploymentNamed(t, fixture, "research", "research-0", "research-lineage-0", generation)
+}
+
+func applyControlDeploymentNamed(
+	t *testing.T,
+	fixture *reconcileFixture,
+	deploymentID, instanceID, lineageID string,
+	generation uint64,
+) {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
+	capsule := admission.ProfileCapsule{
+		SchemaVersion: admission.SchemaV1, CapsuleID: deploymentID + "-capsule", PublisherKeyID: "publisher-a",
+		Profile: admission.ProfileRef{ID: "generic-v1", Version: "v1"},
+		Image: admission.ImageIdentity{
+			Repository: "registry.example/" + deploymentID, ManifestDigest: "sha256:" + strings.Repeat("c", 64),
+			ConfigDigest: "sha256:" + strings.Repeat("d", 64),
+			Platform:     admission.Platform{OS: "linux", Architecture: "amd64"},
+		},
+		Command:   []string{"/agent", "serve"},
+		Resources: admission.ResourceLimits{MemoryBytes: 128 << 20, CPUMillis: 250, PIDs: 32},
+		State:     admission.StateShape{SchemaVersion: "v1", Path: "/state"},
+	}
+	capsulePayload, err := json.Marshal(capsule)
+	if err != nil {
+		t.Fatal(err)
+	}
 	capsuleEnvelope, err := dsse.Sign(
-		admission.CapsulePayloadType, []byte(`{"schema_version":"steward.capsule.v1"}`),
-		"publisher-a", publisherPrivate,
+		admission.CapsulePayloadType, capsulePayload, "publisher-a", publisherPrivate,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -617,12 +682,12 @@ func applyControlDeployment(t *testing.T, fixture *reconcileFixture, generation 
 	}
 	delegation := admission.CommandDelegation{
 		SchemaVersion: admission.CommandDelegationSchemaV1,
-		DelegationID:  "research-authority", TenantID: "tenant-a",
+		DelegationID:  deploymentID + "-authority", TenantID: "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(fixture.controller.Public().(ed25519.PublicKey)),
 		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-1"},
 		Instances: []admission.CommandDelegationInstance{{
-			InstanceID: "research-0", LineageID: "research-lineage-0",
+			InstanceID: instanceID, LineageID: lineageID,
 			MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 4,
 		}},
 		ClaimGeneration: generation,
@@ -651,8 +716,8 @@ func applyControlDeployment(t *testing.T, fixture *reconcileFixture, generation 
 		t.Fatal(err)
 	}
 	if _, changed, err := fixture.store.ApplyDeployment(fixture.admin, controlstore.DeploymentApply{
-		TenantID: "tenant-a", ID: "research", Generation: generation,
-		AgentName: "research-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
+		TenantID: "tenant-a", ID: deploymentID, Generation: generation,
+		AgentName: deploymentID + "-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
 		CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
 	}, fixture.now); err != nil || !changed {
 		t.Fatalf("apply deployment = (%v, %v)", changed, err)
@@ -670,6 +735,7 @@ func completeDeploymentCommand(t *testing.T, fixture *reconcileFixture, operatio
 	if err != nil || len(deliveries) != 1 {
 		t.Fatalf("poll %s = (%+v, %v)", operation, deliveries, err)
 	}
+	observeControlNodeScheduling(t, fixture)
 	deployment := getControlDeployment(t, fixture)
 	instance := deployment.Instances[0]
 	if instance.CommandOperation != operation || instance.CommandID != deliveries[0].CommandID {
@@ -721,6 +787,39 @@ func heartbeatControlNode(t *testing.T, fixture *reconcileFixture) {
 		fixture.node, capabilities, fixture.now, time.Minute, 1,
 	); err != nil || len(deliveries) != 0 {
 		t.Fatalf("heartbeat node = (%+v, %v)", deliveries, err)
+	}
+	observeControlNodeScheduling(t, fixture)
+}
+
+func observeControlNodeScheduling(t *testing.T, fixture *reconcileFixture) {
+	t.Helper()
+	if _, _, err := fixture.store.ObserveNodeScheduling(
+		fixture.node, testSchedulingObservation("node-1"), fixture.now,
+	); err != nil {
+		t.Fatalf("observe node scheduling = %v", err)
+	}
+}
+
+func testSchedulingObservation(nodeID string) controlprotocol.ExecutorSchedulingObservationV1 {
+	return controlprotocol.ExecutorSchedulingObservationV1{
+		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+		NodeID:        nodeID, CredentialScope: "node", OS: "linux", Architecture: "amd64",
+		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
+		Labels:    []controlprotocol.ExecutorSchedulingLabelV1{}, Taints: []string{},
+		Policy: controlprotocol.ExecutorSchedulingPolicyV1{
+			PerWorkload: controlprotocol.ExecutorSchedulingResourcesV1{
+				MemoryBytes: 1 << 30, CPUMillis: 2000, PIDs: 256, Workloads: 1,
+			},
+			Host: controlprotocol.ExecutorSchedulingResourcesV1{
+				MemoryBytes: 8 << 30, CPUMillis: 8000, PIDs: 2048, Workloads: 32,
+			},
+			Tenant: controlprotocol.ExecutorSchedulingResourcesV1{
+				MemoryBytes: 2 << 30, CPUMillis: 2000, PIDs: 512, Workloads: 4,
+			},
+			RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{
+				MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
+			},
+		},
 	}
 }
 

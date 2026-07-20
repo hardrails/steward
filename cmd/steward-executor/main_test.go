@@ -43,6 +43,35 @@ func TestReadTokenTrimsFileWhitespace(t *testing.T) {
 	}
 }
 
+func TestParseSchedulingAttributesCanonicalizesAndRejectsAmbiguity(t *testing.T) {
+	labels, taints, err := parseSchedulingAttributes(
+		"region=west,accelerator=gpu", "gpu,dedicated",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 2 || labels[0].Key != "accelerator" || labels[1].Key != "region" ||
+		len(taints) != 2 || taints[0] != "dedicated" || taints[1] != "gpu" {
+		t.Fatalf("canonical attributes = (%+v, %+v)", labels, taints)
+	}
+	for _, test := range []struct {
+		labels string
+		taints string
+	}{
+		{labels: "missing-value"},
+		{labels: "region=west,region=east"},
+		{labels: "region name=west"},
+		{labels: "region=west coast"},
+		{taints: "dedicated,dedicated"},
+		{taints: "dedicated,"},
+		{taints: "gpu pool"},
+	} {
+		if _, _, err := parseSchedulingAttributes(test.labels, test.taints); err == nil {
+			t.Fatalf("ambiguous attributes were accepted: %+v", test)
+		}
+	}
+}
+
 func TestReadTokenRejectsOverPermissiveFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "executor-token")
 	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {

@@ -276,6 +276,8 @@ outbound-only deployment.
 | `-max-tenant-memory-bytes` | `2147483648` | Aggregate memory reservation for one tenant |
 | `-max-tenant-cpu-millis` | `2000` | Aggregate CPU reservation for one tenant |
 | `-max-tenant-pids` | `512` | Aggregate process reservation for one tenant |
+| `-node-labels` | empty | Comma-separated scheduling labels such as `region=west,accelerator=gpu` |
+| `-node-taints` | empty | Comma-separated scheduling taints; a delegated workload must tolerate every taint |
 | `-allow-unquotaed-state-on-dedicated-host` | `false` | With complete signed admission and exactly one policy tenant, allow persistent local Docker volumes without hard byte or inode quotas |
 | `-admission-policy-file` | empty | Signed site-policy DSSE; enables signed admission |
 | `-admission-site-root-public-key-file` | empty | Base64 Ed25519 site-root public key |
@@ -292,6 +294,18 @@ outbound-only deployment.
 | `-gateway-grant-root` | `/run/steward-gateway/grants` | Host directory containing per-grant capability sockets |
 | `-relay-image` | empty | Trusted relay image pinned by repository digest or local Docker image ID |
 | `-relay-gid` | `0` | Nonzero host GID used for per-grant relay socket access |
+
+With signed admission and a node-scoped uplink, Executor publishes these
+startup limits and scheduling attributes to Control automatically. Control uses
+the observation to reserve CPU, memory, process, tenant, and workload-slot
+capacity before it queues a new admission. Executor checks real Docker usage
+again before creation, so a stale controller decision cannot weaken the local
+limit. A missing or stale scheduling observation pauses new placement; it does
+not block lease renewal, stop, or destroy operations for assigned workloads.
+
+Labels and taints use letters, digits, `.`, `_`, `:`, `/`, and `-`, with a
+maximum of 128 bytes per key or value. Do not put secrets in them. They are
+returned by the node status API and console.
 
 ### Executor local roles
 

@@ -155,6 +155,63 @@ func TestControlPlaneExecutorProtocolV4PersistsAndExposesAdmissionProjection(t *
 	}
 }
 
+func TestControlPlaneAcceptsAuthenticatedSchedulingObservationAndExposesIt(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(
+		t, fixture, fixture.adminToken, "scheduling-enrollment", "node-1", []string{"tenant-a"},
+	)
+	observation := controlprotocol.ExecutorSchedulingObservationV1{
+		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+		NodeID:        "node-1", CredentialScope: "node", OS: "linux", Architecture: "amd64",
+		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
+		Labels:    []controlprotocol.ExecutorSchedulingLabelV1{{Key: "region", Value: "west"}},
+		Taints:    []string{},
+		Policy: controlprotocol.ExecutorSchedulingPolicyV1{
+			PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 512 << 20, CPUMillis: 1000, PIDs: 128, Workloads: 1},
+			Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 8 << 30, CPUMillis: 8000, PIDs: 2048, Workloads: 32},
+			Tenant:          controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2 << 30, CPUMillis: 2000, PIDs: 512, Workloads: 4},
+			RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32},
+		},
+	}
+	response := fixture.request(
+		t, http.MethodPost, "/executor-uplink/scheduling", credential.Credential, mustJSON(t, observation),
+	)
+	requireStatus(t, response, http.StatusOK)
+	var accepted struct {
+		Applied    bool   `json:"applied"`
+		ObservedAt string `json:"observed_at"`
+	}
+	decodeResponse(t, response, &accepted)
+	if !accepted.Applied || accepted.ObservedAt == "" {
+		t.Fatalf("scheduling response = %+v", accepted)
+	}
+	response = fixture.request(
+		t, http.MethodGet, "/v1/tenants/tenant-a/nodes/node-1", fixture.adminToken, "",
+	)
+	requireStatus(t, response, http.StatusOK)
+	var node nodeResponse
+	decodeResponse(t, response, &node)
+	if node.Scheduling == nil || node.Scheduling.Observation.Policy.Host.Workloads != 32 ||
+		node.Scheduling.Observation.Labels[0].Value != "west" {
+		t.Fatalf("node scheduling projection = %+v", node)
+	}
+
+	wrong := observation
+	wrong.NodeID = "node-2"
+	requireError(t, fixture.request(
+		t, http.MethodPost, "/executor-uplink/scheduling", credential.Credential, mustJSON(t, wrong),
+	), http.StatusBadRequest, "invalid_request")
+	requireError(t, fixture.request(
+		t, http.MethodPost, "/executor-uplink/scheduling", fixture.adminToken, mustJSON(t, observation),
+	), http.StatusUnauthorized, "unauthorized")
+	requireError(t, fixture.request(
+		t, http.MethodPost, "/executor-uplink/scheduling", credential.Credential,
+		`{"schema_version":"steward.executor-scheduling.v1","schema_version":"duplicate"}`,
+	), http.StatusBadRequest, "invalid_request")
+}
+
 func TestControlPlaneExecutorProtocolDispatchRejectsAmbiguityWithoutWideningV3(t *testing.T) {
 	fixture := newServerFixture(t)
 	requireStatus(

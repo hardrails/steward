@@ -350,6 +350,32 @@ func VerifyCapsuleForImport(capsuleEnvelope, policyEnvelope []byte, siteRoots ma
 	}, nil
 }
 
+// InspectProfileCapsule decodes and validates bounded capsule routing fields
+// without treating its signature as trusted. Control uses the image platform
+// only as a scheduling filter; Executor remains responsible for signature and
+// policy verification before it creates a workload.
+func InspectProfileCapsule(raw []byte, now time.Time) (ProfileCapsule, error) {
+	if len(raw) == 0 || len(raw) > dsse.DefaultMaxEnvelopeBytes {
+		return ProfileCapsule{}, deny("profile capsule envelope exceeds its limit")
+	}
+	envelope, err := dsse.Parse(raw)
+	if err != nil || envelope.PayloadType != CapsulePayloadType {
+		return ProfileCapsule{}, deny("parse profile capsule envelope")
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return ProfileCapsule{}, deny("decode profile capsule payload")
+	}
+	var capsule ProfileCapsule
+	if err := dsse.DecodeStrictInto(payload, dsse.DefaultMaxEnvelopeBytes, &capsule); err != nil {
+		return ProfileCapsule{}, deny("decode profile capsule statement")
+	}
+	if err := capsule.Validate(now); err != nil {
+		return ProfileCapsule{}, err
+	}
+	return capsule, nil
+}
+
 // VerifyAndAdmit authenticates the signed policy first, verifies a capsule only
 // with a policy-authorized publisher key, then applies finite authority
 // intersection to a caller-bound intent.
