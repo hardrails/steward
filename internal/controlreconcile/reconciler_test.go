@@ -79,7 +79,10 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 	assertReconcileCount(t, reconciler, "observe start", 1, 0)
 	deployment = getControlDeployment(t, fixture)
 	if deployment.Phase != controlstore.DeploymentReady ||
-		deployment.Instances[0].Phase != controlstore.DeploymentInstanceRunning {
+		deployment.Instances[0].Phase != controlstore.DeploymentInstanceRunning ||
+		deployment.Instances[0].Intent == nil || deployment.Instances[0].Admission == nil ||
+		deployment.Instances[0].Intent.InstanceID != "research-0" ||
+		deployment.Instances[0].Admission.RuntimeRef == "" {
 		t.Fatalf("running deployment = %+v", deployment)
 	}
 

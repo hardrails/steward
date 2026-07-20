@@ -251,17 +251,19 @@ const (
 // DeploymentInstance is the controller's durable progress record for one
 // exact instance named by the tenant-signed delegation.
 type DeploymentInstance struct {
-	InstanceID       string                  `json:"instance_id"`
-	LineageID        string                  `json:"lineage_id"`
-	Generation       uint64                  `json:"generation"`
-	NodeID           string                  `json:"node_id,omitempty"`
-	Phase            DeploymentInstancePhase `json:"phase"`
-	CommandID        string                  `json:"command_id,omitempty"`
-	CommandOperation string                  `json:"command_operation,omitempty"`
-	CommandSequence  uint64                  `json:"command_sequence,omitempty"`
-	Attempts         uint32                  `json:"attempts,omitempty"`
-	LastError        string                  `json:"last_error,omitempty"`
-	TransitionedAt   string                  `json:"transitioned_at"`
+	InstanceID       string                                         `json:"instance_id"`
+	LineageID        string                                         `json:"lineage_id"`
+	Generation       uint64                                         `json:"generation"`
+	NodeID           string                                         `json:"node_id,omitempty"`
+	Intent           *admission.InstanceIntent                      `json:"intent,omitempty"`
+	Admission        *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
+	Phase            DeploymentInstancePhase                        `json:"phase"`
+	CommandID        string                                         `json:"command_id,omitempty"`
+	CommandOperation string                                         `json:"command_operation,omitempty"`
+	CommandSequence  uint64                                         `json:"command_sequence,omitempty"`
+	Attempts         uint32                                         `json:"attempts,omitempty"`
+	LastError        string                                         `json:"last_error,omitempty"`
+	TransitionedAt   string                                         `json:"transitioned_at"`
 }
 
 // Deployment is bounded desired state. It contains public signed artifacts,
@@ -602,6 +604,10 @@ func cloneDeployment(deployment Deployment) Deployment {
 	deployment.CapsuleDSSE = append([]byte(nil), deployment.CapsuleDSSE...)
 	deployment.DelegationDSSE = append([]byte(nil), deployment.DelegationDSSE...)
 	deployment.Instances = append([]DeploymentInstance(nil), deployment.Instances...)
+	for index := range deployment.Instances {
+		deployment.Instances[index].Intent = cloneInstanceIntent(deployment.Instances[index].Intent)
+		deployment.Instances[index].Admission = cloneAdmissionProjection(deployment.Instances[index].Admission)
+	}
 	return deployment
 }
 
@@ -613,7 +619,7 @@ func deploymentToStored(deployment Deployment) storedDeployment {
 		CapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(deployment.CapsuleDSSE),
 		DelegationDSSEBase64: base64.StdEncoding.EncodeToString(deployment.DelegationDSSE),
 		DesiredState:         deployment.DesiredState, Phase: deployment.Phase,
-		Instances: append([]DeploymentInstance(nil), deployment.Instances...),
+		Instances: cloneDeployment(deployment).Instances,
 		CreatedAt: deployment.CreatedAt, UpdatedAt: deployment.UpdatedAt,
 	}
 }
@@ -633,9 +639,19 @@ func deploymentFromStored(stored storedDeployment) (Deployment, error) {
 		AgentName: stored.AgentName, BundleDigest: stored.BundleDigest,
 		CapsuleDSSE: capsule, DelegationDSSE: delegation,
 		DesiredState: stored.DesiredState, Phase: stored.Phase,
-		Instances: append([]DeploymentInstance(nil), stored.Instances...),
+		Instances: cloneDeployment(Deployment{Instances: stored.Instances}).Instances,
 		CreatedAt: stored.CreatedAt, UpdatedAt: stored.UpdatedAt,
 	}, nil
+}
+
+func cloneInstanceIntent(intent *admission.InstanceIntent) *admission.InstanceIntent {
+	if intent == nil {
+		return nil
+	}
+	cloned := *intent
+	cloned.EgressRouteIDs = copyStringSlice(intent.EgressRouteIDs)
+	cloned.ConnectorIDs = copyStringSlice(intent.ConnectorIDs)
+	return &cloned
 }
 
 func cloneAdmissionProjection(projection *controlprotocol.ExecutorAdmissionProjectionV1) *controlprotocol.ExecutorAdmissionProjectionV1 {
@@ -1354,6 +1370,24 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 			validDeploymentOperation(instance.CommandOperation) && instance.CommandSequence > 0
 		if !commandEmpty && !commandComplete {
 			return errors.New("deployment instance command cursor is incomplete")
+		}
+		if instance.Intent != nil {
+			if err := instance.Intent.Validate(admission.AuthenticatedIdentity{
+				TenantID: instance.Intent.TenantID,
+				NodeID:   instance.Intent.NodeID,
+			}); err != nil || instance.Intent.TenantID != deployment.TenantID ||
+				instance.Intent.NodeID != instance.NodeID || instance.Intent.InstanceID != instance.InstanceID ||
+				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation ||
+				instance.Intent.CapsuleDigest != dsse.Digest(deployment.CapsuleDSSE) {
+				return errors.New("deployment instance intent is invalid")
+			}
+		}
+		if instance.Admission != nil {
+			if instance.Intent == nil || instance.Admission.Validate() != nil ||
+				instance.Admission.Generation != instance.Generation ||
+				instance.Admission.CapsuleDigest != instance.Intent.CapsuleDigest {
+				return errors.New("deployment instance admission projection is invalid")
+			}
 		}
 	}
 	return nil

@@ -2827,6 +2827,97 @@ components:
           type: integer
           format: int64
           minimum: 1
+    DeploymentInstanceIntent:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - node_id
+        - instance_id
+        - lineage_id
+        - generation
+        - capsule_digest
+        - resources
+        - capabilities
+        - state_disposition
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        lineage_id:
+          $ref: "#/components/schemas/Identifier256"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        resources:
+          $ref: "#/components/schemas/DeploymentResources"
+        capabilities:
+          $ref: "#/components/schemas/DeploymentCapabilities"
+        state_disposition:
+          type: string
+          enum: [none, new, resume]
+        inference_route_id:
+          $ref: "#/components/schemas/Identifier128"
+        model_alias:
+          type: string
+          minLength: 1
+          maxLength: 256
+        service_id:
+          $ref: "#/components/schemas/Identifier128"
+        egress_route_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        connector_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        effect_mode:
+          type: string
+          enum: [standard, authorized]
+    DeploymentResources:
+      type: object
+      additionalProperties: false
+      required: [memory_bytes, cpu_millis, pids]
+      properties:
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        cpu_millis:
+          type: integer
+          format: int64
+          minimum: 1
+        pids:
+          type: integer
+          format: int64
+          minimum: 1
+    DeploymentCapabilities:
+      type: object
+      additionalProperties: false
+      properties:
+        state:
+          type: boolean
+        inference:
+          type: boolean
+        service:
+          type: boolean
+        egress:
+          type: boolean
+        connector:
+          type: boolean
     DeploymentInstance:
       type: object
       additionalProperties: false
@@ -2842,6 +2933,20 @@ components:
           minimum: 1
         node_id:
           $ref: "#/components/schemas/Identifier128"
+        intent:
+          allOf:
+            - $ref: "#/components/schemas/DeploymentInstanceIntent"
+          description: >-
+            Exact non-secret admission intent retained from the verified
+            controller command. Present after admission is durably enqueued.
+        admission:
+          allOf:
+            - $ref: "#/components/schemas/ExecutorAdmissionProjectionV1"
+          description: >-
+            Authenticated non-secret Executor projection retained after a
+            successful admission. Together with intent, this is sufficient to
+            bind a tenant-signed service task without retrieving old command
+            records.
         phase:
           type: string
           enum: [pending, admitting, starting, running, stopping, destroying, removed, failed]
@@ -2849,7 +2954,7 @@ components:
           $ref: "#/components/schemas/Identifier256"
         command_operation:
           type: string
-          enum: [admit, start, read, stop, destroy]
+          enum: [admit, start, stop, destroy]
         command_sequence:
           type: integer
           format: int64

@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
@@ -1064,6 +1065,23 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 			!validEvidenceRouteIdentity(instance.LineageID, 256) || instance.Generation == 0 ||
 			index > 0 && deployment.Instances[index-1].InstanceID >= instance.InstanceID {
 			return errors.New("control deployment response instance set is not canonical")
+		}
+		if instance.Intent != nil {
+			if err := instance.Intent.Validate(admission.AuthenticatedIdentity{
+				TenantID: instance.Intent.TenantID,
+				NodeID:   instance.Intent.NodeID,
+			}); err != nil || instance.Intent.TenantID != deployment.TenantID ||
+				instance.Intent.NodeID != instance.NodeID || instance.Intent.InstanceID != instance.InstanceID ||
+				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation {
+				return errors.New("control deployment response instance intent is invalid")
+			}
+		}
+		if instance.Admission != nil {
+			if instance.Intent == nil || instance.Admission.Validate() != nil ||
+				instance.Admission.Generation != instance.Generation ||
+				instance.Admission.CapsuleDigest != instance.Intent.CapsuleDigest {
+				return errors.New("control deployment response admission projection is invalid")
+			}
 		}
 	}
 	created, createdErr := time.Parse(time.RFC3339Nano, deployment.CreatedAt)
