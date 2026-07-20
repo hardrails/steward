@@ -1072,7 +1072,8 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 				NodeID:   instance.Intent.NodeID,
 			}); err != nil || instance.Intent.TenantID != deployment.TenantID ||
 				instance.Intent.NodeID != instance.NodeID || instance.Intent.InstanceID != instance.InstanceID ||
-				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation {
+				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation ||
+				instance.Intent.CapsuleDigest != deployment.CapsuleDigest {
 				return errors.New("control deployment response instance intent is invalid")
 			}
 		}

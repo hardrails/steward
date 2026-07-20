@@ -216,3 +216,36 @@ credentials in Terraform state. See
 
 It does not install Docker, pull an agent image, invent control-plane credentials,
 or embed a vendor control-plane endpoint.
+
+## Do useful work next
+
+Installation establishes the enforcement boundary; it does not invent authority
+for an agent. Next, follow [Build and run an agent application]({{ '/guides/build-agents/' |
+relative_url }}) to package Hermes or OpenClaw, admit a task service, and apply a
+durable deployment. Then configure the repeated local paths once and run the first
+task:
+
+```console
+sudo -H stewardctl context set production \
+  -control-url https://control.customer.example:8443 \
+  -ca-file /secure/steward/control-ca.pem \
+  -token-file /secure/steward/operator.token \
+  -tenant-id tenant-a \
+  -gateway-token-file /etc/steward/gateway-service-token \
+  -service-trust /secure/steward/hermes-service-trust.json \
+  -task-key /secure/steward/tenant-task.private.pem \
+  -task-key-id tenant-task-1
+
+sudo -H stewardctl task run workspace-auditor \
+  -request workspace-audit.request.json \
+  -operation-id hermes.run \
+  -bundle-out workspace-audit.task.json \
+  -result-out workspace-audit.result.json
+```
+
+The task command does not put the signing key or Gateway credential in the agent.
+It stores only their file paths in the owner-only CLI context, writes the exact
+signed task bundle before dispatch, and leaves that bundle available for safe
+recovery if the terminal or host fails mid-run. See
+[CLI ergonomics and recovery]({{ '/guides/cli/' | relative_url }}) for the shorter
+path and the off-node signing alternative.

@@ -49,7 +49,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
 | `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
-| `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments |
+| `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments, including retained task-ready intent and admission projections when present |
 | `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
 | `DELETE /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Mark one deployment absent; reconciliation performs bounded cleanup asynchronously |
 | `GET /v1/nodes/{node_id}/evidence` | Read the site-admin-only last-good Executor receipt checkpoint and any sticky divergence finding |

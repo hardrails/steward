@@ -209,6 +209,13 @@ It survives restart without duplicating a queued command. Executor independently
 checks the tenant delegation and controller signature. A failed or
 `outcome_unknown` command becomes `degraded` and is not silently retried.
 
+A ready deployment retains the exact verified instance intent and authenticated
+Executor admission projection needed for task issuance. `agent deployment wait`
+can export one instance, and `task run` joins deployment wait, task issuance,
+dispatch, terminal observation, and result storage. It persists the signed task
+bundle before dispatch so recovery reuses the same authority instead of risking a
+duplicate effect.
+
 New placement also requires a recent authenticated node poll. A pending instance
 records `no_eligible_node` when none of its delegated nodes is fresh and capable.
 An instance already assigned to a stale or ineligible node records
@@ -223,6 +230,12 @@ replace an instance after node loss, preempt workloads, perform progressive
 rollouts, or autoscale. Its least-loaded choice uses bounded current inventory,
 not a capacity reservation. Executor revalidates admission and live capacity, so
 a stale decision fails closed rather than overruling the node.
+
+`task run` must execute where its Gateway service endpoint is reachable through a
+literal loopback address, normally on the selected node or through an operator-
+managed authenticated tunnel. Control does not relay prompts, task bodies, result
+bytes, Gateway bearer tokens, or task private keys. Multi-instance deployments
+require an explicit instance selection.
 
 ## Forks clone state, not a live agent
 
