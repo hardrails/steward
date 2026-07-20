@@ -3,6 +3,7 @@ package controlclient
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T
 	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-cursor"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-cursor"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-cursor"))
+	timelineCursor := base64.RawURLEncoding.EncodeToString([]byte("timeline-cursor"))
 	expected := []struct {
 		path  string
 		query url.Values
@@ -34,6 +36,14 @@ func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T
 				"cursor": {attentionCursor}, "limit": {"25"},
 			},
 			body: `{"items":[]}`,
+		},
+		{
+			path: "/v1/operations/timeline",
+			query: url.Values{
+				"tenant_id": {"tenant-a"}, "node_id": {"node-1"}, "kind": {"containment"},
+				"severity": {"critical"}, "cursor": {timelineCursor}, "limit": {"20"},
+			},
+			body: `{"events":[{"id":"incident-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","occurred_at":"2026-07-16T12:00:00Z","kind":"containment","action":"node_quarantined","severity":"critical","scope":"tenant","tenant_id":"tenant-a","node_id":"node-1","reason":"evidence mismatch"}]}`,
 		},
 		{
 			path: "/v1/operations/agents",
@@ -89,6 +99,11 @@ func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T
 	if page, err := client.ListAttention(ctx, "tenant-a", "node_stale", attentionCursor, 25); err != nil || page.Items == nil {
 		t.Fatalf("attention page = (%+v, %v)", page, err)
 	}
+	if page, err := client.ListIncidentTimeline(
+		ctx, "tenant-a", "node-1", "containment", "critical", timelineCursor, 20,
+	); err != nil || len(page.Events) != 1 || page.Events[0].Action != "node_quarantined" {
+		t.Fatalf("incident timeline page = (%+v, %v)", page, err)
+	}
 	if page, err := client.ListAgentInventory(
 		ctx, "tenant-a", "node-1", "running", agentCursor, 40,
 	); err != nil || page.Agents == nil {
@@ -139,6 +154,12 @@ func TestOperationsClientRejectsUnboundedOrAmbiguousFilters(t *testing.T) {
 	}
 	if _, err := client.ListCommandInventory(ctx, "", "", "pending", "failed", "", 1); err == nil {
 		t.Fatal("terminal status with non-terminal state was accepted")
+	}
+	if _, err := client.ListIncidentTimeline(ctx, "", "", "unknown", "", "", 1); err == nil {
+		t.Fatal("unknown incident kind was accepted")
+	}
+	if _, err := client.ListIncidentTimeline(ctx, "", "", "", "urgent", "", 1); err == nil {
+		t.Fatal("unknown incident severity was accepted")
 	}
 	for name, input := range map[string]struct {
 		kind   string
@@ -198,5 +219,80 @@ func TestOperationsClientSurfacesScopeAndFilterBoundCursorRejection(t *testing.T
 			apiError.Code != "invalid_request" {
 			t.Fatalf("%s cursor rejection = %v", name, err)
 		}
+	}
+}
+
+func TestIncidentTimelineClientRejectsUntrustedResponseShape(t *testing.T) {
+	valid := controlstore.IncidentEvent{
+		ID:         "incident-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		OccurredAt: "2026-07-16T12:00:00Z", Kind: controlstore.IncidentContainment,
+		Action: "node_quarantined", Severity: controlstore.IncidentCritical,
+		Scope: "tenant", TenantID: "tenant-a", NodeID: "node-a",
+	}
+	tests := map[string]controlstore.IncidentTimelinePage{
+		"nil events": {},
+		"bad id": {
+			Events: []controlstore.IncidentEvent{func() controlstore.IncidentEvent {
+				value := valid
+				value.ID = "incident-not-a-digest"
+				return value
+			}()},
+		},
+		"noncanonical time": {
+			Events: []controlstore.IncidentEvent{func() controlstore.IncidentEvent {
+				value := valid
+				value.OccurredAt = "2026-07-16T12:00:00+00:00"
+				return value
+			}()},
+		},
+		"tenant leak": {
+			Events: []controlstore.IncidentEvent{func() controlstore.IncidentEvent {
+				value := valid
+				value.TenantID = "tenant-b"
+				return value
+			}()},
+		},
+		"invalid classification": {
+			Events: []controlstore.IncidentEvent{func() controlstore.IncidentEvent {
+				value := valid
+				value.Severity = "urgent"
+				return value
+			}()},
+		},
+		"duplicate event": {Events: []controlstore.IncidentEvent{valid, valid}},
+		"oldest first": {
+			Events: []controlstore.IncidentEvent{
+				func() controlstore.IncidentEvent {
+					value := valid
+					value.OccurredAt = "2026-07-16T11:00:00Z"
+					return value
+				}(),
+				func() controlstore.IncidentEvent {
+					value := valid
+					value.ID = "incident-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+					return value
+				}(),
+			},
+		},
+	}
+	for name, page := range tests {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(writer).Encode(page); err != nil {
+					t.Fatal(err)
+				}
+			}))
+			defer server.Close()
+			client, err := New(server.URL, "operator", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result, err := client.ListIncidentTimeline(
+				context.Background(), "tenant-a", "", "", "", "", 100,
+			); err == nil {
+				t.Fatalf("untrusted page was accepted: %+v", result)
+			}
+		})
 	}
 }

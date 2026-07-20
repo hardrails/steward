@@ -132,6 +132,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/operations/summary", server.operationsSummary)
 	server.mux.HandleFunc("/v1/operations/freeze", server.siteOperationalFreeze)
 	server.mux.HandleFunc("/v1/operations/attention", server.operationsAttention)
+	server.mux.HandleFunc("/v1/operations/timeline", server.operationsTimeline)
 	server.mux.HandleFunc("/v1/operations/agents", server.operationsAgents)
 	server.mux.HandleFunc("/v1/operations/commands", server.operationsCommands)
 	server.mux.HandleFunc("/v1/operations/credentials", server.operationsCredentials)

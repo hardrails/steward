@@ -881,6 +881,159 @@ func (c *Client) ListAttention(ctx context.Context, tenantID, reason, cursor str
 	return page, err
 }
 
+// ListIncidentTimeline returns Steward's metadata-only projection of current
+// incident-relevant facts. It is retained state, not an append-only audit log.
+func (c *Client) ListIncidentTimeline(
+	ctx context.Context,
+	tenantID, nodeID, kind, severity, cursor string,
+	limit int,
+) (controlstore.IncidentTimelinePage, error) {
+	if kind != "" && kind != string(controlstore.IncidentContainment) &&
+		kind != string(controlstore.IncidentEvidence) && kind != string(controlstore.IncidentAccess) &&
+		kind != string(controlstore.IncidentWorkload) {
+		return controlstore.IncidentTimelinePage{}, errors.New("control incident timeline kind is invalid")
+	}
+	if severity != "" && severity != string(controlstore.IncidentInfo) &&
+		severity != string(controlstore.IncidentWarning) && severity != string(controlstore.IncidentCritical) {
+		return controlstore.IncidentTimelinePage{}, errors.New("control incident timeline severity is invalid")
+	}
+	path, err := operationsPath(
+		"/v1/operations/timeline",
+		map[string]string{
+			"tenant_id": tenantID, "node_id": nodeID, "kind": kind, "severity": severity,
+		},
+		nil, cursor, limit,
+	)
+	if err != nil {
+		return controlstore.IncidentTimelinePage{}, err
+	}
+	var page controlstore.IncidentTimelinePage
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return controlstore.IncidentTimelinePage{}, err
+	}
+	if err := validateIncidentTimelinePage(page, tenantID, nodeID, kind, severity, limit); err != nil {
+		return controlstore.IncidentTimelinePage{}, err
+	}
+	return page, nil
+}
+
+func validateIncidentTimelinePage(
+	page controlstore.IncidentTimelinePage,
+	tenantID, nodeID, kind, severity string,
+	limit int,
+) error {
+	maximum := limit
+	if maximum == 0 {
+		maximum = 100
+	}
+	if page.Events == nil || len(page.Events) > maximum {
+		return errors.New("control incident timeline returned an invalid page size")
+	}
+	if page.NextCursor != "" {
+		if err := validateOperationsCursor(page.NextCursor); err != nil {
+			return err
+		}
+	}
+	seen := make(map[string]struct{}, len(page.Events))
+	previous := time.Time{}
+	previousID := ""
+	for _, event := range page.Events {
+		when, err := time.Parse(time.RFC3339Nano, event.OccurredAt)
+		if err != nil || when.Format(time.RFC3339Nano) != event.OccurredAt {
+			return errors.New("control incident timeline returned a non-canonical timestamp")
+		}
+		if !previous.IsZero() && (when.After(previous) || when.Equal(previous) && event.ID <= previousID) {
+			return errors.New("control incident timeline is not newest-first")
+		}
+		previous, previousID = when, event.ID
+		if !strings.HasPrefix(event.ID, "incident-") || len(event.ID) != len("incident-")+64 ||
+			!isLowerHex(event.ID[len("incident-"):]) {
+			return errors.New("control incident timeline returned an invalid event ID")
+		}
+		if _, duplicate := seen[event.ID]; duplicate {
+			return errors.New("control incident timeline returned a duplicate event")
+		}
+		seen[event.ID] = struct{}{}
+		if event.Action == "" || event.Kind != controlstore.IncidentContainment && event.Kind != controlstore.IncidentEvidence &&
+			event.Kind != controlstore.IncidentAccess && event.Kind != controlstore.IncidentWorkload ||
+			event.Severity != controlstore.IncidentInfo && event.Severity != controlstore.IncidentWarning &&
+				event.Severity != controlstore.IncidentCritical ||
+			event.Scope != "site" && event.Scope != "tenant" ||
+			event.Scope == "site" && event.TenantID != "" ||
+			event.Scope == "tenant" && event.TenantID == "" {
+			return errors.New("control incident timeline returned an invalid classification")
+		}
+		if !validOperationsIdentifier(event.TenantID, 128, event.Scope == "site") ||
+			!validOperationsIdentifier(event.NodeID, 128, true) || !validIncidentAction(event.Action) {
+			return errors.New("control incident timeline returned invalid identity metadata")
+		}
+		for _, field := range []struct {
+			name    string
+			value   string
+			maximum int
+		}{
+			{"resource_id", event.ResourceID, 512},
+			{"reason", event.Reason, 1024},
+			{"status", event.Status, 512},
+		} {
+			if field.value != "" {
+				if err := validateOperationsQueryValue(field.name, field.value, field.maximum); err != nil {
+					return err
+				}
+			}
+		}
+		if tenantID != "" && event.Scope != "site" && event.TenantID != tenantID ||
+			nodeID != "" && event.NodeID != nodeID ||
+			kind != "" && string(event.Kind) != kind ||
+			severity != "" && string(event.Severity) != severity {
+			return errors.New("control incident timeline returned an event outside the requested scope")
+		}
+	}
+	return nil
+}
+
+func validOperationsIdentifier(value string, maximum int, optional bool) bool {
+	if value == "" {
+		return optional
+	}
+	if len(value) > maximum {
+		return false
+	}
+	for index, character := range []byte(value) {
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' || index > 0 &&
+			(character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validIncidentAction(value string) bool {
+	if value == "" || len(value) > 128 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range []byte(value[1:]) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isLowerHex(value string) bool {
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (c *Client) ListCommandInventory(ctx context.Context, tenantID, nodeID, state, terminalStatus, cursor string, limit int) (controlstore.CommandInventoryPage, error) {
 	if terminalStatus != "" && state != string(controlstore.CommandTerminal) {
 		return controlstore.CommandInventoryPage{}, errors.New("control operations terminal_status requires state=terminal")

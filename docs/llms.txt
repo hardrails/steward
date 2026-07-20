@@ -106,7 +106,8 @@ Executor handlers.
 
 Steward Control serves an embedded observation-first React console at `/console/`
 on its existing listener. It uses the same operator Bearer scope for operations
-summary, derived attention, nodes, observed agent runtimes, command metadata, and credential metadata. Its
+summary, derived attention, current metadata-only incident facts, nodes, observed
+agent runtimes, command metadata, and credential metadata. Its
 only mutation is to courier one exact offline-signed Executor command after digest
 review, typed confirmation, and bearer re-entry. It has no command creation,
 private-signing, general mutation, or secret-plaintext path. The

@@ -12,6 +12,7 @@ import (
 	"io"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hardrails/steward/internal/controlclient"
@@ -57,6 +58,7 @@ type controlSupportBundleV1 struct {
 	Nodes         []controlclient.Node                 `json:"nodes"`
 	Deployments   []controlclient.Deployment           `json:"deployments"`
 	Attention     []controlstore.AttentionItem         `json:"attention"`
+	Timeline      []controlstore.IncidentEvent         `json:"timeline"`
 	Agents        []controlstore.AgentMetadata         `json:"agents"`
 	Commands      []controlstore.CommandMetadata       `json:"commands"`
 	Credentials   []controlstore.CredentialMetadata    `json:"credentials"`
@@ -92,6 +94,7 @@ type supportBundleControlClient interface {
 	GetOperationalFreeze(context.Context, string) (controlstore.OperationalFreezeStatus, error)
 	GetOperationsSummary(context.Context, string) (controlstore.OperationsSummary, error)
 	ListAttention(context.Context, string, string, string, int) (controlstore.AttentionPage, error)
+	ListIncidentTimeline(context.Context, string, string, string, string, string, int) (controlstore.IncidentTimelinePage, error)
 	ListAgentInventory(context.Context, string, string, string, string, int) (controlstore.AgentInventoryPage, error)
 	ListCommandInventory(context.Context, string, string, string, string, string, int) (controlstore.CommandInventoryPage, error)
 	ListCredentialInventory(context.Context, string, string, string, string, *bool, string, int) (controlstore.CredentialInventoryPage, error)
@@ -252,6 +255,10 @@ func collectControlSupportBundle(
 	if err != nil {
 		return controlSupportBundleV1{}, err
 	}
+	bundle.Timeline, err = collectSupportBundleTimeline(ctx, client, tenantID)
+	if err != nil {
+		return controlSupportBundleV1{}, err
+	}
 	bundle.Agents, err = collectSupportBundleAgents(ctx, client, tenantID)
 	if err != nil {
 		return controlSupportBundleV1{}, err
@@ -362,6 +369,26 @@ func collectSupportBundleAttention(ctx context.Context, client supportBundleCont
 		}
 		result = append(result, page.Items...)
 		if err := supportBundleCursorProgress("attention", &cursor, page.NextCursor, len(page.Items), len(result)); err != nil {
+			return nil, err
+		}
+		if page.NextCursor == "" {
+			return result, nil
+		}
+	}
+}
+
+func collectSupportBundleTimeline(ctx context.Context, client supportBundleControlClient, tenantID string) ([]controlstore.IncidentEvent, error) {
+	var result []controlstore.IncidentEvent
+	cursor := ""
+	for {
+		page, err := client.ListIncidentTimeline(
+			ctx, tenantID, "", "", "", cursor, controlstore.MaxInventoryPageLimit,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("collect incident timeline: %w", err)
+		}
+		result = append(result, page.Events...)
+		if err := supportBundleCursorProgress("incident timeline", &cursor, page.NextCursor, len(page.Events), len(result)); err != nil {
 			return nil, err
 		}
 		if page.NextCursor == "" {
@@ -496,7 +523,7 @@ func validateControlSupportBundle(bundle controlSupportBundleV1) error {
 	}
 	for _, count := range []int{
 		len(bundle.Tenants), len(bundle.Nodes), len(bundle.Deployments), len(bundle.Attention),
-		len(bundle.Agents), len(bundle.Commands), len(bundle.Credentials), len(bundle.Evidence),
+		len(bundle.Timeline), len(bundle.Agents), len(bundle.Commands), len(bundle.Credentials), len(bundle.Evidence),
 	} {
 		if count > maxControlSupportBundleItems {
 			return errors.New("support bundle collection exceeds its item limit")
@@ -514,6 +541,9 @@ func validateControlSupportBundle(bundle controlSupportBundleV1) error {
 			return errors.New("support bundle deployment references an unknown tenant")
 		}
 	}
+	if err := validateSupportBundleTimeline(bundle.Timeline, bundle.Scope.TenantID, knownTenants); err != nil {
+		return err
+	}
 	for _, evidence := range bundle.Evidence {
 		if err := evidence.Inspection.Validate(); err != nil {
 			return fmt.Errorf("support bundle node %q evidence is invalid: %w", evidence.NodeID, err)
@@ -530,6 +560,74 @@ func validateControlSupportBundle(bundle controlSupportBundleV1) error {
 		}
 	}
 	return nil
+}
+
+func validateSupportBundleTimeline(
+	events []controlstore.IncidentEvent,
+	tenantID string,
+	knownTenants map[string]struct{},
+) error {
+	seen := make(map[string]struct{}, len(events))
+	previousTime := time.Time{}
+	previousID := ""
+	for _, event := range events {
+		when, err := time.Parse(time.RFC3339Nano, event.OccurredAt)
+		if err != nil || when.IsZero() || event.OccurredAt != when.UTC().Format(time.RFC3339Nano) {
+			return errors.New("support bundle incident timeline has a non-canonical timestamp")
+		}
+		if !previousTime.IsZero() && (when.After(previousTime) || when.Equal(previousTime) && event.ID <= previousID) {
+			return errors.New("support bundle incident timeline is not strict newest-first")
+		}
+		previousTime, previousID = when, event.ID
+		if !strings.HasPrefix(event.ID, "incident-") || len(event.ID) != len("incident-")+64 {
+			return errors.New("support bundle incident timeline has an invalid event ID")
+		}
+		if _, err := hex.DecodeString(event.ID[len("incident-"):]); err != nil || event.ID != strings.ToLower(event.ID) {
+			return errors.New("support bundle incident timeline has an invalid event digest")
+		}
+		if _, exists := seen[event.ID]; exists {
+			return errors.New("support bundle incident timeline repeats an event")
+		}
+		seen[event.ID] = struct{}{}
+		if !validSupportBundleIncidentAction(event.Action) ||
+			event.Kind != controlstore.IncidentContainment && event.Kind != controlstore.IncidentEvidence &&
+				event.Kind != controlstore.IncidentAccess && event.Kind != controlstore.IncidentWorkload ||
+			event.Severity != controlstore.IncidentInfo && event.Severity != controlstore.IncidentWarning &&
+				event.Severity != controlstore.IncidentCritical ||
+			event.Scope != "site" && event.Scope != "tenant" {
+			return errors.New("support bundle incident timeline has an invalid classification")
+		}
+		if event.Scope == "site" {
+			if event.TenantID != "" {
+				return errors.New("support bundle site incident names a tenant")
+			}
+		} else {
+			if _, known := knownTenants[event.TenantID]; !known || tenantID != "" && event.TenantID != tenantID {
+				return errors.New("support bundle incident timeline references an unknown tenant")
+			}
+		}
+		if !validOptionalControlIdentifier(event.NodeID, 128) || len(event.ResourceID) > 512 ||
+			len(event.Reason) > 1024 || len(event.Status) > 512 ||
+			strings.ContainsAny(event.ResourceID+event.Reason+event.Status, "\r\n\x00") ||
+			strings.TrimSpace(event.ResourceID) != event.ResourceID ||
+			strings.TrimSpace(event.Reason) != event.Reason || strings.TrimSpace(event.Status) != event.Status {
+			return errors.New("support bundle incident timeline contains invalid metadata")
+		}
+	}
+	return nil
+}
+
+func validSupportBundleIncidentAction(value string) bool {
+	if value == "" || len(value) > 128 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range []byte(value[1:]) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func supportBundleCanonicalOrder(bundle controlSupportBundleV1) bool {

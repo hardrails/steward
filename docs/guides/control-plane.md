@@ -874,6 +874,37 @@ stewardctl control snapshot unquarantine \
 The cleared record remains durable with a higher revision. This prevents an old
 operator view from silently restoring an earlier decision after restart.
 
+### Read the current incident chronology
+
+Use the incident timeline to see current containment, evidence divergence,
+credential revocation, and failed-workload facts in one newest-first view:
+
+```console
+stewardctl control incident timeline
+```
+
+With a tenant context, the result is automatically limited to that tenant. A
+site administrator can select one tenant with `-tenant-id tenant-a` or omit it
+for the site-wide view. Narrow the result when investigating one system:
+
+```console
+stewardctl control incident timeline \
+  -node-id node-a \
+  -kind containment \
+  -severity critical
+```
+
+Categories are `containment`, `evidence`, `access`, and `workload`. Severities
+are `info`, `warning`, and `critical`. The output contains bounded metadata only;
+it never contains command envelopes, command results, credentials, prompts,
+request or response bodies, or logs.
+
+This chronology shows the latest retained facts, not every historical change. A
+later state transition replaces the earlier retained transition, and bounded
+records can eventually disappear. Use signed Executor and Gateway evidence plus
+an external log or security information and event management (SIEM) system when
+you require complete historical reconstruction.
+
 ### Preserve a metadata-only support bundle
 
 A site administrator can capture the current incident context in one owner-only
@@ -885,11 +916,11 @@ stewardctl control support-bundle create \
 ```
 
 Add `-tenant-id tenant-a` to restrict the bundle to one tenant. A bundle includes
-the operations summary, attention findings, freeze and quota records, node and
-deployment state, agent and command metadata, credential metadata, and the last
-controller evidence checkpoint for each visible node. Collection is read-only and
-bounded. It does not acknowledge a finding, retry a command, stop an agent, or
-change incident state.
+the operations summary, attention findings, current incident timeline, freeze and
+quota records, node and deployment state, agent and command metadata, credential
+metadata, and the last controller evidence checkpoint for each visible node.
+Collection is read-only and bounded. It does not acknowledge a finding, retry a
+command, stop an agent, or change incident state.
 
 The format cannot represent raw prompts, request or response bodies, signed
 command envelopes, credential values, private keys, agent result text, or logs.

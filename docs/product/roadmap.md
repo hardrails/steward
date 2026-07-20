@@ -257,7 +257,8 @@ application bases, not live authorized agents.
 Steward should preserve signed enforcement evidence and make it operationally
 useful:
 
-- one incident timeline across Control, Executor, Gateway, connectors, and state;
+- extend the current retained Control incident timeline with verified Executor,
+  Gateway, connector, and state evidence;
 - offline verification of artifact, policy, delegation, permit, dispatch, and
   outcome linkage;
 - external witness checkpoints for rollback or fork detection;
@@ -419,8 +420,8 @@ supportable through one coherent operational surface.
   policy while retaining protected-file materialization.
 - Add a connector conformance kit and two or three anchor connectors.
 - Extend the implemented site and tenant freeze, node quarantine, snapshot
-  quarantine, and metadata-only support bundle with capability revocation and one
-  coherent incident/evidence timeline.
+  quarantine, retained Control incident timeline, and metadata-only support
+  bundle with capability revocation and cross-plane verified evidence.
 - Finish the React console, concise CLI, autocomplete, SDK/API examples, Terraform
   modules, progressive documentation, packaging, migrations, upgrade tests, and
   release evidence.

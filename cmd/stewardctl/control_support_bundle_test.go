@@ -16,6 +16,26 @@ import (
 
 type supportBundleClientFixture struct {
 	attentionCalls int
+	timelineCalls  int
+}
+
+func (fixture *supportBundleClientFixture) ListIncidentTimeline(
+	context.Context, string, string, string, string, string, int,
+) (controlstore.IncidentTimelinePage, error) {
+	fixture.timelineCalls++
+	if fixture.timelineCalls == 1 {
+		return controlstore.IncidentTimelinePage{
+			Events: []controlstore.IncidentEvent{{
+				ID:         "incident-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				OccurredAt: "2026-07-20T12:02:00Z", Kind: controlstore.IncidentContainment,
+				Action: "node_quarantined", Severity: controlstore.IncidentCritical,
+				Scope: "tenant", TenantID: "tenant-a", NodeID: "node-a",
+				Reason: "evidence mismatch",
+			}},
+			NextCursor: "next",
+		}, nil
+	}
+	return controlstore.IncidentTimelinePage{Events: []controlstore.IncidentEvent{}}, nil
 }
 
 func (fixture *supportBundleClientFixture) ListTenants(context.Context, string, int) (controlclient.TenantList, error) {
@@ -112,8 +132,9 @@ func TestControlSupportBundleCollectsCanonicalMetadataOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fixture.attentionCalls != 2 || len(bundle.Tenants) != 1 || len(bundle.Nodes) != 1 ||
+	if fixture.attentionCalls != 2 || fixture.timelineCalls != 2 || len(bundle.Tenants) != 1 || len(bundle.Nodes) != 1 ||
 		len(bundle.Attention) != 1 || len(bundle.Commands) != 1 || len(bundle.Credentials) != 1 ||
+		len(bundle.Timeline) != 1 || bundle.Timeline[0].Action != "node_quarantined" ||
 		len(bundle.Evidence) != 1 || bundle.Evidence[0].NodeID != "node-a" {
 		t.Fatalf("support bundle = %#v", bundle)
 	}

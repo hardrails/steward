@@ -49,6 +49,7 @@ func TestOperationsHTTPAuthenticatesProjectsFiltersAndExcludesSecrets(t *testing
 	for _, route := range []string{
 		"/v1/operations/summary",
 		"/v1/operations/attention",
+		"/v1/operations/timeline",
 		"/v1/operations/agents",
 		"/v1/operations/commands",
 		"/v1/operations/credentials",
@@ -69,6 +70,27 @@ func TestOperationsHTTPAuthenticatesProjectsFiltersAndExcludesSecrets(t *testing
 	requireError(t, fixture.request(
 		t, http.MethodGet, "/v1/operations/summary?tenant_id=tenant-b", operatorA, "",
 	), http.StatusNotFound, "not_found")
+
+	requireStatus(t, fixture.request(
+		t, http.MethodPut, "/v1/tenants/tenant-a/freeze", operatorA,
+		`{"action":"freeze","expected_revision":0,"reason":"timeline test"}`,
+	), http.StatusOK)
+	timeline := fixture.request(
+		t, http.MethodGet,
+		"/v1/operations/timeline?tenant_id=tenant-a&kind=containment&severity=critical&limit=1",
+		operatorA, "",
+	)
+	requireStatus(t, timeline, http.StatusOK)
+	var timelinePage controlstore.IncidentTimelinePage
+	decodeResponse(t, timeline, &timelinePage)
+	if len(timelinePage.Events) != 1 || timelinePage.Events[0].Action != "freeze_set" ||
+		timelinePage.Events[0].TenantID != "tenant-a" || timelinePage.Events[0].Reason != "timeline test" {
+		t.Fatalf("incident timeline = %+v", timelinePage)
+	}
+	if strings.Contains(timeline.Body.String(), "command_dsse") ||
+		strings.Contains(timeline.Body.String(), node.Credential) {
+		t.Fatalf("incident timeline exposed sensitive material: %s", timeline.Body.String())
+	}
 
 	first := fixture.request(
 		t, http.MethodGet,
@@ -199,6 +221,9 @@ func TestOperationsHTTPRejectsAmbiguousQueriesAndBoundsPages(t *testing.T) {
 		"/v1/operations/commands?cursor=a&cursor=b",
 		"/v1/operations/commands?terminal_status=failed",
 		"/v1/operations/commands?state=pending&terminal_status=failed",
+		"/v1/operations/timeline?kind=unknown",
+		"/v1/operations/timeline?severity=urgent",
+		"/v1/operations/timeline?kind=containment&kind=evidence",
 		"/v1/operations/credentials?revoked=1",
 		"/v1/operations/credentials?kind=node&unknown=x",
 		"/v1/operations/credentials?role=tenant_operator&node_id=node-1",

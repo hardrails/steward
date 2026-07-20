@@ -33,6 +33,7 @@ type Control interface {
 	GetCommand(context.Context, string, string, string) (controlclient.Command, error)
 	GetOperationsSummary(context.Context, string) (controlstore.OperationsSummary, error)
 	ListAttention(context.Context, string, string, string, int) (controlstore.AttentionPage, error)
+	ListIncidentTimeline(context.Context, string, string, string, string, string, int) (controlstore.IncidentTimelinePage, error)
 	ListAgentInventory(context.Context, string, string, string, string, int) (controlstore.AgentInventoryPage, error)
 	ListCommandInventory(context.Context, string, string, string, string, string, int) (controlstore.CommandInventoryPage, error)
 	ListCredentialInventory(context.Context, string, string, string, string, *bool, string, int) (controlstore.CredentialInventoryPage, error)
@@ -85,6 +86,15 @@ type controlOperationsSummaryArgs struct {
 type controlAttentionListArgs struct {
 	TenantID string `json:"tenant_id,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+type controlIncidentTimelineArgs struct {
+	TenantID string `json:"tenant_id,omitempty"`
+	NodeID   string `json:"node_id,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Severity string `json:"severity,omitempty"`
 	Cursor   string `json:"cursor,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
 }
@@ -242,6 +252,24 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 			return nil, controlFailure("attention list", err)
 		}
 		return result, nil
+	case "steward_control_incident_timeline":
+		var arguments controlIncidentTimelineArgs
+		if decodeArguments(raw, &arguments) != nil ||
+			!validOptionalControlIdentifier(arguments.TenantID, 128) ||
+			!validOptionalControlIdentifier(arguments.NodeID, 128) ||
+			!validControlIncidentKind(arguments.Kind) ||
+			!validControlIncidentSeverity(arguments.Severity) ||
+			!validControlInventoryPage(arguments.Cursor, arguments.Limit) {
+			return nil, errors.New("steward_control_incident_timeline accepts only bounded tenant, node, category, severity, cursor, and limit")
+		}
+		result, err := s.control.ListIncidentTimeline(
+			ctx, arguments.TenantID, arguments.NodeID, arguments.Kind,
+			arguments.Severity, arguments.Cursor, arguments.Limit,
+		)
+		if err != nil {
+			return nil, controlFailure("incident timeline", err)
+		}
+		return result, nil
 	case "steward_control_command_list":
 		var arguments controlCommandListArgs
 		if decodeArguments(raw, &arguments) != nil ||
@@ -369,6 +397,25 @@ func validControlInventoryPage(cursor string, limit int) bool {
 
 func validOptionalControlIdentifier(value string, maximum int) bool {
 	return value == "" || validControlIdentifier(value, maximum)
+}
+
+func validControlIncidentKind(value string) bool {
+	switch controlstore.IncidentKind(value) {
+	case "", controlstore.IncidentContainment, controlstore.IncidentEvidence,
+		controlstore.IncidentAccess, controlstore.IncidentWorkload:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlIncidentSeverity(value string) bool {
+	switch controlstore.IncidentSeverity(value) {
+	case "", controlstore.IncidentInfo, controlstore.IncidentWarning, controlstore.IncidentCritical:
+		return true
+	default:
+		return false
+	}
 }
 
 func validControlAttentionReason(value string) bool {
@@ -540,6 +587,22 @@ func controlTools() []any {
 				"properties": mergeControlProperties(
 					mergeControlProperties(inventoryProperties(), "tenant_id", optionalTenant),
 					"reason", map[string]any{"type": "string", "enum": controlAttentionReasonValues()},
+				)}, true, false, true, false),
+		tool("steward_control_incident_timeline", "Read current incident facts", "List the newest current retained containment, evidence, access, and failed-workload facts for the configured operator scope or one tenant projection. Metadata only; this is not a complete audit log and does not acknowledge or remediate anything.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"properties": mergeControlProperties(
+					mergeControlProperties(
+						mergeControlProperties(
+							mergeControlProperties(inventoryProperties(), "tenant_id", optionalTenant),
+							"node_id", id128,
+						),
+						"kind", map[string]any{"type": "string", "enum": []string{
+							"containment", "evidence", "access", "workload",
+						}},
+					),
+					"severity", map[string]any{"type": "string", "enum": []string{
+						"info", "warning", "critical",
+					}},
 				)}, true, false, true, false),
 		tool("steward_control_command_list", "List command inventory", "List bounded command delivery metadata without signed command bytes, terminal result text, or retry side effects.",
 			map[string]any{"type": "object", "additionalProperties": false,

@@ -96,6 +96,24 @@ func (control *fakeControl) ListAttention(_ context.Context, tenantID, reason, c
 	}, control.err
 }
 
+func (control *fakeControl) ListIncidentTimeline(
+	_ context.Context, tenantID, nodeID, kind, severity, cursor string, limit int,
+) (controlstore.IncidentTimelinePage, error) {
+	control.calls = append(
+		control.calls,
+		"incident-timeline:"+tenantID+":"+nodeID+":"+kind+":"+severity+":"+cursor+":"+strconv.Itoa(limit),
+	)
+	return controlstore.IncidentTimelinePage{
+		Events: []controlstore.IncidentEvent{{
+			ID:         "incident-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			OccurredAt: "2026-07-16T11:56:00Z", Kind: controlstore.IncidentKind(kind),
+			Action: "node_quarantined", Severity: controlstore.IncidentSeverity(severity),
+			Scope: "tenant", TenantID: tenantID, NodeID: nodeID,
+		}},
+		NextCursor: "next-incident",
+	}, control.err
+}
+
 func (control *fakeControl) ListCommandInventory(
 	_ context.Context, tenantID, nodeID, state, terminalStatus, cursor string, limit int,
 ) (controlstore.CommandInventoryPage, error) {
@@ -168,7 +186,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 13 {
+	if len(listed) != 14 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
@@ -177,6 +195,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_node_status", "steward_control_node_revoke", "steward_control_command_submit",
 		"steward_control_command_status", "steward_control_operations_summary",
 		"steward_control_attention_list", "steward_control_command_list",
+		"steward_control_incident_timeline",
 		"steward_control_agent_list",
 		"steward_control_credential_list", "steward_control_evidence_status",
 	} {
@@ -206,6 +225,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_command_submit"], false, true, true, true)
 	requireAnnotations(t, definitions["steward_control_operations_summary"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_attention_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_incident_timeline"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_command_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_agent_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_credential_list"], true, false, true, false)
@@ -224,6 +244,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	}
 	for _, toolName := range []string{
 		"steward_control_operations_summary", "steward_control_attention_list",
+		"steward_control_incident_timeline",
 		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
 	} {
 		schema := definitions[toolName]["inputSchema"].(map[string]any)
@@ -285,6 +306,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		}
 	}
 	attentionCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-v1\x00attention-a"))
+	incidentCursor := base64.RawURLEncoding.EncodeToString([]byte("incident-timeline-v1\x00incident-a"))
 	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-v1\x00agent-a"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
@@ -303,6 +325,13 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 			arguments: map[string]any{
 				"tenant_id": "tenant-a", "reason": "node_stale",
 				"cursor": attentionCursor, "limit": 25,
+			},
+		},
+		{
+			name: "steward_control_incident_timeline",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a", "node_id": "node-a", "kind": "containment",
+				"severity": "critical", "cursor": incidentCursor, "limit": 20,
 			},
 		},
 		{
@@ -352,6 +381,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		"evidence-status:node-a",
 		"operations-summary:tenant-a",
 		"attention-list:tenant-a:node_stale:" + attentionCursor + ":25",
+		"incident-timeline:tenant-a:node-a:containment:critical:" + incidentCursor + ":20",
 		"agent-list:tenant-a:node-a:running:" + agentCursor + ":40",
 		"command-list:tenant-a:node-a:terminal:failed:" + commandCursor + ":50",
 		"credential-list:tenant-a:operator:tenant_operator::false:" + credentialCursor + ":10",
@@ -379,6 +409,10 @@ func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 		{name: "attention cursor", tool: "steward_control_attention_list", arguments: map[string]any{"cursor": "%%%"}},
 		{name: "attention negative limit", tool: "steward_control_attention_list", arguments: map[string]any{"limit": -1}},
 		{name: "attention oversized limit", tool: "steward_control_attention_list", arguments: map[string]any{"limit": 501}},
+		{name: "incident kind", tool: "steward_control_incident_timeline", arguments: map[string]any{"kind": "unknown"}},
+		{name: "incident severity", tool: "steward_control_incident_timeline", arguments: map[string]any{"severity": "urgent"}},
+		{name: "incident node", tool: "steward_control_incident_timeline", arguments: map[string]any{"node_id": "-node"}},
+		{name: "incident cursor", tool: "steward_control_incident_timeline", arguments: map[string]any{"cursor": validCursor + "="}},
 		{name: "agent status", tool: "steward_control_agent_list", arguments: map[string]any{"status": "destroyed"}},
 		{name: "agent node", tool: "steward_control_agent_list", arguments: map[string]any{"node_id": "-node"}},
 		{name: "agent cursor", tool: "steward_control_agent_list", arguments: map[string]any{"cursor": validCursor + "="}},

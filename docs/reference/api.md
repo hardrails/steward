@@ -68,6 +68,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET or PUT /v1/tenants/{tenant_id}/quota` | Inspect requested-resource usage or optimistically set and clear the site-defined fleet-wide tenant ceiling; mutation requires a site administrator |
 | `GET or PUT /v1/operations/freeze` | Inspect or optimistically change the site-wide command-delivery freeze; mutation requires a site administrator |
 | `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
+| `GET /v1/operations/timeline` | Page current metadata-only containment, evidence, access, and failed-workload facts in newest-first order |
 | `GET /v1/operations/agents` | Page through non-secret observed agent runtime state and latest signed operations |
 | `GET /v1/operations/commands` | Page and filter command metadata without command or result bodies |
 | `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
@@ -102,6 +103,15 @@ new deployment fork; the deployment `PUT` returns `423` with error code
 quarantine remain idempotent. Clearing requires the current retained revision.
 Neither transition reads or deletes snapshot bytes, recalls an existing fork, or
 stops a running workload.
+
+The incident timeline is a read-only join over the latest retained Control facts.
+It is useful for answering “what is currently contained, revoked, divergent, or
+failing?” without searching several inventories. It is not an append-only audit
+log: a later transition replaces an earlier retained transition, bounded source
+records can disappear, and it does not include unmanaged activity. Events contain
+metadata only and exclude command envelopes, results, credentials, prompts,
+request and response bodies, and logs. Its opaque cursor is bound to the effective
+tenant projection and every filter.
 
 Tenant resource quotas also use optimistic revisions. The ceiling covers raw CPU,
 memory, process, and workload-slot requests in signed admission intent across the

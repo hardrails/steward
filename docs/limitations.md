@@ -161,12 +161,14 @@ Receipts deliberately omit raw prompts, request bodies, response bodies, termina
 agent result text, and secret values. That protects content but can limit forensic
 detail.
 
-The incident support bundle follows the same metadata-only boundary and also
-excludes command envelopes, credential values, private keys, and logs. It is a
-strict, owner-only snapshot of several controller reads, not an atomic database
-snapshot or a signed attestation. Objects can change while collection is in
-progress; repeated node records that disagree fail the collection instead of being
-silently merged.
+The incident timeline and support bundle follow the same metadata-only boundary
+and also exclude command envelopes, credential values, private keys, and logs.
+The timeline joins the latest retained controller facts; it is not an append-only
+audit log and cannot reconstruct overwritten or removed transitions. The bundle
+is a strict, owner-only snapshot of several controller reads, not an atomic
+database snapshot or a signed attestation. Objects can change while collection
+is in progress; repeated node records that disagree fail the collection instead
+of being silently merged.
 
 ## Air-gapped does not mean supply-chain verified
 

@@ -101,10 +101,17 @@ The console does not set or clear a freeze. Use the authenticated
 | --- | --- | --- |
 | Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, retained-state capacity, and the selected tenant's fleet-wide resource quota and usage | Mutation controls and raw evidence frames |
 | Attention | Deterministic findings derived from retained facts and current process observations, including tenant quota pressure; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, remediation, or incident workflow |
+| Incident view | Current containment, evidence divergence, access revocation, and failed-workload facts in newest-first order, with site or tenant scope and bounded reasons | Complete history, overwritten transitions, command or result bodies, credentials, prompts, logs, acknowledgement, or remediation |
 | Nodes | Node state, placement mode, durable drain state and request ID, failed drain instance when applicable, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
 | Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
 | Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
 | Agents | One card per signed runtime identity and instance generation with its last successful workload status, latest signed operation, node, logical egress routes, and connector IDs | Desired state, automatic recovery promises, command bytes, task authorities, relay endpoints, free-form errors, and secrets |
+
+The Incident view is a retained chronology, not an append-only audit log. A later
+transition replaces the earlier retained state, and bounded records can disappear.
+Use the CLI support bundle to preserve the current metadata snapshot, and preserve
+signed evidence or export events to your own SIEM when historical reconstruction
+is required.
 
 The Agents view keeps workload status separate from operation outcome. For
 example, if a running agent receives a stop command that fails, the card shows

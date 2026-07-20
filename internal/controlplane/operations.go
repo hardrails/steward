@@ -78,6 +78,41 @@ func (server *Server) operationsAttention(writer http.ResponseWriter, request *h
 	writeJSON(writer, http.StatusOK, page)
 }
 
+func (server *Server) operationsTimeline(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	query, ok := parseExactQuery(
+		writer, request, "tenant_id", "node_id", "kind", "severity", "cursor", "limit",
+	)
+	if !ok {
+		return
+	}
+	limit, ok := parseOperationsLimit(writer, query)
+	if !ok {
+		return
+	}
+	input := controlstore.IncidentTimelineQuery{
+		TenantID: query.Get("tenant_id"), NodeID: query.Get("node_id"),
+		Kind:     controlstore.IncidentKind(query.Get("kind")),
+		Severity: controlstore.IncidentSeverity(query.Get("severity")),
+		Limit:    limit, Cursor: query.Get("cursor"),
+	}
+	page, err := boundedOperationsPage(limit, func(candidateLimit int) (controlstore.IncidentTimelinePage, error) {
+		input.Limit = candidateLimit
+		return server.store.ListIncidentTimeline(identity, input)
+	})
+	if err != nil {
+		server.operationsPageError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
+}
+
 func (server *Server) operationsCommands(writer http.ResponseWriter, request *http.Request) {
 	if !method(writer, request, http.MethodGet) {
 		return

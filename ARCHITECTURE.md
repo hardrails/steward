@@ -104,7 +104,8 @@ Responsibilities:
 - issue one-time node enrollment;
 - authenticate outbound node polling;
 - retain exact signed command envelopes and terminal projections;
-- expose bounded node, command, credential, capacity, and attention inventory;
+- expose bounded node, command, credential, capacity, attention, and current
+  incident-fact inventory;
 - retain bounded Executor evidence deltas;
 - sign evidence checkpoints with a key distinct from node receipt keys; and
 - serve the embedded React console.
@@ -178,6 +179,7 @@ request digest, task identity, expiry, and optional influence context.
 ### Control API
 
 Control exposes tenant, operator, enrollment, node, command, operations, attention,
+incident timeline,
 credential-inventory, and evidence APIs. Operator bearer scope is enforced at the
 server, not inferred by clients. Remote non-loopback listeners require TLS.
 

@@ -92,6 +92,8 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlFreezeChange(arguments[2:], stdout, controlstore.OperationalFreezeActionUnfreeze)
 	case "attention list":
 		return controlAttentionList(arguments[2:], stdout)
+	case "incident timeline":
+		return controlIncidentTimeline(arguments[2:], stdout)
 	case "agent list":
 		return controlAgentList(arguments[2:], stdout)
 	case "command submit":
@@ -128,7 +130,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 type controlFlags struct {
@@ -859,6 +861,44 @@ func controlAttentionList(arguments []string, stdout io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	page, err := client.ListAttention(ctx, *tenantID, *reason, *cursor, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, page)
+}
+
+func controlIncidentTimeline(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control incident timeline", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant-projected scope")
+	nodeID := flags.String("node-id", "", "optional exact node identity")
+	kind := flags.String("kind", "", "optional containment, evidence, access, or workload category")
+	severity := flags.String("severity", "", "optional info, warning, or critical severity")
+	cursor := flags.String("cursor", "", "opaque continuation cursor")
+	limit := flags.Int("limit", controlstore.DefaultInventoryPageLimit, "maximum incident facts to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	validKind := *kind == "" || *kind == string(controlstore.IncidentContainment) ||
+		*kind == string(controlstore.IncidentEvidence) || *kind == string(controlstore.IncidentAccess) ||
+		*kind == string(controlstore.IncidentWorkload)
+	validSeverity := *severity == "" || *severity == string(controlstore.IncidentInfo) ||
+		*severity == string(controlstore.IncidentWarning) || *severity == string(controlstore.IncidentCritical)
+	if !validOptionalControlIdentifier(*tenantID, 128) ||
+		!validOptionalControlIdentifier(*nodeID, 128) || !validKind || !validSeverity ||
+		!validControlInventoryPage(*cursor, *limit, false) || flags.NArg() != 0 {
+		return errors.New("control incident timeline accepts bounded tenant, node, category, severity, cursor, and a limit between 1 and 500")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	page, err := client.ListIncidentTimeline(
+		ctx, *tenantID, *nodeID, *kind, *severity, *cursor, *limit,
+	)
 	if err != nil {
 		return err
 	}
