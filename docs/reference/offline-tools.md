@@ -111,7 +111,7 @@ stewardctl executor-command delegation issue \
   -tenant-id tenant-a \
   -controller-public-key controller.public \
   -controller-key-id controller-online \
-  -operations admit,start,stop,destroy,read \
+  -operations admit,renew,start,stop,destroy,read \
   -node-ids executor-1,executor-2 \
   -instances instances.json \
   -admission-template admission-template.json \

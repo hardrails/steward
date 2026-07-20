@@ -303,7 +303,7 @@ authority:
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "BASE64_ED25519_PUBLIC_KEY",
-      "operations": ["admit", "start", "stop", "destroy", "read", "purge", "activation-canary"]
+      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "activation-canary"]
     }]
   }]
 }
@@ -422,10 +422,17 @@ disposition, model route, service, egress routes, connectors, and effect mode.
 Control cannot widen those fields. The delegation lifetime cannot exceed 24 hours.
 Normal command fences still reject stale sequences and generations.
 
-`admit` carries the OpenAPI `SignedAdmissionRequest`. `start`, `stop`, `destroy`,
-and `read` require an empty payload. `purge` carries one bounded `lineage_id`. The
+`admit` carries the OpenAPI `SignedAdmissionRequest`. `renew` carries one bounded
+`steward.workload-lease.v1` expiry. `start`, `stop`, `destroy`, and `read` require
+an empty payload. `purge` carries one bounded `lineage_id`. The
 signed intent and every runtime-reference identity must describe the same tuple
 before the local handler runs.
+
+Once an admission accepts a lease, start requires a current lease. Executor
+persists renewals in admission-fence format 4 and reconciliation deactivates the
+Gateway grant and stops the relay and agent at expiry. Stateless expired
+workloads are removed and tombstoned under the mutation journal; stateful
+workloads are stopped but retained for explicit recovery.
 
 `read` must match the durable claim and instance generations, but does not advance
 the lifecycle high-water sequence. This read-fence separation prevents a read-only

@@ -645,11 +645,70 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/WorkloadDrift"
+          description: The workload drifted or its generation-bound lease expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
           description: Maintenance, journal, receipt, or reconciliation state prevents a safe mutation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/workloads/{runtime_ref}/lease:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [admission]
+      operationId: renewWorkloadLease
+      summary: Extend finite authority for one admitted workload generation
+      description: >-
+        Persists a monotonic, bounded expiry in the owner-only admission fence.
+        The Executor uplink calls this endpoint only after verifying a signed
+        `renew` command and tenant delegation. An expired lease is not revived;
+        start requires a current lease once the admission has accepted one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkloadLease"
+      responses:
+        "200":
+          description: The exact generation-bound lease is durably retained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadLease"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller or admission does not own the exact current signed generation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: The renewal rolls back expiry, targets another generation, or names a non-present admission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "503":
+          description: Reconciliation state prevents an expansive authority renewal.
           content:
             application/json:
               schema:
@@ -790,6 +849,20 @@ components:
         type: string
         pattern: "^executor-[a-f0-9]{64}$"
   schemas:
+    WorkloadLease:
+      type: object
+      additionalProperties: false
+      required: [schema_version, expires_at]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.workload-lease.v1]
+        expires_at:
+          type: string
+          format: date-time
+          description: >-
+            UTC expiry no more than five minutes after the signed command issue
+            time and no later than that command's own expiry.
     LocalPrincipal:
       type: object
       additionalProperties: false

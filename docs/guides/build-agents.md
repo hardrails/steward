@@ -136,7 +136,7 @@ the trusted tenant signing station. Do not copy `controller.private.pem`.
 
 Create the exact instance list and admission template described in the
 [offline tools reference]({{ '/reference/offline-tools/' | relative_url }}), then
-issue a short-lived delegation with all four lifecycle operations:
+issue a short-lived delegation with all five lifecycle operations:
 
 ```console
 stewardctl executor-command delegation issue \
@@ -144,7 +144,7 @@ stewardctl executor-command delegation issue \
   -tenant-id default \
   -controller-public-key controller.public.pem \
   -controller-key-id controller-default \
-  -operations admit,start,stop,destroy \
+  -operations admit,renew,start,stop,destroy \
   -node-ids node-1,node-2 \
   -instances instances.json \
   -admission-template admission-template.json \
@@ -175,8 +175,9 @@ The apply command checks the bundle, capsule envelope, delegation lifetime, tena
 capsule digest, and lifecycle scope locally. It fetches the current revision and
 infers a safe deployment generation. Control then selects an active allowed node
 that advertises delegated-command support and has reported within the configured
-node freshness threshold, then drives `admit` and `start`. Removing desired state
-similarly needs only the name:
+node freshness threshold, then drives `admit`, a bounded workload-lease renewal,
+and `start`. It renews the lease while the agent should remain running. Removing
+desired state similarly needs only the name:
 
 ```console
 stewardctl agent deployment remove auditor
@@ -185,20 +186,29 @@ stewardctl agent deployment remove auditor
 Removal is asynchronous. Watch status until the deployment is `removed`. A failed
 or uncertain Executor outcome becomes `degraded` and is not silently retried.
 `last_error` also reports retryable controller conditions using stable values:
-`no_eligible_node`, `assigned_node_unavailable`, `delegation_expired`,
-`controller_key_mismatch`, or `invalid_deployment_authority`. The controller
+`no_eligible_node`, `assigned_node_unavailable`, `awaiting_lease_expiry`,
+`stateful_replacement_unsupported`, `replacement_generation_exhausted`,
+`delegation_expired`, `controller_key_mismatch`, or
+`invalid_deployment_authority`. The controller
 rechecks these conditions and clears the value when it can enqueue the next command.
 `deployment_command_record_missing` is different: it means the durable command
 result needed to prove the next state is unavailable. Steward marks the deployment
 `degraded` and requires operator recovery instead of guessing or retrying the effect.
 
-A stale node is not a safe reason to create a replacement by itself. The existing
-workload may still be running while disconnected, so automatic replacement could
-create two agents with the same logical role. Steward keeps an assigned instance on
-that node and reports `assigned_node_unavailable` until the node returns or an
-operator performs an explicit recovery. The current scheduler does not yet reserve
-resources or provide fenced replacement; see
-[Known limitations]({{ '/limitations/' | relative_url }}).
+A stale node is not a fence by itself. For a lease-managed stateless deployment,
+Executor persists the latest signed expiry locally and stops the agent, trusted
+relay, and Gateway authority when it expires. Control records the expiry before
+delivery, waits through the command clock-skew allowance, advances the instance
+generation within the tenant-signed range, and then selects an eligible node. A
+lost renewal report therefore delays replacement; it cannot make replacement
+earlier. Before that bound, status reports `awaiting_lease_expiry`.
+
+Delegations without `renew` retain the older non-relocatable behavior and report
+`assigned_node_unavailable`. Stateful instances are also not moved automatically:
+local Docker state is not a portable, quota-enforced snapshot. They report
+`stateful_replacement_unsupported`. See
+[Known limitations]({{ '/limitations/' | relative_url }}) for the remaining trust
+and availability constraints.
 
 Keep lifecycle authority valid for any operation Control may still need. After a
 delegation expires, Executor correctly refuses new commands under it. To roll an

@@ -519,8 +519,8 @@ output formats, and failure boundaries.
 
 Multi-tenant uplink uses a node credential and DSSE
 `steward.executor-command.v2` statements. DSSE binds a typed payload to its
-signature. Site policy must authorize a tenant key for `admit`, `start`, `stop`,
-`destroy`, `read`, or `purge`. A site cleanup key may authorize only `stop`,
+signature. Site policy must authorize a tenant key for `admit`, `renew`, `start`,
+`stop`, `destroy`, `read`, or `purge`. A site cleanup key may authorize only `stop`,
 `destroy`, or `purge`, including after tenant removal. Signatures bind tenant, node,
 instance, runtime, generations, sequence, validity window, kind, and payload to
 Executor's durable admission record. The bearer cannot select a tenant; legacy

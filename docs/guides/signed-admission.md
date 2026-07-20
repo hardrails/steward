@@ -72,7 +72,7 @@ Insert the exact base64 values from `publisher.public`,
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "PASTE tenant-a-commands.public HERE",
-      "operations": ["admit", "start", "stop", "destroy", "read", "purge", "activation-canary"]
+      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "activation-canary"]
     }]
   }]
 }
