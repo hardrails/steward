@@ -274,7 +274,10 @@ func (reconciler *Reconciler) recoverUnavailableInstance(
 	if now.Before(leaseExpiry.Add(admission.CommandClockSkew)) {
 		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAwaitingLeaseExpiry), now)
 	}
-	if delegation.Admission == nil || delegation.Admission.Capabilities.State {
+	if delegation.Admission == nil {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+	}
+	if delegation.Admission.Capabilities.State {
 		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedStatefulReplacement), now)
 	}
 	delegated, found := delegatedInstance(delegation, instance.InstanceID)

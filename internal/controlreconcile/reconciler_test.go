@@ -297,6 +297,40 @@ func TestReconcilerReplacesStatelessInstanceOnlyAfterLeaseSafetyWindow(t *testin
 	}
 }
 
+func TestReconcilerReportsInvalidAuthorityWhenReplacementTemplateIsMissing(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue renew", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe renew", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe start", 1, 0)
+
+	deployment := getControlDeployment(t, fixture)
+	instance := deployment.Instances[0]
+	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegation.Admission = nil
+	leaseExpiry, err := time.Parse(time.RFC3339Nano, instance.LeaseExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.now = leaseExpiry.Add(admission.CommandClockSkew)
+	result, err := reconciler.recoverUnavailableInstance(deployment, instance, delegation, true, fixture.now)
+	blocked := getControlDeployment(t, fixture)
+	if err != nil || result.blockedReason != controlstore.DeploymentBlockedInvalidAuthority || !result.changed ||
+		blocked.Instances[0].LastError != string(controlstore.DeploymentBlockedInvalidAuthority) {
+		t.Fatalf("missing replacement template = result %+v deployment %+v err %v", result, blocked, err)
+	}
+}
+
 func TestReconcilerDoesNotReplaceAfterDelegationExpires(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)

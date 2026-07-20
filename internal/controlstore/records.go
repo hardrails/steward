@@ -1237,7 +1237,7 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 			continue
 		}
 		completed, _ := parseTimestamp(command.Terminal.CompletedAt)
-		if !completed.After(cutoff) || command.CommandKind == "renew" && !completed.After(workloadLeaseCutoff) {
+		if !completed.After(cutoff) || (command.CommandKind == "renew" && !completed.After(workloadLeaseCutoff)) {
 			result = append(result, cloneCommand(command))
 		}
 	}
