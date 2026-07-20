@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -266,6 +268,141 @@ func TestAgentDeploymentWaitExportsOneTaskReadyInstance(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"output":"`+outputPath+`"`) || strings.Contains(output.String(), string(public)) {
 		t.Fatalf("wait output=%s", output.String())
+	}
+}
+
+func TestTaskReadyDeploymentSelectionFailsClosed(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	valid := taskRunControlDeploymentFixture(fixture)
+	if selected, err := taskReadyDeploymentResult(valid, valid.Instances[0].InstanceID); err != nil ||
+		selected.InstanceID != valid.Instances[0].InstanceID {
+		t.Fatalf("selected=%+v error=%v", selected, err)
+	}
+
+	missing := valid
+	missing.Instances = append([]controlstore.DeploymentInstance(nil), valid.Instances...)
+	missing.Instances[0].Phase = controlstore.DeploymentInstanceStarting
+	if _, err := taskReadyDeploymentResult(missing, ""); err == nil || !strings.Contains(err.Error(), "no running") {
+		t.Fatalf("no-running error=%v", err)
+	}
+	if _, err := taskReadyDeploymentResult(valid, "missing"); err == nil || !strings.Contains(err.Error(), `"missing"`) {
+		t.Fatalf("missing selection error=%v", err)
+	}
+
+	multiple := valid
+	multiple.Instances = append([]controlstore.DeploymentInstance(nil), valid.Instances...)
+	second := multiple.Instances[0]
+	second.InstanceID = "agent-b"
+	second.LineageID = "lineage-b"
+	multiple.Instances = append(multiple.Instances, second)
+	if _, err := taskReadyDeploymentResult(multiple, ""); err == nil || !strings.Contains(err.Error(), "multiple") {
+		t.Fatalf("multiple selection error=%v", err)
+	}
+
+	legacy := valid
+	legacy.Instances = append([]controlstore.DeploymentInstance(nil), valid.Instances...)
+	legacy.Instances[0].Intent = nil
+	if _, err := taskReadyDeploymentResult(legacy, ""); err == nil || !strings.Contains(err.Error(), "predates") {
+		t.Fatalf("legacy deployment error=%v", err)
+	}
+
+	noService := valid
+	noService.Instances = append([]controlstore.DeploymentInstance(nil), valid.Instances...)
+	projection := *valid.Instances[0].Admission
+	projection.ServiceID = ""
+	projection.TaskAuthorities = nil
+	noService.Instances[0].Admission = &projection
+	if _, err := taskReadyDeploymentResult(noService, ""); err == nil || !strings.Contains(err.Error(), "task service") {
+		t.Fatalf("no-service error=%v", err)
+	}
+
+	if summary := deploymentFailureSummary(controlclient.Deployment{}); summary != "no failure detail was reported" {
+		t.Fatalf("empty failure summary=%q", summary)
+	}
+	failed := controlclient.Deployment{Instances: []controlstore.DeploymentInstance{
+		{InstanceID: "a", LastError: "first"}, {InstanceID: "b"}, {InstanceID: "c", LastError: "third"},
+	}}
+	if summary := deploymentFailureSummary(failed); summary != "a=first, c=third" {
+		t.Fatalf("failure summary=%q", summary)
+	}
+}
+
+func TestWaitForTaskReadyDeploymentStopsOnTerminalConditions(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	base := taskRunControlDeploymentFixture(fixture)
+	for _, test := range []struct {
+		name    string
+		phase   controlstore.DeploymentPhase
+		detail  string
+		want    string
+		timeout time.Duration
+	}{
+		{name: "degraded", phase: controlstore.DeploymentDegraded, detail: "policy_denied", want: "policy_denied", timeout: time.Second},
+		{name: "stopping", phase: controlstore.DeploymentStopping, want: "not becoming ready", timeout: time.Second},
+		{name: "removed", phase: controlstore.DeploymentRemoved, want: "not becoming ready", timeout: time.Second},
+		{name: "timeout", phase: controlstore.DeploymentPending, want: "context deadline exceeded", timeout: 10 * time.Millisecond},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			view := base
+			view.Phase = test.phase
+			view.Instances = append([]controlstore.DeploymentInstance(nil), base.Instances...)
+			view.Instances[0].LastError = test.detail
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(writer).Encode(view)
+			}))
+			defer server.Close()
+			tokenPath := filepath.Join(t.TempDir(), "operator.token")
+			if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			client, err := controlclient.NewFromFiles(server.URL, tokenPath, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), test.timeout)
+			defer cancel()
+			if _, err := waitForTaskReadyDeployment(ctx, client, "tenant-a", "auditor", ""); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("wait error=%v", err)
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"error":"unavailable","message":"control is unavailable"}`))
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := controlclient.NewFromFiles(server.URL, tokenPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waitForTaskReadyDeployment(context.Background(), client, "tenant-a", "auditor", ""); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("Control failure error=%v", err)
+	}
+}
+
+func TestAgentDeploymentCommandAndLifecycleValidationErrors(t *testing.T) {
+	for _, arguments := range [][]string{nil, {"unknown"}} {
+		if err := agentDeployment(arguments, &bytes.Buffer{}); err == nil {
+			t.Fatalf("deployment arguments %v were accepted", arguments)
+		}
+	}
+	if !deploymentLifecycleGranted([]string{"admit", "destroy", "start", "stop"}) ||
+		deploymentLifecycleGranted([]string{"admit", "start", "stop"}) {
+		t.Fatal("deployment lifecycle scope validation is inconsistent")
+	}
+	withoutContext, err := applyTaskRunContext([]string{"-no-context", "-deployment", "agent.json"})
+	if err != nil || slices.Contains(withoutContext, "-no-context") ||
+		!slices.Equal(withoutContext, []string{"-deployment", "agent.json"}) {
+		t.Fatalf("task run no-context arguments=%v error=%v", withoutContext, err)
+	}
+	if _, err := applyTaskRunContext([]string{"-no-context", "--no-context"}); err == nil {
+		t.Fatal("duplicate task run no-context flag was accepted")
 	}
 }
 
