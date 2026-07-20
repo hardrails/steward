@@ -96,7 +96,7 @@ var completionFlags = map[string][]string{
 	"control credential list":           {"-tenant-id", "-kind", "-role", "-node-id", "-revoked", "-cursor", "-limit"},
 	"control evidence":                  {"-node-id", "-out", "-in", "-witness-public-key"},
 	"control evidence-capture":          {"-tenant-id", "-node-id", "-capture-id", "-request-id", "-runtime-ref", "-out", "-in"},
-	"control support-bundle":            {"-tenant-id", "-out", "-in"},
+	"control support-bundle":            {"-tenant-id", "-out", "-in", "-expected-sha256"},
 	"executor-command issue":            {"-command-id", "-tenant-id", "-node-id", "-instance-id", "-kind", "-claim-generation", "-instance-generation", "-sequence", "-valid-for", "-payload", "-delegation", "-key", "-key-id", "-out"},
 	"executor-command delegation issue": {"-delegation-id", "-tenant-id", "-controller-public-key", "-controller-key-id", "-operations", "-node-ids", "-instances", "-claim-generation", "-admission-template", "-valid-for", "-key", "-key-id", "-out"},
 	"permit context":                    {"-admission", "-intent", "-receipts", "-receipt-public-key", "-receipt-node-id", "-receipt-epoch", "-expected-sequence", "-expected-chain-hash", "-out"},
