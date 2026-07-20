@@ -66,6 +66,15 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"site", "init", "new-site", "-authorized-effects", "r"}); !slices.Equal(candidates, []string{"required"}) {
 		t.Fatalf("site effects candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"site", "node", ""}); !slices.Equal(candidates, []string{"activate", "prepare", "verify"}) {
+		t.Fatalf("site node candidates=%v", candidates)
+	}
+	siteNodeFlags := stewardctlCompletionCandidates([]string{"site", "node", "prepare", "-"})
+	for _, expected := range []string{"-control-url", "-no-context", "-out", "-site-root-public-key", "-token-file"} {
+		if !slices.Contains(siteNodeFlags, expected) {
+			t.Fatalf("site node prepare flags %v missing %s", siteNodeFlags, expected)
+		}
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "init", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
 		t.Fatalf("agent runtime candidates=%v", candidates)
 	}

@@ -33,6 +33,22 @@ The generated directory is a custody handoff, not a secret store; separate its
 private keys before deployment. See
 [Create a site authority]({{ '/getting-started/site-authority/' | relative_url }}).
 
+The nested node workflow composes that verified offline trust with Control's
+online, one-time enrollment:
+
+```console
+stewardctl site node prepare steward-site node-a
+stewardctl site node verify steward-node-node-a
+stewardctl site node activate steward-node-node-a
+```
+
+`prepare` is the only command in this group that requires a site-administrator
+Control connection. It accepts `-control-url`, `-token-file`, `-ca-file`,
+`-valid-for`, `-request-id`, `-out`, and `-site-root-public-key`; the connection
+flags can come from the current CLI context. `verify` is offline. `activate`
+contacts the Control origin recorded in the prepared package, retains a resumable
+node-local receipt identity, and accepts `-out` and `-site-root-public-key`.
+
 ## Generate and inspect keys
 
 Create an Ed25519 key pair:

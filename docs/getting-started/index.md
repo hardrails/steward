@@ -238,6 +238,27 @@ into a tenant signing service. Follow
 [Create a site authority]({{ '/getting-started/site-authority/' | relative_url }})
 to separate key custody and use the generated inputs.
 
+After Control is installed, a site-administrator context can prepare the node
+handoff without manually copying trust and enrollment fields:
+
+```console
+stewardctl site node prepare steward-site node-a
+```
+
+Transfer the resulting owner-only directory to `node-a`, verify it against the
+independent site-root pin, and activate it there:
+
+```console
+stewardctl site node verify steward-node-node-a \
+  -site-root-public-key /secure/checkpoints/site-a-root.public
+stewardctl site node activate steward-node-node-a \
+  -out /secure/enrollment/node-a
+```
+
+Activation retains the node receipt key before the enrollment exchange, so a lost
+response is recovered by rerunning the same command rather than creating a second
+node identity. Its output supplies the exact installer argument array.
+
 Next, follow [Build and run an agent application]({{ '/guides/build-agents/' |
 relative_url }}) to package Hermes or OpenClaw, admit a task service, and apply a
 durable deployment. Then configure the repeated local paths once and run the first

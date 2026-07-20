@@ -339,6 +339,9 @@ The roadmap starts from working primitives rather than a blank design:
   signed inventory verification against an independently pinned site root;
 - a thin protected GitHub issue preset over the generic exact-operation connector,
   with bounded calls and no provider SDK or agent-visible upstream credential;
+- a finite node enrollment handoff that verifies signed site trust, creates the
+  Control tenant, generates the receipt identity on the destination node, and
+  safely resumes a lost enrollment response without changing node authority;
 - authority-preserving in-place rollouts that retain source and target signed
   delegations, spend disruption budget atomically, and switch each instance only
   after a proven destroy; and
@@ -351,9 +354,9 @@ The roadmap starts from working primitives rather than a blank design:
 
 This foundation is not yet the complete product workflow above. The normal
 create, apply, and prompt path is joined, and initial policy/key composition is one
-verified operation, but a fresh site still needs explicit Control tenant and node
-enrollment, deployment delegation, Gateway activation, and service-trust setup.
-The controller also does not yet join
+verified operation. Control tenant creation and node enrollment are now joined
+into the resumable site-node workflow, but a fresh site still needs explicit
+deployment delegation, Gateway activation, and service-trust setup. The controller also does not yet join
 continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 

@@ -110,6 +110,19 @@ point. A compromised browser can misrepresent the preview or steal the operator
 bearer. Compare the displayed file digest with the signing station and use a
 hardened operator browser profile.
 
+`site node prepare` creates an owner-only handoff containing a short-lived
+enrollment bearer. Anyone who obtains it before activation can race the intended
+node, although Control still requires a valid receipt-key proof and binds the
+result to the named node and tenant. Transfer the handoff confidentially, keep the
+independent site-root pin separate, use a short expiry, and revoke a node whose
+handoff may have been exposed.
+
+`site node activate` retains the reusable node credential and receipt private key
+in its owner-only output directory so a lost response can be resumed safely. That
+directory is sensitive node identity state. The command does not remotely copy
+files, invoke the privileged installer, attest the host, or prove that the person
+running it is on the intended physical machine.
+
 ## MCP is privileged local automation
 
 `steward-mcp` can expose node lifecycle and control operations to an MCP client.

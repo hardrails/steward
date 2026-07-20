@@ -92,6 +92,27 @@ install or transmit private keys. Move each private key to the custody named in
 the signed inventory before using it. See
 [Create a site authority](https://hardrails.github.io/steward/getting-started/site-authority/).
 
+After Control is installed, prepare the first node from the same verified package.
+A saved site-administrator context supplies the Control URL and token:
+
+```console
+stewardctl site node prepare steward-site node-a
+```
+
+The output is one finite, owner-only handoff containing only signed public node
+trust and a short-lived enrollment capability—never the site, tenant, publisher,
+or Control private keys. On the destination node, verify and activate that handoff:
+
+```console
+stewardctl site node verify steward-node-node-a
+stewardctl site node activate steward-node-node-a
+```
+
+Activation creates the node receipt identity locally and prints the exact installer
+argument array. If the network response is lost, rerun the same command: Steward
+reuses the retained receipt key and exchange identity instead of creating ambiguous
+node authority.
+
 ## Install on macOS
 
 The native macOS archive supports agent authoring, CUE/OPA policy checks, the

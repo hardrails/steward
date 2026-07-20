@@ -122,3 +122,82 @@ Continue with [installing Steward Control]({{ '/guides/control-plane/' |
 relative_url }}), [enrolling a node]({{ '/getting-started/enroll/' | relative_url
 }}), and [building an agent application]({{ '/guides/build-agents/' |
 relative_url }}).
+
+## Prepare one node without assembling files by hand
+
+After Control is installed and its first site-administrator token is in an
+owner-only file, save the repeated connection once:
+
+```console
+stewardctl context set site-admin \
+  -control-url https://control.customer.example:8443 \
+  -ca-file steward-site/public/control-ca.pem \
+  -token-file /secure/control/site-admin.token
+```
+
+Then prepare a finite handoff for one node:
+
+```console
+stewardctl site node prepare steward-site node-a \
+  -site-root-public-key /secure/checkpoints/site-a-root.public
+```
+
+This command verifies the complete site package, checks the independent root pin,
+idempotently creates the initial tenant in Control, and requests one short-lived
+node enrollment. It publishes `steward-node-node-a` only after the complete output
+passes verification.
+
+The handoff contains:
+
+- the original site-root-signed inventory;
+- the exact signed policy, site-root public key, and Control CA named by that
+  inventory;
+- one owner-only enrollment capability; and
+- a strict manifest binding the site, tenant, node, Control instance, expiry, and
+  enrollment digest.
+
+It does not contain any site, publisher, tenant, action, incident-response, or
+Control private key. The enrollment capability is still a bearer secret until it
+expires or is consumed. Transfer the whole owner-only directory through an
+authenticated confidential channel.
+
+On the destination node, verify it again. Use the same independently obtained root
+pin when the transfer channel is not itself the trust root:
+
+```console
+stewardctl site node verify steward-node-node-a \
+  -site-root-public-key /secure/checkpoints/site-a-root.public
+```
+
+Activate it before the printed expiry:
+
+```console
+stewardctl site node activate steward-node-node-a \
+  -out /secure/enrollment/node-a
+```
+
+Activation creates the receipt key pair on the destination node, signs the Control
+proof of possession, exchanges the one-time enrollment, and writes the exact files
+accepted by the Linux installer. Its JSON output contains an
+`installer_arguments` array rather than a shell string, so automation can pass
+each value without reparsing or interpolation.
+
+The activation directory is deliberately resumable. Steward commits its receipt
+key and exchange identity before contacting Control. If Control consumes the
+enrollment but the response is lost, rerun the identical command. The retry uses
+the same key and request identity, and Control reproduces the same node credential.
+Once `activation.json` exists, an exact rerun verifies the completed files and does
+not contact Control again.
+
+If the enrollment expires before activation, prepare a new package with a new
+bounded request identity:
+
+```console
+stewardctl site node prepare steward-site node-a \
+  -request-id node-a-enrollment-2 \
+  -out steward-node-node-a-2
+```
+
+Neither command copies files to another machine, invokes the root installer, or
+keeps the site-administrator token in the node package. Those remain explicit
+trust-boundary operations.
