@@ -171,7 +171,7 @@ is in progress; repeated node records that disagree fail the collection instead
 of being silently merged. Offline verification requires a SHA-256 digest retained
 through a separate trusted channel. That detects changed bytes but does not prove
 who created the bundle. Tenant-scoped bundles omit site-admin-only evidence
-checkpoints.
+checkpoints and the site-wide freeze record.
 
 ## Air-gapped does not mean supply-chain verified
 

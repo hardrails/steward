@@ -920,8 +920,9 @@ Add `-tenant-id tenant-a` to restrict the bundle to one tenant. A bundle include
 the operations summary, attention findings, current incident timeline, freeze and
 quota records, node and deployment state, agent and command metadata, credential
 metadata, and, for a site-admin bundle, the last controller evidence checkpoint
-for each visible node. Tenant bundles omit those site-admin-only checkpoints rather
-than widening access or failing after the tenant-scoped reads succeed.
+for each visible node. Tenant bundles omit the site-wide freeze record and those
+site-admin-only checkpoints rather than widening access or failing after the
+tenant-scoped reads succeed.
 Collection is read-only and bounded. It does not acknowledge a finding, retry a
 command, stop an agent, or change incident state.
 

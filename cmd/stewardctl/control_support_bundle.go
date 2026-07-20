@@ -49,21 +49,21 @@ type controlSupportBundleEvidence struct {
 // exposed by Control. It cannot represent command envelopes, token MACs,
 // credential values, prompts, request or response bodies, result text, or logs.
 type controlSupportBundleV1 struct {
-	SchemaVersion int                                  `json:"schema_version"`
-	GeneratedAt   string                               `json:"generated_at"`
-	Scope         controlSupportBundleScope            `json:"scope"`
-	Operations    controlstore.OperationsSummary       `json:"operations"`
-	SiteFreeze    controlstore.OperationalFreezeStatus `json:"site_freeze"`
-	Tenants       []controlSupportBundleTenant         `json:"tenants"`
-	Nodes         []controlclient.Node                 `json:"nodes"`
-	Deployments   []controlclient.Deployment           `json:"deployments"`
-	Attention     []controlstore.AttentionItem         `json:"attention"`
-	Timeline      []controlstore.IncidentEvent         `json:"timeline"`
-	Agents        []controlstore.AgentMetadata         `json:"agents"`
-	Commands      []controlstore.CommandMetadata       `json:"commands"`
-	Credentials   []controlstore.CredentialMetadata    `json:"credentials"`
-	Evidence      []controlSupportBundleEvidence       `json:"evidence"`
-	Excluded      []string                             `json:"excluded"`
+	SchemaVersion int                                   `json:"schema_version"`
+	GeneratedAt   string                                `json:"generated_at"`
+	Scope         controlSupportBundleScope             `json:"scope"`
+	Operations    controlstore.OperationsSummary        `json:"operations"`
+	SiteFreeze    *controlstore.OperationalFreezeStatus `json:"site_freeze,omitempty"`
+	Tenants       []controlSupportBundleTenant          `json:"tenants"`
+	Nodes         []controlclient.Node                  `json:"nodes"`
+	Deployments   []controlclient.Deployment            `json:"deployments"`
+	Attention     []controlstore.AttentionItem          `json:"attention"`
+	Timeline      []controlstore.IncidentEvent          `json:"timeline"`
+	Agents        []controlstore.AgentMetadata          `json:"agents"`
+	Commands      []controlstore.CommandMetadata        `json:"commands"`
+	Credentials   []controlstore.CredentialMetadata     `json:"credentials"`
+	Evidence      []controlSupportBundleEvidence        `json:"evidence"`
+	Excluded      []string                              `json:"excluded"`
 }
 
 type controlSupportBundleCreateOutput struct {
@@ -210,9 +210,12 @@ func collectControlSupportBundle(
 	if err != nil {
 		return controlSupportBundleV1{}, fmt.Errorf("collect operations summary: %w", err)
 	}
-	bundle.SiteFreeze, err = client.GetOperationalFreeze(ctx, "")
-	if err != nil {
-		return controlSupportBundleV1{}, fmt.Errorf("collect site freeze: %w", err)
+	if tenantID == "" {
+		siteFreeze, loadErr := client.GetOperationalFreeze(ctx, "")
+		if loadErr != nil {
+			return controlSupportBundleV1{}, fmt.Errorf("collect site freeze: %w", loadErr)
+		}
+		bundle.SiteFreeze = &siteFreeze
 	}
 
 	nodesByID := make(map[string]controlclient.Node)
@@ -539,8 +542,8 @@ func validateControlSupportBundle(bundle controlSupportBundleV1) error {
 			return errors.New("support bundle collection exceeds its item limit")
 		}
 	}
-	if bundle.Scope.TenantID == "" && len(bundle.Nodes) != len(bundle.Evidence) ||
-		bundle.Scope.TenantID != "" && len(bundle.Evidence) != 0 ||
+	if bundle.Scope.TenantID == "" && (bundle.SiteFreeze == nil || len(bundle.Nodes) != len(bundle.Evidence)) ||
+		bundle.Scope.TenantID != "" && (bundle.SiteFreeze != nil || len(bundle.Evidence) != 0) ||
 		!supportBundleCanonicalOrder(bundle) {
 		return errors.New("support bundle inventories are incomplete or not canonical")
 	}

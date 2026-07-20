@@ -20,10 +20,12 @@ import (
 )
 
 type supportBundleClientFixture struct {
-	attentionCalls int
-	evidenceCalls  int
-	timelineCalls  int
-	failAt         string
+	attentionCalls    int
+	evidenceCalls     int
+	siteFreezeCalls   int
+	tenantFreezeCalls int
+	timelineCalls     int
+	failAt            string
 }
 
 func (fixture *supportBundleClientFixture) failure(stage string) error {
@@ -92,6 +94,9 @@ func (fixture *supportBundleClientFixture) GetOperationalFreeze(_ context.Contex
 	stage := "tenant freeze"
 	if tenantID == "" {
 		stage = "site freeze"
+		fixture.siteFreezeCalls++
+	} else {
+		fixture.tenantFreezeCalls++
 	}
 	if err := fixture.failure(stage); err != nil {
 		return controlstore.OperationalFreezeStatus{}, err
@@ -190,7 +195,8 @@ func TestControlSupportBundleCollectsCanonicalMetadataOnly(t *testing.T) {
 	if fixture.attentionCalls != 2 || fixture.timelineCalls != 2 || len(bundle.Tenants) != 1 || len(bundle.Nodes) != 1 ||
 		len(bundle.Attention) != 1 || len(bundle.Commands) != 1 || len(bundle.Credentials) != 1 ||
 		len(bundle.Timeline) != 1 || bundle.Timeline[0].Action != "node_quarantined" ||
-		len(bundle.Evidence) != 0 || fixture.evidenceCalls != 0 {
+		bundle.SiteFreeze != nil || len(bundle.Evidence) != 0 || fixture.evidenceCalls != 0 ||
+		fixture.siteFreezeCalls != 0 || fixture.tenantFreezeCalls != 1 {
 		t.Fatalf("support bundle = %#v", bundle)
 	}
 	raw, err := encodeControlSupportBundle(bundle)
@@ -219,7 +225,7 @@ func TestControlSupportBundleCollectionFailsClosedAtEveryStage(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			fixture := &supportBundleClientFixture{failAt: stage}
 			tenantID := "tenant-a"
-			if stage == "evidence" {
+			if stage == "evidence" || stage == "site freeze" {
 				tenantID = ""
 			}
 			if _, err := collectControlSupportBundle(
@@ -232,6 +238,21 @@ func TestControlSupportBundleCollectionFailsClosedAtEveryStage(t *testing.T) {
 	}
 	if _, err := collectControlSupportBundle(context.Background(), nil, "tenant-a", time.Now()); err == nil {
 		t.Fatal("nil support bundle client was accepted")
+	}
+}
+
+func TestControlSupportBundleTenantScopeSkipsSiteAdminReads(t *testing.T) {
+	fixture := &supportBundleClientFixture{failAt: "site freeze"}
+	bundle, err := collectControlSupportBundle(
+		context.Background(), fixture, "tenant-a",
+		time.Date(2026, 7, 20, 13, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.SiteFreeze != nil || len(bundle.Evidence) != 0 ||
+		fixture.siteFreezeCalls != 0 || fixture.evidenceCalls != 0 {
+		t.Fatalf("tenant support bundle crossed site-admin boundary: bundle=%#v fixture=%#v", bundle, fixture)
 	}
 }
 
@@ -367,6 +388,7 @@ func TestControlSupportBundleRejectsBrokenInventoryRelationships(t *testing.T) {
 			value.Tenants = make([]controlSupportBundleTenant, maxControlSupportBundleItems+1)
 		}},
 		{"node without evidence", func(value *controlSupportBundleV1) { value.Evidence = nil }},
+		{"site bundle without site freeze", func(value *controlSupportBundleV1) { value.SiteFreeze = nil }},
 		{"deployment with unknown tenant", func(value *controlSupportBundleV1) {
 			value.Deployments = []controlclient.Deployment{{TenantID: "tenant-b"}}
 		}},
@@ -408,6 +430,17 @@ func TestControlSupportBundleRejectsBrokenInventoryRelationships(t *testing.T) {
 		{"event with multiline reason", func(value *controlSupportBundleV1) {
 			value.Timeline[0].Reason = "line one\nline two"
 		}},
+	}
+	tenantFixture := &supportBundleClientFixture{}
+	tenantBundle, err := collectControlSupportBundle(
+		context.Background(), tenantFixture, "tenant-a", time.Date(2026, 7, 20, 13, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantBundle.SiteFreeze = &controlstore.OperationalFreezeStatus{}
+	if _, err := encodeControlSupportBundle(tenantBundle); err == nil {
+		t.Fatal("tenant support bundle with site freeze data was accepted")
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
