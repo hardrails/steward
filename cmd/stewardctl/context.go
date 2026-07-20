@@ -13,26 +13,33 @@ import (
 
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/gatewayclient"
 	"github.com/hardrails/steward/internal/nodeclient"
 	"github.com/hardrails/steward/internal/securefile"
 )
 
 const (
 	legacyCLIContextSchema = "steward.cli-context.v1"
-	cliContextSchema       = "steward.cli-context.v2"
+	priorCLIContextSchema  = "steward.cli-context.v2"
+	cliContextSchema       = "steward.cli-context.v3"
 	maxCLIContextFileBytes = 64 << 10
 	maxCLIContexts         = 32
 )
 
 type cliContext struct {
-	Name          string `json:"name"`
-	ControlURL    string `json:"control_url,omitempty"`
-	TokenFile     string `json:"token_file,omitempty"`
-	CAFile        string `json:"ca_file,omitempty"`
-	NodeURL       string `json:"node_url,omitempty"`
-	NodeTokenFile string `json:"node_token_file,omitempty"`
-	TenantID      string `json:"tenant_id,omitempty"`
-	NodeID        string `json:"node_id,omitempty"`
+	Name             string `json:"name"`
+	ControlURL       string `json:"control_url,omitempty"`
+	TokenFile        string `json:"token_file,omitempty"`
+	CAFile           string `json:"ca_file,omitempty"`
+	NodeURL          string `json:"node_url,omitempty"`
+	NodeTokenFile    string `json:"node_token_file,omitempty"`
+	GatewayURL       string `json:"gateway_url,omitempty"`
+	GatewayTokenFile string `json:"gateway_token_file,omitempty"`
+	ServiceTrustFile string `json:"service_trust_file,omitempty"`
+	TaskKeyFile      string `json:"task_key_file,omitempty"`
+	TaskKeyID        string `json:"task_key_id,omitempty"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	NodeID           string `json:"node_id,omitempty"`
 }
 
 type cliContextConfig struct {
@@ -115,6 +122,11 @@ func contextSet(arguments []string, stdout io.Writer) error {
 		caFile := flags.String("ca-file", existing.CAFile, "private CA PEM bundle path")
 		nodeURL := flags.String("node-url", existing.NodeURL, "loopback Executor origin")
 		nodeTokenFile := flags.String("node-token-file", existing.NodeTokenFile, "owner-only Executor token file path")
+		gatewayURL := flags.String("gateway-url", existing.GatewayURL, "loopback Gateway service origin")
+		gatewayTokenFile := flags.String("gateway-token-file", existing.GatewayTokenFile, "owner-only Gateway service token path")
+		serviceTrustFile := flags.String("service-trust", existing.ServiceTrustFile, "Gateway service-trust inventory path")
+		taskKeyFile := flags.String("task-key", existing.TaskKeyFile, "owner-only task-authority private key path")
+		taskKeyID := flags.String("task-key-id", existing.TaskKeyID, "admitted task-authority key ID")
 		tenantID := flags.String("tenant-id", existing.TenantID, "default tenant for scoped operations")
 		nodeID := flags.String("node-id", existing.NodeID, "default node for scoped operations")
 		if err := flags.Parse(arguments[1:]); err != nil {
@@ -132,9 +144,13 @@ func contextSet(arguments []string, stdout io.Writer) error {
 		if *nodeTokenFile != "" && *nodeURL == "" {
 			*nodeURL = "http://127.0.0.1:8090"
 		}
+		if *gatewayTokenFile != "" && *gatewayURL == "" {
+			*gatewayURL = "http://127.0.0.1:8091"
+		}
 		if (*controlURL == "") != (*tokenFile == "") || (*nodeURL == "") != (*nodeTokenFile == "") ||
-			*tokenFile == "" && *nodeTokenFile == "" {
-			return errors.New("context requires a complete control or node connection")
+			(*gatewayURL == "") != (*gatewayTokenFile == "") ||
+			*tokenFile == "" && *nodeTokenFile == "" && *gatewayTokenFile == "" {
+			return errors.New("context requires a complete control, node, or Gateway connection")
 		}
 		resolvedToken, err := absoluteContextPath(*tokenFile, false)
 		if err != nil {
@@ -148,6 +164,18 @@ func contextSet(arguments []string, stdout io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("resolve context node token file: %w", err)
 		}
+		resolvedGatewayToken, err := absoluteContextPath(*gatewayTokenFile, false)
+		if err != nil {
+			return fmt.Errorf("resolve context Gateway token file: %w", err)
+		}
+		resolvedServiceTrust, err := absoluteContextPath(*serviceTrustFile, false)
+		if err != nil {
+			return fmt.Errorf("resolve context service trust file: %w", err)
+		}
+		resolvedTaskKey, err := absoluteContextPath(*taskKeyFile, false)
+		if err != nil {
+			return fmt.Errorf("resolve context task key file: %w", err)
+		}
 		if resolvedToken != "" {
 			if _, err := controlclient.NewFromFiles(*controlURL, resolvedToken, resolvedCA); err != nil {
 				return fmt.Errorf("validate context control connection: %w", err)
@@ -160,9 +188,33 @@ func contextSet(arguments []string, stdout io.Writer) error {
 				return fmt.Errorf("validate context node connection: %w", err)
 			}
 		}
+		if resolvedGatewayToken != "" {
+			token, err := nodeclient.ReadToken(resolvedGatewayToken)
+			if err != nil {
+				return fmt.Errorf("validate context Gateway token: %w", err)
+			}
+			if _, err := gatewayclient.New(*gatewayURL, token); err != nil {
+				return fmt.Errorf("validate context Gateway connection: %w", err)
+			}
+		}
+		taskDefaults := resolvedServiceTrust != "" || resolvedTaskKey != "" || *taskKeyID != ""
+		if taskDefaults && (resolvedServiceTrust == "" || resolvedTaskKey == "" || !taskIdentifier(*taskKeyID) || resolvedGatewayToken == "") {
+			return errors.New("task defaults require Gateway, service trust, task key, and a valid task key ID")
+		}
+		if resolvedServiceTrust != "" {
+			if _, err := securefile.Read(resolvedServiceTrust, maxServiceTrustBytes, securefile.TrustFile); err != nil {
+				return fmt.Errorf("validate context service trust: %w", err)
+			}
+			if _, err := readPrivateKey(resolvedTaskKey); err != nil {
+				return fmt.Errorf("validate context task key: %w", err)
+			}
+		}
 		next := cliContext{
 			Name: name, ControlURL: *controlURL, TokenFile: resolvedToken, CAFile: resolvedCA,
-			NodeURL: *nodeURL, NodeTokenFile: resolvedNodeToken, TenantID: *tenantID, NodeID: *nodeID,
+			NodeURL: *nodeURL, NodeTokenFile: resolvedNodeToken,
+			GatewayURL: *gatewayURL, GatewayTokenFile: resolvedGatewayToken,
+			ServiceTrustFile: resolvedServiceTrust, TaskKeyFile: resolvedTaskKey, TaskKeyID: *taskKeyID,
+			TenantID: *tenantID, NodeID: *nodeID,
 		}
 		upsertCLIContext(config, next)
 		config.Current = name
@@ -393,24 +445,35 @@ func loadCLIContextConfig() (cliContextConfig, string, error) {
 }
 
 func validateCLIContextConfig(config cliContextConfig) error {
-	if (config.SchemaVersion != cliContextSchema && config.SchemaVersion != legacyCLIContextSchema) || len(config.Contexts) > maxCLIContexts {
+	if (config.SchemaVersion != cliContextSchema && config.SchemaVersion != priorCLIContextSchema && config.SchemaVersion != legacyCLIContextSchema) || len(config.Contexts) > maxCLIContexts {
 		return errors.New("CLI context file has an unsupported schema or too many contexts")
 	}
 	seen := make(map[string]struct{}, len(config.Contexts))
 	for _, context := range config.Contexts {
 		controlComplete := context.ControlURL != "" && context.TokenFile != "" && filepath.IsAbs(context.TokenFile)
 		nodeComplete := context.NodeURL != "" && context.NodeTokenFile != "" && filepath.IsAbs(context.NodeTokenFile)
-		if !validCLIContextName(context.Name) || !controlComplete && !nodeComplete ||
+		gatewayComplete := context.GatewayURL != "" && context.GatewayTokenFile != "" && filepath.IsAbs(context.GatewayTokenFile)
+		taskDefaults := context.ServiceTrustFile != "" || context.TaskKeyFile != "" || context.TaskKeyID != ""
+		if !validCLIContextName(context.Name) || !controlComplete && !nodeComplete && !gatewayComplete ||
 			(context.ControlURL == "") != (context.TokenFile == "") ||
 			(context.NodeURL == "") != (context.NodeTokenFile == "") ||
+			(context.GatewayURL == "") != (context.GatewayTokenFile == "") ||
 			context.CAFile != "" && (!controlComplete || !filepath.IsAbs(context.CAFile)) ||
-			config.SchemaVersion == legacyCLIContextSchema && nodeComplete ||
+			config.SchemaVersion == legacyCLIContextSchema && (nodeComplete || gatewayComplete || taskDefaults) ||
+			config.SchemaVersion == priorCLIContextSchema && (gatewayComplete || taskDefaults) ||
+			taskDefaults && (!gatewayComplete || !filepath.IsAbs(context.ServiceTrustFile) ||
+				!filepath.IsAbs(context.TaskKeyFile) || !taskIdentifier(context.TaskKeyID)) ||
 			!validOptionalControlIdentifier(context.TenantID, 128) || !validOptionalControlIdentifier(context.NodeID, 128) {
 			return errors.New("CLI context file contains an invalid context")
 		}
 		if nodeComplete {
 			if _, err := nodeclient.New(context.NodeURL, "context-validation"); err != nil {
 				return errors.New("CLI context file contains an invalid node connection")
+			}
+		}
+		if gatewayComplete {
+			if _, err := gatewayclient.New(context.GatewayURL, "context-validation"); err != nil {
+				return errors.New("CLI context file contains an invalid Gateway connection")
 			}
 		}
 		if _, duplicate := seen[context.Name]; duplicate {

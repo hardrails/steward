@@ -65,9 +65,11 @@ type verifiedTaskBundle struct {
 
 func taskCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("task command requires issue, verify, audit, submit, status, observe, or wait")
+		return errors.New("task command requires run, issue, verify, audit, submit, status, observe, or wait")
 	}
 	switch arguments[0] {
+	case "run":
+		return runTask(arguments[1:], stdout)
 	case "issue":
 		return issueTask(arguments[1:], stdout)
 	case "verify":
@@ -83,7 +85,7 @@ func taskCommand(arguments []string, stdout io.Writer) error {
 	case "wait":
 		return waitTask(arguments[1:], stdout)
 	default:
-		return errors.New("task command requires issue, verify, audit, submit, status, observe, or wait")
+		return errors.New("task command requires run, issue, verify, audit, submit, status, observe, or wait")
 	}
 }
 

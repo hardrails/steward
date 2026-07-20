@@ -17,6 +17,7 @@ import (
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentapp"
 	"github.com/hardrails/steward/internal/controlclient"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
@@ -191,6 +192,80 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		"DELETE /v1/tenants/tenant-a/deployments/auditor"
 	if strings.Join(requests, ",") != wantRequests {
 		t.Fatalf("requests=%v", requests)
+	}
+}
+
+func TestAgentDeploymentWaitExportsOneTaskReadyInstance(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsuleDigest := "sha256:" + strings.Repeat("a", 64)
+	runtimeRef := "executor-" + strings.Repeat("b", 64)
+	grantID := "grant-" + strings.Repeat("c", 64)
+	view := controlclient.Deployment{
+		TenantID: "tenant-a", DeploymentID: "auditor", Generation: 1, Revision: 4,
+		AgentName: "auditor", BundleDigest: "sha256:" + strings.Repeat("d", 64),
+		CapsuleDigest: capsuleDigest, DelegationDigest: "sha256:" + strings.Repeat("e", 64),
+		DelegationID: "auditor-authority", ControllerKeyID: "controller-a", ClaimGeneration: 1,
+		AllowedNodeIDs: []string{"node-a"}, DelegationExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
+		DesiredState: controlstore.DeploymentRunning, Phase: controlstore.DeploymentReady,
+		Instances: []controlstore.DeploymentInstance{{
+			InstanceID: "auditor-0", LineageID: "auditor-lineage", Generation: 1, NodeID: "node-a",
+			Phase: controlstore.DeploymentInstanceRunning, TransitionedAt: now.Format(time.RFC3339Nano),
+			Intent: &admission.InstanceIntent{
+				TenantID: "tenant-a", NodeID: "node-a", InstanceID: "auditor-0", LineageID: "auditor-lineage",
+				Generation: 1, CapsuleDigest: capsuleDigest,
+				Resources:    admission.ResourceLimits{MemoryBytes: 128 << 20, CPUMillis: 250, PIDs: 32},
+				Capabilities: admission.Capabilities{Service: true}, StateDisposition: "none", ServiceID: "hermes-api",
+			},
+			Admission: &controlprotocol.ExecutorAdmissionProjectionV1{
+				SchemaVersion: controlprotocol.ExecutorAdmissionProjectionSchemaV1,
+				RuntimeRef:    runtimeRef, Status: "created", CapsuleDigest: capsuleDigest,
+				PolicyDigest: "sha256:" + strings.Repeat("f", 64), Generation: 1,
+				EvidenceKeyID: strings.Repeat("1", 32), GrantID: grantID,
+				ServicePath: "/v1/services/" + grantID + "/", ServiceID: "hermes-api",
+				TaskAuthorities: []controlprotocol.ExecutorTaskAuthorityV1{{
+					KeyID: "tenant-task", PublicKey: base64.StdEncoding.EncodeToString(public),
+				}},
+				RoutePolicyDigest: "sha256:" + strings.Repeat("2", 64),
+			},
+		}},
+		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/tenants/tenant-a/deployments/auditor" ||
+			request.Header.Get("Authorization") != "Bearer operator" {
+			t.Errorf("unexpected request %s %s headers=%v", request.Method, request.URL.Path, request.Header)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(view)
+	}))
+	defer server.Close()
+	outputPath := filepath.Join(directory, "agent.deployment.json")
+	var output bytes.Buffer
+	err = run([]string{
+		"agent", "deployment", "wait", "auditor", "-tenant", "tenant-a",
+		"-control-url", server.URL, "-token-file", tokenPath, "-out", outputPath, "-timeout", "1s",
+	}, &output, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(outputPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("deployment output info=%v error=%v", info, err)
+	}
+	admitted, intent, err := readTaskDeployment(outputPath)
+	if err != nil || admitted.RuntimeRef != runtimeRef || intent.InstanceID != "auditor-0" {
+		t.Fatalf("task-ready deployment admission=%+v intent=%+v error=%v", admitted, intent, err)
+	}
+	if !strings.Contains(output.String(), `"output":"`+outputPath+`"`) || strings.Contains(output.String(), string(public)) {
+		t.Fatalf("wait output=%s", output.String())
 	}
 }
 
