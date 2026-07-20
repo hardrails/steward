@@ -7,7 +7,7 @@ info:
     controller manages tenant scopes, operator credentials, one-time node
     enrollment, node inventory, bounded desired deployments, reclaimable
     delivery of signed Executor commands, independently witnessed Executor evidence heads, and
-    authenticated read-only fleet operations views. The embedded React console
+    authenticated fleet operations views and emergency command-delivery freezes. The embedded React console
     can also courier one exact offline-signed command through the existing command
     endpoint; it does not create, edit, approve, or sign command authority. An
     optional authenticated Prometheus endpoint exposes only bounded aggregate
@@ -60,7 +60,7 @@ tags:
   - name: commands
     description: Exact tenant-signed Executor command submission and status.
   - name: operations
-    description: Authenticated read-only fleet summaries, inventories, and derived attention.
+    description: Authenticated fleet summaries, inventories, derived attention, and revision-fenced emergency command-delivery gates.
   - name: metrics
     description: Optional authenticated Prometheus exposition of bounded fleet aggregates.
   - name: executor-uplink
@@ -375,6 +375,80 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/freeze:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [operations]
+      operationId: getControlTenantOperationalFreeze
+      summary: Inspect one tenant's effective command-delivery freeze
+      description: |
+        Returns the retained site gate, the named tenant gate, and the active
+        gate that currently takes precedence. A tenant operator can inspect
+        only its own tenant; another tenant is hidden as not found. An empty
+        object means neither scope has ever retained a freeze decision.
+      responses:
+        "200":
+          description: Retained and effective freeze state visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationalFreezeStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [operations]
+      operationId: changeControlTenantOperationalFreeze
+      summary: Freeze or unfreeze new command delivery for one tenant
+      description: |
+        Applies a durable, optimistic tenant gate. `freeze` stops new signed
+        commands from being queued or leased for this tenant; it does not claim
+        to revoke a command that the node already accepted. `unfreeze` resumes
+        delivery unless a site freeze remains active. The first transition
+        expects revision zero. Every later transition must use the retained
+        revision so stale incident-response requests cannot overwrite a newer
+        decision. Exact retries are idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationalFreezeRequest"
+      responses:
+        "200":
+          description: Retained and effective freeze state after the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationalFreezeChange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1254,7 +1328,9 @@ paths:
         The controller parses only the strict signed route identity. It stores
         and later delivers the exact DSSE bytes without verifying or replacing
         the tenant signature. Repeating the same command ID and exact bytes is
-        idempotent; different bytes under the same route return 409.
+        idempotent, including during a freeze; different bytes under the same
+        route return 409. A new command under an effective site or tenant
+        freeze returns 423.
       requestBody:
         required: true
         content:
@@ -1288,6 +1364,8 @@ paths:
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
+        "423":
+          $ref: "#/components/responses/OperationallyFrozen"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1317,6 +1395,75 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operations/freeze:
+    get:
+      tags: [operations]
+      operationId: getControlSiteOperationalFreeze
+      summary: Inspect the site-wide command-delivery freeze
+      description: |
+        Requires a site administrator. Returns the retained site decision and
+        its effective projection. An empty object means the site scope has
+        never retained a freeze decision.
+      responses:
+        "200":
+          description: Retained site freeze state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationalFreezeStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [operations]
+      operationId: changeControlSiteOperationalFreeze
+      summary: Freeze or unfreeze new command delivery for the site
+      description: |
+        Requires a site administrator. The gate applies to every tenant and
+        takes precedence over tenant decisions. It stops new commands from
+        being queued or leased, while authenticated heartbeats, reports, and
+        evidence continue. It does not claim to revoke commands already
+        accepted by a node. Revision behavior matches the tenant endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationalFreezeRequest"
+      responses:
+        "200":
+          description: Retained site freeze state after the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationalFreezeChange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -2202,6 +2349,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    OperationallyFrozen:
+      description: A site or tenant incident gate currently prevents new command delivery for this scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     InternalError:
       description: The controller could not complete the request.
       content:
@@ -2722,6 +2875,109 @@ components:
         created_at:
           type: string
           format: date-time
+    OperationalFreeze:
+      type: object
+      additionalProperties: false
+      required: [scope, frozen, revision, changed_at]
+      properties:
+        scope:
+          type: string
+          enum: [site, tenant]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        frozen:
+          type: boolean
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^\S(?:[^\r\n\x00]*\S)?$'
+        changed_at:
+          type: string
+          format: date-time
+      allOf:
+        - oneOf:
+            - properties:
+                scope:
+                  type: string
+                  enum: [site]
+              not:
+                required: [tenant_id]
+            - required: [tenant_id]
+              properties:
+                scope:
+                  type: string
+                  enum: [tenant]
+        - oneOf:
+            - required: [reason]
+              properties:
+                frozen:
+                  type: boolean
+                  enum: [true]
+            - properties:
+                frozen:
+                  type: boolean
+                  enum: [false]
+              not:
+                required: [reason]
+      description: |
+        One retained site or tenant decision. Revisions increase monotonically
+        across freeze and unfreeze so stale requests cannot restore old state.
+    OperationalFreezeStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        site:
+          $ref: "#/components/schemas/OperationalFreeze"
+        tenant:
+          $ref: "#/components/schemas/OperationalFreeze"
+        effective:
+          $ref: "#/components/schemas/OperationalFreeze"
+      description: |
+        Retained decisions visible for the requested scope. `effective` is
+        present only while delivery is frozen and prefers the site gate.
+    OperationalFreezeRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_revision]
+      properties:
+        action:
+          type: string
+          enum: [freeze, unfreeze]
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 0
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^\S(?:[^\r\n\x00]*\S)?$'
+      oneOf:
+        - required: [reason]
+          properties:
+            action:
+              type: string
+              enum: [freeze]
+        - properties:
+            action:
+              type: string
+              enum: [unfreeze]
+          not:
+            required: [reason]
+    OperationalFreezeChange:
+      type: object
+      additionalProperties: false
+      required: [status, changed]
+      properties:
+        status:
+          $ref: "#/components/schemas/OperationalFreezeStatus"
+        changed:
+          type: boolean
     TenantList:
       type: object
       additionalProperties: false
