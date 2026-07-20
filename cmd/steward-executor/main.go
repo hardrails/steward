@@ -16,12 +16,15 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/buildinfo"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executor"
 	"github.com/hardrails/steward/internal/executoruplink"
@@ -71,6 +74,8 @@ func main() {
 	maxTenantMemoryBytes := flag.Int64("max-tenant-memory-bytes", defaults.MaxTenantMemoryBytes, "maximum memory reserved for one tenant's workloads and relays")
 	maxTenantCPUMillis := flag.Int64("max-tenant-cpu-millis", defaults.MaxTenantCPUMillis, "maximum CPU millicores reserved for one tenant's workloads and relays")
 	maxTenantPIDs := flag.Int64("max-tenant-pids", defaults.MaxTenantPIDs, "maximum processes reserved for one tenant's workloads and relays")
+	nodeLabels := flag.String("node-labels", "", "comma-separated scheduling labels as key=value")
+	nodeTaints := flag.String("node-taints", "", "comma-separated scheduling taints; workloads require matching tolerations")
 	allowUnquotaedState := flag.Bool("allow-unquotaed-state-on-dedicated-host", false, "INSECURE on shared hosts: allow persistent Docker volumes without hard byte or inode quotas")
 	admissionPolicyFile := flag.String("admission-policy-file", "", "signed site-policy DSSE file; enables signed admission")
 	admissionSiteRootFile := flag.String("admission-site-root-public-key-file", "", "base64 Ed25519 site-root public key")
@@ -214,6 +219,11 @@ func main() {
 		MaxTenantCPUMillis:    *maxTenantCPUMillis,
 		MaxTenantPIDs:         *maxTenantPIDs,
 	}
+	schedulingLabels, schedulingTaints, err := parseSchedulingAttributes(*nodeLabels, *nodeTaints)
+	if err != nil {
+		slog.Error("configure node scheduling attributes", "err", err)
+		os.Exit(2)
+	}
 	server, err := executor.NewServerWithLocalCredentials(docker, localCredentials, policy, slog.Default())
 	if err != nil {
 		slog.Error("configure executor", "err", err)
@@ -331,6 +341,34 @@ func main() {
 		secureNodeID = *admissionNodeID
 	}
 	handler := server.Handler()
+	var schedulingObservation *controlprotocol.ExecutorSchedulingObservationV1
+	if secureNodeID != "" {
+		runtimeOverhead := executor.RuntimeOverheadResources()
+		schedulingObservation = &controlprotocol.ExecutorSchedulingObservationV1{
+			SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+			NodeID:        secureNodeID, CredentialScope: "node", OS: "linux",
+			Architecture: runtime.GOARCH, Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
+			Labels: schedulingLabels, Taints: schedulingTaints,
+			Policy: controlprotocol.ExecutorSchedulingPolicyV1{
+				PerWorkload: controlprotocol.ExecutorSchedulingResourcesV1{
+					MemoryBytes: policy.MaxMemoryBytes, CPUMillis: policy.MaxCPUMillis,
+					PIDs: policy.MaxPIDs, Workloads: 1,
+				},
+				Host: controlprotocol.ExecutorSchedulingResourcesV1{
+					MemoryBytes: policy.MaxTotalMemoryBytes, CPUMillis: policy.MaxTotalCPUMillis,
+					PIDs: policy.MaxTotalPIDs, Workloads: int64(policy.MaxWorkloads),
+				},
+				Tenant: controlprotocol.ExecutorSchedulingResourcesV1{
+					MemoryBytes: policy.MaxTenantMemoryBytes, CPUMillis: policy.MaxTenantCPUMillis,
+					PIDs: policy.MaxTenantPIDs, Workloads: int64(policy.MaxWorkloadsPerTenant),
+				},
+				RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{
+					MemoryBytes: runtimeOverhead.MemoryBytes, CPUMillis: runtimeOverhead.CPUMillis,
+					PIDs: runtimeOverhead.PIDs,
+				},
+			},
+		}
+	}
 	var poller *executoruplink.Poller
 	var evidencePublisher *executoruplink.EvidencePublisher
 	if *uplinkURL != "" {
@@ -379,7 +417,7 @@ func main() {
 			ProtectedTransport: parsedUplink.Scheme == "https" && !*uplinkTLSSkipVerify,
 			CommandPolicy:      commandPolicy, ProtocolVersion: *uplinkProtocolVersion,
 			DeliveryState: deliveryState, GatewayControl: gatewayControlClient,
-			ValidateOnly: *checkConfig,
+			ValidateOnly: *checkConfig, Scheduling: schedulingObservation,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)
@@ -476,6 +514,44 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func parseSchedulingAttributes(
+	labelsRaw, taintsRaw string,
+) ([]controlprotocol.ExecutorSchedulingLabelV1, []string, error) {
+	labelValues := make(map[string]string)
+	if labelsRaw != "" {
+		for _, item := range strings.Split(labelsRaw, ",") {
+			key, value, found := strings.Cut(item, "=")
+			if !found || key == "" || value == "" {
+				return nil, nil, errors.New("node labels must use comma-separated key=value entries")
+			}
+			if _, duplicate := labelValues[key]; duplicate {
+				return nil, nil, fmt.Errorf("node label %q is duplicated", key)
+			}
+			labelValues[key] = value
+		}
+	}
+	labelKeys := make([]string, 0, len(labelValues))
+	for key := range labelValues {
+		labelKeys = append(labelKeys, key)
+	}
+	sort.Strings(labelKeys)
+	labels := make([]controlprotocol.ExecutorSchedulingLabelV1, 0, len(labelKeys))
+	for _, key := range labelKeys {
+		labels = append(labels, controlprotocol.ExecutorSchedulingLabelV1{Key: key, Value: labelValues[key]})
+	}
+	taints := []string{}
+	if taintsRaw != "" {
+		taints = strings.Split(taintsRaw, ",")
+		sort.Strings(taints)
+		for index, value := range taints {
+			if value == "" || index > 0 && taints[index-1] == value {
+				return nil, nil, errors.New("node taints must be non-empty and unique")
+			}
+		}
+	}
+	return labels, taints, nil
 }
 
 func readSecureArtifact(path string, secret bool, limit int64) ([]byte, error) {

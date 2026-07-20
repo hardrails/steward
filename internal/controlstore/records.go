@@ -1670,7 +1670,17 @@ func cloneNode(node Node) Node {
 	node.TenantIDs = append([]string(nil), node.TenantIDs...)
 	node.Capabilities = copyStringSlice(node.Capabilities)
 	node.Evidence = cloneEvidenceWitness(node.Evidence)
+	node.Scheduling = cloneNodeScheduling(node.Scheduling)
 	return node
+}
+
+func cloneNodeScheduling(value *NodeScheduling) *NodeScheduling {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.Observation = cloneSchedulingObservation(value.Observation)
+	return &cloned
 }
 
 func cloneCredential(credential controlauth.Credential) controlauth.Credential {

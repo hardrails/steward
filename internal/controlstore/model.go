@@ -27,21 +27,23 @@ import (
 
 const (
 	stateFormatMinReadVersion       = 1
-	stateFormatWriteVersion         = 6
+	stateFormatWriteVersion         = 7
 	stateFormatMaxReadVersion       = stateFormatWriteVersion
 	stateFormatEvidenceVersion      = 2
 	stateFormatExecutorV4Version    = 3
 	stateFormatCaptureVersion       = 4
 	stateFormatDeploymentVersion    = 5
 	stateFormatWorkloadLeaseVersion = 6
+	stateFormatSchedulingVersion    = 7
 	transactionFormatMinReadVersion = 1
-	transactionFormatWriteVersion   = 6
+	transactionFormatWriteVersion   = 7
 	transactionFormatMaxReadVersion = transactionFormatWriteVersion
 	transactionEvidenceVersion      = 2
 	transactionExecutorV4Version    = 3
 	transactionCaptureVersion       = 4
 	transactionDeploymentVersion    = 5
 	transactionWorkloadLeaseVersion = 6
+	transactionSchedulingVersion    = 7
 	maxMutationsPerRecord           = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -130,10 +132,18 @@ type Node struct {
 	TenantIDs    []string         `json:"tenant_ids"`
 	Capabilities []string         `json:"capabilities"`
 	Evidence     *EvidenceWitness `json:"evidence,omitempty"`
+	Scheduling   *NodeScheduling  `json:"scheduling,omitempty"`
 	CreatedAt    string           `json:"created_at"`
 	LastSeenAt   string           `json:"last_seen_at,omitempty"`
 	RevokedAt    string           `json:"revoked_at,omitempty"`
 	Active       bool             `json:"active"`
+}
+
+// NodeScheduling is the most recent controller-timestamped capacity and
+// placement observation accepted from the authenticated Executor node.
+type NodeScheduling struct {
+	Observation controlprotocol.ExecutorSchedulingObservationV1 `json:"observation"`
+	ObservedAt  string                                          `json:"observed_at"`
 }
 
 type EvidenceFindingReason string
@@ -522,6 +532,7 @@ func (current state) clone() state {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
+		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		next.nodes[key] = node
 	}
 	for key, credential := range current.credentials {
@@ -811,6 +822,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
+		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		snapshot.Nodes = append(snapshot.Nodes, node)
 	}
 	for _, credential := range current.credentials {
@@ -892,7 +904,11 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if snapshot.Version < stateFormatEvidenceVersion && node.Evidence != nil {
 			return state{}, errors.New("legacy control snapshot contains evidence witness state")
 		}
+		if snapshot.Version < stateFormatSchedulingVersion && node.Scheduling != nil {
+			return state{}, errors.New("legacy control snapshot contains scheduling observation state")
+		}
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
+		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		current.nodes[node.ID] = node
 	}
 	for _, stored := range snapshot.Credentials {
@@ -1025,9 +1041,13 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionEvidenceVersion && node.Evidence != nil {
 				return state{}, errors.New("legacy control transaction contains evidence witness state")
 			}
+			if value.Version < transactionSchedulingVersion && node.Scheduling != nil {
+				return state{}, errors.New("legacy control transaction contains scheduling observation state")
+			}
 			node.TenantIDs = append([]string(nil), change.Node.TenantIDs...)
 			node.Capabilities = copyStringSlice(change.Node.Capabilities)
 			node.Evidence = cloneEvidenceWitness(change.Node.Evidence)
+			node.Scheduling = cloneNodeScheduling(change.Node.Scheduling)
 			next.nodes[node.ID] = node
 		case mutationCredential:
 			if change.Credential == nil {
@@ -1190,6 +1210,17 @@ func validateState(current state, limits Limits) error {
 				return errors.New("control evidence key is reused across nodes")
 			}
 			evidenceKeys[node.Evidence.PublicKeyDigest] = node.ID
+		}
+		if node.Scheduling != nil {
+			if node.Scheduling.Observation.Validate() != nil ||
+				node.Scheduling.Observation.NodeID != node.ID ||
+				!validTimestamp(node.Scheduling.ObservedAt) {
+				return errors.New("control state contains an invalid node scheduling observation")
+			}
+			observed, _ := parseTimestamp(node.Scheduling.ObservedAt)
+			if observed.Before(created) {
+				return errors.New("control node scheduling observation predates creation")
+			}
 		}
 		for _, tenantID := range node.TenantIDs {
 			if _, ok := current.tenants[tenantID]; !ok {

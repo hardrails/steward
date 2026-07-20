@@ -142,7 +142,9 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 			if actions >= maxActionsPerPass {
 				return report, nil
 			}
-			result, err := reconciler.reconcileInstance(snapshot.Nodes, placements, deployment, instance)
+			result, err := reconciler.reconcileInstance(
+				snapshot.Nodes, snapshot.Deployments, placements, deployment, instance,
+			)
 			if err != nil {
 				return report, err
 			}
@@ -178,6 +180,7 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 
 func (reconciler *Reconciler) reconcileInstance(
 	nodes []controlstore.Node,
+	deployments []controlstore.Deployment,
 	placements map[string]int,
 	deployment controlstore.Deployment,
 	instance controlstore.DeploymentInstance,
@@ -226,7 +229,9 @@ func (reconciler *Reconciler) reconcileInstance(
 	if operation == "" {
 		return instanceResult{}, nil
 	}
-	nodeID, err := selectNode(nodes, placements, deployment, instance, now, reconciler.nodeStaleAfter)
+	nodeID, err := selectNode(
+		nodes, deployments, placements, deployment, instance, now, reconciler.nodeStaleAfter,
+	)
 	if err != nil {
 		return reconciler.recordBlocked(deployment, instance, err, now)
 	}
@@ -241,10 +246,13 @@ func (reconciler *Reconciler) reconcileInstance(
 	_, _, changed, err := reconciler.store.EnqueueDeploymentCommand(controlstore.DeploymentCommandTransition{
 		TenantID: deployment.TenantID, DeploymentID: deployment.ID,
 		ExpectedRevision: deployment.Revision, InstanceID: instance.InstanceID,
-		CommandDSSE: commandRaw,
+		CommandDSSE: commandRaw, SchedulingStaleAfter: reconciler.nodeStaleAfter,
 	}, now)
 	if errors.Is(err, controlstore.ErrConflict) {
 		return instanceResult{conflict: true}, nil
+	}
+	if reason := schedulingBlockedReason(err); reason != "" {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(reason), now)
 	}
 	if changed && instance.NodeID == "" {
 		placements[nodeID]++
@@ -415,7 +423,7 @@ func nextOperation(
 		case controlstore.DeploymentInstancePending:
 			return "admit"
 		case controlstore.DeploymentInstanceStarting:
-			if leaseManaged && instance.LeaseExpiresAt == "" {
+			if leaseManaged && workloadLeaseNeedsRenewal(instance, now) {
 				return "renew"
 			}
 			return "start"
@@ -486,6 +494,7 @@ func assignedNodeEligible(
 
 func selectNode(
 	nodes []controlstore.Node,
+	deployments []controlstore.Deployment,
 	placements map[string]int,
 	deployment controlstore.Deployment,
 	instance controlstore.DeploymentInstance,
@@ -508,10 +517,39 @@ func selectNode(
 		}
 		return "", newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable)
 	}
+	if delegation.Admission == nil {
+		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+	}
+	capsule, err := admission.InspectProfileCapsule(deployment.CapsuleDSSE, time.Time{})
+	if err != nil {
+		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+	}
+	delegated, found := delegatedInstance(delegation, instance.InstanceID)
+	if !found {
+		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+	}
 	selected := ""
 	selectedCount := int(^uint(0) >> 1)
+	var schedulingUnavailable, placementBlocked, nodeCapacity, tenantCapacity bool
 	for _, node := range nodes {
 		if !eligibleNode(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
+			continue
+		}
+		intent := intentFromDelegation(deployment, instance, node.ID, delegated, *delegation.Admission)
+		if err := controlstore.CheckNodeScheduling(
+			node, deployments, deployment.TenantID, intent, capsule,
+			delegation.Admission.Placement, now, nodeStaleAfter,
+		); err != nil {
+			switch {
+			case errors.Is(err, controlstore.ErrNodeSchedulingUnavailable):
+				schedulingUnavailable = true
+			case errors.Is(err, controlstore.ErrNodeSchedulingConstraint):
+				placementBlocked = true
+			case errors.Is(err, controlstore.ErrTenantCapacityExceeded):
+				tenantCapacity = true
+			case errors.Is(err, controlstore.ErrNodeCapacityExceeded):
+				nodeCapacity = true
+			}
 			continue
 		}
 		if count := placements[node.ID]; count < selectedCount || count == selectedCount && node.ID < selected {
@@ -519,9 +557,34 @@ func selectNode(
 		}
 	}
 	if selected == "" {
+		switch {
+		case tenantCapacity:
+			return "", newBlocked(controlstore.DeploymentBlockedTenantCapacity)
+		case nodeCapacity:
+			return "", newBlocked(controlstore.DeploymentBlockedNodeCapacity)
+		case schedulingUnavailable:
+			return "", newBlocked(controlstore.DeploymentBlockedSchedulingUnavailable)
+		case placementBlocked:
+			return "", newBlocked(controlstore.DeploymentBlockedPlacementConstraints)
+		}
 		return "", newBlocked(controlstore.DeploymentBlockedNoEligibleNode)
 	}
 	return selected, nil
+}
+
+func schedulingBlockedReason(err error) controlstore.DeploymentBlockedReason {
+	switch {
+	case errors.Is(err, controlstore.ErrNodeSchedulingUnavailable):
+		return controlstore.DeploymentBlockedSchedulingUnavailable
+	case errors.Is(err, controlstore.ErrNodeSchedulingConstraint):
+		return controlstore.DeploymentBlockedPlacementConstraints
+	case errors.Is(err, controlstore.ErrTenantCapacityExceeded):
+		return controlstore.DeploymentBlockedTenantCapacity
+	case errors.Is(err, controlstore.ErrNodeCapacityExceeded):
+		return controlstore.DeploymentBlockedNodeCapacity
+	default:
+		return ""
+	}
 }
 
 func eligibleNode(

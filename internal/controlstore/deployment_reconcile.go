@@ -23,11 +23,12 @@ type DeploymentFleetSnapshot struct {
 }
 
 type DeploymentCommandTransition struct {
-	TenantID         string
-	DeploymentID     string
-	ExpectedRevision uint64
-	InstanceID       string
-	CommandDSSE      []byte
+	TenantID             string
+	DeploymentID         string
+	ExpectedRevision     uint64
+	InstanceID           string
+	CommandDSSE          []byte
+	SchedulingStaleAfter time.Duration
 }
 
 // DeploymentBlockedReason is a stable, machine-readable explanation for why
@@ -44,6 +45,10 @@ const (
 	DeploymentBlockedAwaitingLeaseExpiry     DeploymentBlockedReason = "awaiting_lease_expiry"
 	DeploymentBlockedStatefulReplacement     DeploymentBlockedReason = "stateful_replacement_unsupported"
 	DeploymentBlockedGenerationExhausted     DeploymentBlockedReason = "replacement_generation_exhausted"
+	DeploymentBlockedSchedulingUnavailable   DeploymentBlockedReason = "scheduling_observation_unavailable"
+	DeploymentBlockedPlacementConstraints    DeploymentBlockedReason = "placement_constraints_unsatisfied"
+	DeploymentBlockedNodeCapacity            DeploymentBlockedReason = "node_capacity_exhausted"
+	DeploymentBlockedTenantCapacity          DeploymentBlockedReason = "tenant_capacity_exhausted"
 	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
 )
 
@@ -118,11 +123,7 @@ func (store *Store) SnapshotDeploymentFleet() (DeploymentFleetSnapshot, error) {
 		snapshot.Deployments = append(snapshot.Deployments, cloneDeployment(deployment))
 	}
 	for _, node := range store.current.nodes {
-		cloned := node
-		cloned.TenantIDs = append([]string(nil), node.TenantIDs...)
-		cloned.Capabilities = append([]string(nil), node.Capabilities...)
-		cloned.Evidence = cloneEvidenceWitness(node.Evidence)
-		snapshot.Nodes = append(snapshot.Nodes, cloned)
+		snapshot.Nodes = append(snapshot.Nodes, cloneNode(node))
 	}
 	sort.Slice(snapshot.Deployments, func(i, j int) bool {
 		if snapshot.Deployments[i].TenantID != snapshot.Deployments[j].TenantID {
@@ -209,6 +210,27 @@ func (store *Store) EnqueueDeploymentCommand(
 		intent, err := deploymentAdmitIntent(statement.Payload, deployment.CapsuleDSSE)
 		if err != nil {
 			return Deployment{}, Command{}, false, invalidError("decode deployment admission intent", err)
+		}
+		if input.SchedulingStaleAfter <= 0 || input.SchedulingStaleAfter > MaxOperationsThreshold {
+			return Deployment{}, Command{}, false, invalid("deployment scheduling freshness is invalid")
+		}
+		capsule, err := admission.InspectProfileCapsule(deployment.CapsuleDSSE, time.Time{})
+		if err != nil {
+			return Deployment{}, Command{}, false, invalidError("inspect deployment capsule for scheduling", err)
+		}
+		delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+		if err != nil || delegation.Admission == nil {
+			return Deployment{}, Command{}, false, invalid("deployment scheduling authority is invalid")
+		}
+		deployments := make([]Deployment, 0, len(store.current.deployments))
+		for _, retained := range store.current.deployments {
+			deployments = append(deployments, retained)
+		}
+		if err := CheckNodeScheduling(
+			node, deployments, input.TenantID, intent, capsule,
+			delegation.Admission.Placement, now, input.SchedulingStaleAfter,
+		); err != nil {
+			return Deployment{}, Command{}, false, err
 		}
 		instance.Intent = &intent
 		instance.Admission = nil
@@ -624,7 +646,9 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 	case DeploymentBlockedNoEligibleNode, DeploymentBlockedAssignedNodeUnavailable,
 		DeploymentBlockedDelegationExpired, DeploymentBlockedControllerKeyMismatch,
 		DeploymentBlockedInvalidAuthority, DeploymentBlockedAwaitingLeaseExpiry,
-		DeploymentBlockedStatefulReplacement, DeploymentBlockedGenerationExhausted:
+		DeploymentBlockedStatefulReplacement, DeploymentBlockedGenerationExhausted,
+		DeploymentBlockedSchedulingUnavailable, DeploymentBlockedPlacementConstraints,
+		DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity:
 		return true
 	default:
 		return false

@@ -78,22 +78,27 @@ type Config struct {
 	// ValidateOnly checks delivery state without converting pre-crash executing
 	// records into outcome_unknown. Normal startup leaves this false.
 	ValidateOnly bool
+	// Scheduling is an optional node-scoped capacity observation. It is
+	// published independently so a telemetry failure cannot block command
+	// polling, reporting, or workload-lease renewal.
+	Scheduling *controlprotocol.ExecutorSchedulingObservationV1
 }
 
 type Poller struct {
-	pollURL, reportURL string
-	credentialPath     string
-	expected           *stewarduplink.Credential
-	interval           time.Duration
-	client             *http.Client
-	logger             *slog.Logger
-	dispatcher         dispatcher
-	security           stewarduplink.CredentialSecurity
-	commandPolicy      *admission.SitePolicy
-	now                func() time.Time
-	protocolVersion    int
-	deliveryState      *DeliveryStore
-	canaryRunner       *activationCanaryRunner
+	pollURL, reportURL, schedulingURL string
+	credentialPath                    string
+	expected                          *stewarduplink.Credential
+	interval                          time.Duration
+	client                            *http.Client
+	logger                            *slog.Logger
+	dispatcher                        dispatcher
+	security                          stewarduplink.CredentialSecurity
+	commandPolicy                     *admission.SitePolicy
+	now                               func() time.Time
+	protocolVersion                   int
+	deliveryState                     *DeliveryStore
+	canaryRunner                      *activationCanaryRunner
+	scheduling                        *controlprotocol.ExecutorSchedulingObservationV1
 }
 
 func NewPoller(cfg Config) (*Poller, error) {
@@ -185,8 +190,15 @@ func NewPoller(cfg Config) (*Poller, error) {
 		}
 		protocolVersion = 1
 	}
+	if cfg.Scheduling != nil {
+		if !credential.NodeScoped() || cfg.Scheduling.Validate() != nil ||
+			cfg.Scheduling.NodeID != credential.NodeID {
+			return nil, errors.New("executor scheduling observation requires its matching node-scoped credential")
+		}
+	}
 	pollURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "poll")
 	reportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "report")
+	schedulingURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "scheduling")
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
@@ -204,13 +216,15 @@ func NewPoller(cfg Config) (*Poller, error) {
 		cfg.GatewayControl,
 	)
 	return &Poller{
-		pollURL: pollURL, reportURL: reportURL, credentialPath: cfg.CredentialPath,
-		expected: credential, interval: cfg.PollInterval, client: client, logger: logger,
+		pollURL: pollURL, reportURL: reportURL, schedulingURL: schedulingURL,
+		credentialPath: cfg.CredentialPath,
+		expected:       credential, interval: cfg.PollInterval, client: client, logger: logger,
 		security: security, commandPolicy: cfg.CommandPolicy, now: now,
 		protocolVersion: protocolVersion, deliveryState: cfg.DeliveryState,
 		canaryRunner: newActivationCanaryRunner(
 			activationGateway != nil,
 		),
+		scheduling: cloneSchedulingObservation(cfg.Scheduling),
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
 			nodeID: credential.NodeID, nodeScoped: credential.NodeScoped(), state: cfg.State,
@@ -240,6 +254,9 @@ func isLoopbackHost(host string) bool {
 }
 
 func (p *Poller) Run(ctx context.Context) {
+	if p.scheduling != nil {
+		go p.runScheduling(ctx)
+	}
 	failures := 0
 	for {
 		if err := p.pollOnce(ctx); err != nil {
@@ -266,6 +283,70 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (p *Poller) runScheduling(ctx context.Context) {
+	for {
+		if err := p.publishScheduling(ctx); err != nil && ctx.Err() == nil {
+			p.logger.Warn("executor scheduling observation failed", "error", err)
+		}
+		timer := time.NewTimer(p.interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (p *Poller) publishScheduling(ctx context.Context) error {
+	credential, err := stewarduplink.LoadCredentialWithSecurity(p.credentialPath, p.security)
+	if err != nil {
+		return err
+	}
+	if credential.Version != p.expected.Version || credential.Scope != p.expected.Scope ||
+		credential.TenantID != p.expected.TenantID || credential.NodeID != p.expected.NodeID {
+		return errors.New("rotated uplink credential changed version, scope, tenant_id, or node_id; refusing it")
+	}
+	raw, err := json.Marshal(p.scheduling)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.schedulingURL, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+credential.Credential)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return wireError("scheduling observation", response)
+	}
+	if _, err := readBounded(response.Body, maxWireBytes); err != nil {
+		return fmt.Errorf("read scheduling observation response: %w", err)
+	}
+	return nil
+}
+
+func cloneSchedulingObservation(
+	value *controlprotocol.ExecutorSchedulingObservationV1,
+) *controlprotocol.ExecutorSchedulingObservationV1 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	if value.Labels != nil {
+		cloned.Labels = append([]controlprotocol.ExecutorSchedulingLabelV1{}, value.Labels...)
+	}
+	if value.Taints != nil {
+		cloned.Taints = append([]string{}, value.Taints...)
+	}
+	return &cloned
 }
 
 func (p *Poller) pollOnce(ctx context.Context) error {

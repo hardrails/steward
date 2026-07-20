@@ -131,6 +131,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/operations/credentials", server.operationsCredentials)
 	server.mux.HandleFunc("/executor-uplink/poll", server.executorPoll)
 	server.mux.HandleFunc("/executor-uplink/report", server.executorReport)
+	server.mux.HandleFunc("/executor-uplink/scheduling", server.executorScheduling)
 	server.mux.HandleFunc("/evidence-uplink/poll", server.evidencePoll)
 	server.mux.HandleFunc("/evidence-uplink/report", server.evidenceReport)
 	if server.enableMetrics {
@@ -846,6 +847,36 @@ func (server *Server) executorPoll(writer http.ResponseWriter, request *http.Req
 	}
 }
 
+func (server *Server) executorScheduling(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	raw, ok := server.readBody(writer, request)
+	if !ok {
+		return
+	}
+	var observation controlprotocol.ExecutorSchedulingObservationV1
+	if len(raw) > controlprotocol.MaxExecutorSchedulingBytes ||
+		dsse.DecodeStrictInto(raw, controlprotocol.MaxExecutorSchedulingBytes, &observation) != nil ||
+		observation.Validate() != nil || observation.NodeID != identity.NodeID {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "executor scheduling observation is invalid")
+		return
+	}
+	node, applied, err := server.store.ObserveNodeScheduling(identity, observation, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Applied    bool   `json:"applied"`
+		ObservedAt string `json:"observed_at"`
+	}{Applied: applied, ObservedAt: node.Scheduling.ObservedAt})
+}
+
 func (server *Server) executorReport(writer http.ResponseWriter, request *http.Request) {
 	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
 		return
@@ -1103,13 +1134,14 @@ func tenantView(tenant controlstore.Tenant) tenantResponse {
 }
 
 type nodeResponse struct {
-	NodeID       string   `json:"node_id"`
-	TenantIDs    []string `json:"tenant_ids"`
-	Capabilities []string `json:"capabilities"`
-	State        string   `json:"state"`
-	CreatedAt    string   `json:"created_at"`
-	LastSeenAt   string   `json:"last_seen_at,omitempty"`
-	RevokedAt    string   `json:"revoked_at,omitempty"`
+	NodeID       string                       `json:"node_id"`
+	TenantIDs    []string                     `json:"tenant_ids"`
+	Capabilities []string                     `json:"capabilities"`
+	State        string                       `json:"state"`
+	CreatedAt    string                       `json:"created_at"`
+	LastSeenAt   string                       `json:"last_seen_at,omitempty"`
+	RevokedAt    string                       `json:"revoked_at,omitempty"`
+	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
 }
 
 type nodeListResponse struct {
@@ -1126,6 +1158,7 @@ func nodeView(node controlstore.Node) nodeResponse {
 		NodeID: node.ID, TenantIDs: append([]string(nil), node.TenantIDs...),
 		Capabilities: append([]string{}, node.Capabilities...), State: state,
 		CreatedAt: node.CreatedAt, LastSeenAt: node.LastSeenAt, RevokedAt: node.RevokedAt,
+		Scheduling: node.Scheduling,
 	}
 }
 

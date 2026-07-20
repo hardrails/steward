@@ -14,12 +14,14 @@ import (
 )
 
 const (
-	CommandDelegationPayloadType  = "application/vnd.steward.executor-command-delegation.v1+json"
-	CommandDelegationSchemaV1     = "steward.executor-command-delegation.v1"
-	maxCommandDelegationBytes     = 64 << 10
-	maxCommandDelegationLifetime  = 24 * time.Hour
-	maxCommandDelegationNodes     = 64
-	maxCommandDelegationInstances = 128
+	CommandDelegationPayloadType   = "application/vnd.steward.executor-command-delegation.v1+json"
+	CommandDelegationSchemaV1      = "steward.executor-command-delegation.v1"
+	maxCommandDelegationBytes      = 64 << 10
+	maxCommandDelegationLifetime   = 24 * time.Hour
+	maxCommandDelegationNodes      = 64
+	maxCommandDelegationInstances  = 128
+	maxCommandPlacementLabels      = 32
+	maxCommandPlacementTolerations = 32
 )
 
 // CommandDelegation grants one online controller key a finite subset of a
@@ -54,16 +56,30 @@ type CommandDelegationInstance struct {
 // The controller may select an allowed node and instance, but it cannot change
 // resources, capabilities, routes, connectors, or state disposition.
 type CommandDelegationAdmissionTemplate struct {
-	CapsuleDigest    string         `json:"capsule_digest"`
-	Resources        ResourceLimits `json:"resources"`
-	Capabilities     Capabilities   `json:"capabilities"`
-	StateDisposition string         `json:"state_disposition"`
-	InferenceRouteID string         `json:"inference_route_id,omitempty"`
-	ModelAlias       string         `json:"model_alias,omitempty"`
-	ServiceID        string         `json:"service_id,omitempty"`
-	EgressRouteIDs   []string       `json:"egress_route_ids,omitempty"`
-	ConnectorIDs     []string       `json:"connector_ids,omitempty"`
-	EffectMode       string         `json:"effect_mode,omitempty"`
+	CapsuleDigest    string                      `json:"capsule_digest"`
+	Resources        ResourceLimits              `json:"resources"`
+	Capabilities     Capabilities                `json:"capabilities"`
+	StateDisposition string                      `json:"state_disposition"`
+	InferenceRouteID string                      `json:"inference_route_id,omitempty"`
+	ModelAlias       string                      `json:"model_alias,omitempty"`
+	ServiceID        string                      `json:"service_id,omitempty"`
+	EgressRouteIDs   []string                    `json:"egress_route_ids,omitempty"`
+	ConnectorIDs     []string                    `json:"connector_ids,omitempty"`
+	EffectMode       string                      `json:"effect_mode,omitempty"`
+	Placement        *CommandDelegationPlacement `json:"placement,omitempty"`
+}
+
+// CommandDelegationPlacement is tenant-signed scheduling intent. It narrows
+// where Control may place an instance but does not grant Executor authority.
+type CommandDelegationPlacement struct {
+	RequiredIsolation string                   `json:"required_isolation,omitempty"`
+	RequiredLabels    []CommandDelegationLabel `json:"required_labels"`
+	Tolerations       []string                 `json:"tolerations"`
+}
+
+type CommandDelegationLabel struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 type VerifiedCommandDelegation struct {
@@ -156,7 +172,30 @@ func (template CommandDelegationAdmissionTemplate) Validate() error {
 		!canonicalDelegatedIDs(template.ConnectorIDs, 32) {
 		return deny("invalid command delegation admission template")
 	}
+	if template.Placement != nil && !validCommandDelegationPlacement(*template.Placement) {
+		return deny("invalid command delegation placement")
+	}
 	return nil
+}
+
+func validCommandDelegationPlacement(placement CommandDelegationPlacement) bool {
+	if placement.RequiredIsolation != "" && placement.RequiredIsolation != "gvisor" ||
+		placement.RequiredLabels == nil || len(placement.RequiredLabels) > maxCommandPlacementLabels ||
+		placement.Tolerations == nil || len(placement.Tolerations) > maxCommandPlacementTolerations {
+		return false
+	}
+	for index, label := range placement.RequiredLabels {
+		if !bounded(label.Key, 128) || !bounded(label.Value, 128) ||
+			index > 0 && placement.RequiredLabels[index-1].Key >= label.Key {
+			return false
+		}
+	}
+	for index, value := range placement.Tolerations {
+		if !bounded(value, 128) || index > 0 && placement.Tolerations[index-1] >= value {
+			return false
+		}
+	}
+	return true
 }
 
 func validDelegatedCapabilityFields(template CommandDelegationAdmissionTemplate) bool {

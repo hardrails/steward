@@ -14,6 +14,18 @@ const (
 	defaultRelayPIDs   = int64(32)
 )
 
+// RuntimeOverheadResources returns the fixed relay reservation Executor adds
+// when an admitted workload needs inference, service, egress, or connector
+// topology. Control publishes and reserves this exact value instead of
+// maintaining a second copy of the limit.
+func RuntimeOverheadResources() Resources {
+	return Resources{
+		MemoryBytes: defaultRelayMemory,
+		CPUMillis:   defaultRelayCPU,
+		PIDs:        defaultRelayPIDs,
+	}
+}
+
 type runtimeTopologyComponent string
 
 const (
