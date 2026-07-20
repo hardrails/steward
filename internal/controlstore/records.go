@@ -1680,7 +1680,16 @@ func cloneNode(node Node) Node {
 	node.Evidence = cloneEvidenceWitness(node.Evidence)
 	node.Scheduling = cloneNodeScheduling(node.Scheduling)
 	node.Placement = cloneNodePlacement(node.Placement)
+	node.Drain = cloneNodeDrain(node.Drain)
 	return node
+}
+
+func cloneNodeDrain(value *NodeDrain) *NodeDrain {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func cloneNodePlacement(value *NodePlacement) *NodePlacement {

@@ -59,6 +59,9 @@ func (store *Store) ChangeNodePlacement(
 	if !node.Active {
 		return Node{}, false, ErrConflict
 	}
+	if action == NodePlacementUncordon && node.Drain != nil && node.Drain.State == NodeDrainActive {
+		return Node{}, false, ErrConflict
+	}
 	current := EffectiveNodePlacement(node)
 	nextMode, err := placementTransition(current, action, reason)
 	if err != nil {
@@ -75,6 +78,10 @@ func (store *Store) ChangeNodePlacement(
 	updated := cloneNode(node)
 	updated.Placement = &NodePlacement{
 		Mode: nextMode, Reason: reason, ChangedAt: canonicalTimestamp(now),
+	}
+	if action == NodePlacementUnquarantine && updated.Drain != nil && updated.Drain.State == NodeDrainActive {
+		updated.Placement.Mode = NodeCordoned
+		updated.Placement.Reason = updated.Drain.Reason
 	}
 	if nextMode == NodeSchedulable {
 		updated.Placement.Reason = ""

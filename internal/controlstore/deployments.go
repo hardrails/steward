@@ -23,6 +23,7 @@ type DeploymentApply struct {
 	BundleDigest     string
 	CapsuleDSSE      []byte
 	DelegationDSSE   []byte
+	DisruptionBudget *DeploymentDisruptionBudget
 }
 
 // ApplyDeployment creates or rolls forward desired state. Exact retries are
@@ -61,6 +62,13 @@ func (store *Store) ApplyDeployment(
 			Generation: delegated.MinInstanceGeneration, Phase: DeploymentInstancePending,
 			TransitionedAt: canonicalTimestamp(now),
 		}
+	}
+	disruptionBudget := DeploymentDisruptionBudget{MaxUnavailable: 1}
+	if input.DisruptionBudget != nil {
+		disruptionBudget = *input.DisruptionBudget
+	}
+	if disruptionBudget.MaxUnavailable < 0 || disruptionBudget.MaxUnavailable > len(instances) {
+		return Deployment{}, false, invalid("deployment disruption budget exceeds its replica count")
 	}
 
 	store.mu.Lock()
@@ -115,7 +123,8 @@ func (store *Store) ApplyDeployment(
 		CapsuleDSSE:    append([]byte(nil), input.CapsuleDSSE...),
 		DelegationDSSE: append([]byte(nil), input.DelegationDSSE...),
 		DesiredState:   DeploymentRunning, Phase: DeploymentPending, Instances: instances,
-		CreatedAt: createdAt, UpdatedAt: canonicalTimestamp(now),
+		DisruptionBudget: disruptionBudget,
+		CreatedAt:        createdAt, UpdatedAt: canonicalTimestamp(now),
 	}
 	if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
 		return Deployment{}, false, err
@@ -241,8 +250,16 @@ func deploymentSpecEqual(existing Deployment, input DeploymentApply) bool {
 	return existing.TenantID == input.TenantID && existing.ID == input.ID &&
 		existing.Generation == input.Generation && existing.AgentName == input.AgentName &&
 		existing.BundleDigest == input.BundleDigest && existing.DesiredState == DeploymentRunning &&
+		existing.DisruptionBudget == effectiveDeploymentDisruptionBudget(input) &&
 		bytes.Equal(existing.CapsuleDSSE, input.CapsuleDSSE) &&
 		bytes.Equal(existing.DelegationDSSE, input.DelegationDSSE)
+}
+
+func effectiveDeploymentDisruptionBudget(input DeploymentApply) DeploymentDisruptionBudget {
+	if input.DisruptionBudget == nil {
+		return DeploymentDisruptionBudget{MaxUnavailable: 1}
+	}
+	return *input.DisruptionBudget
 }
 
 func hasDeploymentLifecycle(operations []string) bool {

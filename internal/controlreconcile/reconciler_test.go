@@ -28,6 +28,7 @@ type reconcileFixture struct {
 	auth       *controlauth.Manager
 	admin      controlauth.Identity
 	node       controlauth.NodeIdentity
+	nodeIDs    []string
 	now        time.Time
 	dir        string
 	controller ed25519.PrivateKey
@@ -155,6 +156,91 @@ func TestTopologyPlacementRanksSpreadBeforePreferenceAndLoad(t *testing.T) {
 	loaded := rankPlacementCandidate(node("node-e"), 0, &admission.CommandDelegationPlacement{PreferredLabels: placement.PreferredLabels}, nil)
 	if !withoutSpread.betterThan(loaded) {
 		t.Fatal("preferred label did not outrank node load when no spread key was requested")
+	}
+}
+
+func TestReconcilerDrainsStatelessInstanceAcrossRestart(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	source := fixture.node
+	target := addControlNode(t, fixture, "node-2")
+	fixture.node = source
+	heartbeatControlNode(t, fixture)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+
+	assertReconcileCount(t, reconciler, "enqueue source admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source start", 1, 0)
+	fixture.node = target
+	heartbeatControlNode(t, fixture)
+	fixture.node = source
+
+	if _, changed, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", fixture.now,
+	); err != nil || !changed {
+		t.Fatalf("start node drain = (%v, %v)", changed, err)
+	}
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Draining != 1 {
+		t.Fatalf("mark drain = (%+v, %v)", report, err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := controlstore.Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store = reopened
+	t.Cleanup(func() { _ = reopened.Close() })
+	reconciler = fixture.reconciler(t)
+
+	assertReconcileCount(t, reconciler, "enqueue drain stop", 0, 1)
+	completeDeploymentCommand(t, fixture, "stop", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe drain stop", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue drain destroy", 0, 1)
+	completeDeploymentCommand(t, fixture, "destroy", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe drain destroy", 1, 0)
+	fixture.node = target
+	heartbeatControlNode(t, fixture)
+	report, err = reconciler.Reconcile(context.Background())
+	if err != nil || report.Replaced != 1 {
+		t.Fatalf("replace drained instance = (%+v, %v)", report, err)
+	}
+	report, err = reconciler.Reconcile(context.Background())
+	if err != nil || report.Enqueued != 1 {
+		t.Fatalf("enqueue target admit = (%+v, %v)", report, err)
+	}
+	deployment := getControlDeployment(t, fixture)
+	if deployment.Instances[0].NodeID != "node-2" || deployment.Instances[0].Generation != 2 ||
+		deployment.Instances[0].Drain == nil {
+		t.Fatalf("target placement = %+v", deployment.Instances[0])
+	}
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe target admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue target renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe target renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue target start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	report, err = reconciler.Reconcile(context.Background())
+	if err != nil || report.Observed != 1 || report.DrainsCompleted != 1 {
+		t.Fatalf("complete target start and node drain = (%+v, %v)", report, err)
+	}
+	deployment = getControlDeployment(t, fixture)
+	if deployment.Instances[0].Drain != nil || deployment.Instances[0].Phase != controlstore.DeploymentInstanceRunning {
+		t.Fatalf("completed replacement = %+v", deployment.Instances[0])
+	}
+	nodes, err := fixture.store.ListNodes(fixture.admin, "tenant-a")
+	if err != nil || len(nodes) != 2 || nodes[0].Drain == nil ||
+		nodes[0].Drain.State != controlstore.NodeDrainCompleted {
+		t.Fatalf("completed node drain = (%+v, %v)", nodes, err)
 	}
 }
 
@@ -685,8 +771,55 @@ func newControlReconcileFixture(t *testing.T) *reconcileFixture {
 	}
 	return &reconcileFixture{
 		store: store, auth: auth, admin: admin, node: node, now: now.Add(3 * time.Minute),
-		dir: dir, controller: controller, limits: limits,
+		nodeIDs: []string{"node-1"}, dir: dir, controller: controller, limits: limits,
 	}
+}
+
+func addControlNode(t *testing.T, fixture *reconcileFixture, nodeID string) controlauth.NodeIdentity {
+	t.Helper()
+	enrollmentRaw, enrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, nodeID, []string{"tenant-a"}, fixture.now.Add(time.Hour), fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, receiptPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		fixture.auth.InstanceID(), enrollment.ID, nodeID, nodeID, 1, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, receiptPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := fixture.store.ExchangeEnrollment(
+		fixture.auth, enrollmentRaw, "enroll-"+nodeID, proof, fixture.now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := fixture.store.AuthenticateNode(fixture.auth, credential.Credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := []string{
+		controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+	}
+	fixture.now = fixture.now.Add(2 * time.Minute)
+	if deliveries, err := fixture.store.PollV4(node, capabilities, fixture.now, time.Minute, 1); err != nil || len(deliveries) != 0 {
+		t.Fatalf("prime %s capabilities = (%+v, %v)", nodeID, deliveries, err)
+	}
+	if _, _, err := fixture.store.ObserveNodeScheduling(node, testSchedulingObservation(nodeID), fixture.now); err != nil {
+		t.Fatalf("prime %s scheduling = %v", nodeID, err)
+	}
+	fixture.nodeIDs = append(fixture.nodeIDs, nodeID)
+	return node
 }
 
 func (fixture *reconcileFixture) reconciler(t *testing.T) *Reconciler {
@@ -748,7 +881,7 @@ func applyControlDeploymentNamed(
 		DelegationID:  deploymentID + "-authority", TenantID: "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(fixture.controller.Public().(ed25519.PublicKey)),
-		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-1"},
+		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: append([]string(nil), fixture.nodeIDs...),
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: instanceID, LineageID: lineageID,
 			MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 4,
@@ -857,7 +990,7 @@ func heartbeatControlNode(t *testing.T, fixture *reconcileFixture) {
 func observeControlNodeScheduling(t *testing.T, fixture *reconcileFixture) {
 	t.Helper()
 	if _, _, err := fixture.store.ObserveNodeScheduling(
-		fixture.node, testSchedulingObservation("node-1"), fixture.now,
+		fixture.node, testSchedulingObservation(fixture.node.NodeID), fixture.now,
 	); err != nil {
 		t.Fatalf("observe node scheduling = %v", err)
 	}

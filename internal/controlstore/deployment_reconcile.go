@@ -51,6 +51,8 @@ const (
 	DeploymentBlockedWorkloadLimit           DeploymentBlockedReason = "workload_limit_exceeded"
 	DeploymentBlockedNodeCapacity            DeploymentBlockedReason = "node_capacity_exhausted"
 	DeploymentBlockedTenantCapacity          DeploymentBlockedReason = "tenant_capacity_exhausted"
+	DeploymentBlockedDrainDisruptionBudget   DeploymentBlockedReason = "drain_disruption_budget_exhausted"
+	DeploymentBlockedStatefulDrain           DeploymentBlockedReason = "stateful_drain_unsupported"
 	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
 )
 
@@ -182,7 +184,7 @@ func (store *Store) EnqueueDeploymentCommand(
 	}
 	instance := deployment.Instances[instanceIndex]
 	if statement.InstanceGeneration != instance.Generation ||
-		!deploymentTransitionAllowed(deployment.DesiredState, instance.Phase, statement.Kind) ||
+		!deploymentTransitionAllowed(deployment.DesiredState, instance, statement.Kind) ||
 		instance.NodeID != "" && instance.NodeID != statement.NodeID ||
 		statement.CommandSequence <= instance.CommandSequence {
 		return Deployment{}, Command{}, false, ErrConflict
@@ -354,6 +356,10 @@ func (store *Store) ObserveDeploymentCommand(
 			} else {
 				instance.Admission = cloneAdmissionProjection(command.Terminal.Admission)
 			}
+		}
+		if instance.CommandOperation == "start" && instance.Drain != nil &&
+			instance.NodeID != instance.Drain.SourceNodeID {
+			instance.Drain = nil
 		}
 	} else {
 		instance.Phase = DeploymentInstanceFailed
@@ -547,7 +553,13 @@ func deploymentDelegatedInstance(
 	return instances[index], true
 }
 
-func deploymentTransitionAllowed(desired DeploymentDesiredState, phase DeploymentInstancePhase, operation string) bool {
+func deploymentTransitionAllowed(desired DeploymentDesiredState, instance DeploymentInstance, operation string) bool {
+	phase := instance.Phase
+	if desired == DeploymentRunning && instance.Drain != nil &&
+		instance.NodeID == instance.Drain.SourceNodeID {
+		return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
+			phase == DeploymentInstanceDestroying && operation == "destroy"
+	}
 	if desired == DeploymentRunning {
 		return phase == DeploymentInstancePending && operation == "admit" ||
 			phase == DeploymentInstanceStarting && (operation == "renew" || operation == "start") ||
@@ -661,7 +673,8 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 		DeploymentBlockedInvalidAuthority, DeploymentBlockedAwaitingLeaseExpiry,
 		DeploymentBlockedStatefulReplacement, DeploymentBlockedGenerationExhausted,
 		DeploymentBlockedSchedulingUnavailable, DeploymentBlockedPlacementConstraints,
-		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity:
+		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity,
+		DeploymentBlockedDrainDisruptionBudget, DeploymentBlockedStatefulDrain:
 		return true
 	default:
 		return false

@@ -53,14 +53,16 @@ type Reconciler struct {
 }
 
 type Report struct {
-	Deployments int `json:"deployments"`
-	Instances   int `json:"instances"`
-	Observed    int `json:"observed"`
-	Enqueued    int `json:"enqueued"`
-	Removed     int `json:"removed"`
-	Replaced    int `json:"replaced"`
-	Conflicts   int `json:"conflicts"`
-	Blocked     int `json:"blocked"`
+	Deployments     int `json:"deployments"`
+	Instances       int `json:"instances"`
+	Observed        int `json:"observed"`
+	Enqueued        int `json:"enqueued"`
+	Removed         int `json:"removed"`
+	Replaced        int `json:"replaced"`
+	Conflicts       int `json:"conflicts"`
+	Blocked         int `json:"blocked"`
+	Draining        int `json:"draining"`
+	DrainsCompleted int `json:"drains_completed"`
 }
 
 type instanceResult struct {
@@ -111,12 +113,14 @@ func (reconciler *Reconciler) Run(ctx context.Context) error {
 				reconciler.logger.Error("desired-state reconciliation failed", "error", err)
 				continue
 			}
-			if report.Enqueued > 0 || report.Observed > 0 || report.Removed > 0 || report.Replaced > 0 || report.Blocked > 0 {
+			if report.Enqueued > 0 || report.Observed > 0 || report.Removed > 0 || report.Replaced > 0 ||
+				report.Blocked > 0 || report.Draining > 0 || report.DrainsCompleted > 0 {
 				reconciler.logger.Info("desired-state reconciliation completed",
 					"deployments", report.Deployments, "instances", report.Instances,
 					"observed", report.Observed, "enqueued", report.Enqueued,
 					"removed", report.Removed, "replaced", report.Replaced,
-					"conflicts", report.Conflicts, "blocked", report.Blocked)
+					"conflicts", report.Conflicts, "blocked", report.Blocked,
+					"draining", report.Draining, "drains_completed", report.DrainsCompleted)
 			}
 		}
 	}
@@ -171,10 +175,17 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 				report.Removed++
 			case "replaced":
 				report.Replaced++
+			case "draining":
+				report.Draining++
 			}
 			break
 		}
 	}
+	completed, err := reconciler.store.CompleteFinishedNodeDrains(reconciler.now().UTC())
+	if err != nil {
+		return report, err
+	}
+	report.DrainsCompleted = completed
 	return report, nil
 }
 
@@ -194,8 +205,21 @@ func (reconciler *Reconciler) reconcileInstance(
 		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
 	}
 	if instance.Phase == controlstore.DeploymentInstanceFailed ||
-		instance.Phase == controlstore.DeploymentInstanceRemoved {
+		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain == nil {
 		return instanceResult{}, nil
+	}
+	if deployment.DesiredState == controlstore.DeploymentRunning &&
+		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain != nil {
+		_, changed, err := reconciler.store.ReplaceDrainedDeploymentInstance(
+			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
+		)
+		if errors.Is(err, controlstore.ErrConflict) {
+			return instanceResult{conflict: true}, nil
+		}
+		if errors.Is(err, controlstore.ErrCapacityExceeded) {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedGenerationExhausted), now)
+		}
+		return instanceResult{changed: changed, kind: "replaced"}, err
 	}
 	leaseManaged := containsOperation(delegation.Operations, "renew")
 	if instance.NodeID != "" && deployment.DesiredState == controlstore.DeploymentRunning &&
@@ -211,7 +235,36 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "observed"}, err
 	}
-	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Phase == controlstore.DeploymentInstanceRunning &&
+	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Drain == nil &&
+		instance.Phase == controlstore.DeploymentInstanceRunning {
+		if drain, found := activeNodeDrain(nodes, instance.NodeID); found {
+			candidate := instance
+			candidate.NodeID = ""
+			if _, _, err := selectNode(
+				nodes, deployments, placements, deployment, candidate, now, reconciler.nodeStaleAfter,
+			); err != nil {
+				return reconciler.recordBlocked(deployment, instance, err, now)
+			}
+			_, changed, err := reconciler.store.BeginDeploymentInstanceDrain(
+				deployment.TenantID, deployment.ID, instance.InstanceID, instance.NodeID,
+				drain.RequestID, deployment.Revision, now,
+			)
+			if errors.Is(err, controlstore.ErrConflict) {
+				return instanceResult{conflict: true}, nil
+			}
+			switch {
+			case errors.Is(err, controlstore.ErrDisruptionBudget):
+				return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedDrainDisruptionBudget), now)
+			case errors.Is(err, controlstore.ErrStatefulDrain):
+				return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedStatefulDrain), now)
+			case errors.Is(err, controlstore.ErrCapacityExceeded):
+				return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedGenerationExhausted), now)
+			}
+			return instanceResult{changed: changed, kind: "draining"}, err
+		}
+	}
+	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Drain == nil &&
+		instance.Phase == controlstore.DeploymentInstanceRunning &&
 		(!leaseManaged || !workloadLeaseNeedsRenewal(instance, now)) {
 		return instanceResult{}, nil
 	}
@@ -419,6 +472,17 @@ func nextOperation(
 	leaseManaged bool,
 	now time.Time,
 ) string {
+	if desired == controlstore.DeploymentRunning && instance.Drain != nil &&
+		instance.NodeID == instance.Drain.SourceNodeID {
+		switch instance.Phase {
+		case controlstore.DeploymentInstanceRunning, controlstore.DeploymentInstanceStarting:
+			return "stop"
+		case controlstore.DeploymentInstanceDestroying:
+			return "destroy"
+		default:
+			return ""
+		}
+	}
 	if desired == controlstore.DeploymentRunning {
 		switch instance.Phase {
 		case controlstore.DeploymentInstancePending:
@@ -443,6 +507,15 @@ func nextOperation(
 	default:
 		return ""
 	}
+}
+
+func activeNodeDrain(nodes []controlstore.Node, nodeID string) (controlstore.NodeDrain, bool) {
+	for _, node := range nodes {
+		if node.ID == nodeID && node.Drain != nil && node.Drain.State == controlstore.NodeDrainActive {
+			return *node.Drain, true
+		}
+	}
+	return controlstore.NodeDrain{}, false
 }
 
 func commandInFlight(instance controlstore.DeploymentInstance) bool {
