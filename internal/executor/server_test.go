@@ -719,6 +719,52 @@ func TestWorkloadLeaseEndpointRequiresSecureAdmission(t *testing.T) {
 	}
 }
 
+func TestWorkloadLeaseEndpointRejectsInvalidAndDegradedRequests(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, false)
+	workload := fixture.docker.observed.Workload
+	authorized := WithAdmissionPrincipal(
+		context.Background(), workload.TenantID, fixture.config.NodeID, workload.Runtime.Generation,
+	)
+	lease := admission.WorkloadLease{
+		SchemaVersion: admission.WorkloadLeaseSchemaV1,
+		ExpiresAt:     time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano),
+	}
+	validBody, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(target string, body []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(body)).WithContext(authorized)
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		fixture.server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	for _, test := range []struct {
+		name   string
+		target string
+		body   []byte
+	}{
+		{name: "invalid runtime", target: "/v1/workloads/not-a-runtime/lease", body: validBody},
+		{name: "invalid lease", target: "/v1/workloads/" + fixture.ref + "/lease", body: []byte(`{}`)},
+		{name: "oversized lease", target: "/v1/workloads/" + fixture.ref + "/lease", body: bytes.Repeat([]byte("x"), maxBodyBytes+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := post(test.target, test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if _, err := fixture.config.Journal.Prepare("lease-pending-test", fixture.ref, workload.Runtime.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if response := post("/v1/workloads/"+fixture.ref+"/lease", validBody); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("degraded lease status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func postActivationCheckpoint(
 	t *testing.T,
 	server *Server,

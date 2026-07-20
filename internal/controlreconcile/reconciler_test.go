@@ -336,6 +336,39 @@ func TestReconcilerReportsExpiredDelegation(t *testing.T) {
 	}
 }
 
+func TestLeaseManagedLifecycleOperationPlan(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(workloadLeaseRenewBefore + time.Minute).Format(time.RFC3339Nano)
+	due := now.Add(workloadLeaseRenewBefore).Format(time.RFC3339Nano)
+	for _, test := range []struct {
+		name         string
+		desired      controlstore.DeploymentDesiredState
+		phase        controlstore.DeploymentInstancePhase
+		leaseManaged bool
+		leaseExpiry  string
+		want         string
+	}{
+		{name: "admit pending", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstancePending, want: "admit"},
+		{name: "renew before first start", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceStarting, leaseManaged: true, want: "renew"},
+		{name: "start with lease", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceStarting, leaseManaged: true, leaseExpiry: fresh, want: "start"},
+		{name: "renew due running", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceRunning, leaseManaged: true, leaseExpiry: due, want: "renew"},
+		{name: "renew malformed running", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceRunning, leaseManaged: true, leaseExpiry: "invalid", want: "renew"},
+		{name: "keep fresh running", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceRunning, leaseManaged: true, leaseExpiry: fresh},
+		{name: "keep legacy running", desired: controlstore.DeploymentRunning, phase: controlstore.DeploymentInstanceRunning},
+		{name: "stop running", desired: controlstore.DeploymentAbsent, phase: controlstore.DeploymentInstanceRunning, want: "stop"},
+		{name: "stop starting", desired: controlstore.DeploymentAbsent, phase: controlstore.DeploymentInstanceStarting, want: "stop"},
+		{name: "destroy stopped", desired: controlstore.DeploymentAbsent, phase: controlstore.DeploymentInstanceDestroying, want: "destroy"},
+		{name: "ignore pending removal", desired: controlstore.DeploymentAbsent, phase: controlstore.DeploymentInstancePending},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			instance := controlstore.DeploymentInstance{Phase: test.phase, LeaseExpiresAt: test.leaseExpiry}
+			if got := nextOperation(test.desired, instance, test.leaseManaged, now); got != test.want {
+				t.Fatalf("next operation=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestReconcilerRemovesPendingDeploymentWithoutNodeEffect(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)
