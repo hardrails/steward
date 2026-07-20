@@ -308,10 +308,12 @@ require an explicit instance selection.
 ## Forks clone state, not a live agent
 
 An agent fork plan binds a new instance and lineage to immutable snapshot
-metadata. The OpenZFS worker implements held snapshots and copy-on-write clones,
-but the public fork workflow does not yet invoke those operations, start the fork,
-or clone process memory. Do not call the worker's private API as a substitute; that
-would bypass Steward's lifecycle and evidence controls.
+metadata. A forked deployment invokes the qualified OpenZFS worker through signed
+Executor commands, admits the cloned state, and runs the normal agent lifecycle.
+Temporary forks automatically stop, destroy, and purge at expiry. Steward does not
+clone process memory or replicate snapshots between nodes. The source node must
+remain available until every fork clone has been purged; Steward blocks rather than
+moving node-local state without proof.
 
 Never place credentials, task permits, receipt keys, live tokens, runtime IDs,
 network sessions, or random-number-generator state in a snapshot. A fork receives

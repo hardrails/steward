@@ -68,7 +68,7 @@ var completionFlags = map[string][]string{
 	"agent plan":                        {"-bundle", "-nodes", "-tenant", "-out"},
 	"agent apply":                       {"-bundle", "-capsule", "-policy", "-site-root-public-key", "-site-root-key-id", "-nodes", "-tenant", "-node-id", "-instance-id", "-lineage-id", "-generation", "-node-url", "-token-file", "-timeout", "-plan-only", "-no-context", "-delegation", "-tenant-id", "-revision", "-max-unavailable", "-control-url", "-ca-file"},
 	"agent deploy":                      {"-bundle", "-capsule", "-policy", "-site-root-public-key", "-site-root-key-id", "-nodes", "-tenant", "-node-id", "-instance-id", "-lineage-id", "-generation", "-claim-generation", "-command-key", "-command-key-id", "-control-url", "-token-file", "-ca-file", "-timeout", "-plan-only", "-no-context"},
-	"agent deployment apply":            {"-bundle", "-capsule", "-delegation", "-tenant", "-tenant-id", "-generation", "-revision", "-max-unavailable", "-control-url", "-token-file", "-ca-file", "-no-context"},
+	"agent deployment apply":            {"-bundle", "-capsule", "-delegation", "-tenant", "-tenant-id", "-generation", "-revision", "-max-unavailable", "-fork-plan", "-source-node", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"agent deployment wait":             {"-tenant", "-tenant-id", "-instance-id", "-out", "-timeout", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"agent deployment status":           {"-tenant", "-tenant-id", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"agent deployment list":             {"-tenant", "-tenant-id", "-after", "-limit", "-control-url", "-token-file", "-ca-file", "-no-context"},

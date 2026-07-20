@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 
@@ -65,6 +66,7 @@ type Report struct {
 	RollingOut      int `json:"rolling_out"`
 	DrainsCompleted int `json:"drains_completed"`
 	DrainsFailed    int `json:"drains_failed"`
+	ForksExpired    int `json:"forks_expired"`
 }
 
 type instanceResult struct {
@@ -116,14 +118,15 @@ func (reconciler *Reconciler) Run(ctx context.Context) error {
 				continue
 			}
 			if report.Enqueued > 0 || report.Observed > 0 || report.Removed > 0 || report.Replaced > 0 ||
-				report.Blocked > 0 || report.Draining > 0 || report.RollingOut > 0 || report.DrainsCompleted > 0 || report.DrainsFailed > 0 {
+				report.Blocked > 0 || report.Draining > 0 || report.RollingOut > 0 || report.DrainsCompleted > 0 ||
+				report.DrainsFailed > 0 || report.ForksExpired > 0 {
 				reconciler.logger.Info("desired-state reconciliation completed",
 					"deployments", report.Deployments, "instances", report.Instances,
 					"observed", report.Observed, "enqueued", report.Enqueued,
 					"removed", report.Removed, "replaced", report.Replaced,
 					"conflicts", report.Conflicts, "blocked", report.Blocked,
 					"draining", report.Draining, "rolling_out", report.RollingOut, "drains_completed", report.DrainsCompleted,
-					"drains_failed", report.DrainsFailed)
+					"drains_failed", report.DrainsFailed, "forks_expired", report.ForksExpired)
 			}
 		}
 	}
@@ -183,6 +186,8 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 				report.Draining++
 			case "rolling_out":
 				report.RollingOut++
+			case "fork_expired":
+				report.ForksExpired++
 			}
 			break
 		}
@@ -207,6 +212,18 @@ func (reconciler *Reconciler) reconcileInstance(
 	now := reconciler.now().UTC()
 	if now.IsZero() {
 		return instanceResult{}, errors.New("controller clock is invalid")
+	}
+	if deployment.Fork != nil && deployment.Fork.ExpiresAt != "" && deployment.DesiredState == controlstore.DeploymentRunning {
+		expires, parseErr := time.Parse(time.RFC3339Nano, deployment.Fork.ExpiresAt)
+		if parseErr == nil && !now.Before(expires) {
+			_, changed, expireErr := reconciler.store.ExpireDeploymentFork(
+				deployment.TenantID, deployment.ID, deployment.Revision, now,
+			)
+			if errors.Is(expireErr, controlstore.ErrConflict) {
+				return instanceResult{conflict: true}, nil
+			}
+			return instanceResult{changed: changed, kind: "fork_expired"}, expireErr
+		}
 	}
 	_, delegationRaw, err := controlstore.DeploymentAuthorityForInstance(deployment, instance)
 	if err != nil {
@@ -270,6 +287,9 @@ func (reconciler *Reconciler) reconcileInstance(
 	}
 	if instance.NodeID != "" && deployment.DesiredState == controlstore.DeploymentRunning &&
 		!assignedNodeEligible(nodes, deployment, instance, delegation, now, reconciler.nodeStaleAfter) {
+		if deployment.Fork != nil {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable), now)
+		}
 		if sourceRolloutInstance {
 			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable), now)
 		}
@@ -348,7 +368,7 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "removed"}, err
 	}
-	operation := nextOperation(deployment.DesiredState, instance, leaseManaged, now)
+	operation := nextOperation(deployment.DesiredState, instance, leaseManaged, deployment.Fork != nil, now)
 	if operation == "" {
 		return instanceResult{}, nil
 	}
@@ -510,6 +530,30 @@ func (reconciler *Reconciler) signCommand(
 		expires = delegationExpiry
 	}
 	payload := []byte(`{}`)
+	if operation == "clone-state" {
+		if deployment.Fork == nil || nodeID != deployment.Fork.SourceNodeID {
+			return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+		}
+		payload, err = json.Marshal(struct {
+			LineageID       string `json:"lineage_id"`
+			SnapshotID      string `json:"snapshot_id"`
+			SourceLineageID string `json:"source_lineage_id"`
+		}{
+			LineageID: instance.LineageID, SnapshotID: deployment.Fork.SnapshotID,
+			SourceLineageID: deployment.Fork.SourceLineageID,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if operation == "purge" {
+		payload, err = json.Marshal(struct {
+			LineageID string `json:"lineage_id"`
+		}{LineageID: instance.LineageID})
+		if err != nil {
+			return nil, err
+		}
+	}
 	if operation == "admit" {
 		delegated, found := delegatedInstance(delegation, instance.InstanceID)
 		if !found || delegation.Admission == nil {
@@ -566,6 +610,7 @@ func nextOperation(
 	desired controlstore.DeploymentDesiredState,
 	instance controlstore.DeploymentInstance,
 	leaseManaged bool,
+	fork bool,
 	now time.Time,
 ) string {
 	if desired == controlstore.DeploymentRunning && instance.Rollout != nil &&
@@ -593,6 +638,11 @@ func nextOperation(
 	if desired == controlstore.DeploymentRunning {
 		switch instance.Phase {
 		case controlstore.DeploymentInstancePending:
+			if fork {
+				return "clone-state"
+			}
+			return "admit"
+		case controlstore.DeploymentInstanceCloned:
 			return "admit"
 		case controlstore.DeploymentInstanceStarting:
 			if leaseManaged && workloadLeaseNeedsRenewal(instance, now) {
@@ -611,6 +661,10 @@ func nextOperation(
 		return "stop"
 	case controlstore.DeploymentInstanceDestroying:
 		return "destroy"
+	case controlstore.DeploymentInstancePurging:
+		return "purge"
+	case controlstore.DeploymentInstanceCloned:
+		return "purge"
 	default:
 		return ""
 	}
@@ -638,6 +692,10 @@ func commandInFlight(instance controlstore.DeploymentInstance) bool {
 		return instance.Phase == controlstore.DeploymentInstanceStopping
 	case "destroy":
 		return instance.Phase == controlstore.DeploymentInstanceDestroying
+	case "clone-state":
+		return instance.Phase == controlstore.DeploymentInstanceCloning
+	case "purge":
+		return instance.Phase == controlstore.DeploymentInstancePurging
 	default:
 		return false
 	}
@@ -667,7 +725,8 @@ func assignedNodeEligible(
 	}
 	for _, node := range nodes {
 		if node.ID == instance.NodeID {
-			return nodeAvailableForAssignment(node, deployment.TenantID, allowed, now, staleAfter)
+			return nodeAvailableForAssignment(node, deployment.TenantID, allowed, now, staleAfter) &&
+				(deployment.Fork == nil || slices.Contains(node.Capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1))
 		}
 	}
 	return false
@@ -696,11 +755,41 @@ func selectNode(
 	}
 	if instance.NodeID != "" {
 		for _, node := range nodes {
-			if node.ID == instance.NodeID && nodeAvailableForAssignment(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
+			if node.ID == instance.NodeID && nodeAvailableForAssignment(node, deployment.TenantID, allowed, now, nodeStaleAfter) &&
+				(deployment.Fork == nil || slices.Contains(node.Capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1)) {
 				return node.ID, nil, nil
 			}
 		}
 		return "", nil, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable)
+	}
+	if deployment.Fork != nil {
+		for _, node := range nodes {
+			if node.ID != deployment.Fork.SourceNodeID ||
+				!eligibleNode(node, deployment.TenantID, allowed, now, nodeStaleAfter) ||
+				!slices.Contains(node.Capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1) {
+				continue
+			}
+			if delegation.Admission == nil {
+				return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+			}
+			capsule, inspectErr := admission.InspectProfileCapsule(capsuleRaw, time.Time{})
+			delegated, found := delegatedInstance(delegation, instance.InstanceID)
+			if inspectErr != nil || !found {
+				return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+			}
+			intent := intentFromDelegation(deployment, instance, node.ID, delegated, *delegation.Admission)
+			if checkErr := controlstore.CheckNodeScheduling(
+				node, deployments, deployment.TenantID, intent, capsule,
+				delegation.Admission.Placement, now, nodeStaleAfter,
+			); checkErr != nil {
+				if reason := schedulingBlockedReason(checkErr); reason != "" {
+					return "", nil, newBlocked(reason)
+				}
+				return "", nil, checkErr
+			}
+			return node.ID, nil, nil
+		}
+		return "", nil, newBlocked(controlstore.DeploymentBlockedNoEligibleNode)
 	}
 	if delegation.Admission == nil {
 		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)

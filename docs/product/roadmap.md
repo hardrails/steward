@@ -349,7 +349,7 @@ providers, and one offline evidence bundle into one first-time-user operation.
 This release makes Steward a complete product on one host, then extends the same
 contract across a small fleet.
 
-#### Pull request 1: working runtime vertical
+#### Working runtime foundation
 
 Outcome: `agent deployment apply` converges one application to a healthy agent,
 and `task run` performs useful work through the enforced boundary.
@@ -382,7 +382,7 @@ Acceptance gates:
 - One offline bundle links application, instance, task, permit, dispatch, and
   outcome.
 
-#### Pull request 2: production platform vertical
+#### Production platform delivery
 
 Outcome: the same application can run across nodes, recover from failure, create
 safe temporary or durable forks, use governed tool ecosystems, and remain

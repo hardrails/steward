@@ -3691,6 +3691,8 @@ components:
           description: Canonical standard-base64 encoding of the tenant-signed controller delegation DSSE JSON.
         disruption_budget:
           $ref: "#/components/schemas/DeploymentDisruptionBudget"
+        fork:
+          $ref: "#/components/schemas/DeploymentFork"
     DeploymentDeleteRequest:
       type: object
       additionalProperties: false
@@ -3836,7 +3838,7 @@ components:
             allowance even if the terminal report is lost.
         phase:
           type: string
-          enum: [pending, admitting, starting, running, stopping, destroying, removed, failed]
+          enum: [pending, cloning, cloned, admitting, starting, running, stopping, destroying, purging, removed, failed]
         command_id:
           $ref: "#/components/schemas/Identifier256"
         command_operation:
@@ -4022,6 +4024,8 @@ components:
           enum: [running, absent]
         disruption_budget:
           $ref: "#/components/schemas/DeploymentDisruptionBudget"
+        fork:
+          $ref: "#/components/schemas/DeploymentFork"
         phase:
           type: string
           enum: [pending, reconciling, ready, stopping, removed, degraded]
@@ -4037,6 +4041,25 @@ components:
           type: string
           format: date-time
         updated_at:
+          type: string
+          format: date-time
+    DeploymentFork:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id, source_lineage_id, source_node_id]
+      description: >-
+        Immutable node-local snapshot source for one forked deployment. The
+        controller clones the snapshot before admission and purges the clone
+        after destroy. expires_at, when present, automatically changes desired
+        state to absent while cleanup authority is still valid.
+      properties:
+        snapshot_id:
+          $ref: "#/components/schemas/Identifier128"
+        source_lineage_id:
+          $ref: "#/components/schemas/Identifier256"
+        source_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        expires_at:
           type: string
           format: date-time
     DeploymentRollout:

@@ -264,7 +264,7 @@ func agentFork(arguments []string, stdout io.Writer) error {
 	instanceID := flags.String("instance-id", "", "new instance identity; generated when omitted")
 	lineageID := flags.String("lineage-id", "", "new lineage identity; generated when omitted")
 	ttl := flags.Duration("ttl", 0, "optional fork lifetime, from 1m to 720h")
-	onExpiry := flags.String("on-expiry", "", "destroy or hibernate when TTL expires")
+	onExpiry := flags.String("on-expiry", "", "destroy when TTL expires")
 	output := flags.String("out", "fork.json", "new fork plan")
 	if err := flags.Parse(arguments); err != nil {
 		return err

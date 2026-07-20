@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion           = 1
-	stateFormatWriteVersion             = 12
+	stateFormatWriteVersion             = 13
 	stateFormatMaxReadVersion           = stateFormatWriteVersion
 	stateFormatEvidenceVersion          = 2
 	stateFormatExecutorV4Version        = 3
@@ -40,8 +41,9 @@ const (
 	stateFormatRolloutVersion           = 10
 	stateFormatOperationalFreezeVersion = 11
 	stateFormatTenantQuotaVersion       = 12
+	stateFormatForkLifecycleVersion     = 13
 	transactionFormatMinReadVersion     = 1
-	transactionFormatWriteVersion       = 12
+	transactionFormatWriteVersion       = 13
 	transactionFormatMaxReadVersion     = transactionFormatWriteVersion
 	transactionEvidenceVersion          = 2
 	transactionExecutorV4Version        = 3
@@ -54,6 +56,7 @@ const (
 	transactionRolloutVersion           = 10
 	transactionOperationalFreezeVersion = 11
 	transactionTenantQuotaVersion       = 12
+	transactionForkLifecycleVersion     = 13
 	maxMutationsPerRecord               = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -63,6 +66,7 @@ const (
 	MaxEvidenceCaptureAggregateBytes = 16 << 20
 	MinEvidenceCaptureTTL            = time.Second
 	MaxEvidenceCaptureTTL            = time.Hour
+	MinDeploymentForkCleanupWindow   = 4 * time.Hour
 )
 
 var (
@@ -361,11 +365,14 @@ type DeploymentInstancePhase string
 
 const (
 	DeploymentInstancePending    DeploymentInstancePhase = "pending"
+	DeploymentInstanceCloning    DeploymentInstancePhase = "cloning"
+	DeploymentInstanceCloned     DeploymentInstancePhase = "cloned"
 	DeploymentInstanceAdmitting  DeploymentInstancePhase = "admitting"
 	DeploymentInstanceStarting   DeploymentInstancePhase = "starting"
 	DeploymentInstanceRunning    DeploymentInstancePhase = "running"
 	DeploymentInstanceStopping   DeploymentInstancePhase = "stopping"
 	DeploymentInstanceDestroying DeploymentInstancePhase = "destroying"
+	DeploymentInstancePurging    DeploymentInstancePhase = "purging"
 	DeploymentInstanceRemoved    DeploymentInstancePhase = "removed"
 	DeploymentInstanceFailed     DeploymentInstancePhase = "failed"
 )
@@ -444,9 +451,20 @@ type Deployment struct {
 	DisruptionBudget DeploymentDisruptionBudget `json:"disruption_budget"`
 	Phase            DeploymentPhase            `json:"phase"`
 	Instances        []DeploymentInstance       `json:"instances"`
+	Fork             *DeploymentFork            `json:"fork,omitempty"`
 	Rollout          *DeploymentRollout         `json:"rollout,omitempty"`
 	CreatedAt        string                     `json:"created_at"`
 	UpdatedAt        string                     `json:"updated_at"`
+}
+
+// DeploymentFork binds a single-instance deployment to an immutable snapshot
+// on one node. Snapshot storage is node-local, so the controller must not move
+// the fork before a separately governed replication feature exists.
+type DeploymentFork struct {
+	SnapshotID      string `json:"snapshot_id"`
+	SourceLineageID string `json:"source_lineage_id"`
+	SourceNodeID    string `json:"source_node_id"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
 }
 
 // DeploymentRollout retains the exact source authority while the deployment's
@@ -618,6 +636,7 @@ type storedDeployment struct {
 	DisruptionBudget     DeploymentDisruptionBudget `json:"disruption_budget"`
 	Phase                DeploymentPhase            `json:"phase"`
 	Instances            []DeploymentInstance       `json:"instances"`
+	Fork                 *DeploymentFork            `json:"fork,omitempty"`
 	Rollout              *storedDeploymentRollout   `json:"rollout,omitempty"`
 	CreatedAt            string                     `json:"created_at"`
 	UpdatedAt            string                     `json:"updated_at"`
@@ -802,6 +821,10 @@ func cloneDeployment(deployment Deployment) Deployment {
 	deployment.CapsuleDSSE = append([]byte(nil), deployment.CapsuleDSSE...)
 	deployment.DelegationDSSE = append([]byte(nil), deployment.DelegationDSSE...)
 	deployment.Instances = append([]DeploymentInstance(nil), deployment.Instances...)
+	if deployment.Fork != nil {
+		fork := *deployment.Fork
+		deployment.Fork = &fork
+	}
 	for index := range deployment.Instances {
 		deployment.Instances[index].Placement = cloneDeploymentPlacement(deployment.Instances[index].Placement)
 		deployment.Instances[index].Drain = cloneDeploymentInstanceDrain(deployment.Instances[index].Drain)
@@ -855,6 +878,7 @@ func deploymentToStored(deployment Deployment) storedDeployment {
 		DesiredState:         deployment.DesiredState, Phase: deployment.Phase,
 		DisruptionBudget: deployment.DisruptionBudget,
 		Instances:        cloneDeployment(deployment).Instances,
+		Fork:             cloneDeployment(deployment).Fork,
 		CreatedAt:        deployment.CreatedAt, UpdatedAt: deployment.UpdatedAt,
 	}
 	if deployment.Rollout != nil {
@@ -886,6 +910,7 @@ func deploymentFromStored(stored storedDeployment) (Deployment, error) {
 		CapsuleDSSE: capsule, DelegationDSSE: delegation,
 		DesiredState: stored.DesiredState, DisruptionBudget: stored.DisruptionBudget, Phase: stored.Phase,
 		Instances: cloneDeployment(Deployment{Instances: stored.Instances}).Instances,
+		Fork:      cloneDeployment(Deployment{Fork: stored.Fork}).Fork,
 		CreatedAt: stored.CreatedAt, UpdatedAt: stored.UpdatedAt,
 	}
 	if stored.Rollout != nil {
@@ -1252,6 +1277,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if snapshot.Version < stateFormatRolloutVersion && deploymentUsesRolloutFormat(deployment) {
 			return state{}, errors.New("legacy control snapshot contains deployment rollout state")
 		}
+		if snapshot.Version < stateFormatForkLifecycleVersion && deploymentUsesForkLifecycleFormat(deployment) {
+			return state{}, errors.New("legacy control snapshot contains deployment fork state")
+		}
 		key := deploymentKey(deployment.TenantID, deployment.ID)
 		if _, exists := current.deployments[key]; exists {
 			return state{}, errors.New("control snapshot contains a duplicate deployment")
@@ -1482,6 +1510,9 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionRolloutVersion && deploymentUsesRolloutFormat(deployment) {
 				return state{}, errors.New("legacy deployment mutation contains rollout state")
 			}
+			if value.Version < transactionForkLifecycleVersion && deploymentUsesForkLifecycleFormat(deployment) {
+				return state{}, errors.New("legacy deployment mutation contains fork state")
+			}
 			next.deployments[deploymentKey(deployment.TenantID, deployment.ID)] = cloneDeployment(deployment)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
@@ -1518,6 +1549,20 @@ func deploymentUsesRolloutFormat(deployment Deployment) bool {
 	}
 	for _, instance := range deployment.Instances {
 		if instance.Rollout != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func deploymentUsesForkLifecycleFormat(deployment Deployment) bool {
+	if deployment.Fork != nil {
+		return true
+	}
+	for _, instance := range deployment.Instances {
+		if instance.Phase == DeploymentInstanceCloning || instance.Phase == DeploymentInstanceCloned ||
+			instance.Phase == DeploymentInstancePurging || instance.CommandOperation == "clone-state" ||
+			instance.CommandOperation == "purge" {
 			return true
 		}
 	}
@@ -1814,6 +1859,27 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 			}
 		}
 	}
+	if deployment.Fork != nil {
+		fork := deployment.Fork
+		if len(deployment.Instances) != 1 || deployment.Rollout != nil ||
+			!validRecordID(fork.SnapshotID, 128) || !validRecordID(fork.SourceLineageID, 256) ||
+			!validRecordID(fork.SourceNodeID, 128) ||
+			fork.SourceLineageID == deployment.Instances[0].LineageID ||
+			!slices.Contains(delegation.NodeIDs, fork.SourceNodeID) ||
+			delegation.Admission.StateDisposition != "resume" || !delegation.Admission.Capabilities.State ||
+			!slices.Contains(delegation.Operations, "clone-state") ||
+			!slices.Contains(delegation.Operations, "purge") {
+			return errors.New("deployment fork authority or identity is invalid")
+		}
+		if fork.ExpiresAt != "" {
+			expires, parseErr := parseTimestamp(fork.ExpiresAt)
+			delegationExpires, delegationExpiryErr := parseTimestamp(delegation.ExpiresAt)
+			if parseErr != nil || delegationExpiryErr != nil || !expires.After(created) ||
+				expires.After(created.Add(30*24*time.Hour)) || expires.Add(MinDeploymentForkCleanupWindow).After(delegationExpires) {
+				return errors.New("deployment fork expiry is invalid")
+			}
+		}
+	}
 	for index, instance := range deployment.Instances {
 		capsuleRaw, delegationRaw, err := DeploymentAuthorityForInstance(deployment, instance)
 		if err != nil {
@@ -1840,9 +1906,9 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 			return errors.New("deployment instance identity or placement is invalid")
 		}
 		switch instance.Phase {
-		case DeploymentInstancePending, DeploymentInstanceAdmitting, DeploymentInstanceStarting,
+		case DeploymentInstancePending, DeploymentInstanceCloning, DeploymentInstanceCloned, DeploymentInstanceAdmitting, DeploymentInstanceStarting,
 			DeploymentInstanceRunning, DeploymentInstanceStopping, DeploymentInstanceDestroying,
-			DeploymentInstanceRemoved, DeploymentInstanceFailed:
+			DeploymentInstancePurging, DeploymentInstanceRemoved, DeploymentInstanceFailed:
 		default:
 			return errors.New("deployment instance phase is invalid")
 		}
@@ -1852,6 +1918,11 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 			validDeploymentOperation(instance.CommandOperation) && instance.CommandSequence > 0
 		if !commandEmpty && !commandCursorOnly && !commandComplete {
 			return errors.New("deployment instance command cursor is incomplete")
+		}
+		if deployment.Fork == nil && (instance.Phase == DeploymentInstanceCloning ||
+			instance.Phase == DeploymentInstanceCloned || instance.Phase == DeploymentInstancePurging ||
+			instance.CommandOperation == "clone-state" || instance.CommandOperation == "purge") {
+			return errors.New("non-fork deployment contains fork lifecycle state")
 		}
 		if instance.Intent != nil {
 			if err := instance.Intent.Validate(admission.AuthenticatedIdentity{
@@ -1966,7 +2037,7 @@ func DeploymentAuthorityForInstance(
 
 func validDeploymentOperation(operation string) bool {
 	switch operation {
-	case "admit", "renew", "start", "stop", "destroy":
+	case "admit", "renew", "start", "stop", "destroy", "clone-state", "purge":
 		return true
 	default:
 		return false

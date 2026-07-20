@@ -348,6 +348,9 @@ func TestDecodeSnapshotAndForkFailures(t *testing.T) {
 	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", time.Second, "destroy", time.Now()); err == nil {
 		t.Fatal("short TTL accepted")
 	}
+	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", time.Hour, "hibernate", time.Now()); err == nil {
+		t.Fatal("unsupported fork hibernation accepted")
+	}
 }
 
 func TestToolBoundaryErrorPathsAndSanitization(t *testing.T) {

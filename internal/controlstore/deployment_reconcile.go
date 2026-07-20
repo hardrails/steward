@@ -33,6 +33,52 @@ type DeploymentCommandTransition struct {
 	Placement            *DeploymentPlacementDecision
 }
 
+// ExpireDeploymentFork changes only a due, running temporary fork to absent.
+// The revision guard prevents a stale reconciliation pass from overriding a
+// concurrent operator change. Fork cleanup then follows the signed lifecycle.
+func (store *Store) ExpireDeploymentFork(
+	tenantID, deploymentID string,
+	expectedRevision uint64,
+	now time.Time,
+) (Deployment, bool, error) {
+	if store == nil {
+		return Deployment{}, false, ErrUnavailable
+	}
+	if now.IsZero() || expectedRevision == 0 || !validRecordID(tenantID, 128) || !validRecordID(deploymentID, 128) {
+		return Deployment{}, false, invalid("deployment fork expiry is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return Deployment{}, false, err
+	}
+	deployment, exists := store.current.deployments[deploymentKey(tenantID, deploymentID)]
+	if !exists {
+		return Deployment{}, false, ErrNotFound
+	}
+	if deployment.Revision != expectedRevision {
+		return Deployment{}, false, ErrConflict
+	}
+	if deployment.Fork == nil || deployment.Fork.ExpiresAt == "" || deployment.DesiredState != DeploymentRunning {
+		return cloneDeployment(deployment), false, nil
+	}
+	expires, err := time.Parse(time.RFC3339Nano, deployment.Fork.ExpiresAt)
+	if err != nil || now.Before(expires) {
+		return cloneDeployment(deployment), false, nil
+	}
+	if deployment.Revision == math.MaxUint64 {
+		return Deployment{}, false, ErrCapacityExceeded
+	}
+	deployment.DesiredState = DeploymentAbsent
+	deployment.Phase = DeploymentStopping
+	deployment.Revision++
+	deployment.UpdatedAt = canonicalTimestamp(now)
+	if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+		return Deployment{}, false, err
+	}
+	return cloneDeployment(deployment), true, nil
+}
+
 // DeploymentBlockedReason is a stable, machine-readable explanation for why
 // the controller cannot advance one deployment instance. Blocked instances
 // remain eligible for reconciliation after the operator fixes the condition.
@@ -204,7 +250,7 @@ func (store *Store) EnqueueDeploymentCommand(
 		return Deployment{}, Command{}, false, invalid("only admission may retain a placement decision")
 	}
 	if statement.InstanceGeneration != instance.Generation ||
-		!deploymentTransitionAllowed(deployment.DesiredState, instance, statement.Kind) ||
+		!deploymentTransitionAllowed(deployment, instance, statement.Kind) ||
 		instance.NodeID != "" && instance.NodeID != statement.NodeID ||
 		statement.CommandSequence <= instance.CommandSequence {
 		return Deployment{}, Command{}, false, ErrConflict
@@ -277,6 +323,34 @@ func (store *Store) EnqueueDeploymentCommand(
 		}
 		instance.Intent = &intent
 		instance.Admission = nil
+	}
+	if statement.Kind == "clone-state" {
+		if deployment.Fork == nil || statement.NodeID != deployment.Fork.SourceNodeID ||
+			!containsCapability(node.Capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1) {
+			return Deployment{}, Command{}, false, ErrConflict
+		}
+		var payload struct {
+			LineageID       string `json:"lineage_id"`
+			SnapshotID      string `json:"snapshot_id"`
+			SourceLineageID string `json:"source_lineage_id"`
+		}
+		if err := dsse.DecodeStrictInto(statement.Payload, store.limits.MaxCommandBytes, &payload); err != nil ||
+			payload.LineageID != instance.LineageID || payload.SnapshotID != deployment.Fork.SnapshotID ||
+			payload.SourceLineageID != deployment.Fork.SourceLineageID {
+			return Deployment{}, Command{}, false, invalid("deployment clone command differs from retained fork intent")
+		}
+	}
+	if statement.Kind == "purge" {
+		if deployment.Fork == nil {
+			return Deployment{}, Command{}, false, ErrConflict
+		}
+		var payload struct {
+			LineageID string `json:"lineage_id"`
+		}
+		if err := dsse.DecodeStrictInto(statement.Payload, store.limits.MaxCommandBytes, &payload); err != nil ||
+			payload.LineageID != instance.LineageID {
+			return Deployment{}, Command{}, false, invalid("deployment purge command differs from retained fork intent")
+		}
 	}
 	if statement.Kind == "renew" {
 		lease, err := admission.DecodeWorkloadLease(statement.Payload, time.Time{})
@@ -375,7 +449,7 @@ func (store *Store) ObserveDeploymentCommand(
 	}
 	if command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
 		if instance.CommandOperation != "renew" {
-			instance.Phase = deploymentSuccessfulPhase(instance.CommandOperation)
+			instance.Phase = deploymentSuccessfulPhase(deployment, instance.CommandOperation)
 		}
 		instance.LastError = ""
 		if instance.CommandOperation == "admit" {
@@ -625,7 +699,8 @@ func deploymentDelegatedInstance(
 	return instances[index], true
 }
 
-func deploymentTransitionAllowed(desired DeploymentDesiredState, instance DeploymentInstance, operation string) bool {
+func deploymentTransitionAllowed(deployment Deployment, instance DeploymentInstance, operation string) bool {
+	desired := deployment.DesiredState
 	phase := instance.Phase
 	if desired == DeploymentRunning && instance.Rollout != nil && instance.Rollout.Stage == "draining" {
 		return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
@@ -637,6 +712,12 @@ func deploymentTransitionAllowed(desired DeploymentDesiredState, instance Deploy
 			phase == DeploymentInstanceDestroying && operation == "destroy"
 	}
 	if desired == DeploymentRunning {
+		if deployment.Fork != nil {
+			return phase == DeploymentInstancePending && operation == "clone-state" ||
+				phase == DeploymentInstanceCloned && operation == "admit" ||
+				phase == DeploymentInstanceStarting && (operation == "renew" || operation == "start") ||
+				phase == DeploymentInstanceRunning && operation == "renew"
+		}
 		return phase == DeploymentInstancePending && operation == "admit" ||
 			phase == DeploymentInstanceStarting && (operation == "renew" || operation == "start") ||
 			phase == DeploymentInstanceRunning && operation == "renew"
@@ -645,7 +726,8 @@ func deploymentTransitionAllowed(desired DeploymentDesiredState, instance Deploy
 		return false
 	}
 	return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
-		phase == DeploymentInstanceDestroying && operation == "destroy"
+		phase == DeploymentInstanceDestroying && operation == "destroy" ||
+		(phase == DeploymentInstancePurging || phase == DeploymentInstanceCloned) && operation == "purge"
 }
 
 func deploymentCommandInFlight(instance DeploymentInstance) bool {
@@ -668,12 +750,16 @@ func deploymentOperationPhase(operation string) DeploymentInstancePhase {
 		return DeploymentInstanceStopping
 	case "destroy":
 		return DeploymentInstanceDestroying
+	case "clone-state":
+		return DeploymentInstanceCloning
+	case "purge":
+		return DeploymentInstancePurging
 	default:
 		return DeploymentInstanceFailed
 	}
 }
 
-func deploymentSuccessfulPhase(operation string) DeploymentInstancePhase {
+func deploymentSuccessfulPhase(deployment Deployment, operation string) DeploymentInstancePhase {
 	switch operation {
 	case "admit":
 		return DeploymentInstanceStarting
@@ -682,6 +768,13 @@ func deploymentSuccessfulPhase(operation string) DeploymentInstancePhase {
 	case "stop":
 		return DeploymentInstanceDestroying
 	case "destroy":
+		if deployment.Fork != nil && deployment.DesiredState == DeploymentAbsent {
+			return DeploymentInstancePurging
+		}
+		return DeploymentInstanceRemoved
+	case "clone-state":
+		return DeploymentInstanceCloned
+	case "purge":
 		return DeploymentInstanceRemoved
 	default:
 		return DeploymentInstanceFailed

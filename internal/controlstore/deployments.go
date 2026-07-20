@@ -25,6 +25,7 @@ type DeploymentApply struct {
 	CapsuleDSSE      []byte
 	DelegationDSSE   []byte
 	DisruptionBudget *DeploymentDisruptionBudget
+	Fork             *DeploymentFork
 }
 
 // ApplyDeployment creates or rolls forward desired state. Exact retries are
@@ -64,6 +65,25 @@ func (store *Store) ApplyDeployment(
 			TransitionedAt: canonicalTimestamp(now),
 		}
 	}
+	if input.Fork != nil {
+		fork := input.Fork
+		if len(instances) != 1 || !validRecordID(fork.SnapshotID, 128) ||
+			!validRecordID(fork.SourceLineageID, 256) || !validRecordID(fork.SourceNodeID, 128) ||
+			fork.SourceLineageID == instances[0].LineageID ||
+			!slices.Contains(delegation.NodeIDs, fork.SourceNodeID) ||
+			delegation.Admission.StateDisposition != "resume" || !delegation.Admission.Capabilities.State ||
+			!slices.Contains(delegation.Operations, "clone-state") || !slices.Contains(delegation.Operations, "purge") {
+			return Deployment{}, false, invalid("deployment fork requires one new stateful instance and exact clone and cleanup authority")
+		}
+		if fork.ExpiresAt != "" {
+			expires, parseErr := time.Parse(time.RFC3339Nano, fork.ExpiresAt)
+			delegationExpires, delegationExpiryErr := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
+			if parseErr != nil || delegationExpiryErr != nil || fork.ExpiresAt != canonicalTimestamp(expires) ||
+				expires.Add(MinDeploymentForkCleanupWindow).After(delegationExpires) {
+				return Deployment{}, false, invalid("deployment fork expiry must be canonical and leave four hours of cleanup authority")
+			}
+		}
+	}
 	disruptionBudget := DeploymentDisruptionBudget{MaxUnavailable: 1}
 	if input.DisruptionBudget != nil {
 		disruptionBudget = *input.DisruptionBudget
@@ -84,16 +104,28 @@ func (store *Store) ApplyDeployment(
 	if !ok || !tenant.Active {
 		return Deployment{}, false, ErrNotFound
 	}
+	key := deploymentKey(input.TenantID, input.ID)
+	existing, exists := store.current.deployments[key]
+	if exists && deploymentSpecEqual(existing, input) {
+		return cloneDeployment(existing), false, nil
+	}
 	for _, nodeID := range delegation.NodeIDs {
 		node, found := store.current.nodes[nodeID]
 		if !found || !node.Active || !tenantMember(node.TenantIDs, input.TenantID) {
 			return Deployment{}, false, invalid("deployment delegation references an unavailable tenant node")
 		}
 	}
-	key := deploymentKey(input.TenantID, input.ID)
-	existing, exists := store.current.deployments[key]
-	if exists && deploymentSpecEqual(existing, input) {
-		return cloneDeployment(existing), false, nil
+	if input.Fork != nil {
+		node := store.current.nodes[input.Fork.SourceNodeID]
+		if !containsCapability(node.Capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1) {
+			return Deployment{}, false, invalid("deployment fork source node does not advertise qualified snapshots")
+		}
+	}
+	if input.Fork != nil && input.Fork.ExpiresAt != "" {
+		expires, _ := time.Parse(time.RFC3339Nano, input.Fork.ExpiresAt)
+		if !expires.After(now) || expires.After(now.Add(30*24*time.Hour)) {
+			return Deployment{}, false, invalid("new deployment fork expiry must be within 30 days")
+		}
 	}
 	for otherKey, other := range store.current.deployments {
 		if otherKey != key && deploymentIdentitiesOverlap(other.Instances, instances) {
@@ -110,6 +142,9 @@ func (store *Store) ApplyDeployment(
 		return Deployment{}, false, ErrConflict
 	}
 	if exists && !deploymentFullyRemoved(existing) {
+		if existing.Fork != nil || input.Fork != nil {
+			return Deployment{}, false, ErrConflict
+		}
 		if !deploymentCanStartRollout(existing, delegation, instances, store.current.nodes, now) {
 			return Deployment{}, false, ErrConflict
 		}
@@ -153,6 +188,7 @@ func (store *Store) ApplyDeployment(
 		CapsuleDSSE:    append([]byte(nil), input.CapsuleDSSE...),
 		DelegationDSSE: append([]byte(nil), input.DelegationDSSE...),
 		DesiredState:   DeploymentRunning, Phase: DeploymentPending, Instances: instances,
+		Fork:             cloneDeployment(Deployment{Fork: input.Fork}).Fork,
 		DisruptionBudget: disruptionBudget,
 		CreatedAt:        createdAt, UpdatedAt: canonicalTimestamp(now),
 	}
@@ -330,8 +366,16 @@ func deploymentSpecEqual(existing Deployment, input DeploymentApply) bool {
 		existing.Generation == input.Generation && existing.AgentName == input.AgentName &&
 		existing.BundleDigest == input.BundleDigest && existing.DesiredState == DeploymentRunning &&
 		existing.DisruptionBudget == effectiveDeploymentDisruptionBudget(input) &&
+		deploymentForkEqual(existing.Fork, input.Fork) &&
 		bytes.Equal(existing.CapsuleDSSE, input.CapsuleDSSE) &&
 		bytes.Equal(existing.DelegationDSSE, input.DelegationDSSE)
+}
+
+func deploymentForkEqual(left, right *DeploymentFork) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func effectiveDeploymentDisruptionBudget(input DeploymentApply) DeploymentDisruptionBudget {

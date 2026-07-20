@@ -390,11 +390,24 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 		controlprotocol.MaxExecutorReportBytes != 16<<10 {
 		t.Fatal("controller or protocol report byte cap changed")
 	}
-	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 12 ||
+	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 13 ||
 		stateFormatWriteVersion != stateFormatMaxReadVersion ||
-		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 12 ||
+		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 13 ||
 		transactionFormatWriteVersion != transactionFormatMaxReadVersion {
 		t.Fatal("control store read/write ranges changed without an explicit migration")
+	}
+	forkStored := storedDeployment{
+		CapsuleDSSEBase64: "e30=", DelegationDSSEBase64: "e30=",
+		Fork: &DeploymentFork{
+			SnapshotID: "snapshot-a", SourceLineageID: "source-lineage",
+			SourceNodeID: "node-a",
+		},
+	}
+	if _, err := applyTransaction(emptyState(), transaction{
+		Version:   transactionTenantQuotaVersion,
+		Mutations: []mutation{{Kind: mutationDeployment, Deployment: &forkStored}},
+	}); err == nil {
+		t.Fatal("legacy transaction smuggled fork lifecycle state")
 	}
 	current, limits := populatedControlState(t)
 	raw, err := encodeState(current, limits.MaxStateBytes)

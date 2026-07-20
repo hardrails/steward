@@ -22,6 +22,10 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 	want := validClientDeployment()
 	want.CapsuleDigest = dsse.Digest(capsule)
 	want.DelegationDigest = dsse.Digest(delegation)
+	want.Fork = &controlstore.DeploymentFork{
+		SnapshotID: "checkpoint-a", SourceLineageID: "source-lineage",
+		SourceNodeID: "node-1", ExpiresAt: "2026-07-13T20:30:00Z",
+	}
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests++
@@ -37,11 +41,13 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 				CapsuleDSSEBase64    string                                   `json:"capsule_dsse_base64"`
 				DelegationDSSEBase64 string                                   `json:"delegation_dsse_base64"`
 				DisruptionBudget     *controlstore.DeploymentDisruptionBudget `json:"disruption_budget"`
+				Fork                 *controlstore.DeploymentFork             `json:"fork"`
 			}
 			if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body.Generation != 1 ||
 				body.ExpectedRevision != 7 || body.CapsuleDSSEBase64 != base64.StdEncoding.EncodeToString(capsule) ||
 				body.DelegationDSSEBase64 != base64.StdEncoding.EncodeToString(delegation) ||
-				body.DisruptionBudget == nil || body.DisruptionBudget.MaxUnavailable != 1 {
+				body.DisruptionBudget == nil || body.DisruptionBudget.MaxUnavailable != 1 ||
+				body.Fork == nil || *body.Fork != *want.Fork {
 				t.Fatalf("deployment apply body = (%+v, %v)", body, err)
 			}
 			_ = json.NewEncoder(writer).Encode(want)
@@ -79,6 +85,7 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 		Generation: 1, ExpectedRevision: 7, AgentName: "research-agent",
 		BundleDigest: want.BundleDigest, CapsuleDSSE: capsule, DelegationDSSE: delegation,
 		DisruptionBudget: &budget,
+		Fork:             want.Fork,
 	})
 	if err != nil || applied.DeploymentID != "research" {
 		t.Fatalf("apply deployment = (%+v, %v)", applied, err)
@@ -213,7 +220,7 @@ func validClientDeployment() Deployment {
 		AgentName: "research-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
 		CapsuleDigest: "sha256:" + strings.Repeat("b", 64), DelegationDigest: "sha256:" + strings.Repeat("c", 64),
 		DelegationID: "research-authority", ControllerKeyID: "controller-a", ClaimGeneration: 1,
-		AllowedNodeIDs: []string{"node-1"}, DelegationExpiresAt: created.Add(time.Hour).Format(time.RFC3339Nano),
+		AllowedNodeIDs: []string{"node-1"}, DelegationExpiresAt: created.Add(6 * time.Hour).Format(time.RFC3339Nano),
 		DesiredState: controlstore.DeploymentRunning, Phase: controlstore.DeploymentPending,
 		DisruptionBudget: controlstore.DeploymentDisruptionBudget{MaxUnavailable: 1},
 		Instances: []controlstore.DeploymentInstance{{

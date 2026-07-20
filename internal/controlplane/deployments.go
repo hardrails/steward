@@ -21,6 +21,7 @@ type deploymentApplyRequest struct {
 	CapsuleDSSEBase64    string                                   `json:"capsule_dsse_base64"`
 	DelegationDSSEBase64 string                                   `json:"delegation_dsse_base64"`
 	DisruptionBudget     *controlstore.DeploymentDisruptionBudget `json:"disruption_budget,omitempty"`
+	Fork                 *controlstore.DeploymentFork             `json:"fork,omitempty"`
 }
 
 type deploymentDeleteRequest struct {
@@ -46,6 +47,7 @@ type deploymentResponse struct {
 	Phase               controlstore.DeploymentPhase            `json:"phase"`
 	Instances           []controlstore.DeploymentInstance       `json:"instances"`
 	Rollout             *deploymentRolloutResponse              `json:"rollout,omitempty"`
+	Fork                *controlstore.DeploymentFork            `json:"fork,omitempty"`
 	CreatedAt           string                                  `json:"created_at"`
 	UpdatedAt           string                                  `json:"updated_at"`
 }
@@ -140,6 +142,7 @@ func (server *Server) deployment(writer http.ResponseWriter, request *http.Reque
 			ExpectedRevision: input.ExpectedRevision, AgentName: input.AgentName,
 			BundleDigest: input.BundleDigest, CapsuleDSSE: capsule, DelegationDSSE: delegation,
 			DisruptionBudget: input.DisruptionBudget,
+			Fork:             input.Fork,
 		}, server.now())
 		if err != nil {
 			server.storeError(writer, err, true)
@@ -196,6 +199,7 @@ func deploymentView(value controlstore.Deployment) (deploymentResponse, error) {
 		DesiredState:        value.DesiredState, Phase: value.Phase,
 		DisruptionBudget: value.DisruptionBudget,
 		Instances:        append([]controlstore.DeploymentInstance(nil), value.Instances...),
+		Fork:             value.Fork,
 		CreatedAt:        value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
 	if value.Rollout != nil {
