@@ -46,7 +46,11 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 	deployment := getControlDeployment(t, fixture)
 	if deployment.Phase != controlstore.DeploymentReconciling ||
 		deployment.Instances[0].Phase != controlstore.DeploymentInstanceAdmitting ||
-		deployment.Instances[0].CommandOperation != "admit" {
+		deployment.Instances[0].CommandOperation != "admit" ||
+		deployment.Instances[0].Placement == nil ||
+		deployment.Instances[0].Placement.NodeID != "node-1" ||
+		deployment.Instances[0].Placement.PreferredLabelMatches == nil ||
+		deployment.Instances[0].Placement.DecidedAt != fixture.now.Format(time.RFC3339Nano) {
 		t.Fatalf("admit cursor = %+v", deployment)
 	}
 	firstCommand := deployment.Instances[0].CommandID
@@ -110,6 +114,47 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 		deployment.Instances[0].Phase != controlstore.DeploymentInstanceRemoved ||
 		deployment.Instances[0].Attempts != 5 {
 		t.Fatalf("removed deployment = %+v", deployment)
+	}
+}
+
+func TestTopologyPlacementRanksSpreadBeforePreferenceAndLoad(t *testing.T) {
+	now := time.Date(2026, 7, 20, 15, 0, 0, 0, time.UTC)
+	placement := &admission.CommandDelegationPlacement{
+		PreferredLabels: []admission.CommandDelegationLabel{{Key: "disk", Value: "fast"}},
+		SpreadBy:        "zone",
+	}
+	node := func(id string, labels ...controlprotocol.ExecutorSchedulingLabelV1) controlstore.Node {
+		return controlstore.Node{ID: id, Scheduling: &controlstore.NodeScheduling{
+			Observation: controlprotocol.ExecutorSchedulingObservationV1{Labels: labels},
+		}}
+	}
+	spread := map[string]int{"1:west-a": 2, "1:west-b": 0, "0:": 0}
+	busyPreferred := rankPlacementCandidate(node("node-a",
+		controlprotocol.ExecutorSchedulingLabelV1{Key: "disk", Value: "fast"},
+		controlprotocol.ExecutorSchedulingLabelV1{Key: "zone", Value: "west-a"},
+	), 0, placement, spread)
+	emptyDomain := rankPlacementCandidate(node("node-b",
+		controlprotocol.ExecutorSchedulingLabelV1{Key: "zone", Value: "west-b"},
+	), 7, placement, spread)
+	missingSpread := rankPlacementCandidate(node("node-c",
+		controlprotocol.ExecutorSchedulingLabelV1{Key: "disk", Value: "fast"},
+	), 0, placement, spread)
+	if !emptyDomain.betterThan(busyPreferred) || !emptyDomain.betterThan(missingSpread) {
+		t.Fatalf("spread rank did not dominate preference/load: busy=%+v empty=%+v missing=%+v", busyPreferred, emptyDomain, missingSpread)
+	}
+	decision := emptyDomain.decision(now)
+	if decision.NodeID != "node-b" || decision.SpreadValue != "west-b" ||
+		decision.SameDeploymentInSpreadDomain != 0 || decision.PreferredLabelCount != 1 ||
+		decision.PreferredLabelMatches == nil || decision.AssignedWorkloads != 7 ||
+		decision.DecidedAt != now.Format(time.RFC3339Nano) {
+		t.Fatalf("placement decision = %+v", decision)
+	}
+	withoutSpread := rankPlacementCandidate(node("node-d",
+		controlprotocol.ExecutorSchedulingLabelV1{Key: "disk", Value: "fast"},
+	), 4, &admission.CommandDelegationPlacement{PreferredLabels: placement.PreferredLabels}, nil)
+	loaded := rankPlacementCandidate(node("node-e"), 0, &admission.CommandDelegationPlacement{PreferredLabels: placement.PreferredLabels}, nil)
+	if !withoutSpread.betterThan(loaded) {
+		t.Fatal("preferred label did not outrank node load when no spread key was requested")
 	}
 }
 
@@ -537,7 +582,7 @@ func TestReconcilerClassifiesMalformedAuthorityAndBoundaries(t *testing.T) {
 	if _, err := reconciler.signCommand(deployment, overflow, "node-1", "start", fixture.now); !errors.Is(err, controlstore.ErrCapacityExceeded) {
 		t.Fatalf("command sequence overflow error = %v", err)
 	}
-	if _, err := selectNode(nil, nil, nil, controlstore.Deployment{}, instance, fixture.now, time.Minute); err == nil {
+	if _, _, err := selectNode(nil, nil, nil, controlstore.Deployment{}, instance, fixture.now, time.Minute); err == nil {
 		t.Fatal("malformed placement authority was accepted")
 	}
 	if eligibleNode(controlstore.Node{Active: true, LastSeenAt: "bad"}, "tenant-a", map[string]struct{}{}, fixture.now, time.Minute) {

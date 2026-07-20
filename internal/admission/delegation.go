@@ -75,6 +75,8 @@ type CommandDelegationAdmissionTemplate struct {
 type CommandDelegationPlacement struct {
 	RequiredIsolation string                   `json:"required_isolation,omitempty"`
 	RequiredLabels    []CommandDelegationLabel `json:"required_labels"`
+	PreferredLabels   []CommandDelegationLabel `json:"preferred_labels,omitempty"`
+	SpreadBy          string                   `json:"spread_by,omitempty"`
 	Tolerations       []string                 `json:"tolerations"`
 }
 
@@ -182,14 +184,18 @@ func (template CommandDelegationAdmissionTemplate) Validate() error {
 func validCommandDelegationPlacement(placement CommandDelegationPlacement) bool {
 	if placement.RequiredIsolation != "" && placement.RequiredIsolation != "gvisor" ||
 		placement.RequiredLabels == nil || len(placement.RequiredLabels) > maxCommandPlacementLabels ||
+		len(placement.PreferredLabels) > maxCommandPlacementLabels ||
+		placement.SpreadBy != "" && !controlprotocol.ValidSchedulingAttribute(placement.SpreadBy) ||
 		placement.Tolerations == nil || len(placement.Tolerations) > maxCommandPlacementTolerations {
 		return false
 	}
-	for index, label := range placement.RequiredLabels {
-		if !controlprotocol.ValidSchedulingAttribute(label.Key) ||
-			!controlprotocol.ValidSchedulingAttribute(label.Value) ||
-			index > 0 && placement.RequiredLabels[index-1].Key >= label.Key {
-			return false
+	for _, labels := range [][]CommandDelegationLabel{placement.RequiredLabels, placement.PreferredLabels} {
+		for index, label := range labels {
+			if !controlprotocol.ValidSchedulingAttribute(label.Key) ||
+				!controlprotocol.ValidSchedulingAttribute(label.Value) ||
+				index > 0 && labels[index-1].Key >= label.Key {
+				return false
+			}
 		}
 	}
 	for index, value := range placement.Tolerations {

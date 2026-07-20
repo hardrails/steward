@@ -29,6 +29,7 @@ type DeploymentCommandTransition struct {
 	InstanceID           string
 	CommandDSSE          []byte
 	SchedulingStaleAfter time.Duration
+	Placement            *DeploymentPlacementDecision
 }
 
 // DeploymentBlockedReason is a stable, machine-readable explanation for why
@@ -172,6 +173,9 @@ func (store *Store) EnqueueDeploymentCommand(
 	if statement.TenantID != input.TenantID || statement.InstanceID != input.InstanceID {
 		return Deployment{}, Command{}, false, invalid("deployment command identity differs from its reconciliation cursor")
 	}
+	if statement.Kind != "admit" && input.Placement != nil {
+		return Deployment{}, Command{}, false, invalid("only admission may retain a placement decision")
+	}
 	instanceIndex := deploymentInstanceIndex(deployment.Instances, input.InstanceID)
 	if instanceIndex < 0 {
 		return Deployment{}, Command{}, false, ErrNotFound
@@ -232,6 +236,13 @@ func (store *Store) EnqueueDeploymentCommand(
 			delegation.Admission.Placement, now, input.SchedulingStaleAfter,
 		); err != nil {
 			return Deployment{}, Command{}, false, err
+		}
+		if input.Placement != nil {
+			placement := cloneDeploymentPlacement(input.Placement)
+			if placement.NodeID != statement.NodeID || placement.DecidedAt != canonicalTimestamp(now) {
+				return Deployment{}, Command{}, false, invalid("deployment placement decision differs from its admission")
+			}
+			instance.Placement = placement
 		}
 		instance.Intent = &intent
 		instance.Admission = nil
@@ -500,6 +511,7 @@ func (store *Store) ReplaceDeploymentInstance(
 	}
 	instance.Generation++
 	instance.NodeID = ""
+	instance.Placement = nil
 	instance.Intent = nil
 	instance.Admission = nil
 	instance.LeaseExpiresAt = ""

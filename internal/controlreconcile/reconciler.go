@@ -229,7 +229,7 @@ func (reconciler *Reconciler) reconcileInstance(
 	if operation == "" {
 		return instanceResult{}, nil
 	}
-	nodeID, err := selectNode(
+	nodeID, placement, err := selectNode(
 		nodes, deployments, placements, deployment, instance, now, reconciler.nodeStaleAfter,
 	)
 	if err != nil {
@@ -247,6 +247,7 @@ func (reconciler *Reconciler) reconcileInstance(
 		TenantID: deployment.TenantID, DeploymentID: deployment.ID,
 		ExpectedRevision: deployment.Revision, InstanceID: instance.InstanceID,
 		CommandDSSE: commandRaw, SchedulingStaleAfter: reconciler.nodeStaleAfter,
+		Placement: placement,
 	}, now)
 	if errors.Is(err, controlstore.ErrConflict) {
 		return instanceResult{conflict: true}, nil
@@ -500,10 +501,10 @@ func selectNode(
 	instance controlstore.DeploymentInstance,
 	now time.Time,
 	nodeStaleAfter time.Duration,
-) (string, error) {
+) (string, *controlstore.DeploymentPlacementDecision, error) {
 	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
 	if err != nil {
-		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
 	allowed := make(map[string]struct{}, len(delegation.NodeIDs))
 	for _, nodeID := range delegation.NodeIDs {
@@ -512,24 +513,24 @@ func selectNode(
 	if instance.NodeID != "" {
 		for _, node := range nodes {
 			if node.ID == instance.NodeID && nodeAvailableForAssignment(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
-				return node.ID, nil
+				return node.ID, nil, nil
 			}
 		}
-		return "", newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable)
+		return "", nil, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable)
 	}
 	if delegation.Admission == nil {
-		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
 	capsule, err := admission.InspectProfileCapsule(deployment.CapsuleDSSE, time.Time{})
 	if err != nil {
-		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
 	delegated, found := delegatedInstance(delegation, instance.InstanceID)
 	if !found {
-		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
-	selected := ""
-	selectedCount := int(^uint(0) >> 1)
+	var selected *placementCandidate
+	spreadCounts := deploymentSpreadCounts(nodes, deployment, delegation.Admission.Placement)
 	var schedulingUnavailable, placementBlocked, workloadLimit, nodeCapacity, tenantCapacity bool
 	for _, node := range nodes {
 		if !eligibleNode(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
@@ -556,26 +557,142 @@ func selectNode(
 			}
 			continue
 		}
-		if count := placements[node.ID]; count < selectedCount || count == selectedCount && node.ID < selected {
-			selected, selectedCount = node.ID, count
+		candidate := rankPlacementCandidate(node, placements[node.ID], delegation.Admission.Placement, spreadCounts)
+		if selected == nil || candidate.betterThan(*selected) {
+			selected = &candidate
 		}
 	}
-	if selected == "" {
+	if selected == nil {
 		switch {
 		case tenantCapacity:
-			return "", newBlocked(controlstore.DeploymentBlockedTenantCapacity)
+			return "", nil, newBlocked(controlstore.DeploymentBlockedTenantCapacity)
 		case workloadLimit:
-			return "", newBlocked(controlstore.DeploymentBlockedWorkloadLimit)
+			return "", nil, newBlocked(controlstore.DeploymentBlockedWorkloadLimit)
 		case nodeCapacity:
-			return "", newBlocked(controlstore.DeploymentBlockedNodeCapacity)
+			return "", nil, newBlocked(controlstore.DeploymentBlockedNodeCapacity)
 		case schedulingUnavailable:
-			return "", newBlocked(controlstore.DeploymentBlockedSchedulingUnavailable)
+			return "", nil, newBlocked(controlstore.DeploymentBlockedSchedulingUnavailable)
 		case placementBlocked:
-			return "", newBlocked(controlstore.DeploymentBlockedPlacementConstraints)
+			return "", nil, newBlocked(controlstore.DeploymentBlockedPlacementConstraints)
 		}
-		return "", newBlocked(controlstore.DeploymentBlockedNoEligibleNode)
+		return "", nil, newBlocked(controlstore.DeploymentBlockedNoEligibleNode)
 	}
-	return selected, nil
+	decision := selected.decision(now)
+	return selected.nodeID, &decision, nil
+}
+
+type placementCandidate struct {
+	nodeID             string
+	assignedWorkloads  int
+	preferredMatches   []string
+	preferredTotal     int
+	spreadBy           string
+	spreadValue        string
+	spreadPresent      bool
+	sameInSpreadDomain int
+}
+
+func (candidate placementCandidate) betterThan(other placementCandidate) bool {
+	if candidate.spreadBy != "" {
+		if candidate.spreadPresent != other.spreadPresent {
+			return candidate.spreadPresent
+		}
+		if candidate.sameInSpreadDomain != other.sameInSpreadDomain {
+			return candidate.sameInSpreadDomain < other.sameInSpreadDomain
+		}
+	}
+	if len(candidate.preferredMatches) != len(other.preferredMatches) {
+		return len(candidate.preferredMatches) > len(other.preferredMatches)
+	}
+	if candidate.assignedWorkloads != other.assignedWorkloads {
+		return candidate.assignedWorkloads < other.assignedWorkloads
+	}
+	return candidate.nodeID < other.nodeID
+}
+
+func (candidate placementCandidate) decision(now time.Time) controlstore.DeploymentPlacementDecision {
+	return controlstore.DeploymentPlacementDecision{
+		NodeID:                candidate.nodeID,
+		PreferredLabelMatches: append([]string{}, candidate.preferredMatches...),
+		PreferredLabelCount:   candidate.preferredTotal,
+		SpreadBy:              candidate.spreadBy, SpreadValue: candidate.spreadValue,
+		SpreadLabelPresent:           candidate.spreadPresent,
+		SameDeploymentInSpreadDomain: candidate.sameInSpreadDomain,
+		AssignedWorkloads:            candidate.assignedWorkloads,
+		DecidedAt:                    now.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func rankPlacementCandidate(
+	node controlstore.Node,
+	assigned int,
+	placement *admission.CommandDelegationPlacement,
+	spreadCounts map[string]int,
+) placementCandidate {
+	candidate := placementCandidate{nodeID: node.ID, assignedWorkloads: assigned}
+	if placement == nil {
+		candidate.preferredMatches = []string{}
+		return candidate
+	}
+	candidate.preferredTotal = len(placement.PreferredLabels)
+	candidate.preferredMatches = make([]string, 0, candidate.preferredTotal)
+	for _, preferred := range placement.PreferredLabels {
+		if value, found := schedulingLabel(node, preferred.Key); found && value == preferred.Value {
+			candidate.preferredMatches = append(candidate.preferredMatches, preferred.Key)
+		}
+	}
+	candidate.spreadBy = placement.SpreadBy
+	if placement.SpreadBy != "" {
+		candidate.spreadValue, candidate.spreadPresent = schedulingLabel(node, placement.SpreadBy)
+		candidate.sameInSpreadDomain = spreadCounts[spreadDomainKey(candidate.spreadPresent, candidate.spreadValue)]
+	}
+	return candidate
+}
+
+func deploymentSpreadCounts(
+	nodes []controlstore.Node,
+	deployment controlstore.Deployment,
+	placement *admission.CommandDelegationPlacement,
+) map[string]int {
+	counts := make(map[string]int)
+	if placement == nil || placement.SpreadBy == "" {
+		return counts
+	}
+	nodesByID := make(map[string]controlstore.Node, len(nodes))
+	for _, node := range nodes {
+		nodesByID[node.ID] = node
+	}
+	for _, existing := range deployment.Instances {
+		if existing.NodeID == "" || existing.Phase == controlstore.DeploymentInstanceRemoved {
+			continue
+		}
+		node, found := nodesByID[existing.NodeID]
+		if !found {
+			continue
+		}
+		value, present := schedulingLabel(node, placement.SpreadBy)
+		counts[spreadDomainKey(present, value)]++
+	}
+	return counts
+}
+
+func schedulingLabel(node controlstore.Node, key string) (string, bool) {
+	if node.Scheduling == nil {
+		return "", false
+	}
+	labels := node.Scheduling.Observation.Labels
+	index := sort.Search(len(labels), func(index int) bool { return labels[index].Key >= key })
+	if index >= len(labels) || labels[index].Key != key {
+		return "", false
+	}
+	return labels[index].Value, true
+}
+
+func spreadDomainKey(present bool, value string) string {
+	if !present {
+		return "0:"
+	}
+	return "1:" + value
 }
 
 func schedulingBlockedReason(err error) controlstore.DeploymentBlockedReason {

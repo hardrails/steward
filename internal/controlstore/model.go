@@ -286,6 +286,7 @@ type DeploymentInstance struct {
 	LineageID  string                                         `json:"lineage_id"`
 	Generation uint64                                         `json:"generation"`
 	NodeID     string                                         `json:"node_id,omitempty"`
+	Placement  *DeploymentPlacementDecision                   `json:"placement,omitempty"`
 	Intent     *admission.InstanceIntent                      `json:"intent,omitempty"`
 	Admission  *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
 	// LeaseExpiresAt is the latest signed lease expiry that Executor could have
@@ -299,6 +300,22 @@ type DeploymentInstance struct {
 	Attempts         uint32                  `json:"attempts,omitempty"`
 	LastError        string                  `json:"last_error,omitempty"`
 	TransitionedAt   string                  `json:"transitioned_at"`
+}
+
+// DeploymentPlacementDecision is the bounded explanation retained with the
+// admission cursor. Hard eligibility and capacity are rechecked separately in
+// the enqueue transaction; this record explains the deterministic soft ranking
+// that selected the node.
+type DeploymentPlacementDecision struct {
+	NodeID                       string   `json:"node_id"`
+	PreferredLabelMatches        []string `json:"preferred_label_matches"`
+	PreferredLabelCount          int      `json:"preferred_label_count"`
+	SpreadBy                     string   `json:"spread_by,omitempty"`
+	SpreadValue                  string   `json:"spread_value,omitempty"`
+	SpreadLabelPresent           bool     `json:"spread_label_present,omitempty"`
+	SameDeploymentInSpreadDomain int      `json:"same_deployment_in_spread_domain"`
+	AssignedWorkloads            int      `json:"assigned_workloads"`
+	DecidedAt                    string   `json:"decided_at"`
 }
 
 // Deployment is bounded desired state. It contains public signed artifacts,
@@ -642,10 +659,22 @@ func cloneDeployment(deployment Deployment) Deployment {
 	deployment.DelegationDSSE = append([]byte(nil), deployment.DelegationDSSE...)
 	deployment.Instances = append([]DeploymentInstance(nil), deployment.Instances...)
 	for index := range deployment.Instances {
+		deployment.Instances[index].Placement = cloneDeploymentPlacement(deployment.Instances[index].Placement)
 		deployment.Instances[index].Intent = cloneInstanceIntent(deployment.Instances[index].Intent)
 		deployment.Instances[index].Admission = cloneAdmissionProjection(deployment.Instances[index].Admission)
 	}
 	return deployment
+}
+
+func cloneDeploymentPlacement(value *DeploymentPlacementDecision) *DeploymentPlacementDecision {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	if value.PreferredLabelMatches != nil {
+		cloned.PreferredLabelMatches = append([]string{}, value.PreferredLabelMatches...)
+	}
+	return &cloned
 }
 
 func deploymentToStored(deployment Deployment) storedDeployment {
@@ -1469,6 +1498,31 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation ||
 				instance.Intent.CapsuleDigest != dsse.Digest(deployment.CapsuleDSSE) {
 				return errors.New("deployment instance intent is invalid")
+			}
+		}
+		if instance.Placement != nil {
+			placement := instance.Placement
+			if placement.NodeID != instance.NodeID || !validRecordID(placement.NodeID, 128) ||
+				placement.PreferredLabelMatches == nil || len(placement.PreferredLabelMatches) > 32 ||
+				placement.PreferredLabelCount < len(placement.PreferredLabelMatches) || placement.PreferredLabelCount > 32 ||
+				placement.SameDeploymentInSpreadDomain < 0 || placement.AssignedWorkloads < 0 ||
+				!validTimestamp(placement.DecidedAt) {
+				return errors.New("deployment placement decision is invalid")
+			}
+			for matchIndex, key := range placement.PreferredLabelMatches {
+				if !controlprotocol.ValidSchedulingAttribute(key) ||
+					matchIndex > 0 && placement.PreferredLabelMatches[matchIndex-1] >= key {
+					return errors.New("deployment placement matches are not canonical")
+				}
+			}
+			if placement.SpreadBy == "" {
+				if placement.SpreadValue != "" || placement.SpreadLabelPresent || placement.SameDeploymentInSpreadDomain != 0 {
+					return errors.New("deployment placement spread explanation is inconsistent")
+				}
+			} else if !controlprotocol.ValidSchedulingAttribute(placement.SpreadBy) ||
+				placement.SpreadLabelPresent && !controlprotocol.ValidSchedulingAttribute(placement.SpreadValue) ||
+				!placement.SpreadLabelPresent && placement.SpreadValue != "" {
+				return errors.New("deployment placement spread explanation is invalid")
 			}
 		}
 		if instance.Admission != nil {
