@@ -89,6 +89,44 @@ type StatePurge struct {
 	Generation uint64 `json:"generation"`
 }
 
+type StateSnapshotRequest struct {
+	TenantID   string `json:"tenant_id"`
+	NodeID     string `json:"node_id"`
+	InstanceID string `json:"instance_id"`
+	LineageID  string `json:"lineage_id"`
+	Generation uint64 `json:"generation"`
+	SnapshotID string `json:"snapshot_id"`
+}
+
+type StateSnapshot struct {
+	Status          string `json:"status"`
+	SnapshotID      string `json:"snapshot_id"`
+	TenantID        string `json:"tenant_id"`
+	SourceLineageID string `json:"source_lineage_id"`
+	ContentDigest   string `json:"content_digest"`
+	RetainedBytes   int64  `json:"retained_bytes"`
+	ObjectCount     int64  `json:"object_count"`
+	CreatedAt       string `json:"created_at"`
+}
+
+type StateCloneRequest struct {
+	TenantID        string `json:"tenant_id"`
+	NodeID          string `json:"node_id"`
+	InstanceID      string `json:"instance_id"`
+	LineageID       string `json:"lineage_id"`
+	Generation      uint64 `json:"generation"`
+	SnapshotID      string `json:"snapshot_id"`
+	SourceLineageID string `json:"source_lineage_id"`
+}
+
+type StateClone struct {
+	Status     string `json:"status"`
+	TenantID   string `json:"tenant_id"`
+	InstanceID string `json:"instance_id"`
+	LineageID  string `json:"lineage_id"`
+	SnapshotID string `json:"snapshot_id"`
+}
+
 type MaintenanceStatus struct {
 	SchemaVersion     string   `json:"schema_version"`
 	Enabled           bool     `json:"enabled"`
@@ -292,6 +330,43 @@ func (c *Client) PurgeState(ctx context.Context, request StatePurge) error {
 	return c.do(ctx, http.MethodPost, "/v1/state/purge", request, nil)
 }
 
+func (c *Client) SnapshotState(ctx context.Context, request StateSnapshotRequest) (StateSnapshot, error) {
+	if request.TenantID == "" || request.NodeID == "" || request.InstanceID == "" || request.LineageID == "" ||
+		request.Generation == 0 || request.SnapshotID == "" {
+		return StateSnapshot{}, errors.New("state snapshot request is incomplete")
+	}
+	var snapshot StateSnapshot
+	if err := c.do(ctx, http.MethodPost, "/v1/state/snapshots", request, &snapshot); err != nil {
+		return StateSnapshot{}, err
+	}
+	if snapshot.Status != "stopped" || snapshot.SnapshotID != request.SnapshotID || snapshot.TenantID != request.TenantID ||
+		snapshot.SourceLineageID != request.LineageID || !validSHA256Digest(snapshot.ContentDigest) || snapshot.RetainedBytes < 0 ||
+		snapshot.ObjectCount < 0 {
+		return StateSnapshot{}, errors.New("node snapshot response changed the requested state identity")
+	}
+	created, err := time.Parse(time.RFC3339Nano, snapshot.CreatedAt)
+	if err != nil || created.IsZero() || snapshot.CreatedAt != created.UTC().Format(time.RFC3339Nano) {
+		return StateSnapshot{}, errors.New("node snapshot response has an invalid creation time")
+	}
+	return snapshot, nil
+}
+
+func (c *Client) CloneState(ctx context.Context, request StateCloneRequest) (StateClone, error) {
+	if request.TenantID == "" || request.NodeID == "" || request.InstanceID == "" || request.LineageID == "" ||
+		request.Generation == 0 || request.SnapshotID == "" || request.SourceLineageID == "" || request.LineageID == request.SourceLineageID {
+		return StateClone{}, errors.New("state clone request is incomplete or reuses the source lineage")
+	}
+	var clone StateClone
+	if err := c.do(ctx, http.MethodPost, "/v1/state/clones", request, &clone); err != nil {
+		return StateClone{}, err
+	}
+	if clone.Status != "stopped" || clone.TenantID != request.TenantID || clone.InstanceID != request.InstanceID ||
+		clone.LineageID != request.LineageID || clone.SnapshotID != request.SnapshotID {
+		return StateClone{}, errors.New("node clone response changed the requested state identity")
+	}
+	return clone, nil
+}
+
 func (c *Client) MaintenanceStatus(ctx context.Context) (MaintenanceStatus, error) {
 	var status MaintenanceStatus
 	if err := c.do(ctx, http.MethodGet, "/v1/maintenance", nil, &status); err != nil {
@@ -413,6 +488,7 @@ func ReadBounded(path string, limit int64) ([]byte, error) {
 
 func validRuntimePath(path string) bool {
 	if path == "/v1/admissions" || path == "/v1/local-principal" || path == "/v1/state/purge" ||
+		path == "/v1/state/snapshots" || path == "/v1/state/clones" ||
 		path == "/v1/maintenance" || path == "/v1/maintenance/enter" || path == "/v1/maintenance/exit" {
 		return true
 	}
@@ -434,6 +510,18 @@ func validRuntimePath(path string) bool {
 		return false
 	}
 	for _, char := range rest {
+		if char < '0' || char > '9' && char < 'a' || char > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
+func validSHA256Digest(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, char := range value[len("sha256:"):] {
 		if char < '0' || char > '9' && char < 'a' || char > 'f' {
 			return false
 		}

@@ -316,6 +316,45 @@ func TestClientPurgeAndStrictResponseFailures(t *testing.T) {
 	}
 }
 
+func TestClientSnapshotsAndClonesThroughBoundedPublicPaths(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/state/snapshots":
+			var request StateSnapshotRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.SnapshotID != "snap" || request.InstanceID != "source" {
+				t.Fatalf("snapshot request=%+v err=%v", request, err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"stopped","snapshot_id":"snap","tenant_id":"tenant","source_lineage_id":"source-lineage","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","retained_bytes":10,"object_count":2,"created_at":"2026-07-20T00:00:00Z"}`))
+		case "/v1/state/clones":
+			var request StateCloneRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.SnapshotID != "snap" || request.InstanceID != "fork" {
+				t.Fatalf("clone request=%+v err=%v", request, err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"stopped","tenant_id":"tenant","instance_id":"fork","lineage_id":"fork-lineage","snapshot_id":"snap"}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, _ := New(server.URL, "secret")
+	snapshot, err := client.SnapshotState(context.Background(), StateSnapshotRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "source", LineageID: "source-lineage", Generation: 1, SnapshotID: "snap",
+	})
+	if err != nil || snapshot.ContentDigest == "" || snapshot.ObjectCount != 2 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	clone, err := client.CloneState(context.Background(), StateCloneRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "fork", LineageID: "fork-lineage", Generation: 1,
+		SnapshotID: "snap", SourceLineageID: "source-lineage",
+	})
+	if err != nil || clone.InstanceID != "fork" || clone.LineageID != "fork-lineage" {
+		t.Fatalf("clone=%+v err=%v", clone, err)
+	}
+}
+
 func TestClientRejectsCapsulesTokensAndInputFiles(t *testing.T) {
 	client, _ := New("http://127.0.0.1:1", "secret")
 	if _, err := client.Admit(context.Background(), nil, admission.InstanceIntent{}); err == nil {

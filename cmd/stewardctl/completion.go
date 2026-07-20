@@ -47,7 +47,7 @@ var completionTree = map[string][]string{
 	"control evidence":         {"status", "export", "verify"},
 	"control evidence-capture": {"arm", "status", "seal", "export", "verify", "delete"},
 	"evidence":                 {"verify", "export"},
-	"node":                     {"whoami", "admit", "status", "logs", "egress", "start", "stop", "destroy", "purge-state", "maintenance"},
+	"node":                     {"whoami", "admit", "status", "logs", "egress", "start", "stop", "destroy", "snapshot-state", "clone-state", "purge-state", "maintenance"},
 	"node maintenance":         {"status", "enter", "drain", "exit"},
 	"gateway":                  {"validate", "route", "connector", "service", "effects"},
 	"gateway route":            {"add", "remove", "list"},

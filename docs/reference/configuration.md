@@ -289,7 +289,7 @@ outbound-only deployment.
 | `-admission-node-id` | empty | Stable node ID bound into intents and receipts |
 | `-admission-fence-file` | `/var/lib/steward-executor/admission-fences.bin` | Highest accepted policy/generation snapshot; capped at 4 MiB and 65,535 records |
 | `-initialize-admission-fence` | `false` | Exclusively create the empty fence and exit; normal startup never recreates it |
-| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-admin local credential select an intent tenant and authorize signed lifecycle, activation-canary preflight, and activation-checkpoint calls; the credential is host authority, not tenant authentication |
+| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-admin local credential select an intent tenant and authorize signed lifecycle, state snapshot/clone, activation-canary preflight, and activation-checkpoint calls; the credential is host authority, not tenant authentication |
 | `-admission-journal-file` | `/var/lib/steward-executor/operation-journal.bin` | Append-only host-mutation journal; capped at 16 MiB |
 | `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Append-only signed receipt chain; capped at 64 MiB |
 | `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
@@ -321,7 +321,7 @@ admission.
 | --- | --- |
 | `observer` | Local identity, readiness, maintenance status, workload status, bounded logs, and egress statistics |
 | `operator` | Everything an observer can call, plus start, stop, destroy, and maintenance enter or exit |
-| `host-admin` | Every local endpoint, including admission, legacy provisioning, state purge, activation preflight, and activation checkpoints |
+| `host-admin` | Every local endpoint, including admission, legacy provisioning, state snapshot/clone/purge, activation preflight, and activation checkpoints |
 
 Fresh packaged configuration creates owner-only files at
 `/etc/steward/executor-observer-token`,

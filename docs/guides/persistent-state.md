@@ -158,6 +158,10 @@ identity to the signed command. Executor derives the dataset and Docker volume
 identity, records the mutation in its durable journal, and appends a signed receipt.
 Exact retries are idempotent. The storage worker's private socket remains an
 internal boundary; operating it directly bypasses lifecycle authority and evidence.
+The same bounded operations are available as `stewardctl node snapshot-state` and
+`stewardctl node clone-state`, and as MCP tools `steward_snapshot_state` and
+`steward_clone_state`. Those local surfaces use the configured Executor credential;
+they do not weaken tenant authorization or enable host-admin intent implicitly.
 
 If Executor loses the worker response after preparing a mutation, it blocks every
 unrelated mutation. Reissuing the exact same signed snapshot or clone request is the

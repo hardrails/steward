@@ -142,7 +142,7 @@ func helpCommand(arguments []string, writer io.Writer) error {
 var commandHelp = map[string]string{
 	"agent":            "Build and run portable Hermes or OpenClaw agent applications, evaluate offline policy, explain fleet placement, and converge durable deployments.\n\nUsage: stewardctl agent create|init|validate|build|plan|apply|deploy|deployment|fork|doctor ...\n\nCreate a project with: stewardctl agent create NAME -runtime hermes\nApply durable desired state with: stewardctl agent apply NAME\nThe expert single-node form remains available as agent apply with named flags only.\n",
 	"context":          "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
-	"node":             "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
+	"node":             "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|snapshot-state|clone-state|purge-state|maintenance ...\n",
 	"control":          "Enroll nodes, manage scoped operators, freeze command delivery during incidents, place and drain agent workloads, and inspect fleet evidence.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|operations|freeze|attention|command|credential|evidence ...\n",
 	"permit":           "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",
 	"task":             "Run, issue, submit, observe, and audit an authorized service task through Gateway. The run command persists the exact signed bundle before dispatch so an interrupted task can be resumed without minting new authority.\n\nUsage: stewardctl task run|issue|verify|audit|submit|status|observe|wait ...\n\nWith task defaults in a context: stewardctl task run DEPLOYMENT \"your request\"\n",
@@ -161,7 +161,7 @@ var commandHelp = map[string]string{
 
 func nodeCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("node command requires whoami, admit, status, logs, egress, start, stop, destroy, purge-state, or maintenance")
+		return errors.New("node command requires whoami, admit, status, logs, egress, start, stop, destroy, snapshot-state, clone-state, purge-state, or maintenance")
 	}
 	var err error
 	arguments, err = applyNodeCLIContext(arguments)
@@ -185,6 +185,9 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 	tenantID := flags.String("tenant-id", "", "signed tenant identity")
 	nodeID := flags.String("node-id", "", "signed node identity")
 	lineageID := flags.String("lineage-id", "", "state lineage identity")
+	instanceID := flags.String("instance-id", "", "signed instance identity")
+	snapshotID := flags.String("snapshot-id", "", "immutable state snapshot identity")
+	sourceLineageID := flags.String("source-lineage-id", "", "source state lineage identity")
 	generation := flags.Uint64("generation", 0, "signed instance generation")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
@@ -203,7 +206,7 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 	switch action {
 	case "whoami":
 		if len(positional) != 0 || *runtimeRef != "" || *capsulePath != "" || *intentPath != "" || *tenantID != "" ||
-			*nodeID != "" || *lineageID != "" || *generation != 0 {
+			*nodeID != "" || *lineageID != "" || *instanceID != "" || *snapshotID != "" || *sourceLineageID != "" || *generation != 0 {
 			return errors.New("node whoami accepts only connection flags")
 		}
 		result, err = client.LocalPrincipal(ctx)
@@ -267,6 +270,33 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 			TenantID: *tenantID, NodeID: *nodeID, LineageID: *lineageID, Generation: *generation,
 		})
 		result = map[string]any{"tenant_id": *tenantID, "lineage_id": *lineageID, "purged": err == nil}
+		if err != nil {
+			return err
+		}
+	case "snapshot-state":
+		if len(positional) != 0 || *tenantID == "" || *nodeID == "" || *instanceID == "" ||
+			*lineageID == "" || *snapshotID == "" || *generation == 0 || *sourceLineageID != "" ||
+			*runtimeRef != "" || *capsulePath != "" || *intentPath != "" {
+			return errors.New("node snapshot-state requires -tenant-id, -node-id, -instance-id, -lineage-id, -generation, and -snapshot-id")
+		}
+		result, err = client.SnapshotState(ctx, nodeclient.StateSnapshotRequest{
+			TenantID: *tenantID, NodeID: *nodeID, InstanceID: *instanceID,
+			LineageID: *lineageID, Generation: *generation, SnapshotID: *snapshotID,
+		})
+		if err != nil {
+			return err
+		}
+	case "clone-state":
+		if len(positional) != 0 || *tenantID == "" || *nodeID == "" || *instanceID == "" ||
+			*lineageID == "" || *sourceLineageID == "" || *snapshotID == "" || *generation == 0 ||
+			*runtimeRef != "" || *capsulePath != "" || *intentPath != "" {
+			return errors.New("node clone-state requires -tenant-id, -node-id, -instance-id, -lineage-id, -generation, -snapshot-id, and -source-lineage-id")
+		}
+		result, err = client.CloneState(ctx, nodeclient.StateCloneRequest{
+			TenantID: *tenantID, NodeID: *nodeID, InstanceID: *instanceID,
+			LineageID: *lineageID, Generation: *generation, SnapshotID: *snapshotID,
+			SourceLineageID: *sourceLineageID,
+		})
 		if err != nil {
 			return err
 		}
