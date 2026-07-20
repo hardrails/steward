@@ -585,9 +585,9 @@ credentials remain single-tenant.
 `admit` carries exact `capsule_dsse_base64` and OpenAPI `intent`; identity and
 generation must match the command. Positive capabilities are explicit state or
 network grants. Network grants require configured Gateway and relay components.
-State also requires the dedicated-host-only compatibility flag for a volume without
-enforced byte or inode quotas; it is unavailable on shared hosts. A missing
-enforcement component returns HTTP 501. Signed admission disables legacy
+State also requires either a qualified quota backend or the dedicated-host-only
+compatibility flag for an unquotaed Docker volume. A missing enforcement component
+returns HTTP 501. Signed admission disables legacy
 `POST /v1/workloads`. Uplink lifecycle operations record verified tenant, node, and
 generation in journal and evidence.
 

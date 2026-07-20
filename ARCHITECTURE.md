@@ -227,8 +227,10 @@ gVisor, fixed UID/GID, a read-only root, dropped capabilities,
 and no published ports.
 
 Network is `none` unless a positive capability requires a private isolated
-network. Persistent Docker state requires an explicit dedicated-host compatibility
-decision because portable local volumes have no reliable hard byte or inode quota.
+network. Shared-host persistent state crosses an authenticated Unix socket into the
+separate `steward-storage-zfs` worker, which creates quota-backed datasets and exact
+Docker bind volumes. Portable unquotaed Docker volumes require an explicit
+dedicated-host compatibility decision.
 
 ## Authorized effects
 

@@ -57,11 +57,10 @@ Yes, within the [shared-host threat model]({{ '/concepts/security-model/' | rela
 Each workload gets a separate gVisor sandbox, fixed least privilege, no host mount
 or raw network access, plus tenant and host aggregate memory, CPU, PID, and
 workload-count caps. A per-instance relay and the host Gateway mediate HTTP(S)
-egress, and relay reservations count toward those totals. Steward does not cap
-disk bytes, inodes, or I/O bandwidth. Persistent Docker state is disabled on
-shared hosts because it has no portable hard byte or inode quota. Use dedicated
-hardware when processor side channels, storage exhaustion, or separate hardware
-failure domains are in scope.
+egress, and relay reservations count toward those totals. Shared-host persistent
+state requires the OpenZFS worker, which applies hard byte and object quotas per
+lineage. Steward does not cap storage I/O bandwidth. Use dedicated hardware when
+processor side channels or separate hardware failure domains are in scope.
 
 Egress denials are limited to 30 per grant, 120 per tenant, and 480 per host per
 minute to bound synchronous audit pressure. After a layer is exhausted, requests

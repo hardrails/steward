@@ -9,10 +9,9 @@ section: How-to
 **Positive capabilities** are explicit grants for state or network access. They
 replace unrestricted container privileges.
 
-- state is one Steward-owned Docker volume at the profile's fixed path (`/state`
-  for the generic profile), keyed by tenant and workload history. Docker's portable
-  local volume driver has no hard byte or inode quota, so state is disabled by
-  default and is not supported on shared multi-tenant hosts;
+- state is one Steward-owned volume at the profile's fixed path (`/state` for the
+  generic profile), keyed by tenant and workload history. A shared host uses the
+  separate OpenZFS worker for hard byte and object quotas;
 - inference is one site-policy-approved route and model alias through
   `steward-gateway`; Gateway does not configure, mount, or inject the upstream
   bearer credential into the agent container; and
@@ -46,13 +45,13 @@ private-origin disclosure, or other application secrets, and it does not apply a
 upstream-specific response schema. Treat each inference and connector upstream as a
 trusted service and use narrow, tenant-specific credentials.
 
-To use persistent state, pass
-`--allow-unquotaed-state-on-dedicated-host` to the installer, `configure-node`, or
-`configure-admission` in the same transaction as the signed-admission trust inputs.
-The configurator runs preflight before committing the change. Executor accepts the
-flag only when the verified policy contains exactly one tenant. The flag name is
-deliberately explicit: a tenant can fill the backing filesystem because the volume
-has no portable hard byte or inode quota. Do not enable it on a shared host.
+For a shared host, configure the quota-enforced backend before admitting a workload
+with state. See [Configure quota-enforced persistent state]({{
+'/guides/persistent-state/' | relative_url }}). The
+`--allow-unquotaed-state-on-dedicated-host` installer and configurator option remains
+an explicit compatibility mode. Executor accepts it only when the verified policy
+contains exactly one tenant. A tenant can fill that backing filesystem, so never use
+the compatibility mode on a shared host.
 
 These networks require Docker Engine 28 or newer. Isolated bridge gateway mode lets
 the agent reach its relay but not host services through the bridge gateway.

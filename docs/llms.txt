@@ -75,9 +75,11 @@ Documentation: https://hardrails.github.io/steward/
 
 ## Important capability boundary
 
-On a dedicated single-tenant host, Steward can grant persistent state across
-approved workload replacements; the Docker volume has no enforced byte or inode
-quota and is disabled on a shared host. Steward can also grant OpenAI-compatible
+On a shared Linux host with OpenZFS, Steward can grant persistent state across
+approved workload replacements with a hard byte and object quota per tenant
+lineage. A separate root worker owns the ZFS and exact Docker-volume operations;
+Executor reaches it through an authenticated Unix socket. The unquotaed portable
+Docker-volume mode is dedicated-host only. Steward can also grant OpenAI-compatible
 inference without directly configuring or injecting the upstream credential into
 the workload, one private service, and named credential-brokered API operations with
 spend-before-effect call budgets. A connector can additionally require a short-lived

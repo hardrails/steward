@@ -58,12 +58,13 @@ The `hermes-v1@v1` Steward profile fixes these values:
 | service port | `8766` |
 | writable filesystem | lineage volume plus a 64 MiB memory-backed `/tmp` (`tmpfs`) |
 
-A lineage volume preserves one workload's state across approved replacements.
-Docker's portable local volume driver has no hard byte or inode quota. Persistent
-state therefore requires
-`-allow-unquotaed-state-on-dedicated-host`, complete signed admission, and a policy
-containing exactly one tenant. This is a dedicated-host compatibility mode, not a
-shared-host storage-isolation claim.
+A lineage volume preserves one workload's state across approved replacements. A
+shared host must use Steward's separate OpenZFS worker, which applies hard byte and
+object quotas to each tenant lineage. The
+`-allow-unquotaed-state-on-dedicated-host` flag is a compatibility mode for a policy
+with exactly one tenant, not a shared-host storage-isolation claim. See
+[Configure quota-enforced persistent state]({{ '/guides/persistent-state/' |
+relative_url }}).
 
 On `linux/amd64`, the qualification suite ran the adapter with Docker's gVisor
 `runsc` runtime, a read-only root filesystem, all Linux capabilities dropped,

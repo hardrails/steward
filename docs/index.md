@@ -93,12 +93,13 @@ return secret values through its control plane, console, MCP adapter, or receipt
 
 A shared host is not equivalent to separate hardware. Host root, Docker, gVisor,
 the Linux kernel, Gateway, configured upstreams, and operator key custody remain
-trusted. Persistent Docker volumes are restricted to an explicit dedicated-host
-compatibility mode because the portable local volume driver has no hard byte or
-inode quota.
+trusted. Shared-host persistent state requires Steward's separate OpenZFS worker,
+which applies a hard byte and object quota to each tenant lineage. Portable Docker
+volumes remain a dedicated-host-only compatibility mode.
 
 [Security model]({{ '/concepts/security-model/' | relative_url }}) ·
 [Known limitations]({{ '/limitations/' | relative_url }}) ·
+[Persistent state]({{ '/guides/persistent-state/' | relative_url }}) ·
 [Air-gapped deployment]({{ '/guides/air-gapped/' | relative_url }}) ·
 [Terraform bootstrap]({{ '/guides/terraform/' | relative_url }}) ·
 [MCP setup]({{ '/guides/mcp/' | relative_url }})

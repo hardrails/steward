@@ -81,13 +81,14 @@ with no network-enabled inference, service, connector, or egress grant remains o
 Executor adds fixed, non-configurable 64 MiB tmpfs mounts at `/workspace` and
 `/tmp`, sets `HOME=/workspace` and `TMPDIR=/tmp`, and starts in `/workspace`. This
 provides bounded ephemeral scratch space without a host path or tenant-selected
-mount. A signed state grant can replace `/workspace` with one Steward-owned Docker
-volume at the profile's fixed state path. Docker's portable local volume driver
-provides no hard byte or inode quota, so Executor rejects state by default. The
-explicit `-allow-unquotaed-state-on-dedicated-host` compatibility flag enables a
-volume without enforced byte or inode quotas. The flag requires complete signed
-admission, is suitable only for a dedicated single-tenant host, and is rejected
-unless the verified site policy contains exactly one tenant. Raw secret and
+mount. A signed state grant can replace `/workspace` with one Steward-owned volume
+at the profile's fixed state path. On a shared host, Executor requires a qualified
+backend that enforces hard byte and object quotas. Steward's separate OpenZFS worker
+implements that contract and returns one exact Docker bind-volume handle. The
+explicit `-allow-unquotaed-state-on-dedicated-host` compatibility flag instead
+enables a portable Docker volume without enforced quotas. The flag requires
+complete signed admission, is suitable only for a dedicated single-tenant host,
+and is rejected unless the verified site policy contains exactly one tenant. Raw secret and
 arbitrary file injection remain unavailable; the image must contain its approved
 content.
 
@@ -221,9 +222,9 @@ authority. The journal remains pending when Executor cannot prove that the agent
 relay, and grant are all inactive.
 
 A state grant uses one Steward-owned volume for a persistent workload history. It
-is rejected unless the dedicated-host-only compatibility flag for a volume without
-enforced byte or inode quotas is enabled. Only one live instance can hold the
-writable lease for a `(tenant_id, lineage_id)` pair. Inference, service, connector,
+requires either the quota-enforced storage backend or the dedicated-host-only
+compatibility flag. Only one live instance can hold the writable lease for a
+`(tenant_id, lineage_id)` pair. Inference, service, connector,
 and egress grants require the configured Gateway and hardened relay; partial
 configuration fails closed. See
 [positive-capability setup]({{ '/guides/positive-capabilities/' | relative_url }}),
@@ -561,8 +562,8 @@ inference service may run elsewhere; neither needs filesystem or Docker access o
 the node. Multiple tenants share a host only through signed tenant commands,
 site-scoped cleanup authority, anti-replay state keyed by tenant and instance,
 tenant-labeled gVisor containers, per-tenant aggregate resource and workload-count
-caps, and per-instance networks and grants. Shared-host workloads must keep
-persistent state disabled.
+caps, per-lineage OpenZFS byte and object quotas when state is enabled, and
+per-instance networks and grants. Shared-host state must use the qualified backend.
 
 `scripts/executor-acceptance.sh` exercises this boundary on a real Linux host. It
 uses `EXECUTOR_BIN` when supplied, builds with a local Go toolchain when available,
