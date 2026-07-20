@@ -266,6 +266,13 @@ capacity remains a documented gap. Executor revalidates admission and live
 capacity, so unmanaged containers or a stale decision fail closed rather than
 overruling the node.
 
+Applying a changed deployment generation is accepted only after every instance
+from the retained generation has a proven `removed` state. Replacing desired state
+while an older runtime might exist would discard the delegation and generation
+cursor needed to stop that runtime safely. Updates therefore require an explicit
+remove, wait, and apply sequence with downtime until a rollout state machine can
+retain both generations and advance instances within a disruption budget.
+
 `task run` must execute where its Gateway service endpoint is reachable through a
 literal loopback address, normally on the selected node or through an operator-
 managed authenticated tunnel. Control does not relay prompts, task bodies, result

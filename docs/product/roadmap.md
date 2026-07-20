@@ -329,6 +329,8 @@ The roadmap starts from working primitives rather than a blank design:
   one prompt into a private recoverable run directory;
 - concise `agent create` and durable `agent apply NAME` commands that reuse the
   exact application-init and deployment reconciliation implementations.
+- fail-closed generation updates that refuse to discard authority for any instance
+  without a proven removal; bounded live rollout remains explicit work.
 
 This foundation is not yet the complete product workflow above. The normal
 create, apply, and prompt path is joined, but a fresh site still needs explicit policy,

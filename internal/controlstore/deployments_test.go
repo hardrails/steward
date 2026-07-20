@@ -39,6 +39,18 @@ func TestDeploymentApplyIsBoundedIdempotentRevisionedAndDurable(t *testing.T) {
 		t.Fatalf("stale deployment revision error = %v", err)
 	}
 	rollout.ExpectedRevision = created.Revision
+	if _, _, err := fixture.store.ApplyDeployment(fixture.admin, rollout, fixture.now.Add(4*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("live deployment rollout error = %v", err)
+	}
+	removed := created
+	for index := range removed.Instances {
+		removed.Instances[index].Phase = DeploymentInstanceRemoved
+	}
+	removed.DesiredState = DeploymentAbsent
+	removed.Phase = DeploymentRemoved
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = removed
+	fixture.store.mu.Unlock()
 	updated, changed, err := fixture.store.ApplyDeployment(fixture.admin, rollout, fixture.now.Add(4*time.Minute))
 	if err != nil || !changed || updated.Generation != 2 || updated.Revision != 2 ||
 		updated.CreatedAt != created.CreatedAt || updated.UpdatedAt == created.UpdatedAt {
@@ -78,6 +90,37 @@ func TestDeploymentApplyIsBoundedIdempotentRevisionedAndDurable(t *testing.T) {
 	loaded, found, err := reopened.GetDeployment(fixture.admin, "tenant-a", "deployment-a")
 	if err != nil || !found || !reflect.DeepEqual(loaded, absent) {
 		t.Fatalf("recovered deployment = (%+v, %v, %v)", loaded, found, err)
+	}
+}
+
+func TestDeploymentUpdateCannotForgetAuthorityForAFormerRuntime(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	created, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := deploymentApplyFixture(t, fixture.now.Add(time.Minute), "deployment-a", 2)
+	next.ExpectedRevision = created.Revision
+	for _, phase := range []DeploymentInstancePhase{
+		DeploymentInstancePending, DeploymentInstanceAdmitting, DeploymentInstanceStarting,
+		DeploymentInstanceRunning, DeploymentInstanceStopping, DeploymentInstanceDestroying,
+		DeploymentInstanceFailed,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			current := created
+			current.Instances = append([]DeploymentInstance(nil), created.Instances...)
+			current.Instances[0].Phase = phase
+			fixture.store.mu.Lock()
+			fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = current
+			fixture.store.mu.Unlock()
+			if _, _, err := fixture.store.ApplyDeployment(fixture.admin, next, fixture.now.Add(2*time.Minute)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("phase %s update error = %v", phase, err)
+			}
+		})
 	}
 }
 

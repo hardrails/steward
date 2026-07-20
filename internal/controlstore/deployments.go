@@ -105,6 +105,13 @@ func (store *Store) ApplyDeployment(
 	if exists && input.Generation <= existing.Generation {
 		return Deployment{}, false, ErrConflict
 	}
+	// Replacing retained desired state while a prior runtime might exist would
+	// discard the delegation and generation cursor needed to stop it. Require a
+	// proven removal until the bounded rollout state machine can retain both
+	// generations during an update.
+	if exists && !deploymentFullyRemoved(existing) {
+		return Deployment{}, false, ErrConflict
+	}
 	if exists && !deploymentInstancesRollForward(existing.Instances, instances) {
 		return Deployment{}, false, ErrConflict
 	}
@@ -130,6 +137,15 @@ func (store *Store) ApplyDeployment(
 		return Deployment{}, false, err
 	}
 	return cloneDeployment(deployment), true, nil
+}
+
+func deploymentFullyRemoved(deployment Deployment) bool {
+	for _, instance := range deployment.Instances {
+		if instance.Phase != DeploymentInstanceRemoved || instance.CommandID != "" || instance.Drain != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // SetDeploymentDesiredState marks a deployment for convergence without
