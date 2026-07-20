@@ -43,6 +43,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/healthz`, `GET /v1/readiness` | Process liveness and durable-store readiness |
 | `POST /v1/tenants`, `GET /v1/tenants` | Create and page through tenants |
 | `GET /v1/tenants/{tenant_id}` | Read one visible tenant |
+| `GET or PUT /v1/tenants/{tenant_id}/freeze` | Inspect or optimistically change the tenant's durable command-delivery freeze |
 | `POST /v1/operators`, `DELETE /v1/operators/{credential_id}` | Issue idempotent scoped operators and revoke them; the last live site administrator cannot be revoked |
 | `POST /v1/enrollments`, `POST /v1/enroll` | Idempotently create a one-time node enrollment and exchange it |
 | `DELETE /v1/node-credentials/{credential_id}` | Revoke one node bearer during staged credential rotation |
@@ -63,6 +64,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands` | Retain one exact signed Executor command |
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
 | `GET /v1/operations/summary` | Read tenant-projected capacity, command, evidence, and attention totals |
+| `GET or PUT /v1/operations/freeze` | Inspect or optimistically change the site-wide command-delivery freeze; mutation requires a site administrator |
 | `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
 | `GET /v1/operations/agents` | Page through non-secret observed agent runtime state and latest signed operations |
 | `GET /v1/operations/commands` | Page and filter command metadata without command or result bodies |
@@ -78,6 +80,18 @@ query parameters, redirects are not used, and every error has the common
 `{"error":"...","message":"..."}` shape. The controller parses signed-command
 identity to bind it to the route but does not treat that parse as authorization;
 Executor verifies the signature and local policy before applying the command.
+
+Operational freeze records use optimistic revisions. The first change expects
+revision `0`; each successful state change advances the revision. A stale revision
+returns `409`, and a new command rejected by an effective freeze returns `423`
+with error code `operationally_frozen`. Exact retries of a command already retained
+before the freeze remain idempotent. A tenant freeze response includes both the
+tenant record and any site record that contributes to the effective state.
+
+The freeze gates new command retention and node delivery. It does not revoke a
+live delivery lease, stop a running workload, or suppress node reports and signed
+evidence. See the [incident freeze workflow]({{ '/guides/control-plane/' | relative_url }}#freeze-new-command-delivery-during-an-incident)
+for the operator-facing boundary.
 
 Every node response includes controller placement state. `schedulable` accepts
 eligible new deployments. `cordoned` preserves existing assignments but excludes

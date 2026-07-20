@@ -209,7 +209,11 @@ hard admission authority, and every decision retains its score inputs. It can
 replace a lease-managed stateless instance after the signed expiry fence. For
 planned work, site administrators can run a restart-safe node drain that cordons
 first and moves stateless instances within each deployment's maximum-unavailable
-budget. Stateful migration and progressive rollouts remain explicit gaps.
+budget. During an incident, an operator can freeze new command delivery for one
+tenant or the whole site without hiding node heartbeats, reports, or evidence.
+The freeze is deliberately a delivery fence: already accepted work keeps running
+until its existing authority or lease ends. Stateful migration, surge-based
+zero-downtime rollout, and automatic rollback remain explicit gaps.
 
 Its embedded React console is available at `/console/`. The console keeps the
 operator bearer only in tab memory, loads no remote assets, and never receives
