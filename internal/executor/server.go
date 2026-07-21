@@ -1247,7 +1247,11 @@ func (s *Server) provisionSecureWorkload(
 			return
 		}
 		s.recordCompensation(opID, prepared, "gateway_policy")
-		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "effective gateway route policy could not be verified")
+		if errors.Is(err, errGatewayRoutePolicyInvalid) {
+			writeError(w, http.StatusServiceUnavailable, "gateway_policy_invalid", "Gateway returned a malformed route-policy digest after grant registration; admission was rolled back")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "Gateway route-policy inspection failed after grant registration; admission was rolled back")
 		return
 	}
 	committed := prepared
@@ -1541,8 +1545,16 @@ func (s *Server) writeSecureResponse(
 	)
 	if runtimeNeedsGatewayPolicy(runtime) {
 		inspection, err := s.secure.gateway.InspectWithPolicy(ctx, response.GrantID)
-		if err != nil || !imageConfigDigest.MatchString(expectedRoutePolicyDigest) || inspection.RoutePolicyDigest != expectedRoutePolicyDigest {
-			writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "effective gateway route policy could not be verified")
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "Gateway route-policy inspection failed while verifying the committed admission")
+			return
+		}
+		if !imageConfigDigest.MatchString(expectedRoutePolicyDigest) {
+			writeError(w, http.StatusServiceUnavailable, "gateway_policy_binding_invalid", "Executor committed an invalid route-policy digest; reconciliation is required")
+			return
+		}
+		if inspection.RoutePolicyDigest != expectedRoutePolicyDigest {
+			writeError(w, http.StatusServiceUnavailable, "gateway_policy_mismatch", "Gateway route policy differs from the committed admission binding; reconcile the node before retrying")
 			return
 		}
 	} else if expectedRoutePolicyDigest != "" {
@@ -2263,7 +2275,10 @@ func (s *Server) secureDestroy(w http.ResponseWriter, r *http.Request) {
 	s.provisionMu.Lock()
 	defer s.provisionMu.Unlock()
 	if s.secureMutationBlockedLocked() {
-		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; destroy is blocked until reconciliation succeeds")
+		if s.recoverMissingWorkload(w, r, name) {
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; inspect GET /v1/readiness for the exact failure; destroy can recover only one proven-missing workload with no pending operation")
 		return
 	}
 	observed, err := s.docker.Inspect(r.Context(), name)

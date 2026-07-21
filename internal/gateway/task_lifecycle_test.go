@@ -422,7 +422,7 @@ func TestLifecycleServiceTaskRecordsDirectFailuresWithoutFalseDispatch(t *testin
 		errorCode   string
 	}{
 		{name: "redirect", status: http.StatusFound, contentType: "application/json", body: `{"run_id":"run_redirect"}`, errorCode: "redirect_denied"},
-		{name: "rejected", status: http.StatusPartialContent, contentType: "application/json", body: `{"run_id":"run_rejected"}`, errorCode: "service_task_rejected"},
+		{name: "rejected", status: http.StatusPartialContent, contentType: "application/json", body: `{"run_id":"run_rejected"}`, errorCode: "service_task_unexpected_status"},
 		{name: "missing run id", status: http.StatusAccepted, contentType: "application/json", body: `{"status":"queued"}`, errorCode: "outcome_unknown"},
 		{name: "wrong media type", status: http.StatusAccepted, contentType: "text/plain", body: `{"run_id":"run_plain"}`, errorCode: "outcome_unknown"},
 		{name: "encoded response", status: http.StatusAccepted, contentType: "application/json", encoding: "gzip", body: `{"run_id":"run_encoded"}`, errorCode: "outcome_unknown"},
@@ -466,7 +466,7 @@ func TestLifecycleServiceTaskAmbiguousTerminalReconcilesFromDurableLedger(t *tes
 		wantError  string
 		wantPhases []connectorledger.Phase
 	}{
-		{name: "durable terminal", durable: true, wantError: "task_already_spent", wantPhases: []connectorledger.Phase{connectorledger.Authorize, connectorledger.Terminal}},
+		{name: "durable terminal", durable: true, wantError: "service_task_unexpected_status", wantPhases: []connectorledger.Phase{connectorledger.Authorize, connectorledger.Terminal}},
 		{name: "absent terminal", wantError: "outcome_unknown", wantPhases: []connectorledger.Phase{connectorledger.Authorize, connectorledger.Terminal}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

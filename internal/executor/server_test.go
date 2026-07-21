@@ -1719,6 +1719,42 @@ func TestSecureAdmissionBindsTaskOnlyServiceRoutePolicy(t *testing.T) {
 	}
 }
 
+func TestSecureResponseDistinguishesGatewayPolicyFailures(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		expectedDigest string
+		observedDigest string
+		inspectErr     error
+		code           string
+	}{
+		{name: "inspection unavailable", expectedDigest: testGatewayRoutePolicyDigest, inspectErr: errors.New("offline"), code: "gateway_unavailable"},
+		{name: "invalid executor binding", expectedDigest: "invalid", observedDigest: testGatewayRoutePolicyDigest, code: "gateway_policy_binding_invalid"},
+		{name: "policy mismatch", expectedDigest: testGatewayRoutePolicyDigest, observedDigest: "sha256:" + strings.Repeat("f", 64), code: "gateway_policy_mismatch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := &secureDocker{}
+			server, _ := NewServer(docker, "secret", nil)
+			_, _, config := secureAdmissionFixtureFor(t, admission.Capabilities{})
+			grants := &gatewayFixture{
+				grants:       map[string]gateway.Grant{"grant-a": {GrantID: "grant-a", RouteID: "local"}},
+				policyDigest: test.observedDigest, inspectErr: test.inspectErr,
+			}
+			config.Topology, config.Gateway = docker, grants
+			config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+			config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+			if err := server.EnableSecureAdmission(config); err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			server.writeSecureResponse(context.Background(), response, http.StatusOK, "executor-agent", "running",
+				admission.EffectiveAdmission{}, &RuntimeGrant{GrantID: "grant-a", Inference: true, RouteID: "local"}, test.expectedDigest)
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"error":"`+test.code+`"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing.T) {
 	docker := &secureDocker{}
 	server, _ := NewServer(docker, "secret", nil)
@@ -1802,6 +1838,48 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+ref, context.Background(), http.StatusNoContent)
 	if docker.network != nil || docker.relay != nil || len(grants.grants) != 0 {
 		t.Fatalf("runtime topology retained: network=%#v relay=%#v grants=%#v", docker.network, docker.relay, grants.grants)
+	}
+}
+
+func TestDestroyRecoversOneReconciledMissingWorkload(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true})
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	config.AllowHostAdminIntent = true
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	response := submitSecureAdmission(t, server, capsule, intent)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	runtimeRef := RuntimeRef(intent.TenantID, intent.InstanceID)
+	docker.observed = nil
+	if report, err := server.Reconcile(context.Background()); !errors.Is(err, ErrReconciliationIncomplete) ||
+		len(report.Failures) != 1 || report.Failures[0].Code != "workload_missing" {
+		t.Fatalf("reconcile report=%#v err=%v", report, err)
+	}
+	request := httptest.NewRequest(http.MethodDelete, "/v1/workloads/"+runtimeRef, nil)
+	request.SetPathValue("id", runtimeRef)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("recovery status=%d body=%s", response.Code, response.Body.String())
+	}
+	record, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
+	if !ok || record.Present || docker.network != nil || docker.relay != nil || len(grants.grants) != 0 {
+		t.Fatalf("record=%#v network=%#v relay=%#v grants=%#v", record, docker.network, docker.relay, grants.grants)
+	}
+	server.reconcileMu.RLock()
+	ready := server.reconcileReport.Ready
+	server.reconcileMu.RUnlock()
+	if !ready || len(config.Journal.Pending()) != 0 {
+		t.Fatalf("recovery did not restore readiness; pending=%#v", config.Journal.Pending())
 	}
 }
 
