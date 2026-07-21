@@ -127,6 +127,9 @@ func TestDeploymentHTTPContractFailsClosedAtRoutingAndEncodingBoundaries(t *test
 		{http.MethodPut, "/v1/tenants/tenant-a/deployments/x", `{}`, http.StatusBadRequest, "invalid_request"},
 		{http.MethodPut, "/v1/tenants/tenant-a/deployments/x", `{"generation":1,"agent_name":"a","bundle_digest":"x","capsule_dsse_base64":"Zh","delegation_dsse_base64":"Zh"}`, http.StatusBadRequest, "invalid_request"},
 		{http.MethodDelete, "/v1/tenants/tenant-a/deployments/x", `{"expected_revision":0}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodGet, "/v1/tenants/tenant-a/deployments/x/rollout", ``, http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodPut, "/v1/tenants/tenant-a/deployments/x/rollout?unexpected=1", `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPut, "/v1/tenants/tenant-a/deployments/x/rollout", `{`, http.StatusBadRequest, "invalid_request"},
 	} {
 		requireError(t, fixture.request(t, test.method, test.path, fixture.adminToken, test.body), test.status, test.code)
 	}
@@ -160,13 +163,14 @@ func TestDeploymentViewProjectsRolloutDigestsWithoutAuthorityEnvelopes(t *testin
 			SourceGeneration: 1, SourceAgentName: "research-agent",
 			SourceBundleDigest: input.BundleDigest,
 			SourceCapsuleDSSE:  capsule, SourceDelegationDSSE: delegation,
-			StartedAt: now.Format(time.RFC3339Nano),
+			StartedAt: now.Format(time.RFC3339Nano), PausedAt: now.Add(time.Minute).Format(time.RFC3339Nano),
 		},
 		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
 	}
 	view, err := deploymentView(value)
 	if err != nil || view.Rollout == nil || view.Rollout.SourceCapsuleDigest != dsse.Digest(capsule) ||
-		view.Rollout.SourceDelegationDigest != dsse.Digest(delegation) {
+		view.Rollout.SourceDelegationDigest != dsse.Digest(delegation) ||
+		view.Rollout.PausedAt != now.Add(time.Minute).Format(time.RFC3339Nano) {
 		t.Fatalf("rollout projection = (%+v, %v)", view.Rollout, err)
 	}
 	raw, err := json.Marshal(view)
