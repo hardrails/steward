@@ -58,6 +58,27 @@ func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testi
 		"activate", "-bundle", bundlePath, "-config", configPath,
 		"-tenant-id", "tenant-a", "-node-id", "node-a", "-trust-out", trustPath,
 	}
+	configBefore, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trustPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentServiceCommand(arguments, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "already contains a different inventory") {
+		t.Fatalf("conflicting trust output error = %v", err)
+	}
+	configAfter, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(configBefore, configAfter) {
+		t.Fatal("failed service activation changed the live Gateway configuration")
+	}
+	if err := os.Remove(trustPath); err != nil {
+		t.Fatal(err)
+	}
 	var output bytes.Buffer
 	if err := agentServiceCommand(arguments, &output); err != nil {
 		t.Fatal(err)
