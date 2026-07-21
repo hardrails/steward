@@ -418,8 +418,22 @@ func main() {
 			os.Exit(2)
 		}
 		var publishedScheduling *controlprotocol.ExecutorSchedulingObservationV1
+		var schedulingProvider func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error)
 		if uplinkMetadata.NodeScoped() {
 			publishedScheduling = schedulingObservation
+			if schedulingObservation != nil {
+				schedulingProvider = func(ctx context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error) {
+					images, err := docker.CachedImageConfigDigests(ctx)
+					if err != nil {
+						return nil, err
+					}
+					observation := *schedulingObservation
+					observation.Labels = append([]controlprotocol.ExecutorSchedulingLabelV1{}, schedulingObservation.Labels...)
+					observation.Taints = append([]string{}, schedulingObservation.Taints...)
+					observation.CachedImageConfigDigests = images
+					return &observation, nil
+				}
+			}
 		}
 		state, err := executoruplink.LoadStateStore(*uplinkStateFile)
 		if err != nil {
@@ -464,6 +478,7 @@ func main() {
 			DeliveryState: deliveryState, GatewayControl: gatewayControlClient,
 			StateSnapshots: stateSnapshots,
 			ValidateOnly:   *checkConfig, Scheduling: publishedScheduling,
+			SchedulingProvider: schedulingProvider,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)

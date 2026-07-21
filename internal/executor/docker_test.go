@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/gateway"
 )
 
@@ -50,6 +51,52 @@ func TestLoadImageUsesNativeDockerImportAndRejectsDaemonErrors(t *testing.T) {
 			err := docker.LoadImage(context.Background(), strings.NewReader("verified archive"))
 			if (err != nil) != test.wantErr {
 				t.Fatalf("LoadImage error=%v wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestCachedImageConfigDigestsReturnsCanonicalBoundedInventory(t *testing.T) {
+	images := make([]map[string]string, 0, controlprotocol.MaxExecutorSchedulingImages+2)
+	for index := controlprotocol.MaxExecutorSchedulingImages + 1; index >= 0; index-- {
+		images = append(images, map[string]string{"Id": fmt.Sprintf("sha256:%064x", index)})
+	}
+	images = append(images, images[0])
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1.41/images/json" || r.URL.Query().Get("all") != "1" {
+			t.Fatalf("unexpected image inventory target %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(images)
+	})
+	digests, err := docker.CachedImageConfigDigests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digests) != controlprotocol.MaxExecutorSchedulingImages ||
+		digests[0] != "sha256:"+strings.Repeat("0", 64) ||
+		digests[len(digests)-1] != fmt.Sprintf("sha256:%064x", controlprotocol.MaxExecutorSchedulingImages-1) {
+		t.Fatalf("canonical bounded inventory = %#v", digests)
+	}
+}
+
+func TestCachedImageConfigDigestsRejectsUntrustedDockerResponses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "daemon status", status: http.StatusServiceUnavailable, body: `{"message":"unavailable"}`},
+		{name: "invalid digest", status: http.StatusOK, body: `[{"Id":"latest"}]`},
+		{name: "invalid json", status: http.StatusOK, body: `[`},
+		{name: "oversized", status: http.StatusOK, body: `"` + strings.Repeat("x", (1<<20)+1) + `"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			})
+			if _, err := docker.CachedImageConfigDigests(context.Background()); err == nil {
+				t.Fatal("untrusted Docker image inventory was accepted")
 			}
 		})
 	}

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/gateway"
 )
@@ -71,6 +72,13 @@ type StateDocker interface {
 // for the secure path.
 type ImageDocker interface {
 	InspectSignedImage(context.Context, string, string) (ObservedImage, error)
+}
+
+// ImageInventoryDocker is the optional, read-only Docker surface used for soft
+// placement locality. Its output never proves admission: the exact signed image
+// is inspected again immediately before Executor mutates runtime state.
+type ImageInventoryDocker interface {
+	CachedImageConfigDigests(context.Context) ([]string, error)
 }
 
 // ObservedImage is the security-relevant projection of Docker image inspect.
@@ -339,6 +347,50 @@ func (d *DockerHTTP) LoadImage(ctx context.Context, archive io.Reader) error {
 			return errors.New(message.Error)
 		}
 	}
+}
+
+// CachedImageConfigDigests returns Docker's bounded canonical set of local image
+// config identities. Repository tags and manifest aliases are deliberately
+// ignored because signed admission is bound to the config digest.
+func (d *DockerHTTP) CachedImageConfigDigests(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/v1.41/images/json?all=1", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, dockerError(resp)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Docker image inventory: %w", err)
+	}
+	if len(raw) > 1<<20 {
+		return nil, errors.New("Docker image inventory exceeds 1 MiB")
+	}
+	var images []struct {
+		ID string `json:"Id"`
+	}
+	if err := json.Unmarshal(raw, &images); err != nil {
+		return nil, fmt.Errorf("decode Docker image inventory: %w", err)
+	}
+	digests := make([]string, 0, len(images))
+	for _, image := range images {
+		if !controlprotocol.ValidSHA256Digest(image.ID) {
+			return nil, errors.New("Docker image inventory contains an invalid config digest")
+		}
+		digests = append(digests, image.ID)
+	}
+	slices.Sort(digests)
+	digests = slices.Compact(digests)
+	if len(digests) > controlprotocol.MaxExecutorSchedulingImages {
+		digests = digests[:controlprotocol.MaxExecutorSchedulingImages]
+	}
+	return digests, nil
 }
 
 // RuntimeAvailable checks Docker's own runtime registry at startup. A missing
