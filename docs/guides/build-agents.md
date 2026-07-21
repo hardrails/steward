@@ -49,6 +49,21 @@ The bundle contains no API key, connector credential, reusable permit, runtime
 reference, or receipt key. Configure model and service secrets through Gateway's
 [external materialization boundary]({{ '/guides/secrets/' | relative_url }}).
 
+After building the qualified adapter archive, publish its exact identity from the
+trusted workstation:
+
+```console
+stewardctl agent publish /secure/steward/site \
+  -archive /secure/builds/hermes/image.tar
+```
+
+The command verifies the complete signed site package, inspects the bounded OCI or
+Docker archive without loading it, requires the bundle's image digest to match,
+and fixes the qualified Hermes or OpenClaw command, state path, service, port, and
+resource contract. Only then does it sign `capsule.dsse.json` with the site
+publisher key. Use the lower-level capsule tooling when publication is performed
+by a separate offline signing service.
+
 JSON input is also accepted. The repository includes concrete
 [Hermes](https://github.com/hardrails/steward/tree/main/examples/agents/hermes)
 and [OpenClaw](https://github.com/hardrails/steward/tree/main/examples/agents/openclaw)
@@ -133,29 +148,26 @@ Control service and the agent should keep converging after the operator disconne
 Copy `/var/lib/steward-control/controller.public.pem` from the management host to
 the trusted tenant signing station. Do not copy `controller.private.pem`.
 
-Create the exact instance list and admission template described in the
-[offline tools reference]({{ '/reference/offline-tools/' | relative_url }}), then
-issue a short-lived delegation with all five lifecycle operations:
+Issue the exact short-lived deployment authority from the trusted workstation:
 
 ```console
-stewardctl executor-command delegation issue \
-  -delegation-id auditor-deployment \
-  -tenant-id default \
+stewardctl agent authorize /secure/steward/site \
   -controller-public-key controller.public.pem \
-  -controller-key-id controller-default \
-  -operations admit,renew,start,stop,destroy \
-  -node-ids node-1,node-2 \
-  -instances instances.json \
-  -admission-template admission-template.json \
-  -key tenant-command.pem \
-  -key-id tenant-command-1 \
-  -out delegation.dsse.json
+  -node-ids node-1,node-2
 ```
 
-The tenant command key must be authorized by the site policy for every delegated
-operation. The delegation expires within 24 hours and names exact nodes, instances,
-lineages, generations, resources, capabilities, routes, and connectors. Control
-cannot widen those fields.
+`agent authorize` derives the instance identity and admission template from the
+bundle, signed capsule, and signed site policy. It grants only `admit`, `renew`,
+`start`, `stop`, and `destroy`; binds exact nodes, lineage, generation, resources,
+capabilities, routes, connectors, and placement; and expires after one hour by
+default. Control cannot widen those fields. The tenant command key must be
+authorized by site policy for every operation.
+
+For an external signing service or a non-standard delegation, create the exact
+instance list and admission template described in the [offline tools
+reference]({{ '/reference/offline-tools/' | relative_url }}) and use
+`executor-command delegation issue`. That expert surface produces the same signed
+contract but requires every field to be supplied explicitly.
 
 With a CLI context supplying Control, the operator token, private CA, and tenant,
 apply and inspect the deployment. The concise and expert apply forms call the same
@@ -349,7 +361,24 @@ created before task-ready state was introduced must be rolled forward to a new
 generation; Steward will not reconstruct a missing admission result from guesses.
 
 For routine work, configure the [CLI task defaults]({{ '/guides/cli/' |
-relative_url }}) once and run the entire authorized task lifecycle in one command:
+relative_url }}) once. On each enrolled node, first activate the qualified private
+service and export its trust inventory:
+
+```console
+sudo stewardctl agent service activate \
+  -bundle agent.bundle.json \
+  -tenant-id default \
+  -node-id node-1 \
+  -trust-out /secure/steward/service-trust.json
+```
+
+The command installs the closed Hermes or OpenClaw Gateway preset, adds a bounded
+tenant receipt budget, and returns the exact `systemctl` activation command. It
+does not execute host service management or copy files across the trust boundary.
+Run the returned command, transfer the non-secret trust inventory through an
+authenticated channel, and connect it with `site task connect`.
+
+Then run the complete authorized task lifecycle in one command:
 
 ```console
 stewardctl task run auditor "Review the workspace and report one concrete issue"

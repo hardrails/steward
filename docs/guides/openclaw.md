@@ -100,10 +100,18 @@ stewardctl image inspect \
 ```
 
 Copy the returned `manifest_digest`, `config_digest`, and `platform` into the
-publisher-signed capsule for profile `openclaw-v1@v1`. The signed runtime command is
-`["serve"]`, and the declared service port is `18789`. Authorize the exact
-repository provenance separately in site policy, then import the same archive
-bytes:
+publisher-signed capsule for profile `openclaw-v1@v1`. The composed command does
+that matching and fixes the signed runtime command to `["serve"]` and the service
+port to `18789`:
+
+```console
+stewardctl agent publish /secure/steward/site \
+  -archive "$HOME/steward-openclaw/bundle/image.tar" \
+  -out openclaw-capsule.dsse.json
+```
+
+Authorize the exact repository provenance separately in site policy, then import
+the same archive bytes:
 
 ```console
 sudo stewardctl image import \
@@ -122,7 +130,21 @@ authority by itself.
 
 ## Configure the qualified service
 
-Configure Gateway's exact service operation with the built-in preset:
+Configure Gateway's exact service operation and export the tenant trust inventory:
+
+```console
+sudo stewardctl agent service activate \
+  -bundle agent.bundle.json \
+  -tenant-id tenant-a \
+  -node-id node-a \
+  -trust-out /secure/steward/openclaw-service-trust.json
+```
+
+Run the exact `systemctl` activation command returned in the JSON. Steward does not
+execute host service management or copy trust material across machines.
+
+The lower-level preset remains available when an operator needs non-default limits
+or separate trust export:
 
 ```console
 sudo stewardctl gateway service set \

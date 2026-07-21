@@ -538,7 +538,19 @@ logical instance, runtime, grant, generation, admission and route-policy digests
 operation-policy digest, task, exact request digest and length, content type, and
 validity window.
 
-Use `stewardctl gateway service` to update and inspect the policy atomically:
+For a qualified agent bundle, compose the preset, tenant budget, and exported trust
+inventory in one operation:
+
+```console
+sudo stewardctl agent service activate \
+  -bundle agent.bundle.json \
+  -tenant-id tenant-a \
+  -node-id node-a \
+  -trust-out /secure/steward/service-trust.json
+```
+
+Run the exact reload or restart command in its JSON result. Use `stewardctl gateway
+service` directly to choose non-default limits or inspect the policy atomically:
 
 ```console
 sudo stewardctl gateway service set \

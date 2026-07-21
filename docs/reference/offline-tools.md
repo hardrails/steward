@@ -220,6 +220,30 @@ delegation digest, exact scope, and normal generation and sequence fences. A
 delegation limits authority but does not make a compromised controller available
 or honest inside that scope.
 
+## Compose publication and finite deployment authority
+
+The common Hermes and OpenClaw path derives the verbose signed contracts from an
+agent bundle and a verified site package:
+
+```console
+stewardctl agent publish /secure/steward/site \
+  -archive image.tar
+
+stewardctl agent authorize /secure/steward/site \
+  -controller-public-key controller.public.pem \
+  -node-ids node-a,node-b
+```
+
+`agent publish` performs bounded OCI inspection and refuses a bundle/archive image
+mismatch before the publisher key is used. `agent authorize` binds one exact
+instance, lineage, generation, admission template, node set, and the five durable
+lifecycle operations. Its default validity is one hour and the hard maximum is 24
+hours. Both outputs are verified against signed site policy before they are written.
+
+These commands intentionally depend on the generated handoff key paths. Use the
+individual image, capsule, policy, and `executor-command delegation` tools when an
+external signer owns a key or the contract differs from the qualified defaults.
+
 ## Inspect an offline OCI image
 
 Inspect the exact image archive before transfer:

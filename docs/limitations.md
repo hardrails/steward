@@ -130,6 +130,26 @@ directory is sensitive node identity state. The command does not remotely copy
 files, invoke the privileged installer, attest the host, or prove that the person
 running it is on the intended physical machine.
 
+## Composed setup commands stop at trust boundaries
+
+`agent publish` and `agent authorize` make the common path shorter, but they are
+not a key-management service. By default they read the publisher and tenant-command
+private keys from the protected `site init` handoff directory. Move those roles to
+their intended long-term custody before retiring the handoff and use the lower-level
+signing commands when an offline or hardware-backed signer owns them.
+
+`agent service activate` validates and writes Gateway configuration and exports a
+new or byte-identical service-trust inventory. It prints the required `systemctl`
+action but does not run it, import the image, or copy files to an operator machine.
+An existing Gateway configured with a different receipt identity is not silently
+relabeled or migrated; drain it and begin a deliberately new receipt chain.
+
+The service-trust inventory contains no credential or private key, but it is not
+independently signed. Authenticate its transfer from the enrolled node. `site task
+connect` checks its structure and bindings against the signed site policy before
+recording paths in the CLI context; that validation does not prove who transported
+the file.
+
 ## MCP is privileged local automation
 
 `steward-mcp` can expose node lifecycle and control operations to an MCP client.

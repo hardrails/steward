@@ -27,7 +27,6 @@ stewardctl site init steward-site \
   -site-id site-a \
   -tenant-id tenant-a \
   -repository registry.internal/agents \
-  -service-id agent-api \
   -control-server-names control.customer.example,10.40.0.10
 ```
 
@@ -47,11 +46,13 @@ stewardctl site init steward-site \
   -dry-run
 ```
 
-The default repository is `steward.local/agents`, the default service is
-`agent-api`, and the default TLS names are loopback-only. Supply the actual Control
-hostname or IP address before a remote deployment. The generated resource ceiling
-is 512 MiB, 1 CPU, and 128 processes. Review and replace the signed policy when the
-site needs different limits or additional tenants.
+The default repository is `steward.local/agents`. The initial policy admits the
+qualified `hermes-api` and `openclaw-api` service identities, and the default TLS
+names are loopback-only. Supply the actual Control hostname or IP address before a
+remote deployment. The generated resource ceiling is 1 GiB, 1 CPU, and 256
+processes, which matches the generated agent project. Review and replace the signed
+policy when the site needs different limits, services, or tenants. Use
+`-service-ids` to choose a comma-separated service set.
 
 ## Separate custody before use
 
@@ -73,7 +74,11 @@ atomically. That is a handoff state, not the intended long-term custody model.
 Do not copy the whole directory to Control or a node. Do not put private keys in
 Terraform state, cloud-init, instance metadata, an agent image, the React console,
 or a CLI context. A CLI context stores only a path to a key that the current user
-is already allowed to read.
+is already allowed to read. The composed publication and authorization commands
+read the generated publisher and tenant-command keys from this protected handoff
+package. Copy those roles into their intended long-term custody before deleting or
+archiving the handoff; use the lower-level signing commands when the keys must stay
+in a separate signing system.
 
 ## Verify before distributing files
 
@@ -215,3 +220,27 @@ stewardctl site node prepare steward-site node-a \
 Neither command copies files to another machine, invokes the root installer, or
 keeps the site-administrator token in the node package. Those remain explicit
 trust-boundary operations.
+
+## Connect the task authority after Gateway is ready
+
+After the node operator activates an agent service and transfers its non-secret
+service-trust inventory through an authenticated channel, join it to the existing
+tenant operator context:
+
+```console
+stewardctl site task connect steward-site \
+  -trust /secure/steward/service-trust.json \
+  -gateway-token-file /secure/steward/gateway-service.token
+```
+
+The command verifies the complete site package, service inventory, tenant, node,
+Gateway credential path, and task key before extending the context. It stores only
+file paths, never bearer values or private-key bytes. An exact retry is safe; a
+different authority already attached to the context fails closed.
+
+The default task key is `private/tenant-task.private.pem` in the protected site
+handoff. Use `-task-key` when that role has moved to a tenant signing workstation.
+The service-trust inventory is not secret or independently signed, so authenticate
+its transfer from the enrolled node. Higher-assurance installations can keep the
+task private key off the node and use `task issue`, `task submit`, and `task wait`
+as separate steps.

@@ -277,9 +277,18 @@ stewardctl image inspect -archive hermes-agent-adapter.tar
 Compare the reported manifest digest, config digest, and platform with the generated
 attestation and your build record. Select the approved repository provenance through
 your trusted build or promotion process; an OCI archive may not contain a repository
-name. Sign those exact values and the `hermes-v1@v1` profile into a capsule using
-your established Steward key workflow. After site policy authorizes its publisher
-and repository, import the same archive:
+name. The composed path signs those exact values and the fixed `hermes-v1@v1`
+contract after matching the archive to `agent.bundle.json`:
+
+```console
+stewardctl agent publish /secure/steward/site \
+  -archive hermes-agent-adapter.tar \
+  -out hermes-capsule.dsse.json
+```
+
+Use the lower-level capsule tools when the publisher key is held by a separate
+offline signing service. After site policy authorizes the publisher and repository,
+import the same archive:
 
 ```console
 sudo stewardctl image import \
@@ -345,6 +354,24 @@ and `stewardctl node admit` response. The response must contain `service_id`, th
 public `task_authorities`, `grant_id`, `service_path`, and `route_policy_digest`.
 
 ### 2. Configure the exact Gateway operation
+
+For the qualified default, configure the service and export tenant-specific trust
+in one command:
+
+```console
+sudo stewardctl agent service activate \
+  -bundle agent.bundle.json \
+  -tenant-id tenant-a \
+  -node-id node-a \
+  -trust-out /secure/steward/hermes-service-trust.json
+```
+
+Run the exact `systemctl` activation command returned in the JSON. The command
+installs only the closed Hermes operation preset and a bounded tenant receipt
+budget. It does not execute service management or transfer the trust file.
+
+The lower-level configuration below is the expert surface for non-default limits
+and separately managed trust export.
 
 Configure only Hermes run submission. Gateway accepts service-task operations only
 as `POST` with `application/json`; the path cannot contain a query, wildcard, or

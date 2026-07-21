@@ -97,35 +97,47 @@ The loopback URL defaults to `http://127.0.0.1:8090` when
 `-node-token-file` is present. Set `-node-url` only when the packaged loopback port
 was changed. A single context may contain both Control and local-node settings.
 
-### Save the first-task defaults
+### Connect the first-task authority
 
-On the node that can reach Gateway through loopback, extend the Control context
-with the files used for authorized service tasks:
+After `site connect` creates the tenant operator context and the node operator
+exports Gateway service trust, connect the task paths from the trusted workstation:
 
 ```console
-sudo -H stewardctl context set production \
+stewardctl site task connect /secure/steward/site \
+  -trust /secure/steward/service-trust.json \
+  -gateway-token-file /secure/steward/gateway-service.token
+```
+
+The Gateway origin defaults to `http://127.0.0.1:8091` when its token path is
+present. `site task connect` verifies the signed site package, tenant, node,
+service inventory, task key, and Gateway credential path before it changes the
+context. The service-trust inventory is non-secret but must cross an authenticated
+channel. The task private key remains an owner-only external file; the context
+stores only its absolute path. Use `-gateway-url`, `-task-key`, or `-context` when
+the defaults do not match the installation.
+
+`context set` remains the expert surface for a separately assembled context:
+
+```console
+stewardctl context set production \
   -control-url https://control.customer.example:8443 \
   -ca-file /etc/steward-control/pki/ca.crt \
   -token-file /secure/steward-control/tenant-a-operator.token \
   -tenant-id tenant-a \
-  -gateway-token-file /etc/steward/gateway-service-token \
-  -service-trust /secure/steward/hermes-service-trust.json \
+  -gateway-token-file /secure/steward/gateway-service.token \
+  -service-trust /secure/steward/service-trust.json \
   -task-key /secure/steward/tenant-task.private.pem \
   -task-key-id tenant-task-1
 ```
 
-The Gateway origin defaults to `http://127.0.0.1:8091` when its token path is
-present. The service-trust inventory is non-secret but authenticated transfer
-material. The task private key remains an owner-only external file; the context
-stores only its absolute path. A higher-assurance site can keep this key off-node
-and continue using the separate `task issue`, transfer, `task submit`, and `task
-wait` commands.
+A higher-assurance site can keep the task key on a separate signing workstation
+and use `task issue`, authenticated transfer, `task submit`, and `task wait`.
 
 With the context selected, run a prompt against a durable Hermes or OpenClaw
 deployment:
 
 ```console
-sudo -H stewardctl task run auditor \
+stewardctl task run auditor \
   "Review the workspace and report one concrete issue"
 ```
 
