@@ -490,6 +490,18 @@ func (b *bridge) process(ctx context.Context, channel string, event buzzEvent) e
 	if !eligible {
 		return nil
 	}
+	lock, acquired, err := acquireEventLock(filepath.Join(b.cfg.StateDirectory, "records", event.ID+".lock"))
+	if err != nil {
+		return fmt.Errorf("acquire event lock: %w", err)
+	}
+	if !acquired {
+		return nil
+	}
+	defer func() {
+		if err := releaseEventLock(lock); err != nil {
+			b.logger.Warn("Buzz event lock release failed", "event_id", event.ID, "error", err)
+		}
+	}()
 	recordPath := filepath.Join(b.cfg.StateDirectory, "records", event.ID+".json")
 	rec, created, err := b.loadOrCreateRecord(recordPath, channel, event)
 	if err != nil {
@@ -543,6 +555,42 @@ func (b *bridge) process(ctx context.Context, channel string, event buzzEvent) e
 	b.processed++
 	b.mu.Unlock()
 	return nil
+}
+
+func acquireEventLock(path string) (*os.File, bool, error) {
+	descriptor, err := syscall.Open(path, syscall.O_RDWR|syscall.O_CREAT|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	file := os.NewFile(uintptr(descriptor), path)
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		_ = file.Close()
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, errors.New("event lock must be an owner-only regular file")
+	}
+	if err := syscall.Flock(descriptor, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return file, true, nil
+}
+
+func releaseEventLock(file *os.File) error {
+	if file == nil {
+		return nil
+	}
+	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	closeErr := file.Close()
+	if unlockErr != nil {
+		return unlockErr
+	}
+	return closeErr
 }
 
 func (b *bridge) eligible(channel string, event buzzEvent) (bool, error) {

@@ -200,6 +200,9 @@ bundles, or credentials.
   Steward reads any event field.
 - Wrong authors, channels, kinds, timestamps, missing or duplicate `h`/`p` tags,
   and self-authored loops create no task.
+- An owner-only advisory lock prevents overlapping bridge processes from
+  submitting or replying to the same event concurrently. The operating system
+  releases the lock if a process crashes, so the next poll can recover.
 - An unavailable Control plane, Gateway tunnel, Hermes service, or Buzz relay
   leaves a durable record with a bounded error and makes `/health` return 503.
 - `max_records` stops intake without deleting old work. Archive completed record

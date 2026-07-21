@@ -373,6 +373,59 @@ func TestFilesystemAndReplyFailureBranches(t *testing.T) {
 	}
 }
 
+func TestEventLockExcludesOverlappingProcessorsAndRecovers(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "event.lock")
+	if lock, acquired, err := acquireEventLock(filepath.Join(directory, "missing", "event.lock")); err == nil || acquired || lock != nil {
+		t.Fatalf("missing-parent lock=%v acquired=%v error=%v", lock, acquired, err)
+	}
+	first, acquired, err := acquireEventLock(path)
+	if err != nil || !acquired {
+		t.Fatalf("first lock acquired=%v error=%v", acquired, err)
+	}
+	second, acquired, err := acquireEventLock(path)
+	if err != nil || acquired || second != nil {
+		t.Fatalf("overlapping lock=%v acquired=%v error=%v", second, acquired, err)
+	}
+	if err := releaseEventLock(first); err != nil {
+		t.Fatal(err)
+	}
+	third, acquired, err := acquireEventLock(path)
+	if err != nil || !acquired {
+		t.Fatalf("recovered lock acquired=%v error=%v", acquired, err)
+	}
+	if err := releaseEventLock(third); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if lock, acquired, err := acquireEventLock(path); err == nil || acquired || lock != nil {
+		t.Fatalf("unsafe lock=%v acquired=%v error=%v", lock, acquired, err)
+	}
+	if err := releaseEventLock(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := validTestConfig(directory)
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	event := validEvent(now)
+	eventLock, acquired, err := acquireEventLock(filepath.Join(cfg.StateDirectory, "records", event.ID+".lock"))
+	if err != nil || !acquired {
+		t.Fatalf("process lock acquired=%v error=%v", acquired, err)
+	}
+	b := &bridge{cfg: cfg, logger: slog.Default(), now: func() time.Time { return now }}
+	if err := b.process(context.Background(), testChannel, event); err != nil {
+		t.Fatalf("busy event was not deferred: %v", err)
+	}
+	if err := releaseEventLock(eventLock); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEligibilityRequiresExactCryptographicMentionShape(t *testing.T) {
 	now := time.Unix(1_900_000_000, 0)
 	b := &bridge{cfg: validTestConfig(t.TempDir()), now: func() time.Time { return now }}
