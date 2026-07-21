@@ -379,6 +379,7 @@ jobs:
           rustup toolchain install "$rust" --profile minimal
           scripts/build-buzz-bridge.sh --source-dir "$source" --output "$output"
           test -x "$output/buzz"
+          "$output/buzz" messages get --help | grep -Fq -- '--before-id'
           test -x "$output/steward-buzz-bridge"
           test -x "$output/stewardctl"
           test -f "$output/source-lock.json"
