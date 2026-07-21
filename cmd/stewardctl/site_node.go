@@ -196,7 +196,7 @@ func siteNodePrepare(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("create Control enrollment: %w", err)
 	}
-	if err := validatePreparedEnrollment(enrollment, verified.inventory.TenantID, nodeID); err != nil {
+	if err := validatePreparedEnrollment(enrollment, verified.inventory.TenantID, nodeID, false); err != nil {
 		return err
 	}
 	enrollmentRaw, err := json.Marshal(enrollment)
@@ -253,10 +253,6 @@ func siteNodeActivate(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	expires, _ := time.Parse(time.RFC3339Nano, prepared.enrollment.ExpiresAt)
-	if !expires.After(timeNow().Add(5 * time.Second)) {
-		return errors.New("node enrollment has expired or is too close to expiry; prepare a new enrollment")
-	}
 	if *output == "" {
 		*output = filepath.Join(filepath.Dir(packageDirectory), "steward-node-"+prepared.manifest.NodeID+"-activation")
 	}
@@ -270,14 +266,29 @@ func siteNodeActivate(arguments []string, stdout io.Writer) error {
 		ControllerInstanceID: prepared.manifest.ControllerInstanceID, EnrollmentID: prepared.manifest.EnrollmentID,
 		ExchangeRequestID: prepared.manifest.ExchangeRequestID,
 	}
-	privateKey, err := ensureSiteNodeActivationWorkspace(activationDirectory, state)
-	if err != nil {
+	var privateKey ed25519.PrivateKey
+	if _, err := os.Lstat(activationDirectory); err == nil {
+		privateKey, err = ensureSiteNodeActivationWorkspace(activationDirectory, state)
+		if err != nil {
+			return err
+		}
+		if complete, err := readCompletedSiteNodeActivation(activationDirectory, state); err != nil {
+			return err
+		} else if complete != nil {
+			return writeSiteNodeActivationSummary(stdout, activationDirectory, prepared, complete.CredentialID)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if complete, err := readCompletedSiteNodeActivation(activationDirectory, state); err != nil {
-		return err
-	} else if complete != nil {
-		return writeSiteNodeActivationSummary(stdout, activationDirectory, prepared, complete.CredentialID)
+	expires, _ := time.Parse(time.RFC3339Nano, prepared.enrollment.ExpiresAt)
+	if !expires.After(timeNow().Add(5 * time.Second)) {
+		return errors.New("node enrollment has expired or is too close to expiry; prepare a new enrollment")
+	}
+	if privateKey == nil {
+		privateKey, err = ensureSiteNodeActivationWorkspace(activationDirectory, state)
+		if err != nil {
+			return err
+		}
 	}
 	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
 		prepared.enrollment.ControllerInstanceID, prepared.enrollment.EnrollmentID,
@@ -806,7 +817,7 @@ func verifySiteNodePackage(directory, pinnedRoot string) (verifiedSiteNodePackag
 	if err != nil {
 		return verifiedSiteNodePackage{}, err
 	}
-	if err := validatePreparedEnrollment(enrollment, manifest.TenantID, manifest.NodeID); err != nil {
+	if err := validatePreparedEnrollment(enrollment, manifest.TenantID, manifest.NodeID, true); err != nil {
 		return verifiedSiteNodePackage{}, err
 	}
 	if enrollment.ControllerInstanceID != manifest.ControllerInstanceID || enrollment.EnrollmentID != manifest.EnrollmentID || enrollment.ExpiresAt != manifest.EnrollmentExpiresAt {
@@ -826,13 +837,13 @@ func verifySiteNodePackage(directory, pinnedRoot string) (verifiedSiteNodePackag
 	}, nil
 }
 
-func validatePreparedEnrollment(enrollment controlclient.Enrollment, tenantID, nodeID string) error {
+func validatePreparedEnrollment(enrollment controlclient.Enrollment, tenantID, nodeID string, allowExpired bool) error {
 	if enrollment.ControllerInstanceID == "" || enrollment.EnrollmentID == "" || enrollment.EnrollmentToken == "" ||
 		enrollment.NodeID != nodeID || !slices.Equal(enrollment.TenantIDs, []string{tenantID}) {
 		return errors.New("Control returned an enrollment outside the requested site, tenant, or node identity")
 	}
 	expires, err := time.Parse(time.RFC3339Nano, enrollment.ExpiresAt)
-	if err != nil || !expires.After(timeNow()) || expires.After(timeNow().Add(24*time.Hour+time.Second)) {
+	if err != nil || (!allowExpired && !expires.After(timeNow())) || expires.After(timeNow().Add(24*time.Hour+time.Second)) {
 		return errors.New("Control returned an invalid enrollment expiry")
 	}
 	return nil

@@ -464,14 +464,14 @@ func TestSiteTaskKeyRejectsUnscopedAuthority(t *testing.T) {
 }
 
 func TestSiteTaskAndNodeHelpersRejectMalformedMaterial(t *testing.T) {
-	if err := validatePreparedEnrollment(controlclient.Enrollment{}, "tenant-a", "node-a"); err == nil {
+	if err := validatePreparedEnrollment(controlclient.Enrollment{}, "tenant-a", "node-a", false); err == nil {
 		t.Fatal("identity-free enrollment was accepted")
 	}
 	invalidExpiry := controlclient.Enrollment{
 		ControllerInstanceID: "control-a", EnrollmentID: "enrollment-a", EnrollmentToken: "token",
 		NodeID: "node-a", TenantIDs: []string{"tenant-a"}, ExpiresAt: "not-a-time",
 	}
-	if err := validatePreparedEnrollment(invalidExpiry, "tenant-a", "node-a"); err == nil {
+	if err := validatePreparedEnrollment(invalidExpiry, "tenant-a", "node-a", false); err == nil {
 		t.Fatal("enrollment with an invalid expiry was accepted")
 	}
 	if err := validateSiteNodeManifest(siteNodePackageManifest{}); err == nil {

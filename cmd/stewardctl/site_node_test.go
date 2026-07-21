@@ -134,6 +134,10 @@ func TestSiteNodePrepareVerifyAndResumeActivation(t *testing.T) {
 	if err := siteCommand(arguments, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
+	now = now.Add(time.Hour)
+	if err := siteCommand(arguments, &bytes.Buffer{}); err != nil {
+		t.Fatalf("recover completed activation after enrollment expiry: %v", err)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if exchanges != 2 {
