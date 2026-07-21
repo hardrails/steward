@@ -250,6 +250,27 @@ the local config digest and rejects mismatches. An existing valid image returns
 `"imported":false`. Import authorizes storage; each workload still needs a
 tenant-bound intent.
 
+### Distribute images across a fleet without manual node copies
+
+For a fleet, operate an OCI-compatible registry inside the disconnected site and
+mirror only approved immutable images into it. The
+[OCI Distribution Specification](https://specs.opencontainers.org/distribution-spec/)
+defines the portable protocol; [CNCF Distribution](https://distribution.github.io/distribution/about/deploying/)
+is one vendor-neutral implementation. A production registry needs TLS and access
+control. Registry deployment, backup, scanning, and availability remain site
+operations rather than Steward authority.
+
+On each Executor, set the approved registry and optional owner-only credential as
+described in [Executor configuration]({{ '/reference/configuration/#optional-site-registry' | relative_url }}).
+After that, normal desired-state deployment can populate a missing image cache.
+The signed capsule still fixes the repository, manifest digest, config digest, and
+platform. Executor allows only its configured registry, bounds the pull, and
+reinspects the exact image before creating a workload.
+
+This removes per-node archive copying from the normal fleet path. Retain the
+offline archive importer for removable-media sites, registry recovery, and
+independent verification.
+
 Do not substitute raw `docker load`: it authenticates neither capsule nor policy and
 may lose the addressable repository digest. See
 [image and evidence tools]({{ '/reference/offline-tools/' | relative_url }}) for the

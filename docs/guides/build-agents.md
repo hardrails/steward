@@ -107,7 +107,9 @@ adjustment is returned.
 ## Run the agent on one node
 
 Use `agent apply` after the Executor has its signed-admission policy and the
-selected node is reachable through a loopback connection or SSH port forwarding:
+selected node is reachable through a loopback connection or SSH port forwarding.
+The exact image must already be imported, or the node must have the optional
+site-registry pull configured:
 
 ```console
 stewardctl agent apply \

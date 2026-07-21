@@ -268,6 +268,38 @@ func TestSecureAdmissionDoesNotPullFromUnconfiguredRegistry(t *testing.T) {
 	}
 }
 
+func TestSecureAdmissionRejectsFailedOrMismatchedPullBeforeMutation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configure  func(*secureDocker)
+		wantStatus int
+	}{
+		{name: "pull failure", configure: func(docker *secureDocker) {
+			docker.pullErr = errors.New("registry unavailable")
+		}, wantStatus: http.StatusBadGateway},
+		{name: "config mismatch", configure: func(docker *secureDocker) {
+			docker.imageID = "sha256:" + strings.Repeat("c", 64)
+		}, wantStatus: http.StatusConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := &secureDocker{imageErr: ErrNotFound}
+			test.configure(docker)
+			server, _ := NewServer(docker, "secret", nil)
+			capsule, intent, config := secureAdmissionFixture(t)
+			config.ImagePullRegistry = "registry.local"
+			config.ImagePullTimeout = time.Minute
+			if err := server.EnableSecureAdmission(config); err != nil {
+				t.Fatal(err)
+			}
+			response := submitSecureAdmission(t, server, capsule, intent)
+			if response.Code != test.wantStatus || docker.pullCalls != 1 || len(docker.created) != 0 ||
+				len(config.Journal.Pending()) != 0 {
+				t.Fatalf("status=%d pulls=%d creates=%d pending=%#v body=%s", response.Code, docker.pullCalls, len(docker.created), config.Journal.Pending(), response.Body.String())
+			}
+		})
+	}
+}
+
 func TestSecureAdmissionRejectsDeclaredImageVolumesBeforeMutation(t *testing.T) {
 	docker := &secureDocker{volumes: []string{"/hidden-state"}}
 	server, _ := NewServer(docker, "secret", nil)

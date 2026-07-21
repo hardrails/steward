@@ -364,7 +364,10 @@ The roadmap starts from working primitives rather than a blank design:
 - durable fleet-wide tenant CPU, memory, process, and workload quotas reserved
   atomically with admission, with CLI, API, attention, and console visibility;
 - bounded exact-image locality reporting and deterministic cache-aware placement,
-  with the optimization kept separate from signed admission authority; and
+  with the optimization kept separate from signed admission authority;
+- opt-in image retrieval from one operator-approved OCI registry, with protected
+  registry authentication, exact signed-digest pulls, and mandatory post-pull
+  image inspection; and
 - a strict, owner-only incident support bundle that joins non-secret controller
   inventory and node evidence checkpoints for offline inspection without exporting
   prompts, bodies, command envelopes, credentials, private keys, result text, or
@@ -373,9 +376,10 @@ The roadmap starts from working primitives rather than a blank design:
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and
 prompt path now has composed commands. Explicit human or automation steps still
-cross the boundaries where a privileged installer runs, an image is transferred
-and imported, Control's public controller key is authenticated, Gateway is
-restarted, or non-secret service trust moves between machines. The controller also
+cross the boundaries where a privileged installer runs, an approved registry is
+populated or an offline image is imported, Control's public controller key is
+authenticated, Gateway is restarted, or non-secret service trust moves between
+machines. The controller also
 does not yet join continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 
