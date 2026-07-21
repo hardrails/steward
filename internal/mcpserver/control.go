@@ -178,7 +178,7 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 	case "steward_control_event_list":
 		var arguments controlEventListArgs
 		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.TenantID, 128) ||
-			!validControlPage(arguments.After, arguments.Limit) || arguments.Limit > 100 {
+			!validControlEventCursor(arguments.After) || !validControlPage(arguments.After, arguments.Limit) || arguments.Limit > 100 {
 			return nil, errors.New("steward_control_event_list requires tenant_id and accepts only a bounded event cursor and limit up to 100")
 		}
 		limit := arguments.Limit
@@ -399,6 +399,21 @@ func decodeControlCommand(value string) ([]byte, error) {
 
 func validControlPage(after string, limit int) bool {
 	return (after == "" || validControlIdentifier(after, 128)) && limit >= 0 && limit <= 500
+}
+
+func validControlEventCursor(after string) bool {
+	if after == "" {
+		return true
+	}
+	if len(after) != len("event-")+64 || !strings.HasPrefix(after, "event-") {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(after, "event-") {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func validControlInventoryPage(cursor string, limit int) bool {

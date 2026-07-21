@@ -122,3 +122,40 @@ func TestInstanceEventReceiptOrderSurvivesControllerClockRollback(t *testing.T) 
 		t.Fatalf("new receipt %s was not ordered after existing receipt %s", events[0].ReceivedAt, events[1].ReceivedAt)
 	}
 }
+
+func TestInstanceEventStoreFailsClosedWhenUnavailableOrCrossTenant(t *testing.T) {
+	var unavailable *Store
+	if _, err := unavailable.ListInstanceEvents(controlauth.Identity{}, "tenant-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil store list error=%v", err)
+	}
+	if _, err := unavailable.RetainInstanceEvents(controlauth.NodeIdentity{}, controlprotocol.InstanceEventBatchRequestV1{}, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil store retain error=%v", err)
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	event := testControllerEvent("tenant-a", node.NodeID, "finding-closed", fixture.now)
+	batch := controlprotocol.InstanceEventBatchRequestV1{
+		SchemaVersion: controlprotocol.InstanceEventBatchV1, NodeID: node.NodeID,
+		Events: []controlprotocol.InstanceEventV1{event},
+	}
+	if _, err := fixture.store.RetainInstanceEvents(node, batch, time.Time{}); err == nil {
+		t.Fatal("zero retention time accepted")
+	}
+	crossTenant := batch
+	crossTenant.Events = append([]controlprotocol.InstanceEventV1(nil), batch.Events...)
+	crossTenant.Events[0] = testControllerEvent("tenant-b", node.NodeID, "finding-cross-tenant", fixture.now)
+	if _, err := fixture.store.RetainInstanceEvents(node, crossTenant, fixture.now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("cross-tenant retain error=%v", err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.ListInstanceEvents(fixture.admin, "tenant-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed store list error=%v", err)
+	}
+	if _, err := fixture.store.RetainInstanceEvents(node, batch, fixture.now); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed store retain error=%v", err)
+	}
+}

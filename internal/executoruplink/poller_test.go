@@ -110,11 +110,21 @@ func TestPollerPublishesControllerEventsAtLeastOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := poller.publishEvents(context.Background()); err == nil || acknowledgements.Load() != 0 {
-		t.Fatalf("failed controller commit err=%v acknowledgements=%d", err, acknowledgements.Load())
+	poller.interval = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		poller.runEvents(ctx)
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for acknowledgements.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
-	if err := poller.publishEvents(context.Background()); err != nil || acknowledgements.Load() != 1 {
-		t.Fatalf("successful controller commit err=%v acknowledgements=%d", err, acknowledgements.Load())
+	cancel()
+	<-done
+	if attempts.Load() < 2 || acknowledgements.Load() != 1 {
+		t.Fatalf("event retry attempts=%d acknowledgements=%d", attempts.Load(), acknowledgements.Load())
 	}
 }
 

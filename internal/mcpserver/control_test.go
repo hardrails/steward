@@ -43,6 +43,7 @@ func (control *fakeControl) ListNodes(_ context.Context, tenantID, after string,
 }
 
 func (control *fakeControl) ListInstanceEvents(_ context.Context, tenantID, after string, limit int) (controlclient.InstanceEventList, error) {
+	control.calls = append(control.calls, "event-list:"+tenantID+":"+after+":"+strconv.Itoa(limit))
 	return controlclient.InstanceEventList{Events: []controlstore.InstanceEvent{}}, control.err
 }
 
@@ -317,6 +318,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-v1\x00agent-a"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
+	eventCursor := "event-" + strings.Repeat("a", 64)
 	directCalls := []struct {
 		name      string
 		arguments map[string]any
@@ -339,6 +341,12 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 			arguments: map[string]any{
 				"tenant_id": "tenant-a", "node_id": "node-a", "kind": "containment",
 				"severity": "critical", "cursor": incidentCursor, "limit": 20,
+			},
+		},
+		{
+			name: "steward_control_event_list",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a", "after": eventCursor, "limit": 25,
 			},
 		},
 		{
@@ -389,6 +397,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		"operations-summary:tenant-a",
 		"attention-list:tenant-a:node_stale:" + attentionCursor + ":25",
 		"incident-timeline:tenant-a:node-a:containment:critical:" + incidentCursor + ":20",
+		"event-list:tenant-a:" + eventCursor + ":25",
 		"agent-list:tenant-a:node-a:running:" + agentCursor + ":40",
 		"command-list:tenant-a:node-a:terminal:failed:" + commandCursor + ":50",
 		"credential-list:tenant-a:operator:tenant_operator::false:" + credentialCursor + ":10",
@@ -423,6 +432,10 @@ func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 		{name: "agent status", tool: "steward_control_agent_list", arguments: map[string]any{"status": "destroyed"}},
 		{name: "agent node", tool: "steward_control_agent_list", arguments: map[string]any{"node_id": "-node"}},
 		{name: "agent cursor", tool: "steward_control_agent_list", arguments: map[string]any{"cursor": validCursor + "="}},
+		{name: "event tenant", tool: "steward_control_event_list", arguments: map[string]any{}},
+		{name: "event cursor", tool: "steward_control_event_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "event-invalid"}},
+		{name: "event cursor alphabet", tool: "steward_control_event_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "event-" + strings.Repeat("G", 64)}},
+		{name: "event limit", tool: "steward_control_event_list", arguments: map[string]any{"tenant_id": "tenant-a", "limit": 101}},
 		{name: "command state", tool: "steward_control_command_list", arguments: map[string]any{"state": "running"}},
 		{name: "command terminal without state", tool: "steward_control_command_list", arguments: map[string]any{"terminal_status": "failed"}},
 		{name: "command terminal status", tool: "steward_control_command_list", arguments: map[string]any{"state": "terminal", "terminal_status": "running"}},
