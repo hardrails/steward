@@ -368,6 +368,13 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 			t.Fatalf("Dockerfile executes or installs through forbidden path %q", forbidden)
 		}
 	}
+	for profile, executable := range map[string]string{"research": "research.py", "developer": "coding_worker.py"} {
+		executableCopy := strings.Index(dockerfile, "--chmod=0555 adapter/profiles/"+profile+"/"+executable)
+		readOnlyCopy := strings.Index(dockerfile, "--chmod=0444 adapter/profiles/"+profile+"/SKILL.md")
+		if executableCopy < 0 || readOnlyCopy < 0 || executableCopy > readOnlyCopy {
+			t.Fatalf("%s profile directory is not created by its searchable 0555 copy", profile)
+		}
+	}
 	if strings.Contains(dockerfile, "# syntax=") {
 		t.Fatal("Dockerfile unexpectedly delegates parsing to an external frontend")
 	}
