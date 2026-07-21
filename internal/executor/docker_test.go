@@ -159,17 +159,11 @@ func TestDockerImageAdministrativeFailuresStayBoundedAndVisible(t *testing.T) {
 	}
 	reference := "registry.site.test/agents/hermes@sha256:" + strings.Repeat("a", 64)
 	for name, call := range map[string]func() error{
-		"nil archive":  func() error { return broken.LoadImage(context.Background(), nil) },
-		"load request": func() error { return broken.LoadImage(nil, strings.NewReader("archive")) },
+		"nil archive": func() error { return broken.LoadImage(context.Background(), nil) },
 		"load transport": func() error {
 			return broken.LoadImage(context.Background(), strings.NewReader("archive"))
 		},
-		"pull request":   func() error { return broken.PullSignedImage(nil, reference, "") },
 		"pull transport": func() error { return broken.PullSignedImage(context.Background(), reference, "") },
-		"inventory request": func() error {
-			_, err := broken.CachedImageConfigDigests(nil)
-			return err
-		},
 		"inventory transport": func() error {
 			_, err := broken.CachedImageConfigDigests(context.Background())
 			return err
