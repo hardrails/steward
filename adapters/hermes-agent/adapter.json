@@ -1,25 +1,29 @@
 {
   "schema_version": "steward.adapter-source.v1",
   "adapter_contract": "steward.hermes-agent.v1",
-  "qualified_platforms": ["linux/amd64"],
+  "qualified_platforms": [
+    "linux/amd64"
+  ],
   "upstream": {
     "repository": "https://github.com/NousResearch/hermes-agent.git",
-    "revision": "095b9eed3801c251796df93f48a8f2a527ff6e70",
+    "revision": "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
     "license": "MIT",
-    "license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+    "license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+    "release": "v2026.7.20",
+    "version": "0.19.0"
   },
   "build_inputs": [
     {
       "path": "pyproject.toml",
-      "sha256": "d1eee316b301dbaa35d8e59ab138cf86a4937f0fe4c65f97d839d798ae6a6755"
+      "sha256": "7fc0552a6bfdd8d58632a9164e3432c868fc4d928170f8c8a545421134c5952f"
     },
     {
       "path": "uv.lock",
-      "sha256": "8d03d04a404c641e1c9642f0482e2d8752c57da02da94d612a5f30883b25fbca"
+      "sha256": "456f76d5396df0f543d1035c2d05173cae1882c290ba585cc926a79958b9d7fe"
     },
     {
       "path": "package-lock.json",
-      "sha256": "6fad90f58253c1be7f7916516a012242793efbe0dfdaf083e183067e6c825dc7"
+      "sha256": "4f8657f00e3d7d03217c7338fb6b8da7514fdb4b6637e6a279f27251c3b53dc6"
     }
   ],
   "base_images": [
@@ -35,7 +39,9 @@
     "home": "/opt/data/home",
     "workdir": "/opt/data",
     "tmp_path": "/tmp",
-    "command": ["serve"],
+    "command": [
+      "serve"
+    ],
     "service_port": 8766,
     "internal_agent_api_port": 8642
   },

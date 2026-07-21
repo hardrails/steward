@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -278,6 +279,19 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	repositoryRoot := filepath.Join(root, "..", "..")
+	var adapter struct {
+		Upstream struct {
+			Release  string `json:"release"`
+			Revision string `json:"revision"`
+			Version  string `json:"version"`
+		} `json:"upstream"`
+	}
+	decodeEvidence(t, filepath.Join(root, "adapter.json"), &adapter)
+	if !regexp.MustCompile(`^v[0-9]+(?:\.[0-9]+){2}$`).MatchString(adapter.Upstream.Release) ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(adapter.Upstream.Revision) ||
+		!regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(adapter.Upstream.Version) {
+		t.Fatalf("invalid Hermes release pin: %#v", adapter.Upstream)
+	}
 	for _, name := range []string{"build-hermes-adapter.sh", "hermes-feasibility.sh", "hermes-steward-acceptance.sh"} {
 		script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", name), 2<<20))
 		for _, line := range strings.Split(script, "\n") {
@@ -355,7 +369,7 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-feasibility.json"), &feasibility)
 	if feasibility.SchemaVersion != "steward.agent-feasibility.v1" || feasibility.Overall != "passed" ||
 		feasibility.ContainsContent || feasibility.Runtime != "runsc" || feasibility.Platform != "linux/amd64" ||
-		feasibility.UpstreamRevision != "095b9eed3801c251796df93f48a8f2a527ff6e70" {
+		feasibility.UpstreamRevision != adapter.Upstream.Revision {
 		t.Fatalf("invalid Hermes feasibility evidence authority: %#v", feasibility)
 	}
 	if !validSHA256Hex(feasibility.AdapterArchiveSHA256) ||
