@@ -225,5 +225,8 @@ func cloneSchedulingObservation(
 	if value.Taints != nil {
 		value.Taints = append([]string{}, value.Taints...)
 	}
+	if value.CachedImageConfigDigests != nil {
+		value.CachedImageConfigDigests = append([]string{}, value.CachedImageConfigDigests...)
+	}
 	return value
 }

@@ -830,7 +830,9 @@ func selectNode(
 			}
 			continue
 		}
-		candidate := rankPlacementCandidate(node, placements[node.ID], delegation.Admission.Placement, spreadCounts)
+		candidate := rankPlacementCandidate(
+			node, placements[node.ID], delegation.Admission.Placement, spreadCounts, capsule.Image.ConfigDigest,
+		)
 		if selected == nil || candidate.betterThan(*selected) {
 			selected = &candidate
 		}
@@ -863,6 +865,9 @@ type placementCandidate struct {
 	spreadValue        string
 	spreadPresent      bool
 	sameInSpreadDomain int
+	imageConfigDigest  string
+	imageLocal         bool
+	imageReported      bool
 }
 
 func (candidate placementCandidate) betterThan(other placementCandidate) bool {
@@ -877,6 +882,9 @@ func (candidate placementCandidate) betterThan(other placementCandidate) bool {
 	if len(candidate.preferredMatches) != len(other.preferredMatches) {
 		return len(candidate.preferredMatches) > len(other.preferredMatches)
 	}
+	if candidate.imageLocal != other.imageLocal {
+		return candidate.imageLocal
+	}
 	if candidate.assignedWorkloads != other.assignedWorkloads {
 		return candidate.assignedWorkloads < other.assignedWorkloads
 	}
@@ -886,6 +894,9 @@ func (candidate placementCandidate) betterThan(other placementCandidate) bool {
 func (candidate placementCandidate) decision(now time.Time) controlstore.DeploymentPlacementDecision {
 	return controlstore.DeploymentPlacementDecision{
 		NodeID:                candidate.nodeID,
+		ImageConfigDigest:     candidate.imageConfigDigest,
+		ImageLocal:            candidate.imageLocal,
+		ImageLocalityReported: candidate.imageReported,
 		PreferredLabelMatches: append([]string{}, candidate.preferredMatches...),
 		PreferredLabelCount:   candidate.preferredTotal,
 		SpreadBy:              candidate.spreadBy, SpreadValue: candidate.spreadValue,
@@ -901,8 +912,15 @@ func rankPlacementCandidate(
 	assigned int,
 	placement *admission.CommandDelegationPlacement,
 	spreadCounts map[string]int,
+	imageConfigDigest string,
 ) placementCandidate {
-	candidate := placementCandidate{nodeID: node.ID, assignedWorkloads: assigned}
+	candidate := placementCandidate{
+		nodeID: node.ID, assignedWorkloads: assigned, imageConfigDigest: imageConfigDigest,
+	}
+	if node.Scheduling != nil && node.Scheduling.Observation.CachedImageConfigDigests != nil {
+		candidate.imageReported = true
+		candidate.imageLocal = slices.Contains(node.Scheduling.Observation.CachedImageConfigDigests, imageConfigDigest)
+	}
 	if placement == nil {
 		candidate.preferredMatches = []string{}
 		return candidate

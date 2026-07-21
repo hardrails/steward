@@ -185,6 +185,16 @@ func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
 }
 
 func TestDeploymentClientRejectsMalformedProjectionFields(t *testing.T) {
+	validPlacement := validClientDeployment()
+	validPlacement.Instances[0].NodeID = "node-1"
+	validPlacement.Instances[0].Placement = &controlstore.DeploymentPlacementDecision{
+		NodeID: "node-1", ImageConfigDigest: "sha256:" + strings.Repeat("d", 64),
+		ImageLocal: true, ImageLocalityReported: true,
+		PreferredLabelMatches: []string{}, DecidedAt: validPlacement.UpdatedAt,
+	}
+	if err := validateDeploymentResponse(validPlacement, "tenant-a", "research"); err != nil {
+		t.Fatalf("valid placement projection was rejected: %v", err)
+	}
 	tests := []struct {
 		name   string
 		mutate func(*Deployment)
@@ -194,6 +204,13 @@ func TestDeploymentClientRejectsMalformedProjectionFields(t *testing.T) {
 		}},
 		{"node scope", func(value *Deployment) { value.AllowedNodeIDs = []string{"bad node"} }},
 		{"instance identity", func(value *Deployment) { value.Instances[0].InstanceID = "bad instance" }},
+		{"placement image locality", func(value *Deployment) {
+			value.Instances[0].NodeID = "node-1"
+			value.Instances[0].Placement = &controlstore.DeploymentPlacementDecision{
+				NodeID: "node-1", ImageConfigDigest: "sha256:" + strings.Repeat("d", 64), ImageLocal: true,
+				PreferredLabelMatches: []string{}, DecidedAt: value.UpdatedAt,
+			}
+		}},
 		{"intent", func(value *Deployment) { value.Instances[0].Intent = &admission.InstanceIntent{} }},
 		{"admission", func(value *Deployment) {
 			value.Instances[0].Admission = &controlprotocol.ExecutorAdmissionProjectionV1{}

@@ -3,6 +3,7 @@ package controlstore
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,10 @@ func TestObserveNodeSchedulingIsAuthenticatedBoundedAndDurable(t *testing.T) {
 		t.Fatalf("first observation = (%+v, %v, %v)", node, applied, err)
 	}
 	originalObservedAt := node.Scheduling.ObservedAt
+	observation.CachedImageConfigDigests[0] = "sha256:" + strings.Repeat("b", 64)
+	if node.Scheduling.Observation.CachedImageConfigDigests[0] != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatal("retained scheduling image inventory aliases caller memory")
+	}
 	observation.Labels[0].Value = "mutated"
 	nodes, err := fixture.store.ListNodes(fixture.admin, "tenant-a")
 	if err != nil || len(nodes) != 1 || nodes[0].Scheduling.Observation.Labels[0].Value != "west" {
@@ -50,7 +55,9 @@ func TestObserveNodeSchedulingIsAuthenticatedBoundedAndDurable(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	nodes, err = reopened.ListNodes(fixture.admin, "tenant-a")
 	if err != nil || len(nodes) != 1 || nodes[0].Scheduling == nil ||
-		nodes[0].Scheduling.Observation.Policy.Host.Workloads != 4 {
+		nodes[0].Scheduling.Observation.Policy.Host.Workloads != 4 ||
+		len(nodes[0].Scheduling.Observation.CachedImageConfigDigests) != 1 ||
+		nodes[0].Scheduling.Observation.CachedImageConfigDigests[0] != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("reopened scheduling observation = (%+v, %v)", nodes, err)
 	}
 }
@@ -182,9 +189,10 @@ func storeSchedulingObservation(nodeID string) controlprotocol.ExecutorSchedulin
 	return controlprotocol.ExecutorSchedulingObservationV1{
 		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
 		NodeID:        nodeID, CredentialScope: "node", OS: "linux", Architecture: "amd64",
-		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
-		Labels:    []controlprotocol.ExecutorSchedulingLabelV1{{Key: "region", Value: "west"}},
-		Taints:    []string{},
+		Isolation:                controlprotocol.ExecutorSchedulingIsolationGVisor,
+		Labels:                   []controlprotocol.ExecutorSchedulingLabelV1{{Key: "region", Value: "west"}},
+		Taints:                   []string{},
+		CachedImageConfigDigests: []string{"sha256:" + strings.Repeat("a", 64)},
 		Policy: controlprotocol.ExecutorSchedulingPolicyV1{
 			PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 512 << 20, CPUMillis: 1000, PIDs: 128, Workloads: 1},
 			Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2 << 30, CPUMillis: 4000, PIDs: 1024, Workloads: 4},

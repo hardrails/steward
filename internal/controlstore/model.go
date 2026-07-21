@@ -442,6 +442,9 @@ type DeploymentDisruptionBudget struct {
 // that selected the node.
 type DeploymentPlacementDecision struct {
 	NodeID                       string   `json:"node_id"`
+	ImageConfigDigest            string   `json:"image_config_digest,omitempty"`
+	ImageLocal                   bool     `json:"image_local"`
+	ImageLocalityReported        bool     `json:"image_locality_reported"`
 	PreferredLabelMatches        []string `json:"preferred_label_matches"`
 	PreferredLabelCount          int      `json:"preferred_label_count"`
 	SpreadBy                     string   `json:"spread_by,omitempty"`
@@ -2021,6 +2024,14 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 				placement.SameDeploymentInSpreadDomain < 0 || placement.AssignedWorkloads < 0 ||
 				!validTimestamp(placement.DecidedAt) {
 				return errors.New("deployment placement decision is invalid")
+			}
+			if placement.ImageConfigDigest == "" {
+				if placement.ImageLocal || placement.ImageLocalityReported {
+					return errors.New("deployment placement image locality is inconsistent")
+				}
+			} else if !validSHA256Digest(placement.ImageConfigDigest) ||
+				placement.ImageLocal && !placement.ImageLocalityReported {
+				return errors.New("deployment placement image locality is invalid")
 			}
 			for matchIndex, key := range placement.PreferredLabelMatches {
 				if !controlprotocol.ValidSchedulingAttribute(key) ||

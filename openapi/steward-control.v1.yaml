@@ -3886,6 +3886,17 @@ components:
             minLength: 1
             maxLength: 128
             pattern: '^[A-Za-z0-9._:/-]+$'
+        cached_image_config_digests:
+          type: array
+          nullable: true
+          maxItems: 128
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/SHA256Digest"
+          description: >-
+            Canonical, bounded local Docker image config identities used only
+            as a soft placement hint. Null means this Executor did not report
+            image locality; an empty array means it reported an empty cache.
         policy:
           $ref: "#/components/schemas/ExecutorSchedulingPolicy"
     ExecutorSchedulingLabel:
@@ -4231,6 +4242,8 @@ components:
       additionalProperties: false
       required:
         - node_id
+        - image_local
+        - image_locality_reported
         - preferred_label_matches
         - preferred_label_count
         - same_deployment_in_spread_domain
@@ -4239,6 +4252,14 @@ components:
       properties:
         node_id:
           $ref: "#/components/schemas/Identifier128"
+        image_config_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        image_local:
+          type: boolean
+          description: True when the selected node reported the exact image config digest locally.
+        image_locality_reported:
+          type: boolean
+          description: False when the selected Executor did not support image-locality reporting.
         preferred_label_matches:
           type: array
           maxItems: 32

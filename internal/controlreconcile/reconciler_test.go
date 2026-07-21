@@ -432,13 +432,13 @@ func TestTopologyPlacementRanksSpreadBeforePreferenceAndLoad(t *testing.T) {
 	busyPreferred := rankPlacementCandidate(node("node-a",
 		controlprotocol.ExecutorSchedulingLabelV1{Key: "disk", Value: "fast"},
 		controlprotocol.ExecutorSchedulingLabelV1{Key: "zone", Value: "west-a"},
-	), 0, placement, spread)
+	), 0, placement, spread, "")
 	emptyDomain := rankPlacementCandidate(node("node-b",
 		controlprotocol.ExecutorSchedulingLabelV1{Key: "zone", Value: "west-b"},
-	), 7, placement, spread)
+	), 7, placement, spread, "")
 	missingSpread := rankPlacementCandidate(node("node-c",
 		controlprotocol.ExecutorSchedulingLabelV1{Key: "disk", Value: "fast"},
-	), 0, placement, spread)
+	), 0, placement, spread, "")
 	if !emptyDomain.betterThan(busyPreferred) || !emptyDomain.betterThan(missingSpread) {
 		t.Fatalf("spread rank did not dominate preference/load: busy=%+v empty=%+v missing=%+v", busyPreferred, emptyDomain, missingSpread)
 	}
@@ -451,10 +451,69 @@ func TestTopologyPlacementRanksSpreadBeforePreferenceAndLoad(t *testing.T) {
 	}
 	withoutSpread := rankPlacementCandidate(node("node-d",
 		controlprotocol.ExecutorSchedulingLabelV1{Key: "disk", Value: "fast"},
-	), 4, &admission.CommandDelegationPlacement{PreferredLabels: placement.PreferredLabels}, nil)
-	loaded := rankPlacementCandidate(node("node-e"), 0, &admission.CommandDelegationPlacement{PreferredLabels: placement.PreferredLabels}, nil)
+	), 4, &admission.CommandDelegationPlacement{PreferredLabels: placement.PreferredLabels}, nil, "")
+	loaded := rankPlacementCandidate(node("node-e"), 0, &admission.CommandDelegationPlacement{PreferredLabels: placement.PreferredLabels}, nil, "")
 	if !withoutSpread.betterThan(loaded) {
 		t.Fatal("preferred label did not outrank node load when no spread key was requested")
+	}
+}
+
+func TestPlacementPrefersReportedLocalImageAfterSignedPreferences(t *testing.T) {
+	imageDigest := "sha256:" + strings.Repeat("a", 64)
+	node := func(id string, assigned int, cached []string) placementCandidate {
+		return rankPlacementCandidate(controlstore.Node{ID: id, Scheduling: &controlstore.NodeScheduling{
+			Observation: controlprotocol.ExecutorSchedulingObservationV1{
+				Labels: []controlprotocol.ExecutorSchedulingLabelV1{}, CachedImageConfigDigests: cached,
+			},
+		}}, assigned, &admission.CommandDelegationPlacement{}, nil, imageDigest)
+	}
+	local := node("node-local", 7, []string{imageDigest})
+	empty := node("node-empty", 0, []string{})
+	unknown := node("node-unknown", 0, nil)
+	if !local.betterThan(empty) || !local.betterThan(unknown) {
+		t.Fatalf("image locality rank = local %+v empty %+v unknown %+v", local, empty, unknown)
+	}
+	decision := local.decision(time.Date(2026, 7, 20, 15, 0, 0, 0, time.UTC))
+	if decision.ImageConfigDigest != imageDigest || !decision.ImageLocal || !decision.ImageLocalityReported {
+		t.Fatalf("image locality decision = %+v", decision)
+	}
+}
+
+func TestReconcilerSelectsNodeWithExactCachedImage(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	node2 := addControlNode(t, fixture, "node-2")
+	fixture.now = fixture.now.Add(time.Minute)
+	capabilities := []string{
+		controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+		controlprotocol.ExecutorCapabilityStateSnapshotsV1,
+	}
+	for _, identity := range []controlauth.NodeIdentity{fixture.node, node2} {
+		if deliveries, err := fixture.store.PollV4(identity, capabilities, fixture.now, time.Minute, 1); err != nil || len(deliveries) != 0 {
+			t.Fatalf("refresh %s = (%+v, %v)", identity.NodeID, deliveries, err)
+		}
+	}
+	imageDigest := "sha256:" + strings.Repeat("d", 64)
+	node1Observation := testSchedulingObservation("node-1")
+	node1Observation.CachedImageConfigDigests = []string{}
+	if _, _, err := fixture.store.ObserveNodeScheduling(fixture.node, node1Observation, fixture.now); err != nil {
+		t.Fatal(err)
+	}
+	node2Observation := testSchedulingObservation("node-2")
+	node2Observation.CachedImageConfigDigests = []string{imageDigest}
+	if _, _, err := fixture.store.ObserveNodeScheduling(node2, node2Observation, fixture.now); err != nil {
+		t.Fatal(err)
+	}
+	applyControlDeployment(t, fixture, 1)
+	assertReconcileCount(t, fixture.reconciler(t), "place on cached image", 0, 1)
+	instance := getControlDeployment(t, fixture).Instances[0]
+	if instance.NodeID != "node-2" || instance.Placement == nil ||
+		instance.Placement.ImageConfigDigest != imageDigest || !instance.Placement.ImageLocal ||
+		!instance.Placement.ImageLocalityReported {
+		if instance.Placement == nil {
+			t.Fatalf("cached image placement = %+v", instance)
+		}
+		t.Fatalf("cached image placement = instance %+v decision %+v", instance, *instance.Placement)
 	}
 }
 
