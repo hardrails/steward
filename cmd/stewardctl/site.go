@@ -102,6 +102,7 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	serviceIDsValue := flags.String("service-ids", "hermes-api", "comma-separated initial agent service identities")
 	serviceID := flags.String("service-id", "", "single initial agent service identity (alias for -service-ids)")
 	connectorID := flags.String("connector-id", "", "optional first protected connector identity")
+	connectorIDsValue := flags.String("connector-ids", "", "comma-separated ordinary connector identities")
 	serverNames := flags.String("control-server-names", "localhost,127.0.0.1,::1", "control TLS DNS names and IP addresses")
 	authorizedEffects := flags.String("authorized-effects", "required", "required or optional when a connector is configured")
 	dryRun := flags.Bool("dry-run", false, "validate and describe outputs without generating keys or files")
@@ -121,7 +122,24 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("site service identities: %w", err)
 	}
+	connectorIDs := []string(nil)
+	if *connectorIDsValue != "" {
+		connectorIDs, err = canonicalCommandDelegationList(*connectorIDsValue)
+		if err != nil {
+			return fmt.Errorf("site connector identities: %w", err)
+		}
+	}
+	if *connectorID != "" {
+		connectorIDs = append(connectorIDs, *connectorID)
+		slices.Sort(connectorIDs)
+		connectorIDs = slices.Compact(connectorIDs)
+	}
 	for _, selected := range serviceIDs {
+		if !validOptionalControlIdentifier(selected, 128) {
+			return errors.New("site, tenant, service, or connector identity is invalid")
+		}
+	}
+	for _, selected := range connectorIDs {
 		if !validOptionalControlIdentifier(selected, 128) {
 			return errors.New("site, tenant, service, or connector identity is invalid")
 		}
@@ -184,7 +202,7 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	}()
 
 	outputs, policyDigest, rootDigest, inventory, err := buildSitePackage(
-		*siteID, *tenantID, *repository, serviceIDs, *connectorID,
+		*siteID, *tenantID, *repository, serviceIDs, connectorIDs, *connectorID,
 		*authorizedEffects, dnsNames, ipAddresses, ipStrings,
 	)
 	if err != nil {
@@ -245,7 +263,7 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	})
 }
 
-func buildSitePackage(siteID, tenantID, repository string, serviceIDs []string, connectorID, effectsMode string,
+func buildSitePackage(siteID, tenantID, repository string, serviceIDs, connectorIDs []string, protectedConnectorID, effectsMode string,
 	dnsNames []string, ipAddresses []net.IP, ipStrings []string,
 ) ([]siteOutput, string, string, []byte, error) {
 	keys := make(map[string]siteKeyMaterial)
@@ -256,7 +274,7 @@ func buildSitePackage(siteID, tenantID, repository string, serviceIDs []string, 
 		}
 		keys[name] = key
 	}
-	if connectorID != "" {
+	if protectedConnectorID != "" {
 		key, err := newSiteKey()
 		if err != nil {
 			return nil, "", "", nil, fmt.Errorf("generate tenant action key: %w", err)
@@ -277,14 +295,14 @@ func buildSitePackage(siteID, tenantID, repository string, serviceIDs []string, 
 			KeyID: "tenant-task-1", PublicKey: base64.StdEncoding.EncodeToString(keys["tenant-task"].public),
 			ServiceIDs: slices.Clone(serviceIDs),
 		}},
+		ConnectorIDs: slices.Clone(connectorIDs),
 	}
-	if connectorID != "" {
-		tenant.ConnectorIDs = []string{connectorID}
+	if protectedConnectorID != "" {
 		tenant.AuthorizedEffects = &admission.AuthorizedEffectsPolicy{
 			Mode: effectsMode,
 			Keys: []admission.ActionKey{{
 				KeyID: "tenant-action-1", PublicKey: base64.StdEncoding.EncodeToString(keys["tenant-action"].public),
-				ConnectorIDs: []string{connectorID},
+				ConnectorIDs: []string{protectedConnectorID},
 			}},
 		}
 	}
@@ -346,7 +364,7 @@ func buildSitePackage(siteID, tenantID, repository string, serviceIDs []string, 
 			siteOutput{path: "public/" + spec.name + ".public", contents: encodeSitePublicKey(keys[spec.name].public), mode: 0o644, classification: "public-trust"},
 		)
 	}
-	if connectorID != "" {
+	if protectedConnectorID != "" {
 		privateRaw, err := encodeSitePrivateKey(keys["tenant-action"].private)
 		if err != nil {
 			return nil, "", "", nil, fmt.Errorf("encode tenant action private key: %w", err)

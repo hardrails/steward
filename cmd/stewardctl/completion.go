@@ -71,7 +71,7 @@ var completionTree = map[string][]string{
 }
 
 var completionFlags = map[string][]string{
-	"site init":                         {"-site-id", "-tenant-id", "-repository", "-service-id", "-service-ids", "-connector-id", "-control-server-names", "-authorized-effects", "-dry-run"},
+	"site init":                         {"-site-id", "-tenant-id", "-repository", "-service-id", "-service-ids", "-connector-id", "-connector-ids", "-control-server-names", "-authorized-effects", "-dry-run"},
 	"site verify":                       {"-site-root-public-key"},
 	"site connect":                      {"-context", "-operator-token-out", "-request-id", "-node-id", "-site-root-public-key", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"site task connect":                 {"-context", "-trust", "-gateway-url", "-gateway-token-file", "-task-key", "-task-key-id", "-site-root-public-key"},

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -129,6 +130,44 @@ func TestSiteInitCreatesAndVerifiesSeparatedAuthorityPackage(t *testing.T) {
 	}
 	if err := siteCommand([]string{"verify", directory, "-site-root-public-key", pinned}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSiteInitAddsOrdinaryConnectorsWithoutActionAuthority(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "research-site")
+	if err := siteCommand([]string{
+		"init", directory,
+		"-tenant-id", "research",
+		"-connector-ids", "steward-research-extract,steward-research-search",
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := readPublicKey(filepath.Join(directory, "public", "site-root.public"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyRaw, err := os.ReadFile(filepath.Join(directory, "public", "site-policy.dsse.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _, err := dsse.Verify(policyRaw, admission.PolicyPayloadType, map[string]ed25519.PublicKey{"site-root-1": root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy admission.SitePolicy
+	if err := json.Unmarshal(payload, &policy); err != nil {
+		t.Fatal(err)
+	}
+	tenant := policy.Tenants[0]
+	if !slices.Equal(tenant.ConnectorIDs, []string{"steward-research-extract", "steward-research-search"}) {
+		t.Fatalf("connector identities=%v", tenant.ConnectorIDs)
+	}
+	if tenant.AuthorizedEffects != nil {
+		t.Fatalf("ordinary connectors unexpectedly require action authority: %#v", tenant.AuthorizedEffects)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "private", "tenant-action.private.pem")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ordinary connector package created action key: %v", err)
 	}
 }
 
