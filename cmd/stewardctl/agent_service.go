@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/gateway"
 	"github.com/hardrails/steward/internal/securefile"
 )
 
@@ -62,9 +63,18 @@ func agentServiceActivate(arguments []string, stdout io.Writer) error {
 	if !ok || contract.serviceID == "" {
 		return errors.New("agent runtime has no activatable Steward service contract")
 	}
+	trustPath, err := filepath.Abs(*trustOutput)
+	if err != nil || trustPath == string(filepath.Separator) {
+		return errors.New("service trust output path is invalid")
+	}
+	stagedConfigPath, originalConfig, err := stageAgentServiceGatewayConfig(*configPath)
+	if err != nil {
+		return fmt.Errorf("stage agent Gateway configuration: %w", err)
+	}
+	defer os.Remove(stagedConfigPath)
 	var configured bytes.Buffer
 	if err := gatewayServiceCommand([]string{
-		"set", "-config", *configPath, "-agent", bundle.Definition.Runtime.Engine,
+		"set", "-config", stagedConfigPath, "-agent", bundle.Definition.Runtime.Engine,
 		"-tenant-budget", *tenantID + "=" + strconv.FormatInt(*tenantBudget, 10),
 	}, &configured); err != nil {
 		return fmt.Errorf("configure agent Gateway service: %w", err)
@@ -80,22 +90,68 @@ func agentServiceActivate(arguments []string, stdout io.Writer) error {
 	}
 	var trust bytes.Buffer
 	if err := gatewayServiceCommand([]string{
-		"trust", "-config", *configPath, "-node-id", *nodeID, "-tenant-id", *tenantID,
+		"trust", "-config", stagedConfigPath, "-node-id", *nodeID, "-tenant-id", *tenantID,
 	}, &trust); err != nil {
 		return fmt.Errorf("export agent service trust: %w", err)
 	}
-	trustPath, err := filepath.Abs(*trustOutput)
-	if err != nil || trustPath == string(filepath.Separator) {
-		return errors.New("service trust output path is invalid")
-	}
 	if err := writeOrVerifyAgentServiceTrust(trustPath, trust.Bytes()); err != nil {
 		return err
+	}
+	currentConfig, err := readCLIArtifact(*configPath)
+	if err != nil {
+		return fmt.Errorf("re-read agent Gateway configuration: %w", err)
+	}
+	if !bytes.Equal(currentConfig, originalConfig) {
+		return errors.New("Gateway configuration changed while agent service activation was being prepared")
+	}
+	plannedConfig, _, _, _, err := gateway.LoadConfig(stagedConfigPath)
+	if err != nil {
+		return fmt.Errorf("load staged agent Gateway configuration: %w", err)
+	}
+	if err := writeGatewayConfig(*configPath, plannedConfig); err != nil {
+		return fmt.Errorf("commit agent Gateway configuration: %w", err)
 	}
 	return writeAgentJSON(stdout, agentServiceActivationSummary{
 		AgentName: bundle.Definition.Name, Runtime: bundle.Definition.Runtime.Engine,
 		ServiceID: contract.serviceID, TenantID: *tenantID, NodeID: *nodeID, TrustFile: trustPath,
 		Activation: gatewayResult.Activation, ServiceReplaced: gatewayResult.Replaced,
 	})
+}
+
+func stageAgentServiceGatewayConfig(path string) (string, []byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() <= 0 || info.Size() > maxArtifactBytes {
+		return "", nil, errors.New("gateway config must be a bounded regular file with no group/world write permission")
+	}
+	original, err := readCLIArtifact(path)
+	if err != nil {
+		return "", nil, err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".gateway-agent-service.*")
+	if err != nil {
+		return "", nil, err
+	}
+	temporaryPath := temporary.Name()
+	cleanup := func(cause error) (string, []byte, error) {
+		return "", nil, errors.Join(cause, temporary.Close(), os.Remove(temporaryPath))
+	}
+	if err := temporary.Chmod(info.Mode().Perm()); err != nil {
+		return cleanup(err)
+	}
+	if _, err := temporary.Write(original); err != nil {
+		return cleanup(err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return "", nil, err
+	}
+	return temporaryPath, original, nil
 }
 
 func writeOrVerifyAgentServiceTrust(path string, contents []byte) error {
