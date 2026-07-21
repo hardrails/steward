@@ -1401,7 +1401,6 @@ func DefaultProfiles() StaticRegistry {
 	return StaticRegistry{
 		{Ref: ProfileRef{ID: "generic-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/state", StateSchemaVersion: "v1"},
 		{Ref: ProfileRef{ID: "hermes-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},
-		{Ref: ProfileRef{ID: "openclaw-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/home/node/.openclaw", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "openclaw-api", ServicePort: 18789},
 	}
 }
 

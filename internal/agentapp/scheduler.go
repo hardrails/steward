@@ -248,7 +248,7 @@ func DecodeSnapshot(raw []byte) (Snapshot, error) {
 func (value Snapshot) Validate() error {
 	if value.Schema != SnapshotSchema || !validToken(value.ID, 128) || !validDigest(value.BundleDigest) ||
 		!validDigest(value.StateDigest) || !validToken(value.SourceLineage, 128) ||
-		(value.RuntimeEngine != "hermes" && value.RuntimeEngine != "openclaw") {
+		value.RuntimeEngine != "hermes" {
 		return errors.New("snapshot metadata is invalid")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, value.CreatedAt); err != nil {

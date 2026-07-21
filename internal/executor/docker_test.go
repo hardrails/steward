@@ -270,8 +270,8 @@ func TestCreateSendsNonEscapableDockerPolicy(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	})
 	w := Workload{
-		InstanceID: "x", TenantID: "tenant-a", ProfileID: "openclaw-v1",
-		Image:     "registry.local/openclaw@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		InstanceID: "x", TenantID: "tenant-a", ProfileID: "hermes-v1",
+		Image:     "registry.local/hermes@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 250, PIDs: 32},
 	}
 	if err := docker.Create(context.Background(), "executor-x", w); err != nil {
@@ -636,7 +636,6 @@ func TestStateMountPathIsDerivedFromBuiltInProfile(t *testing.T) {
 	for _, test := range []struct{ profile, path string }{
 		{"generic-v1@v1", "/state"},
 		{"hermes-v1@v1", "/opt/data"},
-		{"openclaw-v1@v1", "/home/node/.openclaw"},
 	} {
 		workload := Workload{
 			InstanceID: "agent", TenantID: "tenant", ProfileID: test.profile,
@@ -1438,7 +1437,7 @@ func TestInspectProjectsOnlyExecutorOwnedWorkloadState(t *testing.T) {
 
 func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	addresses := testNetworkSpec("tenant-a", "agent-1", 3)
-	state := &StateMount{VolumeName: StateVolumeName("tenant-a", "lineage-a"), Path: "/home/node/.openclaw"}
+	state := &StateMount{VolumeName: StateVolumeName("tenant-a", "lineage-a"), Path: "/opt/data"}
 	taskAuthorities := []gateway.TaskAuthority{{
 		KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
 	}}
@@ -1453,7 +1452,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	}}
 	runtime := &RuntimeGrant{
 		NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), NodeID: "node-a", Generation: 3,
-		Inference: true, RouteID: "local", ModelAlias: "private-model", ServicePort: 8080, ServiceID: "hermes-api",
+		Inference: true, RouteID: "local", ModelAlias: "private-model", ServicePort: 8766, ServiceID: "hermes-api",
 		TaskAuthorities: taskAuthorities,
 		Subnet:          addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, ConnectorIDs: []string{"git.read", "issues.create"},
@@ -1463,8 +1462,8 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 		ActivationBeginDigest: "sha256:" + strings.Repeat("f", 64),
 	}
 	workload := Workload{
-		InstanceID: "agent-1", TenantID: "tenant-a", ProfileID: "openclaw-v1@v1",
-		Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), Command: []string{"agent", "serve"},
+		InstanceID: "agent-1", TenantID: "tenant-a", ProfileID: "hermes-v1@v1",
+		Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), Command: []string{"serve"},
 		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 250, PIDs: 32}, State: state, Runtime: runtime,
 	}
 	fingerprint := workloadFingerprint(workload)
@@ -1482,14 +1481,14 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 			"Config": map[string]any{
 				"Image": workload.Image, "Cmd": workload.Command, "User": "65532:65532",
 				"Env": []string{
-					"HOME=/home/node", "TMPDIR=/tmp", "OPENAI_BASE_URL=http://steward-relay:8080/v1",
+					"HOME=/opt/data/home", "TMPDIR=/tmp", "OPENAI_BASE_URL=http://steward-relay:8080/v1",
 					"OPENAI_API_BASE=http://steward-relay:8080/v1", "OPENAI_API_KEY=steward-local", "OPENAI_MODEL=private-model",
 					"STEWARD_CONNECTOR_URL=http://steward-relay:8081",
 				},
-				"WorkingDir": "/home/node/.openclaw/workspace",
+				"WorkingDir": "/opt/data",
 				"Labels": map[string]string{
 					managedWorkloadLabel: "true", workloadFingerprintLabel: fingerprint,
-					"io.hardrails.tenant": "tenant-a", "io.hardrails.instance": "agent-1", "io.hardrails.profile": "openclaw-v1@v1",
+					"io.hardrails.tenant": "tenant-a", "io.hardrails.instance": "agent-1", "io.hardrails.profile": "hermes-v1@v1",
 					workloadMemoryLabel: "1048576", workloadCPULabel: "250", workloadPIDsLabel: "32",
 					stateVolumeLabel: state.VolumeName, statePathLabel: state.Path,
 					runtimeNetworkLabel: addresses.Name, runtimeGrantLabel: runtime.GrantID, runtimeGenerationLabel: "3",
@@ -1500,7 +1499,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					runtimeActionContextRequiredLabel: "true",
 					runtimeActionAuthoritiesLabel:     string(actionAuthorityLabel),
 					runtimeSubnetLabel:                addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
-					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
+					runtimeServicePortLabel: "8766", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
 					runtimeConnectorsLabel: "git.read,issues.create", runtimeCapsuleDigestLabel: runtime.CapsuleDigest,
 					runtimePolicyDigestLabel:          runtime.PolicyDigest,
 					runtimeActivationIDLabel:          runtime.ActivationID,

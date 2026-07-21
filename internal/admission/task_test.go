@@ -13,10 +13,10 @@ func TestTenantTaskKeysAreServiceScoped(t *testing.T) {
 	publicA, _, _ := ed25519.GenerateKey(rand.Reader)
 	publicB, _, _ := ed25519.GenerateKey(rand.Reader)
 	policy := testPolicy(publisher)
-	policy.Tenants[0].ServiceIDs = []string{"hermes-api", "openclaw-api"}
+	policy.Tenants[0].ServiceIDs = []string{"hermes-api", "other-api"}
 	policy.Tenants[0].TaskKeys = []TaskKey{
 		{KeyID: "hermes-approver", PublicKey: base64.StdEncoding.EncodeToString(publicA), ServiceIDs: []string{"hermes-api"}},
-		{KeyID: "shared-approver", PublicKey: base64.StdEncoding.EncodeToString(publicB), ServiceIDs: []string{"hermes-api", "openclaw-api"}},
+		{KeyID: "shared-approver", PublicKey: base64.StdEncoding.EncodeToString(publicB), ServiceIDs: []string{"hermes-api", "other-api"}},
 	}
 	if err := policy.Validate(); err != nil {
 		t.Fatal(err)
@@ -25,9 +25,9 @@ func TestTenantTaskKeysAreServiceScoped(t *testing.T) {
 	if err != nil || len(keys) != 2 || string(keys["hermes-approver"]) != string(publicA) {
 		t.Fatalf("hermes keys=%v err=%v", keys, err)
 	}
-	keys, err = policy.TrustedTaskKeys("tenant-a", "openclaw-api")
+	keys, err = policy.TrustedTaskKeys("tenant-a", "other-api")
 	if err != nil || len(keys) != 1 || string(keys["shared-approver"]) != string(publicB) {
-		t.Fatalf("openclaw keys=%v err=%v", keys, err)
+		t.Fatalf("other service keys=%v err=%v", keys, err)
 	}
 	if _, err := policy.TrustedTaskKeys("other-tenant", "hermes-api"); err == nil {
 		t.Fatal("cross-tenant task-key lookup succeeded")
@@ -47,16 +47,16 @@ func TestTenantTaskKeyValidationRejectsAmbiguousAuthority(t *testing.T) {
 		{"invalid public key", []TaskKey{{KeyID: valid.KeyID, PublicKey: "not-base64", ServiceIDs: valid.ServiceIDs}}},
 		{"noncanonical public key", []TaskKey{{KeyID: valid.KeyID, PublicKey: encoded + "\n", ServiceIDs: valid.ServiceIDs}}},
 		{"empty scope", []TaskKey{{KeyID: valid.KeyID, PublicKey: encoded}}},
-		{"unknown service", []TaskKey{{KeyID: valid.KeyID, PublicKey: encoded, ServiceIDs: []string{"other-api"}}}},
+		{"unknown service", []TaskKey{{KeyID: valid.KeyID, PublicKey: encoded, ServiceIDs: []string{"unlisted-api"}}}},
 		{"duplicate service", []TaskKey{{KeyID: valid.KeyID, PublicKey: encoded, ServiceIDs: []string{"hermes-api", "hermes-api"}}}},
-		{"unsorted services", []TaskKey{{KeyID: valid.KeyID, PublicKey: encoded, ServiceIDs: []string{"openclaw-api", "hermes-api"}}}},
+		{"unsorted services", []TaskKey{{KeyID: valid.KeyID, PublicKey: encoded, ServiceIDs: []string{"other-api", "hermes-api"}}}},
 		{"duplicate key ID", []TaskKey{valid, valid}},
 		{"duplicate key material", []TaskKey{valid, {KeyID: "other-approver", PublicKey: encoded, ServiceIDs: valid.ServiceIDs}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			policy := testPolicy(publisher)
-			policy.Tenants[0].ServiceIDs = []string{"hermes-api", "openclaw-api"}
+			policy.Tenants[0].ServiceIDs = []string{"hermes-api", "other-api"}
 			policy.Tenants[0].TaskKeys = test.keys
 			if err := policy.Validate(); err == nil {
 				t.Fatal("invalid task authority accepted")

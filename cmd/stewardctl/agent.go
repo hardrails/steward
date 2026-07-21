@@ -83,14 +83,14 @@ func agentInit(arguments []string, stdout io.Writer) error {
 func agentInitWithDefault(arguments []string, stdout io.Writer, defaultDirectory string) error {
 	flags := flag.NewFlagSet("agent init", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	engine := flags.String("runtime", "hermes", "hermes or openclaw")
+	engine := flags.String("runtime", "hermes", "agent runtime; currently hermes")
 	name := flags.String("name", "my-agent", "agent name")
 	force := flags.Bool("force", false, "replace an existing Stewardfile.cue")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *engine != "hermes" && *engine != "openclaw" {
-		return errors.New("agent runtime must be hermes or openclaw")
+	if *engine != "hermes" {
+		return errors.New("agent runtime must be hermes")
 	}
 	if err := agentapp.ValidateName(*name); err != nil {
 		return err
@@ -112,9 +112,6 @@ func agentInitWithDefault(arguments []string, stdout io.Writer, defaultDirectory
 		return err
 	}
 	contract := "steward.hermes-agent.v1"
-	if *engine == "openclaw" {
-		contract = "steward.openclaw.v1"
-	}
 	content := fmt.Sprintf(agentCUETemplate, *name, *engine, strings.Repeat("0", 64), contract)
 	if *force {
 		if err := replaceAgentFile(path, []byte(content), 0o644); err != nil {
@@ -353,7 +350,7 @@ func agentDoctor(arguments []string, stdout io.Writer) error {
 		limitations = append(limitations, "Docker Desktop is a development profile; hardened workloads belong in a managed Linux VM with gVisor")
 	}
 	if runtime.GOARCH == "arm64" {
-		limitations = append(limitations, "the bundled Hermes and OpenClaw qualification evidence currently covers linux/amd64 only")
+		limitations = append(limitations, "the bundled Hermes qualification evidence currently covers linux/amd64 only")
 	}
 	return writeAgentJSON(stdout, map[string]any{"os": runtime.GOOS, "architecture": runtime.GOARCH, "profile": profile, "tools": tools, "limitations": limitations})
 }

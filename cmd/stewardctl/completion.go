@@ -351,7 +351,7 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 		leaf := completionLeafPath(arguments[:len(arguments)-2])
 		if previous == "-agent" || previous == "-runtime" &&
 			(leaf == "agent init" || leaf == "agent create" || strings.HasPrefix(leaf, "agent create ")) {
-			return matchingCandidates([]string{"hermes", "openclaw"}, current)
+			return matchingCandidates([]string{"hermes"}, current)
 		}
 		if previous == "-preset" && leaf == "gateway connector set" {
 			return matchingCandidates([]string{"github-issues"}, current)

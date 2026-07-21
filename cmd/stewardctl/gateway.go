@@ -312,7 +312,7 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("gateway service "+action, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
-	agent := flags.String("agent", "", "built-in agent preset: hermes or openclaw")
+	agent := flags.String("agent", "", "built-in agent preset: hermes")
 	serviceID := flags.String("service-id", "", "exact admitted service ID")
 	trustNodeID := flags.String("node-id", "", "exact node identity for an exported service-trust inventory")
 	trustTenantID := flags.String("tenant-id", "", "exact tenant identity for an exported service-trust inventory")
@@ -369,7 +369,7 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 		}
 		contract, ok := gatewayAgentServicePreset(*agent)
 		if !ok {
-			return errors.New("-agent must be hermes or openclaw")
+			return errors.New("-agent must be hermes")
 		}
 		*serviceID = contract.ServiceID
 		operations = repeatedFlag{contract.OperationID + "=POST:/v1/runs"}
@@ -498,8 +498,6 @@ func gatewayAgentServicePreset(value string) (agentServicePreset, bool) {
 	switch value {
 	case "hermes":
 		return agentServicePreset{ServiceID: "hermes-api", OperationID: "hermes.run"}, true
-	case "openclaw":
-		return agentServicePreset{ServiceID: "openclaw-api", OperationID: "openclaw.run"}, true
 	default:
 		return agentServicePreset{}, false
 	}

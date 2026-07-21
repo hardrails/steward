@@ -100,7 +100,7 @@ func TestComposedAgentCommandsRejectIncompleteAndConflictingInputs(t *testing.T)
 		t.Fatalf("derived placement template = %+v", template.Placement)
 	}
 	archive, manifestDigest, _, _ := writeImageImportArchive(t, directory)
-	bundle := publishedAgentBundle(t, "openclaw", "steward.local/agents@"+manifestDigest)
+	bundle := publishedAgentBundle(t, "hermes", "steward.local/agents@"+manifestDigest)
 	bundleRaw, err := agentapp.MarshalCanonical(bundle)
 	if err != nil {
 		t.Fatal(err)

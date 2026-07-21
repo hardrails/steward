@@ -13,7 +13,7 @@ limits where that agent runs. It does not decide whether the agent may send an
 email, change an account, call an internal service, or spend a reusable API key.
 
 Steward is the open-source agent application runtime and enforcement plane for
-that missing boundary. It packages Hermes or OpenClaw agents behind one portable
+that missing boundary. It packages Hermes agents behind one portable
 contract, places them on customer-controlled infrastructure, mediates their
 network capabilities, and records which exact authority produced each managed
 external action.
@@ -147,12 +147,11 @@ for repeatable infrastructure.
 
 ## Run an agent
 
-Steward supports containerized agents that expose bounded service APIs. The
-included adapters make Hermes Agent and OpenClaw usable behind Steward's fixed
+Steward supports containerized Hermes agents through a bounded service API. The
+included adapter makes a qualified Hermes surface usable behind Steward's fixed
 security boundary.
 
 - [Run Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/)
-- [Run OpenClaw](https://hardrails.github.io/steward/guides/openclaw/)
 - [Understand workload admission](https://hardrails.github.io/steward/guides/signed-admission/)
 - [Configure inference, services, connectors, and egress](https://hardrails.github.io/steward/guides/positive-capabilities/)
 
@@ -176,7 +175,7 @@ stewardctl agent authorize ../steward-site \
 ```
 
 `agent publish` inspects the complete OCI or Docker archive and signs the exact
-image identity and qualified Hermes or OpenClaw contract. `agent authorize` grants
+image identity and qualified Hermes contract. `agent authorize` grants
 Control only the five lifecycle operations needed for this agent, on the named
 nodes, for one hour. Neither artifact contains a reusable credential.
 

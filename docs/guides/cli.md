@@ -133,7 +133,7 @@ stewardctl context set production \
 A higher-assurance site can keep the task key on a separate signing workstation
 and use `task issue`, authenticated transfer, `task submit`, and `task wait`.
 
-With the context selected, run a prompt against a durable Hermes or OpenClaw
+With the context selected, run a prompt against a durable Hermes
 deployment:
 
 ```console
@@ -146,7 +146,7 @@ one. It retains the verified intent and authenticated admission result from
 Control, checks that the configured key is admitted for the selected service,
 writes the owner-only signed task bundle, dispatches through Gateway, waits, and
 writes the result without printing request or result bytes. For prompt mode it
-infers the qualified `hermes.run` or `openclaw.run` operation from the authenticated
+infers the qualified `hermes.run` operation from the authenticated
 admission result. It creates an owner-only run directory beside the CLI context,
 with `request.json`, `task.bundle.json`, and `result.json`, and returns their paths.
 Use `-run-dir` to select a new directory under an existing owner-only parent.
@@ -157,7 +157,7 @@ is safe and observable; issuing a new task ID could duplicate an effect whose
 outcome is still unknown.
 
 For generated requests, the prompt is limited to 32 KiB. Hermes receives it as
-`input`; OpenClaw receives it as `message`. Use the explicit `-request`,
+`input`. Use the explicit `-request`,
 `-operation-id`, `-bundle-out`, and result flags when exact prebuilt JSON, a
 different qualified operation, deterministic paths, or off-node signing is
 required.
@@ -242,9 +242,9 @@ stewardctl control operations status -no-context \
 ## Enable shell completion
 
 Completion covers commands, nested subcommands, common flags, saved context names,
-and the built-in `hermes` and `openclaw` Gateway service presets. It runs the local
+and the built-in `hermes` Gateway service preset. It runs the local
 `stewardctl` binary and makes no network request. For example, after
-`stewardctl gateway service set -agent ` it offers only those two closed presets.
+`stewardctl gateway service set -agent ` it offers only the closed Hermes preset.
 
 Install and activate completion for the current shell:
 

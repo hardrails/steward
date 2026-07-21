@@ -154,8 +154,6 @@ func agentPublicationContractFor(runtime string) (agentPublicationContract, bool
 	switch runtime {
 	case "hermes":
 		ref = admission.ProfileRef{ID: "hermes-v1", Version: "v1"}
-	case "openclaw":
-		ref = admission.ProfileRef{ID: "openclaw-v1", Version: "v1"}
 	default:
 		return agentPublicationContract{}, false
 	}

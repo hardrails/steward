@@ -5,7 +5,7 @@
   schema: "steward.agent.v1"
   name: =~"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
   runtime: {
-    engine: "hermes" | "openclaw"
+    engine: "hermes"
     image: string & =~"@sha256:[0-9a-f]{64}$"
     adapter_contract: string
   }

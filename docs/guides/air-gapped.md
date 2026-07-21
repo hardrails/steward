@@ -1,6 +1,6 @@
 ---
 title: Install Steward without public network access
-description: Import, verify, install, enroll, and activate Steward and a qualified Hermes or OpenClaw release without contacting a public service from the target Linux server.
+description: Import, verify, install, enroll, and activate Steward and a qualified Hermes release without contacting a public service from the target Linux server.
 section: How-to guide
 ---
 

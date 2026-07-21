@@ -121,16 +121,6 @@ release_files=(
 	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
 	integration/adapters/hermes-agent/license-inventory.json
 	integration/adapters/hermes-agent/source-inputs.sha256
-	integration/adapters/openclaw/Dockerfile
-	integration/adapters/openclaw/adapter.json
-	integration/adapters/openclaw/entrypoint.mjs
-	integration/adapters/openclaw/fixture_model.mjs
-	integration/adapters/openclaw/fixtures/skill/SKILL.md
-	integration/adapters/openclaw/fixtures/skill/workspace_audit.mjs
-	integration/adapters/openclaw/fixtures/workspace/qualification/input/alpha.txt
-	integration/adapters/openclaw/fixtures/workspace/qualification/input/nested.json
-	integration/adapters/openclaw/result.mjs
-	integration/adapters/openclaw/source-inputs.sha256
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -143,14 +133,12 @@ release_files=(
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
 	integration/scripts/build-hermes-adapter.sh
-	integration/scripts/build-openclaw-adapter.sh
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
-	integration/scripts/openclaw-feasibility.sh
 	integration/scripts/node-doctor.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
@@ -787,9 +775,7 @@ for mapping in \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-	build-openclaw-adapter:/opt/steward/current/integration/scripts/build-openclaw-adapter.sh \
 	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
-	openclaw-feasibility:/opt/steward/current/integration/scripts/openclaw-feasibility.sh \
 	hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 	name=${mapping%%:*}
 	path="/usr/local/libexec/steward/$name"
@@ -848,9 +834,7 @@ for mapping in \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-	build-openclaw-adapter:/opt/steward/current/integration/scripts/build-openclaw-adapter.sh \
 	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
-	openclaw-feasibility:/opt/steward/current/integration/scripts/openclaw-feasibility.sh \
 	hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 	name=${mapping%%:*}
 	target=${mapping#*:}

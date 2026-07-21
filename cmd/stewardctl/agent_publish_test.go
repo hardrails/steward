@@ -89,7 +89,7 @@ func TestAgentPublishRejectsBundleArchiveIdentityMismatch(t *testing.T) {
 	}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	bundle := publishedAgentBundle(t, "openclaw", "registry.example/agent@sha256:"+strings.Repeat("f", 64))
+	bundle := publishedAgentBundle(t, "hermes", "registry.example/agent@sha256:"+strings.Repeat("f", 64))
 	bundleRaw, err := agentapp.MarshalCanonical(bundle)
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestAgentPublishRejectsBundleArchiveIdentityMismatch(t *testing.T) {
 
 func publishedAgentBundle(t *testing.T, runtime, image string) agentapp.Bundle {
 	t.Helper()
-	contract := map[string]string{"hermes": "steward.hermes-agent.v1", "openclaw": "steward.openclaw.v1"}[runtime]
+	contract := map[string]string{"hermes": "steward.hermes-agent.v1"}[runtime]
 	definition := agentapp.Definition{
 		Schema: agentapp.DefinitionSchema, Name: "workspace-auditor",
 		Runtime: agentapp.Runtime{Engine: runtime, Image: image, AdapterContract: contract},

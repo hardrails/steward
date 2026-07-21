@@ -57,7 +57,7 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "service", ""}); !slices.Equal(candidates, []string{"list", "set", "trust"}) {
 		t.Fatalf("gateway service candidates=%v", candidates)
 	}
-	if candidates := stewardctlCompletionCandidates([]string{"gateway", "service", "set", "-agent", "o"}); !slices.Equal(candidates, []string{"openclaw"}) {
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "service", "set", "-agent", "h"}); !slices.Equal(candidates, []string{"hermes"}) {
 		t.Fatalf("agent preset candidates=%v", candidates)
 	}
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "connector", "set", "-preset", "g"}); !slices.Equal(candidates, []string{"github-issues"}) {
@@ -99,10 +99,10 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 			t.Fatalf("site node prepare flags %v missing %s", siteNodeFlags, expected)
 		}
 	}
-	if candidates := stewardctlCompletionCandidates([]string{"agent", "init", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
+	if candidates := stewardctlCompletionCandidates([]string{"agent", "init", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes"}) {
 		t.Fatalf("agent runtime candidates=%v", candidates)
 	}
-	if candidates := stewardctlCompletionCandidates([]string{"agent", "create", "auditor", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
+	if candidates := stewardctlCompletionCandidates([]string{"agent", "create", "auditor", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes"}) {
 		t.Fatalf("agent create runtime candidates=%v", candidates)
 	}
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "deployment", ""}); !slices.Equal(candidates, []string{"apply", "list", "pause", "remove", "resume", "status", "wait"}) {

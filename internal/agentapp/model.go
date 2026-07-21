@@ -189,10 +189,10 @@ func (value Definition) Validate() error {
 	if err := ValidateName(value.Name); err != nil {
 		return err
 	}
-	wantContract := map[string]string{"hermes": "steward.hermes-agent.v1", "openclaw": "steward.openclaw.v1"}
+	wantContract := map[string]string{"hermes": "steward.hermes-agent.v1"}
 	contract, ok := wantContract[value.Runtime.Engine]
 	if !ok || value.Runtime.AdapterContract != contract {
-		return errors.New("runtime must select hermes or openclaw with its exact Steward adapter contract")
+		return errors.New("runtime must select hermes with its exact Steward adapter contract")
 	}
 	if !validImage(value.Runtime.Image) {
 		return errors.New("runtime image must be a bounded OCI reference pinned by sha256 digest")

@@ -384,8 +384,6 @@ func profileLayoutFor(profileID string) profileLayout {
 	switch profileID {
 	case "hermes-v1@v1":
 		return profileLayout{StatePath: "/opt/data", Home: "/opt/data/home", WorkDir: "/opt/data"}
-	case "openclaw-v1@v1":
-		return profileLayout{StatePath: "/home/node/.openclaw", Home: "/home/node", WorkDir: "/home/node/.openclaw/workspace"}
 	default:
 		return profileLayout{StatePath: "/state", Home: "/state", WorkDir: "/state"}
 	}

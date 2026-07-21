@@ -16,7 +16,6 @@ before signing, import, or admission.
 | --- | --- | --- | --- | --- |
 | `generic-v1@v1` | `65532:65532` | `/state` (`v1`) | Publisher-defined | Publisher-defined |
 | `hermes-v1@v1` | `65532:65532` | `/opt/data` (`v1`) | `serve` | `hermes-api` on `8766` |
-| `openclaw-v1@v1` | `65532:65532` | `/home/node/.openclaw` (`v1`) | `serve` | `openclaw-api` on `18789` |
 
 Check an unsigned capsule before moving it to a signing workstation:
 
@@ -25,7 +24,7 @@ stewardctl capsule check-profile -in capsule.json
 ```
 
 `stewardctl capsule sign` and `stewardctl capsule verify` run the same profile
-check automatically. `stewardctl agent publish` obtains its Hermes and OpenClaw
+check automatically. `stewardctl agent publish` obtains its Hermes
 values from this same built-in registry, so its generated capsule cannot drift
 from Executor's admission rules.
 

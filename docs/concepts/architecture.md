@@ -8,7 +8,7 @@ section: Concepts
 
 Steward separates six responsibilities that agent platforms often combine:
 
-1. define a portable Hermes or OpenClaw agent application;
+1. define a portable Hermes agent application;
 2. explain which fleet node satisfies its declared constraints;
 3. decide which immutable workload and capabilities are allowed;
 4. run the workload behind a hardened container boundary;
@@ -55,7 +55,7 @@ over bounded public node, control, and pre-signed task operations.
 `stewardctl agent` provides the runtime-neutral authoring surface. CUE compiles
 human-facing definitions to concrete JSON, OPA may deny them under an offline
 organizational policy, and Steward validates the result again at its own strict
-boundary. The bundle selects a qualified Hermes or OpenClaw adapter; it does not
+boundary. The bundle selects the qualified Hermes adapter; it does not
 replace that runtime's reasoning loop.
 
 The legacy `steward` supervisor remains for the generic public uplink contract.

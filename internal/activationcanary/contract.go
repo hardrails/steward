@@ -530,14 +530,6 @@ func (verified VerifiedResultV1) Hermes() activation.HermesCanaryResultV1 {
 	return activation.HermesCanaryResultV1{RunID: verified.canary.RunID, SessionID: verified.canary.SessionID, ManifestDigest: verified.canary.ManifestDigest}
 }
 
-// OpenClaw returns the closed OpenClaw workspace-audit observation.
-func (verified VerifiedResultV1) OpenClaw() activation.OpenClawCanaryResultV1 {
-	if verified.canary.Kind != agentrelease.CanaryKindOpenClawWorkspaceAuditV1 {
-		return activation.OpenClawCanaryResultV1{}
-	}
-	return activation.OpenClawCanaryResultV1{RunID: verified.canary.RunID, SessionID: verified.canary.SessionID, ManifestDigest: verified.canary.ManifestDigest}
-}
-
 // Canary returns the agent-neutral verified workspace-audit observation.
 func (verified VerifiedResultV1) Canary() activation.CanaryResultV1 { return verified.canary }
 

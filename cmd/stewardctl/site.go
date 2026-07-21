@@ -99,7 +99,7 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	siteID := flags.String("site-id", "steward-site", "stable site identity")
 	tenantID := flags.String("tenant-id", "default", "initial tenant identity")
 	repository := flags.String("repository", "steward.local/agents", "allowed OCI repository")
-	serviceIDsValue := flags.String("service-ids", "hermes-api,openclaw-api", "comma-separated initial agent service identities")
+	serviceIDsValue := flags.String("service-ids", "hermes-api", "comma-separated initial agent service identities")
 	serviceID := flags.String("service-id", "", "single initial agent service identity (alias for -service-ids)")
 	connectorID := flags.String("connector-id", "", "optional first protected connector identity")
 	serverNames := flags.String("control-server-names", "localhost,127.0.0.1,::1", "control TLS DNS names and IP addresses")
@@ -299,7 +299,6 @@ func buildSitePackage(siteID, tenantID, repository string, serviceIDs []string, 
 			AllowedProfiles: []admission.ProfileRef{
 				{ID: "generic-v1", Version: "v1"},
 				{ID: "hermes-v1", Version: "v1"},
-				{ID: "openclaw-v1", Version: "v1"},
 			},
 			AllowedRepositories: []string{repository}, ResourceCeiling: limits,
 		}},

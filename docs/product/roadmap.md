@@ -17,7 +17,7 @@ section: Product
 Steward is being built as the **customer-owned runtime and authority plane for AI
 agents**.
 
-It should let an operator package Hermes, OpenClaw, or another qualified agent as
+It should let an operator package Hermes, or another future qualified agent, as
 one portable application; run it on infrastructure the operator controls; keep
 reusable authority outside the agent; continuously reconcile its lifecycle; and
 produce enforcement evidence that an auditor can verify without contacting a
@@ -138,7 +138,7 @@ They should not be prerequisites for the first useful task.
 One versioned, portable definition should describe:
 
 - immutable runtime image and qualified adapter;
-- Hermes, OpenClaw, or another supported engine;
+- Hermes, or another future supported engine;
 - a logical model route, not a provider credential;
 - skills and MCP dependencies pinned by digest;
 - CPU, memory, process, storage, and lifetime limits;
@@ -316,7 +316,7 @@ end-to-end acceptance and hostile-path tests.
 
 The roadmap starts from working primitives rather than a blank design:
 
-- portable Hermes and OpenClaw application bundles with CUE authoring and offline
+- portable Hermes application bundles with CUE authoring and offline
   OPA policy evidence;
 - strict signed capsule admission, default-deny capabilities, Docker and gVisor
   execution, Gateway mediation, task permits, and signed receipts;
@@ -334,7 +334,7 @@ The roadmap starts from working primitives rather than a blank design:
   admission projection without retaining private keys; and
 - a recovery-safe `task run` workflow that writes signed authority before dispatch,
   joins deployment wait, task issuance, Gateway submission, terminal observation,
-  and result storage, and can derive the qualified Hermes or OpenClaw request from
+  and result storage, and can derive the qualified Hermes request from
   one prompt into a private recoverable run directory;
 - concise `agent create` and durable `agent apply NAME` commands that reuse the
   exact application-init and deployment reconciliation implementations;
@@ -350,7 +350,7 @@ The roadmap starts from working primitives rather than a blank design:
   once, retains a tenant-scoped operator in an owner-only file, and selects a
   least-privilege CLI context without storing bearer values in context metadata;
 - composed agent publication that inspects the exact OCI archive, fixes the
-  qualified Hermes or OpenClaw runtime contract, signs it with the site publisher,
+  qualified Hermes runtime contract, signs it with the site publisher,
   and verifies the result against signed site policy before writing it;
 - composed finite deployment authorization that derives the exact admission and
   placement template, binds the eligible node set and five required lifecycle
@@ -405,8 +405,9 @@ and `task run` performs useful work through the enforced boundary.
   egress, secrets, and evidence into one operation.
 - Complete Executor-verifiable, time-bounded controller delegation without placing
   tenant root keys in Control.
-- Qualify one pinned Hermes adapter and one pinned OpenClaw adapter through the
-  same task, chat, health, log, and result contract.
+- Keep one pinned Hermes adapter qualified through the task, health, and result
+  contract. Add another runtime only after a concrete user need justifies its
+  security and maintenance surface.
 - Qualify the shipped protected GitHub issue preset through the release acceptance
   workflow, and add one generic read-only OpenAPI example.
 
@@ -582,8 +583,8 @@ and independent offline evidence.
 
 Choose OpenClaw Machines for an OpenClaw-specific mini-cloud with Firecracker,
 browser machines, workspace integrations, backups, chat, and terminal access.
-Choose Steward when the site must support multiple agent engines, avoid a mandatory
-Cloudflare data plane, run without KVM, remain fully disconnected, or bind every
+Choose Steward when the site uses Hermes, must avoid a mandatory Cloudflare data
+plane, run without KVM, remain fully disconnected, or bind every
 managed action to customer-held authority and offline evidence.
 
 ### Why not Kubernetes Agent Sandbox or OpenSandbox?

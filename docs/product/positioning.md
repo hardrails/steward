@@ -119,8 +119,8 @@ Steward is not an agent framework, model server, general container orchestrator,
 secret manager, identity provider, workflow engine, software-provenance issuer,
 endpoint security product, or hosted control plane.
 
-Hermes Agent and OpenClaw remain the agent implementations. Steward's adapters
-expose only a bounded service API and a tested custom-skill path inside the outer
+Hermes Agent remains the supported agent implementation. Steward's adapter
+exposes only a bounded service API and a tested custom-skill path inside the outer
 gVisor boundary. Broader upstream plugins, channels, browser tools, MCP servers,
 and future releases require separate review and qualification.
 
@@ -148,7 +148,7 @@ certification.
 Steward is succeeding when a new operator can:
 
 1. install and verify one node without learning every protocol;
-2. run one real Hermes or OpenClaw task that changes bounded state;
+2. run one real Hermes task that changes bounded state;
 3. configure one protected connector without placing its credential in the agent;
 4. approve and audit one exact action;
 5. understand an uncertain outcome without accidentally replaying it; and

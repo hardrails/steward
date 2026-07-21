@@ -1,12 +1,12 @@
 ---
 title: Build and run an agent
-description: Define, validate, package, place, run, and fork a Hermes or OpenClaw agent application with CUE and optional OPA policy.
+description: Define, validate, package, place, run, and fork a Hermes agent application with CUE and optional OPA policy.
 section: Guides
 ---
 
 # Build and run an agent
 
-Steward provides one application surface around Hermes and OpenClaw. The agent
+Steward provides one application surface around Hermes. The agent
 runtime still owns its reasoning loop. Steward defines the immutable image,
 skills, model route, resources, state, placement, and lifetime that operators can
 inspect before granting authority.
@@ -59,15 +59,14 @@ stewardctl agent publish /secure/steward/site \
 
 The command verifies the complete signed site package, inspects the bounded OCI or
 Docker archive without loading it, requires the bundle's image digest to match,
-and fixes the qualified Hermes or OpenClaw command, state path, service, port, and
+and fixes the qualified Hermes command, state path, service, port, and
 resource contract. Only then does it sign `capsule.dsse.json` with the site
 publisher key. Use the lower-level capsule tooling when publication is performed
 by a separate offline signing service.
 
-JSON input is also accepted. The repository includes concrete
+JSON input is also accepted. The repository includes a concrete
 [Hermes](https://github.com/hardrails/steward/tree/main/examples/agents/hermes)
-and [OpenClaw](https://github.com/hardrails/steward/tree/main/examples/agents/openclaw)
-examples for systems that generate configuration programmatically.
+example for systems that generate configuration programmatically.
 
 ## Apply organizational policy
 
@@ -396,7 +395,7 @@ sudo stewardctl agent service activate \
   -trust-out /secure/steward/service-trust.json
 ```
 
-The command installs the closed Hermes or OpenClaw Gateway preset, adds a bounded
+The command installs the closed Hermes Gateway preset, adds a bounded
 tenant receipt budget, and returns the exact `systemctl` activation command. It
 does not execute host service management or copy files across the trust boundary.
 Run the returned command, transfer the non-secret trust inventory through an
@@ -410,8 +409,8 @@ stewardctl task run auditor "Review the workspace and report one concrete issue"
 
 This waits for the deployment, checks the exact admitted service and task key,
 persists the signed bundle before dispatch, submits through the node-local Gateway,
-and saves verified terminal bytes. Steward infers only the qualified Hermes or
-OpenClaw task operation and stores the generated request, bundle, and result in a
+and saves verified terminal bytes. Steward infers only the qualified Hermes task
+operation and stores the generated request, bundle, and result in a
 new owner-only run directory. The bundle remains the recovery handle after a
 timeout or interrupted terminal. Resume it instead of minting replacement
 authority. The explicit artifact flags remain the stable automation surface.
@@ -482,8 +481,7 @@ binds one exact JSON request to the admitted tenant, instance, generation, model
 service, operation policy, and short validity window. `task wait` stores the first
 terminal result in a new owner-only file; it does not silently overwrite a prior
 observation. See the [Hermes guide]({{ '/guides/hermes-agent/' | relative_url }})
-or [OpenClaw guide]({{ '/guides/openclaw/' | relative_url }}) for their supported
-request shapes and qualification limits.
+for its supported request shape and qualification limits.
 
 ## Fork persistent state
 

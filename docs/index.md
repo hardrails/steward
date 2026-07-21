@@ -29,8 +29,8 @@ home: true
 <div class="split">
   <div>
     <h3>Try one agent</h3>
-    <p>Install a Linux node, verify the hardened services, then run a bounded Hermes Agent or OpenClaw adapter behind Steward.</p>
-    <p><a href="{{ '/getting-started/' | relative_url }}">Install a node →</a> · <a href="{{ '/guides/hermes-agent/' | relative_url }}">Run Hermes →</a> · <a href="{{ '/guides/openclaw/' | relative_url }}">Run OpenClaw →</a></p>
+    <p>Install a Linux node, verify the hardened services, then run a bounded Hermes Agent behind Steward.</p>
+    <p><a href="{{ '/getting-started/' | relative_url }}">Install a node →</a> · <a href="{{ '/guides/hermes-agent/' | relative_url }}">Run Hermes →</a></p>
   </div>
   <div>
     <h3>Operate a fleet</h3>
@@ -43,7 +43,7 @@ home: true
 
 Define skills, MCP endpoints, a model route, resources, state, lifetime, and
 placement once. Steward validates the definition with CUE, can require an offline
-OPA policy decision, and packages a deterministic bundle for Hermes or OpenClaw.
+OPA policy decision, and packages a deterministic bundle for Hermes.
 The same surface explains which fleet node is eligible, admits and starts the
 agent directly, retain durable desired state through Steward Control, and derive a
 new, short-lived lineage from immutable state snapshot metadata.

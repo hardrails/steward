@@ -238,7 +238,7 @@ authenticate the party that supplied both the file and checksum.
 
 ## Agent qualification is narrow
 
-The included Hermes and OpenClaw procedures cover exact pinned adapters, platforms,
+The included Hermes procedure covers an exact pinned adapter, platform,
 skills, and bounded service APIs. They do not establish the safety of arbitrary
 plugins, channels, browser tools, MCP servers, models, prompts, or future upstream
 versions.
