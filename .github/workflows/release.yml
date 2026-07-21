@@ -187,29 +187,21 @@ jobs:
           grep -Fq '    "integration/adapters/hermes-agent/adapter.json": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/skill/SKILL.md": "' <<<"$manifest"
-          grep -Fq '    "integration/adapters/openclaw/adapter.json": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/build-hermes-adapter.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/hermes-feasibility.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/hermes-steward-acceptance.sh": "' <<<"$manifest"
-          grep -Fq '    "integration/scripts/build-openclaw-adapter.sh": "' <<<"$manifest"
-          grep -Fq '    "integration/scripts/openclaw-feasibility.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/node-doctor.sh": "' <<<"$manifest"
           grep -Fq '    "integration/examples/agents/hermes/agent.json": "' <<<"$manifest"
-          grep -Fq '    "integration/examples/agents/openclaw/agent.json": "' <<<"$manifest"
           grep -Fq '    "integration/schemas/agent.cue": "' <<<"$manifest"
           tar -tzf "$archive" steward-control >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/adapter.json >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/fixtures/connector-skill/SKILL.md >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/fixtures/skill/SKILL.md >/dev/null
-          tar -tzf "$archive" adapters/openclaw/adapter.json >/dev/null
           tar -tzf "$archive" scripts/build-hermes-adapter.sh >/dev/null
           tar -tzf "$archive" scripts/hermes-feasibility.sh >/dev/null
           tar -tzf "$archive" scripts/hermes-steward-acceptance.sh >/dev/null
-          tar -tzf "$archive" scripts/build-openclaw-adapter.sh >/dev/null
-          tar -tzf "$archive" scripts/openclaw-feasibility.sh >/dev/null
           tar -tzf "$archive" scripts/node-doctor.sh >/dev/null
           tar -tzf "$archive" examples/agents/hermes/agent.json >/dev/null
-          tar -tzf "$archive" examples/agents/openclaw/agent.json >/dev/null
           tar -tzf "$archive" schemas/agent.cue >/dev/null
           darwin_archive="dist/steward_${STEWARD_RELEASE_VERSION}_darwin_${{ matrix.goarch }}.tar.gz"
           tar -tzf "$darwin_archive" steward-control >/dev/null
@@ -264,12 +256,9 @@ jobs:
           grep -q './usr/lib/steward-node/release/release.json' "$deb_contents"
           grep -q './usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' "$deb_contents"
           grep -q './usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' "$deb_contents"
-          grep -q './usr/lib/steward-node/release/adapters/openclaw/adapter.json' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$deb_contents"
-          grep -q './usr/lib/steward-node/release/scripts/build-openclaw-adapter.sh' "$deb_contents"
-          grep -q './usr/lib/steward-node/release/scripts/openclaw-feasibility.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/node-doctor.sh' "$deb_contents"
           rpm -qpl "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.rpm" >"$rpm_contents"
           grep -q '/usr/lib/steward-node/release/steward-control' "$rpm_contents"
@@ -280,12 +269,9 @@ jobs:
           grep -q '/usr/lib/steward-node/release/release.json' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' "$rpm_contents"
-          grep -q '/usr/lib/steward-node/release/adapters/openclaw/adapter.json' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$rpm_contents"
-          grep -q '/usr/lib/steward-node/release/scripts/build-openclaw-adapter.sh' "$rpm_contents"
-          grep -q '/usr/lib/steward-node/release/scripts/openclaw-feasibility.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/node-doctor.sh' "$rpm_contents"
 
       - name: Keep one installer copy
