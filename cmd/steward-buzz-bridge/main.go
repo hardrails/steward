@@ -216,31 +216,39 @@ type bridge struct {
 }
 
 func main() {
+	os.Exit(runMain(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func runMain(arguments []string, stdout, stderr io.Writer) int {
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{}); err != nil {
-		fmt.Fprintln(os.Stderr, "steward-buzz-bridge: disable core dumps")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "steward-buzz-bridge: disable core dumps")
+		return 1
 	}
-	configPath := flag.String("config", "", "owner-only Buzz bridge configuration")
-	once := flag.Bool("once", false, "poll each configured channel once and exit")
-	check := flag.Bool("check-config", false, "validate configuration and secrets without network access")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
+	flags := flag.NewFlagSet("steward-buzz-bridge", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", "", "owner-only Buzz bridge configuration")
+	once := flags.Bool("once", false, "poll each configured channel once and exit")
+	check := flags.Bool("check-config", false, "validate configuration and secrets without network access")
+	showVersion := flags.Bool("version", false, "print version and exit")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
 	if *showVersion {
-		fmt.Printf("steward-buzz-bridge %s\n", buildinfo.Resolve())
-		return
+		fmt.Fprintf(stdout, "steward-buzz-bridge %s\n", buildinfo.Resolve())
+		return 0
 	}
-	if *configPath == "" || flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "steward-buzz-bridge: -config is required")
-		os.Exit(2)
+	if *configPath == "" || flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "steward-buzz-bridge: -config is required")
+		return 2
 	}
 	bridge, err := newBridge(*configPath, slog.Default())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "steward-buzz-bridge: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "steward-buzz-bridge: %v\n", err)
+		return 1
 	}
 	if *check {
-		fmt.Println(`{"schema_version":"steward.buzz-bridge-check.v1","valid":true}`)
-		return
+		fmt.Fprintln(stdout, `{"schema_version":"steward.buzz-bridge-check.v1","valid":true}`)
+		return 0
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -251,13 +259,19 @@ func main() {
 			cancel()
 		}
 	}()
-	defer server.Shutdown(context.Background())
+	defer func() {
+		shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownContext); err != nil {
+			bridge.logger.Warn("Buzz bridge status listener shutdown failed", "error", err)
+		}
+	}()
 	if *once {
 		if err := bridge.poll(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "steward-buzz-bridge: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "steward-buzz-bridge: %v\n", err)
+			return 1
 		}
-		return
+		return 0
 	}
 	interval := defaultPoll
 	if bridge.cfg.PollIntervalSeconds > 0 {
@@ -274,7 +288,7 @@ func main() {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return
+			return 0
 		case <-timer.C:
 		}
 	}
@@ -654,7 +668,6 @@ func (b *bridge) runOrRecoverTask(ctx context.Context, event buzzEvent, rec *rec
 			return "", recoveryErr
 		}
 		rec.RunDirectory = recovery
-		bundle = filepath.Join(recovery, "task.bundle.json")
 		result = filepath.Join(recovery, "result.json")
 	}
 	prompt := taskPrompt(event)
@@ -850,7 +863,7 @@ func writeRecord(path string, rec record) error {
 		temporary.Close()
 		return err
 	}
-	if _, err := temporary.Write(append(raw, '\n')); err == nil {
+	if _, err = temporary.Write(append(raw, '\n')); err == nil {
 		err = temporary.Sync()
 	}
 	if closeErr := temporary.Close(); err == nil {

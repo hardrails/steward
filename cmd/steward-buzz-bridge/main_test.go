@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,11 +95,281 @@ func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
 	if _, err := newBridge(configPath, slog.Default()); err != nil {
 		t.Fatal(err)
 	}
+	var stdout, stderr bytes.Buffer
+	if code := runMain([]string{"-version"}, &stdout, &stderr); code != 0 || !strings.HasPrefix(stdout.String(), "steward-buzz-bridge ") {
+		t.Fatalf("version code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-check-config"}, &stdout, &stderr); code != 0 ||
+		!strings.Contains(stdout.String(), `"valid":true`) {
+		t.Fatalf("check code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain(nil, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "-config is required") {
+		t.Fatalf("missing config code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-unknown"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided") {
+		t.Fatalf("unknown flag code=%d stderr=%q", code, stderr.String())
+	}
 	if err := os.Chmod(cfg.GatewayTokenFile, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := newBridge(configPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "gateway.token") {
 		t.Fatalf("unsafe Gateway token error=%v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-check-config"}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "gateway.token") {
+		t.Fatalf("unsafe config code=%d stderr=%q", code, stderr.String())
+	}
+	if err := os.Chmod(cfg.GatewayTokenFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BuzzAPITokenFile = filepath.Join(directory, "missing-buzz-token")
+	raw, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(configPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "Buzz API token") {
+		t.Fatalf("missing optional Buzz token error=%v", err)
+	}
+	cfg.BuzzAPITokenFile = ""
+	cfg.BuzzAuthTagFile = filepath.Join(directory, "missing-buzz-auth-tag")
+	raw, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(configPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "owner attestation") {
+		t.Fatalf("missing optional Buzz owner attestation error=%v", err)
+	}
+	cfg.BuzzAuthTagFile = ""
+	cfg.ControlCAFile = filepath.Join(directory, "missing-control-ca")
+	raw, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(configPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "Control CA") {
+		t.Fatalf("missing Control CA error=%v", err)
+	}
+	cfg.ControlCAFile = ""
+	cfg.BuzzBinary = filepath.Join(directory, "missing-buzz")
+	raw, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(configPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "required executable") {
+		t.Fatalf("missing executable error=%v", err)
+	}
+}
+
+func TestTaskRecoveryUsesTheRetainedBundle(t *testing.T) {
+	directory := t.TempDir()
+	cfg := validTestConfig(directory)
+	stewardctl := writeExecutable(t, directory, "recover-stewardctl", `#!/bin/sh
+result=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-result-out" ]; then shift; result=$1; fi
+  shift
+done
+if [ -n "$result" ]; then
+  printf '{"run_id":"run_00000000000000000000000000000000","status":"completed","output":"recovered answer"}\n' >"$result"
+  chmod 600 "$result"
+fi
+printf '{}\n'
+`)
+	cfg.StewardctlBinary = stewardctl
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	runDirectory := filepath.Join(cfg.StateDirectory, "runs", "retained")
+	if err := os.Mkdir(runDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDirectory, "task.bundle.json"), []byte("retained\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := record{TaskID: "task-retained", RunDirectory: runDirectory}
+	b := &bridge{cfg: cfg, logger: slog.Default(), now: time.Now}
+	reply, err := b.runOrRecoverTask(context.Background(), validEvent(time.Now()), &rec,
+		filepath.Join(cfg.StateDirectory, "records", testEvent+".json"))
+	if err != nil || reply != "recovered answer" {
+		t.Fatalf("recovered reply=%q error=%v", reply, err)
+	}
+	for attempt := 1; attempt <= 100; attempt++ {
+		path := filepath.Join(cfg.StateDirectory, "runs", fmt.Sprintf("task-full-recovery-%d", attempt))
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := b.nextRunDirectory("task-full"); err == nil || !strings.Contains(err.Error(), "exhausted") {
+		t.Fatalf("exhausted recovery error=%v", err)
+	}
+}
+
+func TestPollReportsAChannelFailureWithoutClaimingSuccess(t *testing.T) {
+	directory := t.TempDir()
+	cfg := validTestConfig(directory)
+	cfg.BuzzBinary = writeExecutable(t, directory, "failed-buzz", "#!/bin/sh\nexit 7\n")
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{cfg: cfg, logger: slog.Default(), buzzKey: "nsec-fixture", now: time.Now}
+	err := b.poll(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "failed items") || b.lastPoll != "" {
+		t.Fatalf("poll error=%v last_poll=%q", err, b.lastPoll)
+	}
+}
+
+func TestStatusSurfaceIsLoopbackSafeAndContentFree(t *testing.T) {
+	b := &bridge{cfg: validTestConfig(t.TempDir()), lastError: "initial_poll_pending"}
+	handler := b.statusServer().Handler
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusServiceUnavailable || health.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(health.Body.String(), `"ready":false`) {
+		t.Fatalf("initial health code=%d headers=%v body=%s", health.Code, health.Header(), health.Body.String())
+	}
+	b.setError("")
+	health = httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusOK || !strings.Contains(health.Body.String(), `"ready":true`) {
+		t.Fatalf("ready health code=%d body=%s", health.Code, health.Body.String())
+	}
+
+	status := httptest.NewRecorder()
+	handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), statusSchema) ||
+		strings.Contains(status.Body.String(), "protected") {
+		t.Fatalf("status code=%d body=%s", status.Code, status.Body.String())
+	}
+	denied := httptest.NewRecorder()
+	handler.ServeHTTP(denied, httptest.NewRequest(http.MethodPost, "/status?unexpected=1", nil))
+	if denied.Code != http.StatusMethodNotAllowed || !strings.Contains(denied.Body.String(), `"error":"method_not_allowed"`) {
+		t.Fatalf("denied code=%d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
+func TestCommandAndResultBoundariesFailClosed(t *testing.T) {
+	output, err := runCommand(context.Background(), "/bin/sh", []string{"-c", "printf useful"}, nil,
+		[]string{"PATH=/usr/bin:/bin"}, 32)
+	if err != nil || string(output) != "useful" {
+		t.Fatalf("command output=%q error=%v", output, err)
+	}
+	if _, err := runCommand(context.Background(), "/bin/sh", []string{"-c", "exit 7"}, nil,
+		[]string{"PATH=/usr/bin:/bin"}, 32); err == nil || !strings.Contains(err.Error(), "exit code 7") {
+		t.Fatalf("exit error=%v", err)
+	}
+	if _, err := runCommand(context.Background(), "/bin/sh", []string{"-c", "printf 123456789"}, nil,
+		[]string{"PATH=/usr/bin:/bin"}, 4); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("limit error=%v", err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := runCommand(cancelled, "/bin/sh", []string{"-c", "sleep 1"}, nil,
+		[]string{"PATH=/usr/bin:/bin"}, 32); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timeout error=%v", err)
+	}
+
+	directory := t.TempDir()
+	result := filepath.Join(directory, "result.json")
+	if err := os.WriteFile(result, []byte(`{"status":"completed","output":"answer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if reply, err := readTaskReply(result); err != nil || reply != "answer" {
+		t.Fatalf("reply=%q error=%v", reply, err)
+	}
+	if err := os.WriteFile(result, []byte(`{"status":"failed","output":"answer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTaskReply(result); err == nil || !strings.Contains(err.Error(), "completed") {
+		t.Fatalf("failed result error=%v", err)
+	}
+	if _, err := readTaskReply(filepath.Join(directory, "missing-result.json")); err == nil {
+		t.Fatal("missing task result was accepted")
+	}
+	if boundedError(fmt.Errorf("%s", strings.Repeat("x", 600))) != strings.Repeat("x", 512) {
+		t.Fatal("bounded error did not enforce its byte cap")
+	}
+	if boundedError(nil) != "" || !fileExists(result) || fileExists(filepath.Join(directory, "missing")) {
+		t.Fatal("nil error or file-existence boundary is incorrect")
+	}
+	buffer := &boundedBuffer{maximum: 4}
+	if written, _ := buffer.Write([]byte("abcdef")); written != 6 || !buffer.exceeded || !bytes.Equal(buffer.content, []byte("abcd")) {
+		t.Fatalf("bounded buffer written=%d exceeded=%v content=%q", written, buffer.exceeded, buffer.content)
+	}
+}
+
+func TestFilesystemAndReplyFailureBranches(t *testing.T) {
+	directory := t.TempDir()
+	permissive := filepath.Join(directory, "permissive")
+	if err := os.Mkdir(permissive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareStateDirectory(permissive); err == nil || !strings.Contains(err.Error(), "owner-only") {
+		t.Fatalf("permissive state error=%v", err)
+	}
+	target := filepath.Join(directory, "target")
+	if err := os.WriteFile(target, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(directory, "linked")
+	if err := os.Symlink(target, linked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSecureFile(linked, 32, true); err == nil {
+		t.Fatal("symlinked secret was accepted")
+	}
+	if _, err := runCommand(context.Background(), filepath.Join(directory, "missing"), nil, nil,
+		[]string{"PATH=/usr/bin:/bin"}, 32); err == nil || !strings.Contains(err.Error(), "could not start") {
+		t.Fatalf("missing command error=%v", err)
+	}
+	recorder := httptest.NewRecorder()
+	writeStatusJSON(recorder, http.StatusOK, make(chan int))
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "response encoding failed") {
+		t.Fatalf("encoding response code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	cfg := validTestConfig(directory)
+	cfg.BuzzBinary = writeExecutable(t, directory, "invalid-thread-buzz", "#!/bin/sh\nprintf 'not-json\\n'\n")
+	b := &bridge{cfg: cfg, logger: slog.Default(), buzzKey: "nsec-fixture", now: time.Now}
+	if _, _, err := b.findExistingReply(context.Background(), testChannel, testEvent, "answer"); err == nil ||
+		!strings.Contains(err.Error(), "invalid verified thread") {
+		t.Fatalf("invalid thread error=%v", err)
+	}
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(cfg.StateDirectory, "records", testEvent+".json")
+	if err := os.WriteFile(recordPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.loadOrCreateRecord(recordPath, testChannel, validEvent(time.Now())); err == nil ||
+		!strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("corrupt record error=%v", err)
+	}
+	if err := writeRecord(filepath.Join(directory, "missing", "record.json"), record{}); err == nil {
+		t.Fatal("record write into a missing directory succeeded")
+	}
+	if err := syncDirectory(filepath.Join(directory, "missing")); err == nil {
+		t.Fatal("missing directory sync succeeded")
 	}
 }
 
@@ -169,10 +443,16 @@ printf '{}\n'
 	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
 		t.Fatal(err)
 	}
+	taskSum := sha256.Sum256([]byte("steward-buzz-task-v1\x00" + cfg.TenantID + "\x00" + cfg.IntegrationID + "\x00" + testEvent))
+	initialRun := filepath.Join(cfg.StateDirectory, "runs", "task-"+fmt.Sprintf("%x", taskSum[:16]))
+	if err := os.Mkdir(initialRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	b := &bridge{cfg: cfg, logger: slog.Default(), buzzKey: "nsec-fixture", now: func() time.Time { return now }}
 	// The production child receives a minimal environment. Add fixture-only
 	// values by wrapping binaries because arbitrary parent env is intentionally absent.
 	b.BuzzBinaryEnvironmentForTest(t, eventJSON, replyCapture)
+	cfg.BuzzBinary = b.cfg.BuzzBinary
 	if err := b.poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -184,11 +464,55 @@ printf '{}\n'
 	if err != nil || !strings.Contains(string(raw), `"phase": "replied"`) {
 		t.Fatalf("record=%s error=%v", raw, err)
 	}
+	if !strings.Contains(string(raw), `"run_directory": "`+initialRun+`-recovery-1"`) {
+		t.Fatalf("record did not retain the recovered run directory: %s", raw)
+	}
+	found, replyID, err := b.findExistingReply(context.Background(), testChannel, testEvent, "useful answer")
+	if err != nil || !found || replyID != testReply {
+		t.Fatalf("existing reply found=%v id=%q error=%v", found, replyID, err)
+	}
 	if err := b.poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if content, _ := os.ReadFile(replyCapture); string(content) != "useful answer" {
 		t.Fatalf("second poll changed reply: %q", content)
+	}
+	cfg.MaxRecords = 1
+	b.cfg.MaxRecords = 1
+	secondEvent := validEvent(now)
+	secondEvent.ID = strings.Repeat("e", 64)
+	if _, _, err := b.loadOrCreateRecord(filepath.Join(cfg.StateDirectory, "records", secondEvent.ID+".json"),
+		testChannel, secondEvent); err == nil || !strings.Contains(err.Error(), "max_records") {
+		t.Fatalf("record capacity error=%v", err)
+	}
+	for _, path := range []string{
+		cfg.BuzzPrivateKeyFile, cfg.ControlTokenFile, cfg.GatewayTokenFile,
+		cfg.ServiceTrustFile, cfg.TaskKeyFile,
+	} {
+		if err := os.WriteFile(path, []byte("protected\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg.BuzzAPITokenFile = filepath.Join(directory, "buzz.token")
+	cfg.BuzzAuthTagFile = filepath.Join(directory, "buzz.auth-tag")
+	cfg.ControlCAFile = filepath.Join(directory, "control-ca.pem")
+	for _, path := range []string{cfg.BuzzAPITokenFile, cfg.BuzzAuthTagFile, cfg.ControlCAFile} {
+		if err := os.WriteFile(path, []byte("optional\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg.HTTPListen = "127.0.0.1:19083"
+	configRaw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "bridge.json")
+	if err := os.WriteFile(configPath, configRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runMain([]string{"-config", configPath, "-once"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("once code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
