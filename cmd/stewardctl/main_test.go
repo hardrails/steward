@@ -31,6 +31,11 @@ func TestKeygenCapsuleSignAndVerify(t *testing.T) {
 	if err := os.WriteFile(payloadPath, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	output.Reset()
+	if err := run([]string{"capsule", "check-profile", "-in", payloadPath}, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"state_path":"/state"`) {
+		t.Fatalf("profile check output=%s err=%v", output.String(), err)
+	}
 	envelopePath := filepath.Join(directory, "capsule.dsse.json")
 	if err := run([]string{"capsule", "sign", "-in", payloadPath, "-out", envelopePath, "-key", privateKey, "-key-id", "publisher-1"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)

@@ -340,8 +340,8 @@ func VerifyCapsuleForImport(capsuleEnvelope, policyEnvelope []byte, siteRoots ma
 	if !ok {
 		return VerifiedCapsuleImport{}, deny("unknown built-in profile")
 	}
-	if capsule.State.Path != profile.StatePath || capsule.State.SchemaVersion != profile.StateSchemaVersion {
-		return VerifiedCapsuleImport{}, deny("capsule state shape differs from built-in profile")
+	if _, err := ValidateProfileContract(capsule, profiles); err != nil {
+		return VerifiedCapsuleImport{}, err
 	}
 	return VerifiedCapsuleImport{
 		Capsule: capsule, SitePolicy: policy, Profile: profile,
@@ -1377,6 +1377,9 @@ type Profile struct {
 	GID                int
 	StatePath          string
 	StateSchemaVersion string
+	Command            []string
+	ServiceID          string
+	ServicePort        int
 }
 
 type Registry interface {
@@ -1397,7 +1400,27 @@ func (r StaticRegistry) Lookup(ref ProfileRef) (Profile, bool) {
 func DefaultProfiles() StaticRegistry {
 	return StaticRegistry{
 		{Ref: ProfileRef{ID: "generic-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/state", StateSchemaVersion: "v1"},
-		{Ref: ProfileRef{ID: "hermes-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1"},
-		{Ref: ProfileRef{ID: "openclaw-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/home/node/.openclaw", StateSchemaVersion: "v1"},
+		{Ref: ProfileRef{ID: "hermes-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},
+		{Ref: ProfileRef{ID: "openclaw-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/home/node/.openclaw", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "openclaw-api", ServicePort: 18789},
 	}
+}
+
+// ValidateProfileContract checks the runtime-specific fields that otherwise
+// fail only after a container starts. Generic profiles intentionally leave the
+// command and service shape publisher-defined; named adapters fix them.
+func ValidateProfileContract(capsule ProfileCapsule, profiles Registry) (Profile, error) {
+	profile, ok := profiles.Lookup(capsule.Profile)
+	if !ok {
+		return Profile{}, deny("unknown built-in profile")
+	}
+	if capsule.State.Path != profile.StatePath || capsule.State.SchemaVersion != profile.StateSchemaVersion {
+		return Profile{}, deny("capsule state shape differs from built-in profile: expected %s at %s", profile.StateSchemaVersion, profile.StatePath)
+	}
+	if len(profile.Command) != 0 && !slices.Equal(capsule.Command, profile.Command) {
+		return Profile{}, deny("capsule command differs from built-in profile: expected %q", profile.Command)
+	}
+	if profile.ServiceID != "" && (capsule.Service.ID != profile.ServiceID || capsule.Service.Port != profile.ServicePort) {
+		return Profile{}, deny("capsule service differs from built-in profile: expected %s on port %d", profile.ServiceID, profile.ServicePort)
+	}
+	return profile, nil
 }

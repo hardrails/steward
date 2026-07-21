@@ -322,13 +322,13 @@ func TestAgentApplyAdmitsAndStartsAuthenticatedBundle(t *testing.T) {
 			Repository: "example.invalid/hermes", ManifestDigest: "sha256:" + strings.Repeat("a", 64),
 			ConfigDigest: "sha256:" + strings.Repeat("b", 64), Platform: admission.Platform{OS: "linux", Architecture: "amd64"},
 		},
-		Command: []string{"/opt/hermes/run"},
+		Command: []string{"serve"},
 		Resources: admission.ResourceLimits{
 			MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256,
 		},
 		Capabilities: admission.Capabilities{State: true, Inference: true, Service: true},
 		State:        admission.StateShape{SchemaVersion: "v1", Path: "/opt/data"},
-		Service:      admission.ServiceShape{ID: "hermes-api", Port: 8080},
+		Service:      admission.ServiceShape{ID: "hermes-api", Port: 8766},
 	}
 	policy := admission.SitePolicy{
 		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
