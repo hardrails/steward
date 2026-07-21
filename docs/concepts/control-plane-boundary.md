@@ -17,7 +17,7 @@ signed admission when the controller is absent or unreachable.
 | Node-local workload lifecycle state | Tenant records, scoped operators, and bounded fleet inventory |
 | Open Container Initiative (OCI) artifact and workload admission | Bounded desired deployments and public signed workload artifacts |
 | Fixed sandbox and capability enforcement | One-time node enrollment and explicit tenant bindings |
-| Tenant-signature verification and durable anti-replay state | Deterministic placement and delegated lifecycle command creation |
+| Tenant-signature verification and durable anti-replay state | Deterministic, cache-aware placement and delegated lifecycle command creation |
 | Independent verification of tenant delegation and controller command | Exact signed-command retention, leasing, reclaim, and outcomes |
 | Node-local health checks and signed evidence | Bounded node inventory and command status |
 | Public APIs and outbound uplink protocols | Controller health, readiness, and operator API |
