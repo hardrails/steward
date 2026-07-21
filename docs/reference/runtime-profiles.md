@@ -16,6 +16,15 @@ before signing, import, or admission.
 | --- | --- | --- | --- | --- |
 | `generic-v1@v1` | `65532:65532` | `/state` (`v1`) | Publisher-defined | Publisher-defined |
 | `hermes-v1@v1` | `65532:65532` | `/opt/data` (`v1`) | `serve` | `hermes-api` on `8766` |
+| `hermes-research-v1@v1` | `65532:65532` | `/opt/data` (`v1`) | `serve` | `hermes-api` on `8766` |
+| `hermes-developer-v1@v1` | `65532:65532` | `/opt/data` (`v1`) | `serve` | `hermes-api` on `8766` |
+
+The three Hermes profiles run the same qualified adapter but expose different
+signed skill directories and Hermes toolsets. `hermes-v1` is the general
+workspace profile. The research profile requires the normalized search and
+extract connectors plus controller events. The developer profile requires at
+least one separately operated Claude Code or Codex connector. Credentials stay
+in those services; they are not mounted into Hermes state.
 
 Check an unsigned capsule before moving it to a signing workstation:
 

@@ -63,6 +63,9 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "connector", "set", "-preset", "g"}); !slices.Equal(candidates, []string{"github-issues"}) {
 		t.Fatalf("connector preset candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "connector", "set", "-preset", "research-"}); !slices.Equal(candidates, []string{"research-extract", "research-search"}) {
+		t.Fatalf("research connector preset candidates=%v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-provider", "v"}); !slices.Equal(candidates, []string{"vllm"}) {
 		t.Fatalf("inference provider candidates=%v", candidates)
 	}

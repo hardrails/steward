@@ -347,6 +347,23 @@ func TestCreateRunsSecureWorkloadByExactConfigDigest(t *testing.T) {
 	}
 }
 
+func TestHermesProfileIDsMapToExactImmutableToolProfiles(t *testing.T) {
+	tests := map[string]string{
+		"hermes-v1@v1":           "workspace",
+		"hermes-research-v1@v1":  "research",
+		"hermes-developer-v1@v1": "developer",
+	}
+	for profileID, want := range tests {
+		got, ok := hermesToolProfileForProfileID(profileID)
+		if !ok || got != want {
+			t.Fatalf("profile %q mapped to %q, %t; want %q", profileID, got, ok, want)
+		}
+	}
+	if got, ok := hermesToolProfileForProfileID("generic-v1@v1"); ok || got != "" {
+		t.Fatalf("generic profile mapped to %q, %t", got, ok)
+	}
+}
+
 func TestCreateRunsContainerdStoreWorkloadByExactManifestDigest(t *testing.T) {
 	var payload map[string]any
 	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1481,7 +1498,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 			"Config": map[string]any{
 				"Image": workload.Image, "Cmd": workload.Command, "User": "65532:65532",
 				"Env": []string{
-					"HOME=/opt/data/home", "TMPDIR=/tmp", "OPENAI_BASE_URL=http://steward-relay:8080/v1",
+					"HOME=/opt/data/home", "TMPDIR=/tmp", "STEWARD_HERMES_PROFILE=workspace", "OPENAI_BASE_URL=http://steward-relay:8080/v1",
 					"OPENAI_API_BASE=http://steward-relay:8080/v1", "OPENAI_API_KEY=steward-local", "OPENAI_MODEL=private-model",
 					"STEWARD_CONNECTOR_URL=http://steward-relay:8081",
 				},

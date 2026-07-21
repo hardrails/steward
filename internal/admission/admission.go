@@ -1402,6 +1402,8 @@ func DefaultProfiles() StaticRegistry {
 	return StaticRegistry{
 		{Ref: ProfileRef{ID: "generic-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/state", StateSchemaVersion: "v1"},
 		{Ref: ProfileRef{ID: "hermes-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},
+		{Ref: ProfileRef{ID: "hermes-research-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},
+		{Ref: ProfileRef{ID: "hermes-developer-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},
 	}
 }
 

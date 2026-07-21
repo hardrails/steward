@@ -383,7 +383,7 @@ type profileLayout struct {
 
 func profileLayoutFor(profileID string) profileLayout {
 	switch profileID {
-	case "hermes-v1@v1":
+	case "hermes-v1@v1", "hermes-research-v1@v1", "hermes-developer-v1@v1":
 		return profileLayout{StatePath: "/opt/data", Home: "/opt/data/home", WorkDir: "/opt/data"}
 	default:
 		return profileLayout{StatePath: "/state", Home: "/state", WorkDir: "/state"}

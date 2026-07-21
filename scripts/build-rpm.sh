@@ -48,8 +48,14 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	adapters/hermes-agent/fixtures/skill/public.pem \
 	adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json \
 	adapters/hermes-agent/fixtures/skill/workspace_audit.py \
+	adapters/hermes-agent/profiles/research/SKILL.md adapters/hermes-agent/profiles/research/research.py \
+	adapters/hermes-agent/profiles/research/manifest.json adapters/hermes-agent/profiles/research/manifest.sig adapters/hermes-agent/profiles/research/public.pem \
+	adapters/hermes-agent/profiles/developer/SKILL.md adapters/hermes-agent/profiles/developer/coding_worker.py \
+	adapters/hermes-agent/profiles/developer/manifest.json adapters/hermes-agent/profiles/developer/manifest.sig adapters/hermes-agent/profiles/developer/public.pem \
 	adapters/hermes-agent/license-inventory.json adapters/hermes-agent/source-inputs.sha256 \
-	examples/agents/hermes/agent.json \
+	workers/coding/Dockerfile workers/coding/README.md workers/coding/coding_worker.py workers/coding/package-lock.json workers/coding/package.json \
+	workers/research/Dockerfile workers/research/README.md workers/research/research_worker.py \
+	examples/agents/hermes/agent.json examples/agents/researcher/agent.json examples/agents/developer/agent.json \
 	examples/agents/nodes.json examples/policy/steward.rego schemas/agent.cue \
 	release.json LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then

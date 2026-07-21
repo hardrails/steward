@@ -24,7 +24,9 @@ func BuildIntent(
 		return admission.InstanceIntent{}, errors.New("agent admission generation must be positive")
 	}
 	capsule := verified.Capsule
-	profileID := map[string]string{"hermes": "hermes-v1"}[bundle.Definition.Runtime.Engine]
+	profileID := map[string]string{
+		"workspace": "hermes-v1", "research": "hermes-research-v1", "developer": "hermes-developer-v1",
+	}[bundle.Definition.EffectiveToolProfile()]
 	serviceID := map[string]string{"hermes": "hermes-api"}[bundle.Definition.Runtime.Engine]
 	if capsule.Profile != (admission.ProfileRef{ID: profileID, Version: "v1"}) {
 		return admission.InstanceIntent{}, errors.New("agent runtime does not match the authenticated capsule profile")

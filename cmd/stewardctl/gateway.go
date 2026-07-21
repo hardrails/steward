@@ -581,7 +581,7 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("gateway connector "+action, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
-	preset := flags.String("preset", "", "vetted connector preset: github-issues")
+	preset := flags.String("preset", "", "vetted preset: github-issues, research-search, research-extract, codex-worker, or claude-code-worker")
 	presetRepository := flags.String("repository", "", "preset repository in OWNER/NAME form")
 	id := flags.String("id", "", "stable connector ID")
 	baseURL := flags.String("base-url", "", "exact upstream HTTPS origin")
@@ -852,7 +852,8 @@ func applyGatewayConnectorPreset(action string, flags *flag.FlagSet, preset, rep
 		return errors.New("connector presets are accepted only by gateway connector set")
 	}
 	if preset != "github-issues" {
-		return fmt.Errorf("unsupported connector preset %q", preset)
+		return applyAgentServiceConnectorPreset(flags, preset, repository, id, baseURL, credentialMode,
+			operations, maxConcurrent, maxRequest, maxResponse, maxSeconds, maxCalls)
 	}
 	if !validGitHubRepository(repository) {
 		return errors.New("github-issues preset requires -repository OWNER/NAME")
@@ -885,6 +886,70 @@ func applyGatewayConnectorPreset(action string, flags *flag.FlagSet, preset, rep
 	}
 	if !flagWasVisited(flags, "max-calls-per-grant") {
 		*maxCalls = 4
+	}
+	return nil
+}
+
+func applyAgentServiceConnectorPreset(
+	flags *flag.FlagSet, preset, repository string,
+	id, baseURL, credentialMode *string, operations *repeatedFlag,
+	maxConcurrent *int, maxRequest, maxResponse *int64, maxSeconds, maxCalls *int,
+) error {
+	if repository != "" {
+		return errors.New("-repository requires -preset github-issues")
+	}
+	type connectorPreset struct {
+		id, operation                          string
+		concurrent, request, response, seconds int
+		calls                                  int
+	}
+	presets := map[string]connectorPreset{
+		"research-search": {
+			id: "steward-research-search", operation: "search=POST:/v1/search",
+			concurrent: 8, request: 64 << 10, response: 1 << 20, seconds: 30, calls: 64,
+		},
+		"research-extract": {
+			id: "steward-research-extract", operation: "extract=POST:/v1/extract",
+			concurrent: 4, request: 64 << 10, response: 4 << 20, seconds: 60, calls: 64,
+		},
+		"codex-worker": {
+			id: "steward-codex", operation: "run=POST:/v1/run",
+			concurrent: 2, request: 64 << 10, response: 1 << 20, seconds: 915, calls: 16,
+		},
+		"claude-code-worker": {
+			id: "steward-claude-code", operation: "run=POST:/v1/run",
+			concurrent: 2, request: 64 << 10, response: 1 << 20, seconds: 915, calls: 16,
+		},
+	}
+	selected, ok := presets[preset]
+	if !ok {
+		return fmt.Errorf("unsupported connector preset %q", preset)
+	}
+	if *baseURL == "" {
+		return fmt.Errorf("%s preset requires -base-url for the separately operated service", preset)
+	}
+	for _, conflict := range []string{"id", "operation", "credential-mode", "clear-action-permit"} {
+		if flagWasVisited(flags, conflict) {
+			return fmt.Errorf("%s preset owns -%s; omit the conflicting flag", preset, conflict)
+		}
+	}
+	*id = selected.id
+	*credentialMode = string(gateway.CredentialModeBearer)
+	*operations = repeatedFlag{selected.operation}
+	if !flagWasVisited(flags, "max-concurrent") {
+		*maxConcurrent = selected.concurrent
+	}
+	if !flagWasVisited(flags, "max-request-bytes") {
+		*maxRequest = int64(selected.request)
+	}
+	if !flagWasVisited(flags, "max-response-bytes") {
+		*maxResponse = int64(selected.response)
+	}
+	if !flagWasVisited(flags, "max-seconds") {
+		*maxSeconds = selected.seconds
+	}
+	if !flagWasVisited(flags, "max-calls-per-grant") {
+		*maxCalls = selected.calls
 	}
 	return nil
 }

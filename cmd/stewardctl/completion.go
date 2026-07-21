@@ -356,7 +356,13 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 			return matchingCandidates([]string{"hermes"}, current)
 		}
 		if previous == "-preset" && leaf == "gateway connector set" {
-			return matchingCandidates([]string{"github-issues"}, current)
+			return matchingCandidates([]string{
+				"claude-code-worker",
+				"codex-worker",
+				"github-issues",
+				"research-extract",
+				"research-search",
+			}, current)
 		}
 		if previous == "-provider" && leaf == "gateway inference set" {
 			return matchingCandidates([]string{"anthropic", "compatible", "litellm", "llamacpp", "lmstudio", "localai", "mistral", "ollama", "openai", "openrouter", "sglang", "tgi", "vllm"}, current)

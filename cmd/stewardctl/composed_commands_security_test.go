@@ -87,7 +87,7 @@ func TestComposedAgentCommandsRejectIncompleteAndConflictingInputs(t *testing.T)
 	if err := validateGeneratedTenantCommandKey(verified.policy, unrelated); err == nil {
 		t.Fatal("unrelated tenant command key was accepted")
 	}
-	if _, ok := agentPublicationContractFor("unsupported"); ok {
+	if _, ok := agentPublicationContractFor("unsupported", "workspace"); ok {
 		t.Fatal("unsupported runtime received a publication contract")
 	}
 	template := agentDelegationTemplate(admission.InstanceIntent{}, agentapp.Placement{

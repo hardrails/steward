@@ -1,0 +1,20 @@
+{
+  "schema": "steward.agent.v1",
+  "name": "researcher",
+  "runtime": {
+    "engine": "hermes",
+    "image": "replace.invalid/steward-hermes@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "adapter_contract": "steward.hermes-agent.v1"
+  },
+  "tool_profile": "research",
+  "model": {"route": "local/default"},
+  "skills": ["steward-research"],
+  "capabilities": {
+    "connector_ids": ["steward-research-extract", "steward-research-search"],
+    "controller_events": true
+  },
+  "resources": {"cpu_millis": 1500, "memory_mib": 2048, "disk_mib": 4096, "pids": 256},
+  "placement": {"architectures": ["amd64"], "isolation": "hardened"},
+  "state": {"persistent": true},
+  "lifetime": {"mode": "service"}
+}

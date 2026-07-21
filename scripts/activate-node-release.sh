@@ -119,8 +119,29 @@ release_files=(
 	integration/adapters/hermes-agent/fixtures/skill/public.pem
 	integration/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json
 	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
+	integration/adapters/hermes-agent/profiles/developer/SKILL.md
+	integration/adapters/hermes-agent/profiles/developer/coding_worker.py
+	integration/adapters/hermes-agent/profiles/developer/manifest.json
+	integration/adapters/hermes-agent/profiles/developer/manifest.sig
+	integration/adapters/hermes-agent/profiles/developer/public.pem
+	integration/adapters/hermes-agent/profiles/research/SKILL.md
+	integration/adapters/hermes-agent/profiles/research/manifest.json
+	integration/adapters/hermes-agent/profiles/research/manifest.sig
+	integration/adapters/hermes-agent/profiles/research/public.pem
+	integration/adapters/hermes-agent/profiles/research/research.py
 	integration/adapters/hermes-agent/license-inventory.json
 	integration/adapters/hermes-agent/source-inputs.sha256
+	integration/workers/coding/Dockerfile
+	integration/workers/coding/README.md
+	integration/workers/coding/coding_worker.py
+	integration/workers/coding/package-lock.json
+	integration/workers/coding/package.json
+	integration/workers/research/Dockerfile
+	integration/workers/research/README.md
+	integration/workers/research/research_worker.py
+	integration/examples/agents/developer/agent.json
+	integration/examples/agents/hermes/agent.json
+	integration/examples/agents/researcher/agent.json
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in

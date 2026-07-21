@@ -59,7 +59,7 @@ func agentServiceActivate(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	contract, ok := agentPublicationContractFor(bundle.Definition.Runtime.Engine)
+	contract, ok := agentPublicationContractFor(bundle.Definition.Runtime.Engine, bundle.Definition.EffectiveToolProfile())
 	if !ok || contract.serviceID == "" {
 		return errors.New("agent runtime has no activatable Steward service contract")
 	}

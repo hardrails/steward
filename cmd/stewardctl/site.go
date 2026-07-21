@@ -299,6 +299,8 @@ func buildSitePackage(siteID, tenantID, repository string, serviceIDs []string, 
 			AllowedProfiles: []admission.ProfileRef{
 				{ID: "generic-v1", Version: "v1"},
 				{ID: "hermes-v1", Version: "v1"},
+				{ID: "hermes-research-v1", Version: "v1"},
+				{ID: "hermes-developer-v1", Version: "v1"},
 			},
 			AllowedRepositories: []string{repository}, ResourceCeiling: limits,
 		}},

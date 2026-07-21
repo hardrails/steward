@@ -867,6 +867,8 @@ release_files=(
 	steward-storage-zfs
 	stewardctl
 	integration/examples/agents/hermes/agent.json
+	integration/examples/agents/developer/agent.json
+	integration/examples/agents/researcher/agent.json
 	integration/examples/agents/nodes.json
 	integration/examples/policy/steward.rego
 	integration/schemas/agent.cue
@@ -890,8 +892,26 @@ release_files=(
 	integration/adapters/hermes-agent/fixtures/skill/public.pem
 	integration/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json
 	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
+	integration/adapters/hermes-agent/profiles/developer/SKILL.md
+	integration/adapters/hermes-agent/profiles/developer/coding_worker.py
+	integration/adapters/hermes-agent/profiles/developer/manifest.json
+	integration/adapters/hermes-agent/profiles/developer/manifest.sig
+	integration/adapters/hermes-agent/profiles/developer/public.pem
+	integration/adapters/hermes-agent/profiles/research/SKILL.md
+	integration/adapters/hermes-agent/profiles/research/manifest.json
+	integration/adapters/hermes-agent/profiles/research/manifest.sig
+	integration/adapters/hermes-agent/profiles/research/public.pem
+	integration/adapters/hermes-agent/profiles/research/research.py
 	integration/adapters/hermes-agent/license-inventory.json
 	integration/adapters/hermes-agent/source-inputs.sha256
+	integration/workers/coding/Dockerfile
+	integration/workers/coding/README.md
+	integration/workers/coding/coding_worker.py
+	integration/workers/coding/package-lock.json
+	integration/workers/coding/package.json
+	integration/workers/research/Dockerfile
+	integration/workers/research/README.md
+	integration/workers/research/research_worker.py
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -1164,14 +1184,20 @@ done
 install -d -o root -g root -m 0755 "$incoming/integration" \
 	"$incoming/integration/examples" "$incoming/integration/examples/agents" \
 	"$incoming/integration/examples/agents/hermes" \
+	"$incoming/integration/examples/agents/developer" \
+	"$incoming/integration/examples/agents/researcher" \
 	"$incoming/integration/examples/policy" "$incoming/integration/schemas" \
 	"$incoming/integration/adapters" "$incoming/integration/adapters/hermes-agent" \
 	"$incoming/integration/adapters/hermes-agent/fixtures" \
 	"$incoming/integration/adapters/hermes-agent/fixtures/connector-skill" \
 	"$incoming/integration/adapters/hermes-agent/fixtures/skill" \
+	"$incoming/integration/adapters/hermes-agent/profiles/developer" \
+	"$incoming/integration/adapters/hermes-agent/profiles/research" \
+	"$incoming/integration/workers" "$incoming/integration/workers/coding" \
+	"$incoming/integration/workers/research" \
 	"$incoming/integration/deploy" "$incoming/integration/deploy/config" \
 	"$incoming/integration/deploy/systemd" "$incoming/integration/scripts"
-for file in agents/hermes/agent.json agents/nodes.json \
+for file in agents/hermes/agent.json agents/developer/agent.json agents/researcher/agent.json agents/nodes.json \
 	policy/steward.rego; do
 	install -o root -g root -m 0644 "$root/examples/$file" "$incoming/integration/examples/$file"
 done
@@ -1189,6 +1215,22 @@ for file in SKILL.md manifest.json manifest.sig public.pem workspace-fixture-con
 	workspace_audit.py; do
 	install -o root -g root -m 0644 "$root/adapters/hermes-agent/fixtures/skill/$file" \
 		"$incoming/integration/adapters/hermes-agent/fixtures/skill/$file"
+done
+for file in SKILL.md coding_worker.py manifest.json manifest.sig public.pem; do
+	install -o root -g root -m 0644 "$root/adapters/hermes-agent/profiles/developer/$file" \
+		"$incoming/integration/adapters/hermes-agent/profiles/developer/$file"
+done
+for file in SKILL.md research.py manifest.json manifest.sig public.pem; do
+	install -o root -g root -m 0644 "$root/adapters/hermes-agent/profiles/research/$file" \
+		"$incoming/integration/adapters/hermes-agent/profiles/research/$file"
+done
+for file in Dockerfile README.md coding_worker.py package-lock.json package.json; do
+	install -o root -g root -m 0644 "$root/workers/coding/$file" \
+		"$incoming/integration/workers/coding/$file"
+done
+for file in Dockerfile README.md research_worker.py; do
+	install -o root -g root -m 0644 "$root/workers/research/$file" \
+		"$incoming/integration/workers/research/$file"
 done
 for file in deploy/config/executor-gateway.env deploy/config/executor.env \
 	deploy/config/gateway.json.in deploy/config/steward-local.json deploy/config/steward.json deploy/config/storage-zfs.json.in \

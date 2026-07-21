@@ -71,6 +71,26 @@
     "network": true,
     "result_schema": "steward.connector-work.result.v1"
   },
+  "profile_skills": [
+    {
+      "profile": "research",
+      "name": "steward-research",
+      "connector_ids": [
+        "steward-research-extract",
+        "steward-research-search"
+      ],
+      "controller_events": true
+    },
+    {
+      "profile": "developer",
+      "name": "steward-coding-worker",
+      "connector_ids": [
+        "steward-claude-code",
+        "steward-codex"
+      ],
+      "controller_events": false
+    }
+  ],
   "known_upstream_incompatibilities": [
     "upstream image starts as root for s6 initialization",
     "upstream image declares VOLUME /opt/data",

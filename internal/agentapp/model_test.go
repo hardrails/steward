@@ -49,6 +49,41 @@ func TestBuildIsDeterministicAndTamperEvident(t *testing.T) {
 	}
 }
 
+func TestToolProfilesRequireTheirExactPositiveCapabilities(t *testing.T) {
+	tests := []struct {
+		name       string
+		profile    string
+		skills     []string
+		connectors []string
+		events     bool
+		wantError  string
+	}{
+		{name: "workspace", profile: "workspace"},
+		{name: "research", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-research-search", "steward-research-extract"}, events: true},
+		{name: "research missing events", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-research-search", "steward-research-extract"}, wantError: "controller events"},
+		{name: "developer codex", profile: "developer", skills: []string{"steward-coding-worker"}, connectors: []string{"steward-codex"}},
+		{name: "developer claude", profile: "developer", skills: []string{"steward-coding-worker"}, connectors: []string{"steward-claude-code"}},
+		{name: "developer missing worker", profile: "developer", skills: []string{"steward-coding-worker"}, wantError: "coding-worker connector"},
+		{name: "unknown", profile: "browser", wantError: "tool_profile"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			definition := validDefinition()
+			definition.ToolProfile = test.profile
+			definition.Skills = append(definition.Skills, test.skills...)
+			definition.Capabilities.ConnectorIDs = append([]string(nil), test.connectors...)
+			definition.Capabilities.ControllerEvents = test.events
+			err := definition.Validate()
+			if test.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("error=%v, want substring %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	bundle, err := Build(validDefinition(), nil)
 	if err != nil {

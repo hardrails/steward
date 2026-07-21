@@ -789,6 +789,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		labels[runtimeActivationBeginDigestLabel] = w.Runtime.ActivationBeginDigest
 	}
 	environment := []string{"HOME=" + home, "TMPDIR=/tmp"}
+	if toolProfile, ok := hermesToolProfileForProfileID(w.ProfileID); ok {
+		environment = append(environment, "STEWARD_HERMES_PROFILE="+toolProfile)
+	}
 	if w.Runtime != nil && w.Runtime.Inference {
 		environment = append(environment,
 			"OPENAI_BASE_URL=http://steward-relay:8080/v1", "OPENAI_API_BASE=http://steward-relay:8080/v1",
@@ -945,6 +948,10 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs}) && hasExactStateMount(payload.Mounts, *state)
 	}
 	var runtimeGrant *RuntimeGrant
+	toolProfileHardened := true
+	if toolProfile, ok := hermesToolProfileForProfileID(labels["io.hardrails.profile"]); ok {
+		toolProfileHardened = contains(payload.Config.Env, "STEWARD_HERMES_PROFILE="+toolProfile)
+	}
 	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == "" &&
 		labels[runtimeNodeIDLabel] == "" && labels[runtimeConnectorsLabel] == "" && labels[runtimeControllerEventsLabel] == "" && labels[runtimeServiceIDLabel] == "" && labels[runtimeTaskAuthoritiesLabel] == "" &&
 		labels[runtimeEffectModeLabel] == "" && labels[runtimeActionApprovalThresholdLabel] == "" && labels[runtimeActionContextRequiredLabel] == "" && labels[runtimeActionAuthoritiesLabel] == "" &&
@@ -1062,7 +1069,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			labels[workloadMemoryLabel] == strconv.FormatInt(payload.HostConfig.Memory, 10) &&
 			labels[workloadCPULabel] == strconv.FormatInt(payload.HostConfig.NanoCPUs/1_000_000, 10) &&
 			labels[workloadPIDsLabel] == strconv.FormatInt(payload.HostConfig.Pids, 10) &&
-			stateHardened &&
+			stateHardened && toolProfileHardened &&
 			contains(payload.Config.Env, "TMPDIR=/tmp") &&
 			payload.HostConfig.Runtime == "runsc" && runtimeHardened &&
 			payload.HostConfig.namespacesHardened() && payload.HostConfig.lifecycleHardened() &&
@@ -1083,6 +1090,19 @@ func splitRouteIDs(value string) []string {
 		return nil
 	}
 	return strings.Split(value, ",")
+}
+
+func hermesToolProfileForProfileID(profileID string) (string, bool) {
+	switch profileID {
+	case "hermes-v1@v1":
+		return "workspace", true
+	case "hermes-research-v1@v1":
+		return "research", true
+	case "hermes-developer-v1@v1":
+		return "developer", true
+	default:
+		return "", false
+	}
 }
 
 func decodeTaskAuthorityLabel(value string) ([]gateway.TaskAuthority, error) {

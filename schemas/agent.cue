@@ -9,6 +9,7 @@
     image: string & =~"@sha256:[0-9a-f]{64}$"
     adapter_contract: string
   }
+  tool_profile?: "workspace" | "research" | "developer"
   model: route: string & !=""
   skills?: [...string]
   mcp_servers?: [...string]
