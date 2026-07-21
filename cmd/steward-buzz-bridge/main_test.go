@@ -100,7 +100,8 @@ func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
 	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newBridge(configPath, slog.Default()); err != nil {
+	readyBridge, err := newBridge(configPath, slog.Default())
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := newBridge(filepath.Join(directory, "missing-config.json"), slog.Default()); err == nil ||
@@ -166,6 +167,78 @@ func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
 	if code := runMain([]string{"-config", configPath, "-check-config"}, &stdout, &stderr); code != 0 ||
 		!strings.Contains(stdout.String(), `"valid":true`) {
 		t.Fatalf("check code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if err := readyBridge.ingest(testChannel, validEvent(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-list-records"}, &stdout, &stderr); code != 0 ||
+		!strings.Contains(stdout.String(), `"event_id":"`+testEvent+`"`) || strings.Contains(stdout.String(), "hello") {
+		t.Fatalf("list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-retry-record", testEvent}, &stdout, &stderr); code != 0 ||
+		!strings.Contains(stdout.String(), `"queued":true`) {
+		t.Fatalf("retry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	recordPath := filepath.Join(cfg.StateDirectory, "records", testEvent+".json")
+	completed, err := readRecord(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed.Phase = "replied"
+	completed.ReplyDigest = sha256Digest([]byte("answer"))
+	completed.ReplyEventID = testReply
+	if err := writeRecord(recordPath, completed); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-retry-record", testEvent}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "cannot be retried") {
+		t.Fatalf("completed retry code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-retry-record", "INVALID"}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "64 lowercase hexadecimal") {
+		t.Fatalf("invalid retry code=%d stderr=%q", code, stderr.String())
+	}
+	locked, acquired, err := acquireEventLock(strings.TrimSuffix(recordPath, ".json") + ".lock")
+	if err != nil || !acquired {
+		t.Fatalf("record lock acquired=%v error=%v", acquired, err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-retry-record", testEvent}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "currently being processed") {
+		t.Fatalf("locked retry code=%d stderr=%q", code, stderr.String())
+	}
+	if err := releaseEventLock(locked); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-list-records"}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "record is invalid") {
+		t.Fatalf("corrupt list code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-once", "-list-records"}, &stdout, &stderr); code != 2 ||
+		!strings.Contains(stderr.String(), "choose only one") {
+		t.Fatalf("conflicting mode code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMain([]string{"-config", configPath, "-retry-record", strings.Repeat("e", 64)}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "no such file") {
+		t.Fatalf("missing retry code=%d stderr=%q", code, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -905,6 +978,135 @@ printf '[{"id":"`+testReply+`","pubkey":"`+testAgent+`","kind":9,"content":"answ
 	queued, failed, err := b.recordCounts()
 	if err != nil || queued != 0 || failed != 0 {
 		t.Fatalf("queued=%d failed=%d error=%v", queued, failed, err)
+	}
+}
+
+func TestCommandFailureTaxonomyAndRedaction(t *testing.T) {
+	tests := []struct {
+		name      string
+		binary    string
+		exitCode  int
+		wantCode  string
+		retryable bool
+	}{
+		{name: "invalid Buzz request", binary: "buzz", exitCode: 1, wantCode: "buzz_request_invalid"},
+		{name: "relay unavailable", binary: "steward-buzz", exitCode: 2, wantCode: "buzz_relay_unavailable", retryable: true},
+		{name: "authentication rejected", binary: "buzz-cli", exitCode: 3, wantCode: "buzz_authentication_failed"},
+		{name: "external Buzz failure", binary: "buzz", exitCode: 4, wantCode: "buzz_external_failure", retryable: true},
+		{name: "Buzz conflict", binary: "buzz", exitCode: 5, wantCode: "buzz_conflict", retryable: true},
+		{name: "unknown Buzz failure", binary: "buzz", exitCode: 9, wantCode: "buzz_command_failed", retryable: true},
+		{name: "Steward task failure", binary: "stewardctl", exitCode: 7, wantCode: "steward_task_command_failed", retryable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := classifyCommandFailure(test.binary, test.exitCode, "token=secret")
+			var failure *commandFailure
+			if !errors.As(err, &failure) || failure.code != test.wantCode || failure.retryable != test.retryable {
+				t.Fatalf("failure=%+v error=%v", failure, err)
+			}
+			redacted := redactCommandSecrets(err, "secret")
+			if strings.Contains(redacted.Error(), "secret") || !strings.Contains(redacted.Error(), "[redacted]") {
+				t.Fatalf("redacted error=%q", redacted)
+			}
+		})
+	}
+
+	detail := safeCommandDetail([]byte("line one\nline\ttwo\x00" + strings.Repeat("x", 600)))
+	if strings.ContainsAny(detail, "\n\t\x00") || len(detail) != 512 {
+		t.Fatalf("unsafe bounded command detail length=%d value=%q", len(detail), detail)
+	}
+	ordinary := errors.New("ordinary failure")
+	if redactCommandSecrets(ordinary, "ordinary") != ordinary {
+		t.Fatal("redaction replaced a non-command error")
+	}
+	cause := errors.New("underlying failure")
+	wrapped := &bridgeFailure{code: "bridge_failed", retryable: true, cause: cause}
+	if !errors.Is(wrapped, cause) || publicFailureCode(wrapped) != "bridge_failed" {
+		t.Fatalf("bridge failure did not preserve its cause: %v", wrapped)
+	}
+	withoutDetail := (&commandFailure{binary: "buzz", exitCode: 2, code: "relay_unavailable"}).Error()
+	if strings.HasSuffix(withoutDetail, ": ") {
+		t.Fatalf("empty command detail was rendered: %q", withoutDetail)
+	}
+}
+
+func TestRecordFailureBackoffAndDeadLetterPolicy(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0).UTC()
+	b := &bridge{now: func() time.Time { return now }}
+	if recordReady(record{NextAttemptAt: now.Add(time.Second).Format(time.RFC3339Nano)}, now) ||
+		recordReady(record{NextAttemptAt: "invalid"}, now) {
+		t.Fatal("future or malformed retry time was ready")
+	}
+
+	retryable := record{Phase: "pending"}
+	b.recordFailure(&retryable, &bridgeFailure{code: "relay_unavailable", retryable: true, cause: errors.New("offline")})
+	if retryable.Attempts != 1 || retryable.ErrorCode != "relay_unavailable" || !retryable.Retryable ||
+		retryable.NextAttemptAt != now.Add(5*time.Second).Format(time.RFC3339Nano) || retryable.Phase != "pending" {
+		t.Fatalf("first retry=%+v", retryable)
+	}
+	retryable.Attempts = 8
+	b.recordFailure(&retryable, &commandFailure{code: "buzz_relay_unavailable", retryable: true})
+	if retryable.Attempts != 9 || retryable.NextAttemptAt != now.Add(5*time.Minute).Format(time.RFC3339Nano) {
+		t.Fatalf("capped retry=%+v", retryable)
+	}
+	b.recordFailure(&retryable, errors.New("last attempt"))
+	if retryable.Phase != "dead_letter" || retryable.ResumePhase != "pending" || retryable.NextAttemptAt != "" {
+		t.Fatalf("exhausted retry=%+v", retryable)
+	}
+
+	permanent := record{Phase: "dispatched"}
+	b.recordFailure(&permanent, &bridgeFailure{code: "invalid_reply", retryable: false, cause: errors.New("bad result")})
+	if permanent.Phase != "dead_letter" || permanent.ResumePhase != "dispatched" || permanent.ErrorCode != "invalid_reply" {
+		t.Fatalf("permanent failure=%+v", permanent)
+	}
+	clearRecordFailure(&permanent)
+	if permanent.LastError != "" || permanent.ErrorCode != "" || permanent.Retryable || permanent.NextAttemptAt != "" {
+		t.Fatalf("cleared failure=%+v", permanent)
+	}
+}
+
+func TestReadRecordRejectsIncompleteDurableTransitions(t *testing.T) {
+	directory := t.TempDir()
+	cfg := validTestConfig(directory)
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_900_000_000, 0).UTC()
+	b := &bridge{cfg: cfg, logger: slog.Default(), now: func() time.Time { return now }}
+	if err := b.ingest(testChannel, validEvent(now)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cfg.StateDirectory, "records", testEvent+".json")
+	base, err := readRecord(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		want string
+		edit func(*record)
+	}{
+		{name: "unknown phase", want: "invalid phase", edit: func(rec *record) { rec.Phase = "unknown" }},
+		{name: "unknown resume phase", want: "invalid resume phase", edit: func(rec *record) { rec.ResumePhase = "replied" }},
+		{name: "malformed retry time", want: "invalid retry time", edit: func(rec *record) { rec.NextAttemptAt = "tomorrow" }},
+		{name: "publishing without reply digest", want: "incomplete phase transition", edit: func(rec *record) { rec.Phase = "publishing" }},
+		{name: "dead letter without resume phase", want: "incomplete phase transition", edit: func(rec *record) { rec.Phase = "dead_letter" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := base
+			test.edit(&candidate)
+			raw, err := json.Marshal(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readRecord(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("record error=%v", err)
+			}
+		})
 	}
 }
 

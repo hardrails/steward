@@ -46,7 +46,7 @@
     },
     {
       "path": "cmd/steward-buzz-bridge/main_test.go",
-      "sha256": "0a7683e4c83e8b2d384e4f8d0c4c5aa952c0496250a0b859436f742608c74d52"
+      "sha256": "54743592e0f886f80a45e25b53be610649ef9ff48561a6707a4101278e03a3a5"
     },
     {
       "path": "scripts/build-buzz-bridge.sh",
