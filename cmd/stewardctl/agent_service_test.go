@@ -95,4 +95,16 @@ func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testi
 		summary.Activation != "systemctl reload steward-gateway.service" {
 		t.Fatalf("service activation retry = %+v, err=%v", summary, err)
 	}
+	if err := agentServiceCommand([]string{
+		"activate", "-bundle", bundlePath, "-config", configPath,
+		"-tenant-id", "tenant-a", "-node-id", "node-b", "-trust-out", filepath.Join(directory, "node-b-trust.json"),
+	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "export agent service trust") {
+		t.Fatalf("receipt identity mismatch error = %v", err)
+	}
+	if err := agentServiceCommand([]string{
+		"activate", "-bundle", bundlePath, "-config", configPath,
+		"-tenant-id", "tenant-a", "-node-id", "node-a", "-trust-out", string(filepath.Separator),
+	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "output path is invalid") {
+		t.Fatalf("root trust output error = %v", err)
+	}
 }

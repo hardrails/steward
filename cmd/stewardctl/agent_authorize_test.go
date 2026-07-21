@@ -48,13 +48,17 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 		t.Fatal(err)
 	}
 	delegationPath := filepath.Join(directory, "delegation.dsse.json")
-	var output bytes.Buffer
-	if err := agentAuthorize([]string{
+	arguments := []string{
 		siteDirectory, "-bundle", bundlePath, "-capsule", capsulePath,
 		"-controller-public-key", controllerPath, "-node-ids", "node-b,node-a",
 		"-out", delegationPath,
-	}, &output); err != nil {
+	}
+	var output bytes.Buffer
+	if err := agentAuthorize(arguments, &output); err != nil {
 		t.Fatal(err)
+	}
+	if err := agentAuthorize(arguments, &bytes.Buffer{}); err == nil {
+		t.Fatal("existing controller delegation was replaced")
 	}
 	var summary agentAuthorizeSummary
 	if err := json.Unmarshal(output.Bytes(), &summary); err != nil {

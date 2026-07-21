@@ -209,6 +209,16 @@ func TestComposedCredentialOutputsFailClosed(t *testing.T) {
 	if err := writeOrVerifyAgentServiceTrust(filepath.Join(unsafeParent, "trust"), []byte("trust\n")); err == nil {
 		t.Fatal("world-writable trust parent was accepted")
 	}
+	blocked := filepath.Join(directory, "blocked-parent")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOrVerifySiteOperatorToken(filepath.Join(blocked, "token"), "operator"); err == nil {
+		t.Fatal("operator token below a regular file was accepted")
+	}
+	if err := writeOrVerifyAgentServiceTrust(filepath.Join(blocked, "trust"), []byte("trust\n")); err == nil {
+		t.Fatal("service trust below a regular file was accepted")
+	}
 }
 
 func TestComposedAuthorityValidatorsRejectIdentityDrift(t *testing.T) {
@@ -348,6 +358,12 @@ func TestSiteConnectRejectsAuthorityAndControlDrift(t *testing.T) {
 			}
 		})
 	}
+	if err := os.WriteFile(filepath.Join(directory, "contexts.json"), []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := siteConnect([]string{siteDirectory}, &bytes.Buffer{}); err == nil {
+		t.Fatal("corrupt CLI context was accepted")
+	}
 }
 
 func TestSiteTaskKeyRejectsUnscopedAuthority(t *testing.T) {
@@ -448,6 +464,22 @@ func TestSiteTaskKeyRejectsUnscopedAuthority(t *testing.T) {
 }
 
 func TestSiteTaskAndNodeHelpersRejectMalformedMaterial(t *testing.T) {
+	if err := validatePreparedEnrollment(controlclient.Enrollment{}, "tenant-a", "node-a"); err == nil {
+		t.Fatal("identity-free enrollment was accepted")
+	}
+	invalidExpiry := controlclient.Enrollment{
+		ControllerInstanceID: "control-a", EnrollmentID: "enrollment-a", EnrollmentToken: "token",
+		NodeID: "node-a", TenantIDs: []string{"tenant-a"}, ExpiresAt: "not-a-time",
+	}
+	if err := validatePreparedEnrollment(invalidExpiry, "tenant-a", "node-a"); err == nil {
+		t.Fatal("enrollment with an invalid expiry was accepted")
+	}
+	if err := validateSiteNodeManifest(siteNodePackageManifest{}); err == nil {
+		t.Fatal("empty node package manifest was accepted")
+	}
+	if _, err := siteNodePackageOutputs(verifiedSitePackage{directory: filepath.Join(t.TempDir(), "missing")}, nil, nil); err == nil {
+		t.Fatal("missing verified site root was accepted")
+	}
 	if err := siteTaskCommand(nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("missing site task subcommand was accepted")
 	}
