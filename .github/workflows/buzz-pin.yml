@@ -2,7 +2,7 @@ name: Buzz pin refresh
 
 on:
   schedule:
-    - cron: "41 10 * * 3"
+    - cron: "41 10 * * *"
   workflow_dispatch:
 
 permissions:
@@ -55,12 +55,21 @@ jobs:
           observed = datetime.datetime.fromisoformat(published.replace("Z", "+00:00"))
           now = datetime.datetime.now(datetime.timezone.utc)
           if now - observed < datetime.timedelta(hours=24):
-              raise SystemExit("latest Buzz source snapshot has not completed its 24-hour observation window")
+              print("observing")
+              print(tag)
+              raise SystemExit(0)
+          print("stable")
           print(tag)
           PY
           )
-          test "${#release[@]}" -eq 1
-          tag=${release[0]}
+          test "${#release[@]}" -eq 2
+          status=${release[0]}
+          tag=${release[1]}
+          if [[ $status == observing ]]; then
+            echo "Buzz $tag is still completing its 24-hour observation window."
+            printf 'stable=false\ntag=%s\n' "$tag" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           source=$(mktemp -d)
           git -c init.defaultBranch=main init -q "$source"
           git -C "$source" remote add origin https://github.com/block/buzz.git
@@ -68,9 +77,10 @@ jobs:
           git -C "$source" checkout -q --detach "$tag"
           python3 -I scripts/update-buzz-pin.py --source-dir "$source" --release-tag "$tag"
           revision=$(git -C "$source" rev-parse HEAD)
-          printf 'tag=%s\nrevision=%s\n' "$tag" "$revision" >>"$GITHUB_OUTPUT"
+          printf 'stable=true\ntag=%s\nrevision=%s\n' "$tag" "$revision" >>"$GITHUB_OUTPUT"
 
       - name: Open qualification-gated update pull request
+        if: steps.buzz.outputs.stable == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BUZZ_TAG: ${{ steps.buzz.outputs.tag }}

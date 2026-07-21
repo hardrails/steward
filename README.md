@@ -33,7 +33,7 @@ they can verify without a vendor service.
 | Inference and service credentials | Gateway injects credentials only at the trusted outbound boundary. Agents receive a scoped route, not the upstream secret. |
 | Web research over hostile content | A bounded Hermes profile reaches search and extraction through credential-isolating connectors, then reports source-linked findings over a durable event channel. |
 | Repository work with coding agents | Hermes delegates to Codex or Claude Code in a separate isolated worker with its own clean Git worktree and authentication store. |
-| Signed collaboration requests | An optional, tenant-specific Buzz bridge turns an allowed signed mention into one signed Hermes task and one correctly threaded literal reply without putting either signing key inside the agent. |
+| Signed collaboration requests | An optional, tenant-specific Buzz bridge durably queues allowed signed mentions, runs bounded concurrent Hermes tasks, and verifies correctly threaded replies without putting either signing key inside the agent. |
 | Disconnected and sovereign sites | Uses local keys, static Go binaries, local state, offline OCI archives, and customer-operated control services. No hosted service is required after transfer. |
 | Incident review and audit | Writes signed, hash-linked Executor and Gateway receipts. Receipt exports can be verified offline and omit prompt, request, response, and secret plaintext. |
 

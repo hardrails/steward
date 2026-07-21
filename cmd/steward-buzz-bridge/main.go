@@ -32,8 +32,9 @@ import (
 )
 
 const (
-	configSchema      = "steward.buzz-bridge-config.v1"
-	recordSchema      = "steward.buzz-bridge-record.v1"
+	configSchema      = "steward.buzz-bridge-config.v2"
+	recordSchema      = "steward.buzz-bridge-record.v2"
+	cursorSchema      = "steward.buzz-bridge-cursor.v1"
 	statusSchema      = "steward.buzz-bridge-status.v1"
 	maxConfigBytes    = 64 << 10
 	maxSecretBytes    = 4096
@@ -41,17 +42,22 @@ const (
 	maxCommandOutput  = 2 << 20
 	maxMessageBytes   = 32 << 10
 	maxReplyBytes     = 16 << 10
-	maxEventsPerPoll  = 200
+	maxEventsPerPage  = 200
+	maxPagesPerPoll   = 50
 	defaultPoll       = 5 * time.Second
 	defaultEventAge   = 24 * time.Hour
 	defaultTaskWait   = 10 * time.Minute
 	defaultMaxRecords = 1000
+	defaultMaxWorkers = 4
+	cursorReplay      = 5 * time.Minute
 	defaultHTTPListen = "127.0.0.1:9082"
 )
 
 var (
-	hex64RE = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	uuidRE  = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
+	hex64RE  = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	uuidRE   = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
+	taskIDRE = regexp.MustCompile(`^task-[a-f0-9]{32}$`)
+	digestRE = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 )
 
 type config struct {
@@ -64,7 +70,6 @@ type config struct {
 	AllowedAuthors      []string `json:"allowed_authors"`
 	Channels            []string `json:"channels"`
 	BuzzPrivateKeyFile  string   `json:"buzz_private_key_file"`
-	BuzzAPITokenFile    string   `json:"buzz_api_token_file,omitempty"`
 	BuzzAuthTagFile     string   `json:"buzz_auth_tag_file,omitempty"`
 	StateDirectory      string   `json:"state_directory"`
 	BuzzBinary          string   `json:"buzz_binary"`
@@ -81,6 +86,7 @@ type config struct {
 	MaxEventAgeSeconds  int      `json:"max_event_age_seconds,omitempty"`
 	TaskWaitSeconds     int      `json:"task_wait_seconds,omitempty"`
 	MaxRecords          int      `json:"max_records,omitempty"`
+	MaxWorkers          int      `json:"max_workers,omitempty"`
 	HTTPListen          string   `json:"http_listen,omitempty"`
 }
 
@@ -105,7 +111,7 @@ func (cfg config) validate() error {
 			return errors.New("all file and state paths must be absolute and clean")
 		}
 	}
-	for _, value := range []string{cfg.BuzzAPITokenFile, cfg.BuzzAuthTagFile} {
+	for _, value := range []string{cfg.BuzzAuthTagFile} {
 		if value != "" && (!filepath.IsAbs(value) || filepath.Clean(value) != value) {
 			return errors.New("optional Buzz secret paths must be absolute and clean")
 		}
@@ -123,6 +129,9 @@ func (cfg config) validate() error {
 	}
 	if cfg.MaxRecords != 0 && (cfg.MaxRecords < 1 || cfg.MaxRecords > 10000) {
 		return errors.New("max_records must be 1 through 10000")
+	}
+	if cfg.MaxWorkers != 0 && (cfg.MaxWorkers < 1 || cfg.MaxWorkers > 32) {
+		return errors.New("max_workers must be 1 through 32")
 	}
 	if cfg.HTTPListen != "" && !literalLoopbackAddress(cfg.HTTPListen) {
 		return errors.New("http_listen must use literal IPv4 loopback")
@@ -193,26 +202,68 @@ type record struct {
 	Author        string `json:"author"`
 	CreatedAt     int64  `json:"created_at"`
 	ContentDigest string `json:"content_digest"`
+	Content       string `json:"content"`
 	TaskID        string `json:"task_id"`
 	Phase         string `json:"phase"`
 	RunDirectory  string `json:"run_directory"`
 	ReplyDigest   string `json:"reply_digest,omitempty"`
 	ReplyEventID  string `json:"reply_event_id,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
+	// PublishCreatedAt is persisted before the first send. Buzz uses it to
+	// rebuild the same Nostr event ID for every ambiguous-outcome retry.
+	PublishCreatedAt int64  `json:"publish_created_at,omitempty"`
+	LastError        string `json:"last_error,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	Retryable        bool   `json:"retryable,omitempty"`
+	Attempts         uint32 `json:"attempts,omitempty"`
+	NextAttemptAt    string `json:"next_attempt_at,omitempty"`
+	ResumePhase      string `json:"resume_phase,omitempty"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
+type channelCursor struct {
+	SchemaVersion string `json:"schema_version"`
+	ChannelID     string `json:"channel_id"`
+	CreatedAt     int64  `json:"created_at"`
+	EventID       string `json:"event_id"`
 	UpdatedAt     string `json:"updated_at"`
+}
+
+type bridgeFailure struct {
+	code      string
+	retryable bool
+	cause     error
+}
+
+func (failure *bridgeFailure) Error() string { return failure.code + ": " + failure.cause.Error() }
+func (failure *bridgeFailure) Unwrap() error { return failure.cause }
+
+type commandFailure struct {
+	binary    string
+	exitCode  int
+	code      string
+	retryable bool
+	detail    string
+}
+
+func (failure *commandFailure) Error() string {
+	message := fmt.Sprintf("external command %s failed: %s (exit %d)", failure.binary, failure.code, failure.exitCode)
+	if failure.detail != "" {
+		message += ": " + failure.detail
+	}
+	return message
 }
 
 type bridge struct {
 	cfg         config
 	logger      *slog.Logger
 	buzzKey     string
-	buzzToken   string
 	buzzAuthTag string
 	now         func() time.Time
 	mu          sync.Mutex
 	lastPoll    string
 	lastError   string
 	processed   uint64
+	inflight    uint64
 }
 
 func main() {
@@ -229,6 +280,8 @@ func runMain(arguments []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "", "owner-only Buzz bridge configuration")
 	once := flags.Bool("once", false, "poll each configured channel once and exit")
 	check := flags.Bool("check-config", false, "validate configuration and secrets without network access")
+	listRecords := flags.Bool("list-records", false, "print non-secret durable record status and exit")
+	retryRecord := flags.String("retry-record", "", "retry one non-terminal durable event ID and exit")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -241,6 +294,16 @@ func runMain(arguments []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "steward-buzz-bridge: -config is required")
 		return 2
 	}
+	modeCount := 0
+	for _, selected := range []bool{*once, *check, *listRecords, *retryRecord != ""} {
+		if selected {
+			modeCount++
+		}
+	}
+	if modeCount > 1 {
+		fmt.Fprintln(stderr, "steward-buzz-bridge: choose only one operation mode")
+		return 2
+	}
 	bridge, err := newBridge(*configPath, slog.Default())
 	if err != nil {
 		fmt.Fprintf(stderr, "steward-buzz-bridge: %v\n", err)
@@ -248,6 +311,21 @@ func runMain(arguments []string, stdout, stderr io.Writer) int {
 	}
 	if *check {
 		fmt.Fprintln(stdout, `{"schema_version":"steward.buzz-bridge-check.v1","valid":true}`)
+		return 0
+	}
+	if *listRecords {
+		if err := bridge.writeRecordList(stdout); err != nil {
+			fmt.Fprintf(stderr, "steward-buzz-bridge: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if *retryRecord != "" {
+		if err := bridge.retryDurableRecord(*retryRecord); err != nil {
+			fmt.Fprintf(stderr, "steward-buzz-bridge: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "{\"schema_version\":\"steward.buzz-bridge-retry.v1\",\"event_id\":%q,\"queued\":true}\n", *retryRecord)
 		return 0
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -271,18 +349,38 @@ func runMain(arguments []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "steward-buzz-bridge: %v\n", err)
 			return 1
 		}
+		if err := bridge.drainReady(ctx); err != nil {
+			fmt.Fprintf(stderr, "steward-buzz-bridge: %v\n", err)
+			return 1
+		}
 		return 0
 	}
+	workerCount := bridge.cfg.MaxWorkers
+	if workerCount == 0 {
+		workerCount = defaultMaxWorkers
+	}
+	var workers sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			bridge.workerLoop(ctx)
+		}()
+	}
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
 	interval := defaultPoll
 	if bridge.cfg.PollIntervalSeconds > 0 {
 		interval = time.Duration(bridge.cfg.PollIntervalSeconds) * time.Second
 	}
 	for {
 		if err := bridge.poll(ctx); err != nil {
-			bridge.logger.Warn("Buzz bridge poll failed", "error", err)
-			bridge.setError(err.Error())
+			bridge.logger.Warn("Buzz bridge poll failed", "error_code", publicFailureCode(err))
+			bridge.setError(publicFailureCode(err))
 		} else {
-			bridge.setError("")
+			bridge.refreshLastError()
 		}
 		timer := time.NewTimer(interval)
 		select {
@@ -314,13 +412,6 @@ func newBridge(path string, logger *slog.Logger) (*bridge, error) {
 	key, err := readSecureFile(cfg.BuzzPrivateKeyFile, maxSecretBytes, true)
 	if err != nil {
 		return nil, fmt.Errorf("read Buzz private key: %w", err)
-	}
-	token := []byte(nil)
-	if cfg.BuzzAPITokenFile != "" {
-		token, err = readSecureFile(cfg.BuzzAPITokenFile, maxSecretBytes, true)
-		if err != nil {
-			return nil, fmt.Errorf("read Buzz API token: %w", err)
-		}
 	}
 	authTag := []byte(nil)
 	if cfg.BuzzAuthTagFile != "" {
@@ -354,11 +445,34 @@ func newBridge(path string, logger *slog.Logger) (*bridge, error) {
 			return nil, fmt.Errorf("required executable %s is unavailable", executable)
 		}
 	}
-	return &bridge{
+	b := &bridge{
 		cfg: cfg, logger: logger, buzzKey: strings.TrimSpace(string(key)),
-		buzzToken: strings.TrimSpace(string(token)), buzzAuthTag: strings.TrimSpace(string(authTag)),
-		now: time.Now, lastError: "initial_poll_pending",
-	}, nil
+		buzzAuthTag: strings.TrimSpace(string(authTag)),
+		now:         time.Now, lastError: "initial_poll_pending",
+	}
+	if err := b.verifyBuzzIdentity(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (b *bridge) verifyBuzzIdentity() error {
+	output, err := b.runBuzzIdentity(context.Background())
+	if err != nil {
+		return fmt.Errorf("derive Buzz public key: %w", err)
+	}
+	var identity struct {
+		PublicKey string `json:"public_key"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&identity) != nil || decoder.Decode(&struct{}{}) != io.EOF || !hex64RE.MatchString(identity.PublicKey) {
+		return errors.New("Buzz identity command returned an invalid public key")
+	}
+	if identity.PublicKey != b.cfg.AgentPublicKey {
+		return errors.New("agent_public_key does not match buzz_private_key_file")
+	}
+	return nil
 }
 
 func readSecureFile(path string, maximum int64, secret bool) ([]byte, error) {
@@ -412,7 +526,7 @@ func prepareStateDirectory(path string) error {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
 		return errors.New("state directory must be a real owner-only directory owned by the bridge user")
 	}
-	for _, child := range []string{"records", "runs"} {
+	for _, child := range []string{"records", "runs", "cursors"} {
 		childPath := filepath.Join(path, child)
 		if err := os.Mkdir(childPath, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
@@ -433,24 +547,11 @@ func (b *bridge) poll(ctx context.Context) error {
 		if firstFailure == "" {
 			firstFailure = boundedError(err)
 		}
-		b.logger.Warn("Buzz bridge item failed", "error", err)
+		b.logger.Warn("Buzz bridge item failed", "error_code", publicFailureCode(err))
 	}
 	for _, channel := range b.cfg.Channels {
-		events, err := b.fetchEvents(ctx, channel)
-		if err != nil {
+		if err := b.pollChannel(ctx, channel); err != nil {
 			recordFailure(fmt.Errorf("poll channel %s: %w", channel, err))
-			continue
-		}
-		sort.Slice(events, func(i, j int) bool {
-			if events[i].CreatedAt != events[j].CreatedAt {
-				return events[i].CreatedAt < events[j].CreatedAt
-			}
-			return events[i].ID < events[j].ID
-		})
-		for _, event := range events {
-			if err := b.process(ctx, channel, event); err != nil {
-				recordFailure(fmt.Errorf("process event %s: %w", event.ID, err))
-			}
 		}
 	}
 	if failures > 0 {
@@ -462,95 +563,107 @@ func (b *bridge) poll(ctx context.Context) error {
 	return nil
 }
 
-func (b *bridge) fetchEvents(ctx context.Context, channel string) ([]buzzEvent, error) {
+func (b *bridge) pollChannel(ctx context.Context, channel string) error {
 	lookback := defaultEventAge
 	if b.cfg.MaxEventAgeSeconds > 0 {
 		lookback = time.Duration(b.cfg.MaxEventAgeSeconds) * time.Second
 	}
-	since := b.now().Add(-lookback).Unix()
-	output, err := b.runBuzz(ctx, nil, "--format", "json", "messages", "get", "--channel", channel,
-		"--limit", strconv.Itoa(maxEventsPerPoll), "--since", strconv.FormatInt(since, 10), "--kinds", "9")
+	startedAt := b.now().Unix()
+	cursor, err := b.loadCursor(channel)
+	if err != nil {
+		return err
+	}
+	since := startedAt - int64(lookback.Seconds())
+	if cursor.CreatedAt > 0 {
+		since = cursor.CreatedAt - int64(cursorReplay.Seconds())
+	}
+	before, beforeID := startedAt, ""
+	for page := 0; page < maxPagesPerPoll; page++ {
+		events, err := b.fetchEventPage(ctx, channel, since, before, beforeID)
+		if err != nil {
+			return err
+		}
+		sort.Slice(events, func(i, j int) bool {
+			if events[i].CreatedAt != events[j].CreatedAt {
+				return events[i].CreatedAt < events[j].CreatedAt
+			}
+			return events[i].ID < events[j].ID
+		})
+		for _, event := range events {
+			if b.eligible(channel, event) {
+				if err := b.ingest(channel, event); err != nil {
+					return fmt.Errorf("ingest event %s: %w", event.ID, err)
+				}
+			}
+		}
+		if len(events) < maxEventsPerPage {
+			next := channelCursor{SchemaVersion: cursorSchema, ChannelID: channel, CreatedAt: startedAt}
+			return b.writeCursor(next)
+		}
+		oldest := events[0]
+		if oldest.CreatedAt > before || oldest.CreatedAt == before && oldest.ID >= beforeID && beforeID != "" {
+			return errors.New("buzz_pagination_stalled: relay did not advance the composite event cursor")
+		}
+		before, beforeID = oldest.CreatedAt, oldest.ID
+	}
+	return errors.New("buzz_backlog_saturated: more than 10000 verified events await intake; cursor was not advanced")
+}
+
+func (b *bridge) fetchEventPage(ctx context.Context, channel string, since, before int64, beforeID string) ([]buzzEvent, error) {
+	arguments := []string{"--format", "json", "messages", "get", "--channel", channel,
+		"--limit", strconv.Itoa(maxEventsPerPage), "--since", strconv.FormatInt(since, 10),
+		"--before", strconv.FormatInt(before, 10), "--kinds", "9"}
+	if beforeID != "" {
+		arguments = append(arguments, "--before-id", beforeID)
+	}
+	output, err := b.runBuzz(ctx, nil, arguments...)
 	if err != nil {
 		return nil, err
 	}
 	var events []buzzEvent
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&events); err != nil || decoder.Decode(&struct{}{}) != io.EOF || len(events) > maxEventsPerPoll {
-		return nil, errors.New("Buzz returned an invalid or oversized verified event list")
+	if decoder.Decode(&events) != nil || decoder.Decode(&struct{}{}) != io.EOF || len(events) > maxEventsPerPage {
+		return nil, errors.New("Buzz returned an invalid or oversized verified event page")
+	}
+	for _, event := range events {
+		if !hex64RE.MatchString(event.ID) || !hex64RE.MatchString(event.PublicKey) || event.Kind != 9 ||
+			event.CreatedAt <= 0 || event.CreatedAt > b.now().Unix()+300 || len([]byte(event.Content)) > maxMessageBytes {
+			return nil, errors.New("Buzz returned a verified event outside the bridge envelope")
+		}
 	}
 	return events, nil
 }
 
+func (b *bridge) ingest(channel string, event buzzEvent) error {
+	lock, acquired, err := acquireEventLock(filepath.Join(b.cfg.StateDirectory, "records", ".capacity.lock"))
+	if err != nil {
+		return fmt.Errorf("acquire inbox capacity lock: %w", err)
+	}
+	if !acquired {
+		return errors.New("durable inbox capacity is being updated; cursor was not advanced")
+	}
+	defer func() {
+		if err := releaseEventLock(lock); err != nil {
+			b.logger.Warn("Buzz inbox lock release failed", "event_id", event.ID, "error", err)
+		}
+	}()
+	recordPath := filepath.Join(b.cfg.StateDirectory, "records", event.ID+".json")
+	_, _, err = b.loadOrCreateRecord(recordPath, channel, event)
+	return err
+}
+
+// process is the synchronous one-event path used by recovery tests and small
+// embedded callers. The service loop separates durable intake from workers.
 func (b *bridge) process(ctx context.Context, channel string, event buzzEvent) error {
 	if !b.eligible(channel, event) {
 		return nil
 	}
-	lock, acquired, err := acquireEventLock(filepath.Join(b.cfg.StateDirectory, "records", event.ID+".lock"))
-	if err != nil {
-		return fmt.Errorf("acquire event lock: %w", err)
-	}
-	if !acquired {
-		return nil
-	}
-	defer func() {
-		if err := releaseEventLock(lock); err != nil {
-			b.logger.Warn("Buzz event lock release failed", "event_id", event.ID, "error", err)
-		}
-	}()
-	recordPath := filepath.Join(b.cfg.StateDirectory, "records", event.ID+".json")
-	rec, created, err := b.loadOrCreateRecord(recordPath, channel, event)
-	if err != nil {
+	if err := b.ingest(channel, event); err != nil {
 		return err
 	}
-	if !created && rec.Phase == "replied" {
-		return nil
-	}
-	reply, err := b.runOrRecoverTask(ctx, event, &rec, recordPath)
-	if err != nil {
-		rec.LastError = boundedError(err)
-		_ = writeRecord(recordPath, rec)
-		return err
-	}
-	rec.ReplyDigest = sha256Digest([]byte(reply))
-	rec.Phase = "publishing"
-	rec.LastError = ""
-	if err := writeRecord(recordPath, rec); err != nil {
-		return err
-	}
-	found, replyEventID, err := b.findExistingReply(ctx, channel, event.ID, reply)
-	if err != nil {
-		return err
-	}
-	if !found {
-		output, publishErr := b.runBuzz(ctx, []byte(reply), "messages", "send", "--channel", channel,
-			"--content", "-", "--reply-to", event.ID)
-		if publishErr != nil {
-			found, replyEventID, err = b.findExistingReply(ctx, channel, event.ID, reply)
-			if err != nil || !found {
-				return fmt.Errorf("publish reply: %w", publishErr)
-			}
-		} else {
-			var response map[string]any
-			if json.Unmarshal(output, &response) == nil {
-				for _, key := range []string{"event_id", "id"} {
-					if value, ok := response[key].(string); ok && hex64RE.MatchString(value) {
-						replyEventID = value
-					}
-				}
-			}
-		}
-	}
-	rec.Phase = "replied"
-	rec.ReplyEventID = replyEventID
-	rec.LastError = ""
-	if err := writeRecord(recordPath, rec); err != nil {
-		return err
-	}
-	b.mu.Lock()
-	b.processed++
-	b.mu.Unlock()
-	return nil
+	_, err := b.processNext(ctx)
+	return err
 }
 
 func acquireEventLock(path string) (*os.File, bool, error) {
@@ -589,6 +702,34 @@ func releaseEventLock(file *os.File) error {
 	return closeErr
 }
 
+func (b *bridge) loadCursor(channel string) (channelCursor, error) {
+	path := filepath.Join(b.cfg.StateDirectory, "cursors", channel+".json")
+	raw, err := readSecureFile(path, maxConfigBytes, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return channelCursor{SchemaVersion: cursorSchema, ChannelID: channel}, nil
+	}
+	if err != nil {
+		return channelCursor{}, fmt.Errorf("read durable cursor: %w", err)
+	}
+	var cursor channelCursor
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&cursor) != nil || decoder.Decode(&struct{}{}) != io.EOF || cursor.SchemaVersion != cursorSchema ||
+		cursor.ChannelID != channel || cursor.CreatedAt <= 0 || cursor.EventID != "" && !hex64RE.MatchString(cursor.EventID) {
+		return channelCursor{}, errors.New("durable Buzz cursor is invalid")
+	}
+	return cursor, nil
+}
+
+func (b *bridge) writeCursor(cursor channelCursor) error {
+	cursor.UpdatedAt = b.now().UTC().Format(time.RFC3339Nano)
+	raw, err := json.MarshalIndent(cursor, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(b.cfg.StateDirectory, "cursors", cursor.ChannelID+".json"), raw)
+}
+
 func (b *bridge) eligible(channel string, event buzzEvent) bool {
 	if !hex64RE.MatchString(event.ID) || !hex64RE.MatchString(event.PublicKey) || event.Kind != 9 || len([]byte(event.Content)) > maxMessageBytes {
 		return false
@@ -597,11 +738,7 @@ func (b *bridge) eligible(channel string, event buzzEvent) bool {
 		return false
 	}
 	now := b.now().Unix()
-	maximumAge := int64(defaultEventAge.Seconds())
-	if b.cfg.MaxEventAgeSeconds > 0 {
-		maximumAge = int64(b.cfg.MaxEventAgeSeconds)
-	}
-	if event.CreatedAt < now-maximumAge || event.CreatedAt > now+300 {
+	if event.CreatedAt > now+300 {
 		return false
 	}
 	hCount, mentionCount := 0, 0
@@ -633,7 +770,7 @@ func (b *bridge) loadOrCreateRecord(path, channel string, event buzzEvent) (reco
 	taskID := "task-" + hex.EncodeToString(taskSum[:16])
 	rec := record{
 		SchemaVersion: recordSchema, EventID: event.ID, ChannelID: channel, Author: event.PublicKey,
-		CreatedAt: event.CreatedAt, ContentDigest: contentDigest, TaskID: taskID, Phase: "pending",
+		CreatedAt: event.CreatedAt, ContentDigest: contentDigest, Content: event.Content, TaskID: taskID, Phase: "pending",
 		RunDirectory: filepath.Join(b.cfg.StateDirectory, "runs", taskID), UpdatedAt: b.now().UTC().Format(time.RFC3339Nano),
 	}
 	raw, err := json.MarshalIndent(rec, "", "  ")
@@ -645,12 +782,8 @@ func (b *bridge) loadOrCreateRecord(path, channel string, event buzzEvent) (reco
 		if maximum == 0 {
 			maximum = defaultMaxRecords
 		}
-		entries, readErr := os.ReadDir(filepath.Dir(path))
-		if readErr != nil {
-			return record{}, false, readErr
-		}
-		if len(entries) >= maximum {
-			return record{}, false, errors.New("durable Buzz inbox reached max_records; intake stopped without dropping work")
+		if err := b.ensureRecordCapacity(filepath.Dir(path), maximum); err != nil {
+			return record{}, false, err
 		}
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
@@ -680,10 +813,395 @@ func (b *bridge) loadOrCreateRecord(path, channel string, event buzzEvent) (reco
 	}
 	var existing record
 	if json.Unmarshal(existingRaw, &existing) != nil || existing.SchemaVersion != recordSchema || existing.EventID != event.ID ||
-		existing.ChannelID != channel || existing.Author != event.PublicKey || existing.ContentDigest != contentDigest || existing.TaskID != taskID {
+		existing.ChannelID != channel || existing.Author != event.PublicKey || existing.ContentDigest != contentDigest ||
+		existing.Content != event.Content || existing.TaskID != taskID {
 		return record{}, false, errors.New("durable event record does not match the verified event")
 	}
 	return existing, false, nil
+}
+
+func (b *bridge) ensureRecordCapacity(directory string, maximum int) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	type completedRecord struct {
+		path      string
+		updatedAt time.Time
+	}
+	recordCount := 0
+	completed := make([]completedRecord, 0)
+	cutoff := b.now().Add(-cursorReplay)
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		recordCount++
+		path := filepath.Join(directory, entry.Name())
+		rec, err := readRecord(path)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := time.Parse(time.RFC3339Nano, rec.UpdatedAt)
+		if rec.Phase == "replied" && err == nil && updatedAt.Before(cutoff) {
+			completed = append(completed, completedRecord{path: path, updatedAt: updatedAt})
+		}
+	}
+	if recordCount < maximum {
+		return nil
+	}
+	sort.Slice(completed, func(left, right int) bool {
+		if completed[left].updatedAt.Equal(completed[right].updatedAt) {
+			return completed[left].path < completed[right].path
+		}
+		return completed[left].updatedAt.Before(completed[right].updatedAt)
+	})
+	removed := false
+	for _, candidate := range completed {
+		if recordCount < maximum {
+			break
+		}
+		if err := os.Remove(candidate.path); err != nil {
+			return err
+		}
+		recordCount--
+		removed = true
+	}
+	if removed {
+		if err := syncDirectory(directory); err != nil {
+			return err
+		}
+	}
+	if recordCount >= maximum {
+		return errors.New("durable Buzz inbox reached max_records; intake stopped without dropping work")
+	}
+	return nil
+}
+
+func (b *bridge) workerLoop(ctx context.Context) {
+	for {
+		worked, err := b.processNext(ctx)
+		if err != nil {
+			b.logger.Warn("Buzz bridge worker failed", "error_code", publicFailureCode(err))
+			b.setError(publicFailureCode(err))
+		}
+		if worked {
+			continue
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (b *bridge) drainReady(ctx context.Context) error {
+	maximum := b.cfg.MaxRecords
+	if maximum == 0 {
+		maximum = defaultMaxRecords
+	}
+	var first error
+	for attempt := 0; attempt < maximum; attempt++ {
+		worked, err := b.processNext(ctx)
+		if err != nil && first == nil {
+			first = err
+		}
+		if !worked {
+			break
+		}
+	}
+	return first
+}
+
+func (b *bridge) processNext(ctx context.Context) (bool, error) {
+	directory := filepath.Join(b.cfg.StateDirectory, "records")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(directory, entry.Name())
+		lockPath := strings.TrimSuffix(path, ".json") + ".lock"
+		lock, acquired, err := acquireEventLock(lockPath)
+		if err != nil {
+			return false, fmt.Errorf("acquire event worker lock: %w", err)
+		}
+		if !acquired {
+			continue
+		}
+		rec, readErr := readRecord(path)
+		if readErr != nil {
+			_ = releaseEventLock(lock)
+			return true, readErr
+		}
+		if rec.Phase == "replied" || rec.Phase == "dead_letter" || !recordReady(rec, b.now()) {
+			_ = releaseEventLock(lock)
+			continue
+		}
+		b.mu.Lock()
+		b.inflight++
+		b.mu.Unlock()
+		processErr := b.completeRecord(ctx, path, &rec)
+		b.mu.Lock()
+		b.inflight--
+		b.mu.Unlock()
+		if processErr != nil {
+			if rec.Phase == "publishing" {
+				rec.Phase = "publish_outcome_unknown"
+			}
+			b.recordFailure(&rec, processErr)
+			if writeErr := writeRecord(path, rec); writeErr != nil {
+				processErr = fmt.Errorf("%v; persist failure: %w", processErr, writeErr)
+			}
+		}
+		releaseErr := releaseEventLock(lock)
+		if processErr != nil {
+			return true, processErr
+		}
+		if releaseErr != nil {
+			return true, releaseErr
+		}
+		b.refreshLastError()
+		return true, nil
+	}
+	return false, nil
+}
+
+func readRecord(path string) (record, error) {
+	raw, err := readSecureFile(path, maxConfigBytes, false)
+	if err != nil {
+		return record{}, err
+	}
+	var rec record
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&rec) != nil || decoder.Decode(&struct{}{}) != io.EOF || rec.SchemaVersion != recordSchema ||
+		!hex64RE.MatchString(rec.EventID) || !hex64RE.MatchString(rec.Author) || !uuidRE.MatchString(rec.ChannelID) ||
+		rec.CreatedAt <= 0 || len([]byte(rec.Content)) > maxMessageBytes || sha256Digest([]byte(rec.Content)) != rec.ContentDigest ||
+		!taskIDRE.MatchString(rec.TaskID) || !filepath.IsAbs(rec.RunDirectory) || filepath.Clean(rec.RunDirectory) != rec.RunDirectory ||
+		rec.ReplyDigest != "" && !digestRE.MatchString(rec.ReplyDigest) || rec.ReplyEventID != "" && !hex64RE.MatchString(rec.ReplyEventID) ||
+		rec.PublishCreatedAt < 0 || rec.Attempts > 10 {
+		return record{}, errors.New("durable Buzz event record is invalid")
+	}
+	switch rec.Phase {
+	case "pending", "dispatched", "publishing", "publish_outcome_unknown", "replied", "dead_letter":
+	default:
+		return record{}, errors.New("durable Buzz event record has an invalid phase")
+	}
+	if rec.ResumePhase != "" && rec.ResumePhase != "pending" && rec.ResumePhase != "dispatched" &&
+		rec.ResumePhase != "publishing" && rec.ResumePhase != "publish_outcome_unknown" {
+		return record{}, errors.New("durable Buzz event record has an invalid resume phase")
+	}
+	if rec.NextAttemptAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, rec.NextAttemptAt); err != nil {
+			return record{}, errors.New("durable Buzz event record has an invalid retry time")
+		}
+	}
+	if _, err := time.Parse(time.RFC3339Nano, rec.UpdatedAt); err != nil {
+		return record{}, errors.New("durable Buzz event record has an invalid update time")
+	}
+	if rec.Phase == "replied" && (rec.ReplyDigest == "" || rec.ReplyEventID == "" || rec.PublishCreatedAt == 0) ||
+		(rec.Phase == "publishing" || rec.Phase == "publish_outcome_unknown") && (rec.ReplyDigest == "" || rec.PublishCreatedAt == 0) ||
+		(rec.Phase == "pending" || rec.Phase == "dispatched") && rec.PublishCreatedAt != 0 ||
+		rec.Phase == "dead_letter" && rec.ResumePhase == "" {
+		return record{}, errors.New("durable Buzz event record has an incomplete phase transition")
+	}
+	return rec, nil
+}
+
+func recordReady(rec record, now time.Time) bool {
+	if rec.NextAttemptAt == "" {
+		return true
+	}
+	next, err := time.Parse(time.RFC3339Nano, rec.NextAttemptAt)
+	return err == nil && !next.After(now)
+}
+
+func (b *bridge) writeRecordList(output io.Writer) error {
+	entries, err := os.ReadDir(filepath.Join(b.cfg.StateDirectory, "records"))
+	if err != nil {
+		return err
+	}
+	type summary struct {
+		EventID       string `json:"event_id"`
+		ChannelID     string `json:"channel_id"`
+		Phase         string `json:"phase"`
+		Attempts      uint32 `json:"attempts"`
+		ErrorCode     string `json:"error_code,omitempty"`
+		Retryable     bool   `json:"retryable,omitempty"`
+		NextAttemptAt string `json:"next_attempt_at,omitempty"`
+		UpdatedAt     string `json:"updated_at"`
+	}
+	records := make([]summary, 0)
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		rec, err := readRecord(filepath.Join(b.cfg.StateDirectory, "records", entry.Name()))
+		if err != nil {
+			return err
+		}
+		records = append(records, summary{
+			EventID: rec.EventID, ChannelID: rec.ChannelID, Phase: rec.Phase, Attempts: rec.Attempts,
+			ErrorCode: rec.ErrorCode, Retryable: rec.Retryable, NextAttemptAt: rec.NextAttemptAt, UpdatedAt: rec.UpdatedAt,
+		})
+	}
+	document := map[string]any{"schema_version": "steward.buzz-bridge-record-list.v1", "records": records}
+	encoder := json.NewEncoder(output)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(document)
+}
+
+func (b *bridge) retryDurableRecord(eventID string) error {
+	if !hex64RE.MatchString(eventID) {
+		return errors.New("retry event ID must be 64 lowercase hexadecimal characters")
+	}
+	path := filepath.Join(b.cfg.StateDirectory, "records", eventID+".json")
+	lock, acquired, err := acquireEventLock(strings.TrimSuffix(path, ".json") + ".lock")
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return errors.New("durable event is currently being processed")
+	}
+	rec, err := readRecord(path)
+	if err != nil {
+		_ = releaseEventLock(lock)
+		return err
+	}
+	if rec.Phase == "replied" {
+		_ = releaseEventLock(lock)
+		return errors.New("completed Buzz event cannot be retried")
+	}
+	if rec.Phase == "dead_letter" {
+		if rec.ResumePhase == "" {
+			_ = releaseEventLock(lock)
+			return errors.New("dead-letter record has no safe resume phase")
+		}
+		rec.Phase = rec.ResumePhase
+	}
+	rec.ResumePhase = ""
+	rec.Attempts = 0
+	clearRecordFailure(&rec)
+	writeErr := writeRecord(path, rec)
+	releaseErr := releaseEventLock(lock)
+	if writeErr != nil {
+		return writeErr
+	}
+	return releaseErr
+}
+
+func (b *bridge) completeRecord(ctx context.Context, path string, rec *record) error {
+	event := buzzEvent{ID: rec.EventID, PublicKey: rec.Author, Kind: 9, Content: rec.Content, CreatedAt: rec.CreatedAt}
+	var reply string
+	var err error
+	if rec.Phase != "publishing" && rec.Phase != "publish_outcome_unknown" {
+		reply, err = b.runOrRecoverTask(ctx, event, rec, path)
+		if err != nil {
+			return err
+		}
+		rec.ReplyDigest = sha256Digest([]byte(reply))
+		rec.PublishCreatedAt = b.now().Unix()
+		if rec.PublishCreatedAt <= 0 {
+			return &bridgeFailure{code: "publish_time_invalid", retryable: false, cause: errors.New("reply publish timestamp is invalid")}
+		}
+		rec.Phase = "publishing"
+		clearRecordFailure(rec)
+		if err := writeRecord(path, *rec); err != nil {
+			return err
+		}
+	} else {
+		reply, err = readTaskReply(filepath.Join(rec.RunDirectory, "result.json"))
+		if err != nil {
+			return &bridgeFailure{code: "task_result_invalid", retryable: false, cause: err}
+		}
+		if sha256Digest([]byte(reply)) != rec.ReplyDigest {
+			return &bridgeFailure{code: "reply_digest_mismatch", retryable: false, cause: errors.New("retained task reply changed")}
+		}
+	}
+	found, replyEventID, err := b.findExistingReply(ctx, rec.ChannelID, rec.EventID, reply)
+	if err != nil {
+		return &bridgeFailure{code: "reply_reconciliation_failed", retryable: true, cause: err}
+	}
+	if !found {
+		_, publishErr := b.runBuzzAt(ctx, []byte(reply), rec.PublishCreatedAt, "messages", "send", "--channel", rec.ChannelID,
+			"--content", "-", "--reply-to", rec.EventID)
+		found, replyEventID, err = b.findExistingReply(ctx, rec.ChannelID, rec.EventID, reply)
+		if err != nil {
+			return &bridgeFailure{code: "publish_outcome_unknown", retryable: true, cause: err}
+		}
+		if !found {
+			if publishErr == nil {
+				publishErr = errors.New("Buzz accepted the send command but the signed reply is not yet observable")
+			}
+			return &bridgeFailure{code: "publish_outcome_unknown", retryable: true, cause: publishErr}
+		}
+	}
+	rec.Phase = "replied"
+	rec.ReplyEventID = replyEventID
+	clearRecordFailure(rec)
+	if err := writeRecord(path, *rec); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	b.processed++
+	b.mu.Unlock()
+	return nil
+}
+
+func clearRecordFailure(rec *record) {
+	rec.LastError = ""
+	rec.ErrorCode = ""
+	rec.Retryable = false
+	rec.NextAttemptAt = ""
+}
+
+func (b *bridge) recordFailure(rec *record, err error) {
+	rec.Attempts++
+	rec.LastError = boundedError(err)
+	rec.ErrorCode = "bridge_operation_failed"
+	rec.Retryable = true
+	var bridgeErr *bridgeFailure
+	var commandErr *commandFailure
+	if errors.As(err, &bridgeErr) {
+		rec.ErrorCode, rec.Retryable = bridgeErr.code, bridgeErr.retryable
+	} else if errors.As(err, &commandErr) {
+		rec.ErrorCode, rec.Retryable = commandErr.code, commandErr.retryable
+	}
+	if !rec.Retryable || rec.Attempts >= 10 {
+		if rec.Phase != "dead_letter" {
+			rec.ResumePhase = rec.Phase
+		}
+		rec.Phase = "dead_letter"
+		rec.NextAttemptAt = ""
+		return
+	}
+	delay := 5 * time.Second
+	for attempt := uint32(1); attempt < rec.Attempts && delay < 5*time.Minute; attempt++ {
+		delay *= 2
+	}
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	rec.NextAttemptAt = b.now().Add(delay).UTC().Format(time.RFC3339Nano)
+}
+
+func publicFailureCode(err error) string {
+	var bridgeErr *bridgeFailure
+	var commandErr *commandFailure
+	if errors.As(err, &bridgeErr) {
+		return bridgeErr.code
+	}
+	if errors.As(err, &commandErr) {
+		return commandErr.code
+	}
+	return "buzz_bridge_operation_failed"
 }
 
 func (b *bridge) runOrRecoverTask(ctx context.Context, event buzzEvent, rec *record, path string) (string, error) {
@@ -811,6 +1329,10 @@ func (b *bridge) findExistingReply(ctx context.Context, channel, parent, content
 }
 
 func (b *bridge) runBuzz(ctx context.Context, stdin []byte, arguments ...string) ([]byte, error) {
+	return b.runBuzzAt(ctx, stdin, 0, arguments...)
+}
+
+func (b *bridge) runBuzzAt(ctx context.Context, stdin []byte, createdAt int64, arguments ...string) ([]byte, error) {
 	commandContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	environment := []string{
@@ -818,13 +1340,34 @@ func (b *bridge) runBuzz(ctx context.Context, stdin []byte, arguments ...string)
 		"STEWARD_BUZZ_LITERAL_CONTENT=1",
 		"BUZZ_RELAY_URL=" + b.cfg.RelayURL, "BUZZ_PRIVATE_KEY=" + b.buzzKey,
 	}
-	if b.buzzToken != "" {
-		environment = append(environment, "BUZZ_API_TOKEN="+b.buzzToken)
+	if createdAt > 0 {
+		environment = append(environment, "STEWARD_BUZZ_CREATED_AT="+strconv.FormatInt(createdAt, 10))
 	}
 	if b.buzzAuthTag != "" {
 		environment = append(environment, "BUZZ_AUTH_TAG="+b.buzzAuthTag)
 	}
-	return runCommand(commandContext, b.cfg.BuzzBinary, arguments, stdin, environment, maxBuzzOutput)
+	output, err := runCommand(commandContext, b.cfg.BuzzBinary, arguments, stdin, environment, maxBuzzOutput)
+	if err != nil {
+		return nil, redactCommandSecrets(err, b.buzzKey, b.buzzAuthTag)
+	}
+	return output, nil
+}
+
+func (b *bridge) runBuzzIdentity(ctx context.Context) ([]byte, error) {
+	commandContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	environment := []string{
+		"HOME=/nonexistent", "PATH=/usr/local/bin:/usr/bin:/bin", "NO_COLOR=1",
+		"STEWARD_BUZZ_PRINT_PUBLIC_KEY=1", "BUZZ_RELAY_URL=" + b.cfg.RelayURL, "BUZZ_PRIVATE_KEY=" + b.buzzKey,
+	}
+	if b.buzzAuthTag != "" {
+		environment = append(environment, "BUZZ_AUTH_TAG="+b.buzzAuthTag)
+	}
+	output, err := runCommand(commandContext, b.cfg.BuzzBinary, []string{"users", "get"}, nil, environment, maxCommandOutput)
+	if err != nil {
+		return nil, redactCommandSecrets(err, b.buzzKey, b.buzzAuthTag)
+	}
+	return output, nil
 }
 
 func (b *bridge) runSteward(ctx context.Context, arguments ...string) ([]byte, error) {
@@ -858,7 +1401,7 @@ func runCommand(ctx context.Context, binary string, arguments []string, stdin []
 		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
-			return nil, fmt.Errorf("external command %s failed with exit code %d", filepath.Base(binary), exit.ExitCode())
+			return nil, classifyCommandFailure(filepath.Base(binary), exit.ExitCode(), safeCommandDetail(stderr.content))
 		}
 		return nil, fmt.Errorf("external command %s could not start", filepath.Base(binary))
 	}
@@ -866,6 +1409,60 @@ func runCommand(ctx context.Context, binary string, arguments []string, stdin []
 		return nil, errors.New("external command output exceeded its byte limit")
 	}
 	return stdout.content, nil
+}
+
+func classifyCommandFailure(binary string, exitCode int, detail string) error {
+	failure := &commandFailure{binary: binary, exitCode: exitCode, code: "command_failed", retryable: true, detail: detail}
+	if binary == "buzz" || strings.HasSuffix(binary, "-buzz") || strings.Contains(binary, "buzz") {
+		switch exitCode {
+		case 1:
+			failure.code, failure.retryable = "buzz_request_invalid", false
+		case 2:
+			failure.code = "buzz_relay_unavailable"
+		case 3:
+			failure.code, failure.retryable = "buzz_authentication_failed", false
+		case 4:
+			failure.code = "buzz_external_failure"
+		case 5:
+			failure.code = "buzz_conflict"
+		default:
+			failure.code = "buzz_command_failed"
+		}
+	} else if strings.Contains(binary, "stewardctl") {
+		failure.code = "steward_task_command_failed"
+	}
+	return failure
+}
+
+func safeCommandDetail(raw []byte) string {
+	value := strings.TrimSpace(string(raw))
+	value = strings.Map(func(character rune) rune {
+		if character == '\n' || character == '\r' || character == '\t' {
+			return ' '
+		}
+		if character < 0x20 || character == 0x7f {
+			return -1
+		}
+		return character
+	}, value)
+	if len(value) > 512 {
+		value = value[:512]
+	}
+	return value
+}
+
+func redactCommandSecrets(err error, secrets ...string) error {
+	failure := &commandFailure{}
+	if !errors.As(err, &failure) {
+		return err
+	}
+	copy := *failure
+	for _, secret := range secrets {
+		if secret != "" {
+			copy.detail = strings.ReplaceAll(copy.detail, secret, "[redacted]")
+		}
+	}
+	return &copy
 }
 
 type boundedBuffer struct {
@@ -896,6 +1493,10 @@ func writeRecord(path string, rec record) error {
 	if err != nil {
 		return err
 	}
+	return writeAtomic(path, raw)
+}
+
+func writeAtomic(path string, raw []byte) error {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".record-*")
 	if err != nil {
@@ -958,6 +1559,42 @@ func (b *bridge) setError(message string) {
 	b.mu.Unlock()
 }
 
+func (b *bridge) refreshLastError() {
+	_, failed, scanErr := b.recordCounts()
+	message := ""
+	if scanErr != nil {
+		message = boundedError(scanErr)
+	} else if failed > 0 {
+		message = fmt.Sprintf("%d durable Buzz records require retry or operator review", failed)
+	}
+	b.mu.Lock()
+	b.lastError = message
+	b.mu.Unlock()
+}
+
+func (b *bridge) recordCounts() (queued, failed int, err error) {
+	entries, err := os.ReadDir(filepath.Join(b.cfg.StateDirectory, "records"))
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		rec, readErr := readRecord(filepath.Join(b.cfg.StateDirectory, "records", entry.Name()))
+		if readErr != nil {
+			return 0, 0, readErr
+		}
+		if rec.Phase != "replied" {
+			queued++
+		}
+		if rec.LastError != "" || rec.Phase == "dead_letter" || rec.Phase == "publish_outcome_unknown" {
+			failed++
+		}
+	}
+	return queued, failed, nil
+}
+
 func (b *bridge) statusServer() *http.Server {
 	listen := b.cfg.HTTPListen
 	if listen == "" {
@@ -983,11 +1620,13 @@ func (b *bridge) statusServer() *http.Server {
 			writeStatusError(writer, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
+		queued, failed, _ := b.recordCounts()
 		b.mu.Lock()
 		response := map[string]any{
 			"schema_version": statusSchema, "integration_id": b.cfg.IntegrationID,
 			"tenant_id": b.cfg.TenantID, "deployment": b.cfg.Deployment,
 			"last_poll_at": b.lastPoll, "last_error": b.lastError, "processed": b.processed,
+			"queued": queued, "failed": failed, "inflight": b.inflight,
 		}
 		b.mu.Unlock()
 		writeStatusJSON(writer, http.StatusOK, response)

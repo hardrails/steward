@@ -1,15 +1,16 @@
 ---
 title: Connect Hermes to Buzz
-description: Turn an allowed, cryptographically signed Buzz mention into one signed Steward task and one reply without giving Buzz credentials to Hermes.
+description: Reliably turn allowed, cryptographically signed Buzz mentions into isolated Steward tasks and verified replies without giving credentials to Hermes.
 section: Guides
 ---
 
 # Connect Hermes to Buzz
 
 Buzz can be the place where people ask a Hermes agent for work and receive the
-answer. Steward remains the security boundary: every accepted message becomes one
-exact tenant-signed task, Hermes runs inside its existing isolated deployment, and
-the reply returns to the same verified Buzz conversation.
+answer. Steward remains the security boundary: every accepted message is first
+saved to a durable inbox, then becomes one exact tenant-signed task. Hermes runs
+inside its existing isolated deployment, and the bridge marks work complete only
+after it can read the signed reply back from the correct Buzz conversation.
 
 The important separation is simple:
 
@@ -28,8 +29,10 @@ The initial surface is deliberately narrow:
 
 - a kind-9 Buzz message with exactly one cryptographic mention of the bridge;
 - an exact, configured author public key and channel UUID;
-- one bounded `hermes.run` task against one configured durable deployment; and
-- one plain-text reply to the triggering event.
+- one bounded `hermes.run` task against one configured durable deployment;
+- a bounded worker pool, so one slow task does not block every other accepted
+  message; and
+- one plain-text reply to the triggering event, verified after publication.
 
 DMs, forum-wide listening, uploads, channel administration, workflows, Git
 operations, arbitrary Buzz commands, and open-to-anyone dispatch are not enabled.
@@ -106,14 +109,15 @@ Use a separate Buzz identity and task authority for each tenant integration.
 Place the following as files owned by `steward-buzz`, mode `0400` or `0600`:
 
 - the Buzz `nsec` private key;
-- the Buzz API token when the relay requires it;
 - the Buzz owner-attestation tag when the relay uses one;
 - a Control operator token scoped to the configured tenant;
 - the Gateway service bearer, exported service trust, and task-authority private
   key used by the existing `stewardctl task run` flow; and
 - the private Control CA bundle when Control uses a private CA.
 
-The bridge validates every protected file before reporting a valid configuration.
+Buzz authentication is the signing key, with an optional owner-attestation tag;
+there is no separate API-token setting. The bridge validates every protected file
+before reporting a valid configuration.
 It rejects symlinks, unsafe group/world access, multiple hard links, unexpected
 secret owners, oversized values, and files that change while being read. It
 disables core dumps. Secrets enter only the short-lived, pinned Buzz CLI process
@@ -154,7 +158,16 @@ sudo -u steward-buzz /usr/local/lib/steward-buzz/steward-buzz-bridge \
 
 `gateway_url` must remain a literal-loopback HTTP origin. `relay_url` must be one
 exact HTTPS origin without user information, a query, fragment, or trailing
-slash. Proxy environment variables are not inherited by child processes.
+slash. Proxy environment variables are not inherited by child processes. The
+configuration check derives the public key from `buzz_private_key_file`, verifies
+the optional owner-attestation tag against that key, and refuses a different
+`agent_public_key`; it does not contact the relay.
+
+The configuration schema is `steward.buzz-bridge-config.v2`. To migrate an older
+configuration, change the schema value, remove `buzz_api_token_file`, and add
+`max_workers` if the default of four concurrent tasks is not appropriate.
+`max_event_age_seconds` is the first-start discovery window. After a cursor has
+been saved, the bridge resumes from that cursor even after a longer outage.
 
 ## 5. Start and prove a real task
 
@@ -173,12 +186,17 @@ Add the bridge identity to one configured Buzz channel. From an allowed author,
 send a message that cryptographically mentions the agent, for example: “Research
 the latest primary sources on this topic and explain what is uncertain.”
 
-The first successful poll writes an owner-only record before task dispatch. The
-task ID is deterministic from the tenant, integration, and verified Buzz event
-ID. If the process stops after dispatch, it resubmits the same retained bundle and
-waits for the same result. Before retrying a reply after an ambiguous relay
-failure, it searches the verified thread for the same signed author, parent, and
-content. This prevents a normal restart from producing duplicate work or replies.
+The first successful poll writes owner-only records and then advances an
+owner-only channel cursor. Task workers run independently of polling. Each task
+ID is deterministic from the tenant, integration, and verified Buzz event ID. If
+the process stops after dispatch, it resubmits the same retained bundle and waits
+for the same result. Before publishing, the bridge stores one immutable Nostr
+creation timestamp. Every retry signs the same author, timestamp, kind, tags,
+and content, which produces the same Nostr event ID. The relay can therefore
+accept a repeated submission after delayed visibility without creating a second
+logical reply. The bridge also searches the verified thread for the same author,
+parent, and content before each submission. A send that cannot be verified
+remains `publish_outcome_unknown`; it is never reported as complete.
 Reply text is sent literally: `@names` and `nostr:` references remain text and do
 not create additional mention tags selected by the agent.
 
@@ -189,24 +207,58 @@ curl --fail --silent http://127.0.0.1:9082/status
 journalctl -u steward-buzz-bridge --since today
 ```
 
+List durable work without printing message or model content:
+
+```console
+sudo -u steward-buzz /usr/local/lib/steward-buzz/steward-buzz-bridge \
+  -config /etc/steward-buzz/bridge.json -list-records
+```
+
+After correcting the underlying problem, explicitly requeue one failed or
+dead-lettered event:
+
+```console
+sudo -u steward-buzz /usr/local/lib/steward-buzz/steward-buzz-bridge \
+  -config /etc/steward-buzz/bridge.json \
+  -retry-record <64-character-event-id>
+```
+
+The retry command takes the same per-event kernel lock as a worker, refuses a
+completed event, restores the recorded safe phase, and resets its ten-attempt
+budget. It never deletes the signed task bundle or creates a new task identity.
+
 The health endpoint returns 503 until the first complete poll succeeds. The status
-endpoint reports integration identity, last successful poll, a bounded
-error, and completed count. It never returns message content, model output, task
-bundles, or credentials.
+endpoint reports integration identity, last successful poll, bounded error,
+completed count, queued count, failed count, and active worker count. It never
+returns message content, model output, task bundles, or credentials.
 
 ## Failure and recovery behavior
 
 - Invalid signatures or event IDs are rejected by the patched Buzz CLI before
   Steward reads any event field.
+- The patched CLI exposes Buzz's timestamp-and-event-ID pagination cursor. The
+  bridge drains verified history in 200-event pages and examines as many as
+  10,000 events in one poll, subject to `max_records`. A larger or non-advancing result returns
+  `buzz_backlog_saturated` or `buzz_pagination_stalled` without advancing that
+  channel's durable cursor. Records accepted before that stop remain safe and
+  are deduplicated during the next poll; no truncated page is treated as complete.
 - Wrong authors, channels, kinds, timestamps, missing or duplicate `h`/`p` tags,
   and self-authored loops create no task.
 - An owner-only advisory lock prevents overlapping bridge processes from
   submitting or replying to the same event concurrently. The operating system
   releases the lock if a process crashes, so the next poll can recover.
 - An unavailable Control plane, Gateway tunnel, Hermes service, or Buzz relay
-  leaves a durable record with a bounded error and makes `/health` return 503.
-- `max_records` stops intake without deleting old work. Archive completed record
-  and run directories through a reviewed operator procedure before raising it.
+  leaves a durable record with a machine-readable error code, bounded diagnostic
+  detail, attempt count, exponential retry time, and makes `/health` return 503.
+- Authentication and invalid-result failures enter `dead_letter` instead of
+  retrying forever. Retryable failures stop after ten attempts for operator
+  review.
+- `max_records` bounds active and recently completed inbox records. When the
+  limit is reached, the bridge removes only verified `replied` records whose
+  completion is older than the five-minute replay window, oldest first. It
+  retains pending, failed, and recent deduplication records, and stops intake
+  rather than deleting them. Retained task run directories are separate audit
+  evidence; archive them through a reviewed operator procedure.
 - A failed Hermes task is not published as an answer. Inspect the retained signed
   bundle/result path and Gateway receipt chain with the normal task tools.
 
@@ -215,11 +267,19 @@ proves who authored the bytes, not that the bytes are safe. The bridge quotes th
 message as untrusted data, while Hermes' existing egress, connector, inference,
 and action policy remains authoritative.
 
+The cursor proves what the bridge has durably accepted from relay query results;
+it cannot prove that a faulty relay disclosed every event it received. Each poll
+replays the previous five minutes to catch late and same-second delivery, and
+event IDs make that replay idempotent. Operators that require stronger delivery
+evidence must also retain and audit the relay's own append-only event log.
+
 ## Automatic upstream refresh
 
-`.github/workflows/buzz-pin.yml` checks weekly and can be run manually. It waits
+`.github/workflows/buzz-pin.yml` checks daily and can be run manually. It waits
 24 hours after a stable Buzz source snapshot, resolves the tag to one immutable
 commit, recalculates source and Steward bridge hashes, and opens one pull request.
+An upstream release still inside the observation window is a successful no-op,
+not a failed workflow, so it is reconsidered the next day.
 It never auto-merges, force-replaces bytes already under review, or treats Buzz's
 desktop, relay, chart, and rolling Sprig labels as the same version.
 

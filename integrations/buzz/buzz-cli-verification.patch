@@ -1,15 +1,20 @@
 diff --git a/crates/buzz-cli/src/commands/messages.rs b/crates/buzz-cli/src/commands/messages.rs
-index 290cc59..dabd600 100644
+index 290cc59..6faf8cf 100644
 --- a/crates/buzz-cli/src/commands/messages.rs
 +++ b/crates/buzz-cli/src/commands/messages.rs
-@@ -68,8 +68,12 @@ async fn resolve_thread_ref(
+@@ -1,3 +1,3 @@
+ use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
+-use nostr::PublicKey;
++use nostr::{PublicKey, Timestamp};
+ use uuid::Uuid;
+@@ -64,9 +64,13 @@ async fn resolve_thread_ref(
+     let raw = client.query(&filter).await?;
      let events: serde_json::Value = serde_json::from_str(&raw)
          .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
 -    let event = events
--        .as_array()
--        .and_then(|a| a.first())
 +    let events = events
-+        .as_array()
+         .as_array()
+-        .and_then(|a| a.first())
 +        .ok_or_else(|| CliError::Other("parent event query did not return an array".into()))?;
 +    verify_query_events(events)?;
 +    let event = events
@@ -18,11 +23,10 @@ index 290cc59..dabd600 100644
          .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} not found")))?;
      let tags = event
          .get("tags")
-@@ -259,8 +259,22 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
+@@ -259,12 +263,27 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
          crate::OutputFormat::Json => normalized.to_string(),
      }
  }
--
 +/// Verify every complete event returned by the relay before any field is used
 +/// or normalized. Relay-side verification is not a client trust boundary: a
 +/// compromised or misconfigured relay must not be able to fabricate an author,
@@ -37,37 +41,60 @@ index 290cc59..dabd600 100644
 +    }
 +    Ok(())
 +}
+-
 +
  pub async fn cmd_get_messages(
      client: &BuzzClient,
      channel_id: &str,
      limit: Option<u32>,
-@@ -296,3 +310,4 @@ pub async fn cmd_get_messages(
+     before: Option<i64>,
++    before_id: Option<&str>,
+     since: Option<i64>,
+     kinds: Option<&str>,
+     format: &crate::OutputFormat,
+@@ -289,12 +308,17 @@ pub async fn cmd_get_messages(
+     if let Some(b) = before {
+         filter["until"] = serde_json::json!(b);
+     }
++    if let Some(id) = before_id {
++        validate_hex64(id)?;
++        filter["before_id"] = serde_json::json!(id);
++    }
+     if let Some(s) = since {
+         filter["since"] = serde_json::json!(s);
+     }
+-
++
      let resp = client.query(&filter).await?;
      let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
 +    verify_query_events(&events)?;
      events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
-@@ -332,3 +347,4 @@ pub async fn cmd_get_thread(
+     let normalized = normalize_events(&events);
+     println!("{}", format_events(&normalized, format));
+@@ -331,6 +355,7 @@ pub async fn cmd_get_thread(
+     });
      let resp = client.query_multi(&[reply_filter, root_filter]).await?;
      let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
 +    verify_query_events(&events)?;
      events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
-@@ -529,10 +545,17 @@ pub async fn cmd_send_message(
+     let normalized = normalize_events(&events);
+     println!("{}", format_events(&normalized, format));
+@@ -529,10 +554,17 @@ pub async fn cmd_send_message(
      // Resolve @name mentions in the author-written body only — not the media markdown we
      // append above, which is derived from upload metadata and can't carry `@names`.
 -    let mut auto_resolved = resolve_content_mentions(client, &p.channel_id, &p.content).await;
--
--    // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
--    let stripped = strip_code_regions(&p.content);
--    let uri_pubkeys = extract_nostr_uris(&stripped);
--    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
 +    let literal_content = std::env::var("STEWARD_BUZZ_LITERAL_CONTENT").as_deref() == Ok("1");
 +    let mut auto_resolved = if literal_content {
 +        Vec::new()
 +    } else {
 +        resolve_content_mentions(client, &p.channel_id, &p.content).await
 +    };
+-
 +
+-    // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
+-    let stripped = strip_code_regions(&p.content);
+-    let uri_pubkeys = extract_nostr_uris(&stripped);
+-    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
 +    if !literal_content {
 +        // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
 +        let stripped = strip_code_regions(&p.content);
@@ -77,3 +104,73 @@ index 290cc59..dabd600 100644
 -
 +
      let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
+@@ -540,4 +572,4 @@ pub async fn cmd_send_message(
+-    let builder = match p.kind {
++    let mut builder = match p.kind {
+         Some(45001) => {
+             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
+                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
+@@ -571,4 +603,12 @@ pub async fn cmd_send_message(
+         }
+     };
+-
++    if literal_content {
++        if let Ok(raw) = std::env::var("STEWARD_BUZZ_CREATED_AT") {
++            let created_at = raw.parse::<u64>().map_err(|_| {
++                CliError::Usage("STEWARD_BUZZ_CREATED_AT must be Unix seconds".into())
++            })?;
++            builder = builder.custom_created_at(Timestamp::from(created_at));
++        }
++    }
++
+     let event = client.sign_event(builder)?;
+@@ -832,6 +864,7 @@ pub async fn dispatch(
+             channel,
+             limit,
+             before,
++            before_id,
+             since,
+             kinds,
+         } => {
+@@ -840,6 +873,7 @@ pub async fn dispatch(
+                 &channel,
+                 limit,
+                 before,
++                before_id.as_deref(),
+                 since,
+                 kinds.as_deref(),
+                 format,
+diff --git a/crates/buzz-cli/src/lib.rs b/crates/buzz-cli/src/lib.rs
+index 446db37..cf077af 100644
+--- a/crates/buzz-cli/src/lib.rs
++++ b/crates/buzz-cli/src/lib.rs
+@@ -435,6 +435,9 @@ pub enum MessagesCmd {
+         /// Unix timestamp — return messages before this time
+         #[arg(long)]
+         before: Option<i64>,
++        /// Event ID tie-breaker for messages sharing the --before timestamp
++        #[arg(long)]
++        before_id: Option<String>,
+         /// Unix timestamp — return messages after this time
+         #[arg(long)]
+         since: Option<i64>,
+@@ -1695,6 +1698,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
+         _ => (None, None),
+     };
+-
++
++    // Steward uses this local-only path to bind configured policy identity to
++    // the exact signing key and validate an optional owner attestation before
++    // any relay connection is attempted.
++    if std::env::var("STEWARD_BUZZ_PRINT_PUBLIC_KEY").as_deref() == Ok("1") {
++        println!(
++            "{}",
++            serde_json::json!({"public_key": keys.public_key().to_hex()})
++        );
++        return Ok(());
++    }
++
+     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+-
++
+     match cli.command {

@@ -38,19 +38,19 @@
   "steward_inputs": [
     {
       "path": "integrations/buzz/buzz-cli-verification.patch",
-      "sha256": "81f645be6554d032b4a00ee2e6327b7f23299b78cca3f69e403ae0c2d40c2f22"
+      "sha256": "325ccaf3d178915fcec9fbc7a181c520136d6a40931beecbee8bac4cd787993b"
     },
     {
       "path": "cmd/steward-buzz-bridge/main.go",
-      "sha256": "6c5869ff350882249e00f775f13561ede8540df7215d8167fbf40cb79db3a4b2"
+      "sha256": "3be9cfb8ecd2443e874f73ed7563615486d349a0d8e3a71a670e6857aca10941"
     },
     {
       "path": "cmd/steward-buzz-bridge/main_test.go",
-      "sha256": "714ec15adf9440dd500ca4f4539c26eef4ca2282c6002c4562451ca7806d1e7a"
+      "sha256": "cda444658b45e427f9025bae3176ff5437004eb59e6f619a1bb5443f94904cde"
     },
     {
       "path": "scripts/build-buzz-bridge.sh",
-      "sha256": "4c2a9b9334f8c28ab6126ff7885d2a435037d0c9cce69641d6e77ee3b7917580"
+      "sha256": "3fdaf82251de0c48033ae6f45aefcc4181388337506b1145c6cdf0f0905fde54"
     },
     {
       "path": "scripts/update-buzz-pin.py",
@@ -58,11 +58,11 @@
     },
     {
       "path": "integrations/buzz/bridge.example.json",
-      "sha256": "ab3c9c260c4acc487f547771f9e5473790c60adbcd8efd9c432bb45b0dba1086"
+      "sha256": "61dbe4993ccb8a0baa93d47ddfd0c5568fa8177926de2ee1ba798fcdb020be6b"
     },
     {
       "path": "deploy/systemd/steward-buzz-bridge.service",
-      "sha256": "809895ef577531d16101c515eca52f41fefb22100229627e530788ad5bd44c7e"
+      "sha256": "d20c3e9e59b834a4e5e814094a40fe7787d718267cf916a470ab96a29e74668a"
     },
     {
       "path": "integrations/buzz/build-release-bundle.sh",

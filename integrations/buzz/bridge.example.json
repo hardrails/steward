@@ -1,5 +1,5 @@
 {
-  "schema_version": "steward.buzz-bridge-config.v1",
+  "schema_version": "steward.buzz-bridge-config.v2",
   "integration_id": "buzz-research",
   "tenant_id": "research",
   "deployment": "researcher",
@@ -12,7 +12,6 @@
     "123e4567-e89b-12d3-a456-426614174000"
   ],
   "buzz_private_key_file": "/etc/steward-buzz/buzz.nsec",
-  "buzz_api_token_file": "/etc/steward-buzz/buzz-api.token",
   "buzz_auth_tag_file": "/etc/steward-buzz/buzz-auth.tag",
   "state_directory": "/var/lib/steward-buzz",
   "buzz_binary": "/usr/local/lib/steward-buzz/buzz",
@@ -29,5 +28,6 @@
   "max_event_age_seconds": 86400,
   "task_wait_seconds": 600,
   "max_records": 1000,
+  "max_workers": 4,
   "http_listen": "127.0.0.1:9082"
 }
