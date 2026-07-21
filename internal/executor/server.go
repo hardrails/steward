@@ -50,6 +50,7 @@ type Server struct {
 	// counts restart-safe; this lock prevents concurrent HTTP calls from racing
 	// past the same ceiling.
 	provisionMu sync.Mutex
+	imagePullMu sync.Mutex
 
 	reconcileMu        sync.RWMutex
 	reconcileAttempted bool
@@ -74,6 +75,9 @@ type secureAdmission struct {
 	relayImage          string
 	grantRoot           string
 	relayGID            int
+	imagePullRegistry   string
+	imagePullAuth       string
+	imagePullTimeout    time.Duration
 }
 
 type GatewayControl interface {
@@ -116,6 +120,13 @@ type SecureAdmissionConfig struct {
 	RelayImage string
 	GrantRoot  string
 	RelayGID   int
+	// ImagePullRegistry opts this node into fetching missing exact image
+	// digests from one operator-approved OCI registry. RegistryAuth is the
+	// encoded Docker header produced from a protected external secret, or empty
+	// for anonymous access.
+	ImagePullRegistry string
+	RegistryAuth      string
+	ImagePullTimeout  time.Duration
 }
 
 type admissionPrincipal struct {
@@ -190,6 +201,17 @@ func (s *Server) EnableSecureAdmission(config SecureAdmissionConfig) error {
 	} else if config.StateVolumeByteLimit != 0 || config.StateVolumeObjectLimit != 0 {
 		return errors.New("persistent state limits require a quota-enforced backend")
 	}
+	if config.ImagePullRegistry == "" {
+		if config.RegistryAuth != "" || config.ImagePullTimeout != 0 {
+			return errors.New("image pull authentication or timeout requires an approved registry")
+		}
+	} else if !ValidRegistryAuthority(config.ImagePullRegistry) ||
+		!validImagePullTimeout(config.ImagePullTimeout) || len(config.RegistryAuth) > 64<<10 ||
+		strings.ContainsAny(config.RegistryAuth, "\r\n") {
+		return errors.New("image pull registry configuration is invalid")
+	} else if _, ok := s.docker.(SignedImagePullDocker); !ok {
+		return errors.New("image pull registry requires a Docker backend with signed pull support")
+	}
 	s.secure = &secureAdmission{
 		policyEnvelope:      append([]byte(nil), config.PolicyEnvelope...),
 		siteRoots:           clonePublicKeys(config.SiteRoots),
@@ -203,6 +225,8 @@ func (s *Server) EnableSecureAdmission(config SecureAdmissionConfig) error {
 		stateObjectLimit: config.StateVolumeObjectLimit,
 		topology:         config.Topology, gateway: config.Gateway, relayImage: config.RelayImage,
 		grantRoot: config.GrantRoot, relayGID: config.RelayGID,
+		imagePullRegistry: config.ImagePullRegistry, imagePullAuth: config.RegistryAuth,
+		imagePullTimeout: config.ImagePullTimeout,
 	}
 	s.reconcileMu.Lock()
 	s.reconcileAttempted = false
@@ -432,6 +456,30 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 	}
 	imageReference := effective.Capsule.Image.Repository + "@" + effective.Capsule.Image.ManifestDigest
 	observedImage, err := imageDocker.InspectSignedImage(r.Context(), imageReference, effective.Capsule.Image.ConfigDigest)
+	if errors.Is(err, ErrNotFound) && imageReferenceUsesRegistry(imageReference, s.secure.imagePullRegistry) {
+		s.imagePullMu.Lock()
+		// Another admission may have completed the same pull while this request
+		// waited. Reinspect under the pull lock before mutating Docker's cache.
+		observedImage, err = imageDocker.InspectSignedImage(
+			r.Context(), imageReference, effective.Capsule.Image.ConfigDigest,
+		)
+		if errors.Is(err, ErrNotFound) {
+			pullContext, cancel := context.WithTimeout(r.Context(), s.secure.imagePullTimeout)
+			pullErr := s.docker.(SignedImagePullDocker).PullSignedImage(
+				pullContext, imageReference, s.secure.imagePullAuth,
+			)
+			cancel()
+			if pullErr != nil {
+				s.imagePullMu.Unlock()
+				writeDockerError(w, pullErr)
+				return
+			}
+			observedImage, err = imageDocker.InspectSignedImage(
+				r.Context(), imageReference, effective.Capsule.Image.ConfigDigest,
+			)
+		}
+		s.imagePullMu.Unlock()
+	}
 	if errors.Is(err, ErrNotFound) {
 		writeError(w, http.StatusConflict, "image_unavailable", "the exact signed image is not loaded on this node")
 		return

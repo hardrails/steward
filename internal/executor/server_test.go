@@ -54,6 +54,10 @@ type secureDocker struct {
 	startNoop bool
 	stopNoop  bool
 	stopCalls int
+	pullCalls int
+	pullRef   string
+	pullAuth  string
+	pullErr   error
 	// stopAppliesOnError models Docker applying a stop before its response is
 	// lost. Lifecycle code must trust the exact reinspection, not the error alone.
 	stopAppliesOnError bool
@@ -61,6 +65,16 @@ type secureDocker struct {
 	volumeErr          error
 	network            *ObservedNetwork
 	relay              *ObservedRelay
+}
+
+func (d *secureDocker) PullSignedImage(_ context.Context, reference, auth string) error {
+	d.pullCalls++
+	d.pullRef, d.pullAuth = reference, auth
+	if d.pullErr != nil {
+		return d.pullErr
+	}
+	d.imageErr = nil
+	return nil
 }
 
 func (d *secureDocker) InspectSignedImage(context.Context, string, string) (ObservedImage, error) {
@@ -210,6 +224,47 @@ func TestSecureAdmissionRejectsLocalConfigDigestMismatch(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusConflict || len(docker.created) != 0 || docker.removes != 0 || len(config.Journal.Pending()) != 0 {
 		t.Fatalf("status=%d creates=%d removes=%d pending=%#v body=%s", response.Code, len(docker.created), docker.removes, config.Journal.Pending(), response.Body.String())
+	}
+}
+
+func TestSecureAdmissionPullsOnlyFromConfiguredRegistryThenReinspects(t *testing.T) {
+	docker := &secureDocker{imageErr: ErrNotFound}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	config.ImagePullRegistry = "registry.local"
+	config.RegistryAuth = "encoded-auth"
+	config.ImagePullTimeout = time.Minute
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	wantReference := "registry.local/agent@sha256:" + strings.Repeat("a", 64)
+	if response.Code != http.StatusCreated || docker.pullCalls != 1 || docker.pullRef != wantReference ||
+		docker.pullAuth != "encoded-auth" || len(docker.created) != 1 {
+		t.Fatalf("status=%d pulls=%d ref=%q auth=%q creates=%d body=%s", response.Code, docker.pullCalls, docker.pullRef, docker.pullAuth, len(docker.created), response.Body.String())
+	}
+}
+
+func TestSecureAdmissionDoesNotPullFromUnconfiguredRegistry(t *testing.T) {
+	docker := &secureDocker{imageErr: ErrNotFound}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	config.ImagePullRegistry = "other.registry.test"
+	config.ImagePullTimeout = time.Minute
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || docker.pullCalls != 0 || len(docker.created) != 0 {
+		t.Fatalf("status=%d pulls=%d creates=%d body=%s", response.Code, docker.pullCalls, len(docker.created), response.Body.String())
 	}
 }
 
@@ -2541,6 +2596,29 @@ func TestEnableSecureAdmissionRejectsBrokenAuthorityState(t *testing.T) {
 		config.PolicyEnvelope[len(config.PolicyEnvelope)-2] ^= 1
 		if err := server.EnableSecureAdmission(config); err == nil {
 			t.Fatal("tampered policy accepted")
+		}
+	})
+	t.Run("image pull without registry", func(t *testing.T) {
+		_, _, config := secureAdmissionFixture(t)
+		config.RegistryAuth = "encoded"
+		if err := server.EnableSecureAdmission(config); err == nil {
+			t.Fatal("image pull authentication without a registry was accepted")
+		}
+	})
+	t.Run("invalid image pull registry", func(t *testing.T) {
+		_, _, config := secureAdmissionFixture(t)
+		config.ImagePullRegistry = "https://registry.test"
+		config.ImagePullTimeout = time.Minute
+		if err := server.EnableSecureAdmission(config); err == nil {
+			t.Fatal("invalid image pull registry was accepted")
+		}
+	})
+	t.Run("unbounded image pull timeout", func(t *testing.T) {
+		_, _, config := secureAdmissionFixture(t)
+		config.ImagePullRegistry = "registry.test"
+		config.ImagePullTimeout = time.Hour
+		if err := server.EnableSecureAdmission(config); err == nil {
+			t.Fatal("unbounded image pull timeout was accepted")
 		}
 	})
 }
