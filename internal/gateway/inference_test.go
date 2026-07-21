@@ -104,6 +104,119 @@ func TestInferenceGrantEnforcesModelAndSynthesizesModels(t *testing.T) {
 	}
 }
 
+func TestInferenceProvidersUsePinnedProtocolPathAndCredentials(t *testing.T) {
+	t.Run("OpenRouter OpenAI-compatible prefix", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer router-secret" {
+				t.Errorf("path=%q authorization=%q", r.URL.Path, r.Header.Get("Authorization"))
+			}
+			if r.Header.Get("X-Api-Key") != "" || r.Header.Get("Api-Key") != "" || r.Header.Get("Anthropic-Version") != "" ||
+				r.Header.Get("OpenAI-Organization") != "" || r.Header.Get("OpenAI-Project") != "" {
+				t.Errorf("untrusted provider headers survived: %#v", r.Header)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}))
+		defer upstream.Close()
+		base, _ := url.Parse(upstream.URL + "/api/v1")
+		route := loadedRoute{Route: Route{ID: "openrouter", BaseURL: base.String(), Protocol: InferenceProtocolOpenAI,
+			CredentialMode: CredentialModeBearer, MaxConcurrent: 1}, base: base, credential: "router-secret"}
+		server := &Server{client: upstream.Client()}
+		request := httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"openai/gpt"}`))
+		request.Header.Set("Authorization", "Bearer agent-secret")
+		request.Header.Set("X-Api-Key", "agent-secret")
+		request.Header.Set("Api-Key", "agent-secret")
+		request.Header.Set("Anthropic-Version", "2099-01-01")
+		request.Header.Set("OpenAI-Organization", "agent-selected")
+		request.Header.Set("OpenAI-Project", "agent-selected")
+		response := httptest.NewRecorder()
+		server.proxyInference(response, request, Grant{ModelAlias: "openai/gpt"}, route)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("Anthropic messages", func(t *testing.T) {
+		var requests atomic.Int64
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			if r.URL.Path != "/v1/messages" && r.URL.Path != "/v1/messages/count_tokens" {
+				t.Errorf("path=%q", r.URL.Path)
+			}
+			if r.Header.Get("X-Api-Key") != "anthropic-secret" || r.Header.Get("Authorization") != "" ||
+				r.Header.Get("Anthropic-Version") != defaultAnthropicVersion || r.Header.Get("Anthropic-Beta") != "" ||
+				r.Header.Get("Anthropic-Dangerous-Direct-Browser-Access") != "" {
+				t.Errorf("provider headers=%#v", r.Header)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"type":"message"}`))
+		}))
+		defer upstream.Close()
+		base, _ := url.Parse(upstream.URL + "/v1")
+		route := loadedRoute{Route: Route{ID: "anthropic", BaseURL: base.String(), Protocol: InferenceProtocolAnthropic,
+			MaxConcurrent: 1}, base: base, credential: "anthropic-secret"}
+		server := &Server{client: upstream.Client()}
+		for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
+			request := httptest.NewRequest(http.MethodPost, "http://relay"+path, strings.NewReader(`{"model":"claude"}`))
+			request.Header.Set("Authorization", "Bearer agent-secret")
+			request.Header.Set("Anthropic-Version", "2099-01-01")
+			request.Header.Set("Anthropic-Beta", "untrusted-beta")
+			request.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
+			response := httptest.NewRecorder()
+			server.proxyInference(response, request, Grant{ModelAlias: "claude"}, route)
+			if response.Code != http.StatusOK {
+				t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
+			}
+		}
+		denied := httptest.NewRecorder()
+		server.proxyInference(denied, httptest.NewRequest(http.MethodPost, "http://relay/v1/chat/completions", strings.NewReader(`{"model":"claude"}`)), Grant{ModelAlias: "claude"}, route)
+		if denied.Code != http.StatusForbidden || requests.Load() != 2 {
+			t.Fatalf("denied status=%d upstream requests=%d", denied.Code, requests.Load())
+		}
+	})
+
+	t.Run("Anthropic model discovery is local", func(t *testing.T) {
+		base, _ := url.Parse("https://api.anthropic.test/v1")
+		server := &Server{}
+		recorder := httptest.NewRecorder()
+		server.proxyInference(recorder, httptest.NewRequest(http.MethodGet, "http://relay/v1/models", nil),
+			Grant{ModelAlias: "claude"}, loadedRoute{Route: Route{Protocol: InferenceProtocolAnthropic}, base: base})
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"type":"model"`) ||
+			!strings.Contains(recorder.Body.String(), `"id":"claude"`) {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	})
+}
+
+func TestInferenceProviderProtocolIsPinnedIntoRoutePolicy(t *testing.T) {
+	base, _ := url.Parse("https://models.example.test/v1")
+	grant := Grant{RouteID: "models", ModelAlias: "model"}
+	legacy := loadedRoute{Route: Route{ID: "models", BaseURL: base.String(), MaxConcurrent: 1}, base: base}
+	legacyDigest := routePolicyDigest(grant, map[string]loadedRoute{"models": legacy}, nil, nil, nil, 0)
+	explicit := legacy
+	explicit.Protocol = InferenceProtocolOpenAI
+	explicit.CredentialMode = CredentialModeBearer
+	explicitDigest := routePolicyDigest(grant, map[string]loadedRoute{"models": explicit}, nil, nil, nil, 0)
+	if explicitDigest == legacyDigest {
+		t.Fatal("protocol-aware route reused the legacy policy digest")
+	}
+	mutations := []func(*loadedRoute){
+		func(route *loadedRoute) { route.Protocol = InferenceProtocolAnthropic },
+		func(route *loadedRoute) { route.CredentialMode = CredentialModeXAPIKey },
+		func(route *loadedRoute) {
+			route.Protocol = InferenceProtocolAnthropic
+			route.AnthropicVersion = "2024-01-01"
+		},
+	}
+	for _, mutate := range mutations {
+		changed := explicit
+		mutate(&changed)
+		if digest := routePolicyDigest(grant, map[string]loadedRoute{"models": changed}, nil, nil, nil, 0); digest == explicitDigest {
+			t.Fatalf("provider policy mutation was not pinned: %#v", changed.Route)
+		}
+	}
+}
+
 func TestInferenceStreamIsRevokedOnDeactivate(t *testing.T) {
 	started := make(chan struct{})
 	canceled := make(chan struct{})

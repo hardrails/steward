@@ -149,8 +149,8 @@ func TestGrantInferenceAndServiceFlow(t *testing.T) {
 	}))
 	defer upstream.Close()
 	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" || r.Header.Get("Authorization") != "" {
-			t.Fatalf("unexpected service request path=%s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		if r.URL.Path != "/health" || r.Header.Get("Authorization") != "" || r.Header.Get("X-Api-Key") != "service-metadata" {
+			t.Fatalf("unexpected service request path=%s auth=%q metadata=%q", r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Api-Key"))
 		}
 		_, _ = w.Write([]byte("agent-ok"))
 	}))
@@ -192,6 +192,7 @@ func TestGrantInferenceAndServiceFlow(t *testing.T) {
 	_ = result.Body.Close()
 	serviceRequest := httptest.NewRequest(http.MethodGet, "/v1/services/"+grant.GrantID+"/health", nil)
 	serviceRequest.Header.Set("Authorization", "Bearer service-secret")
+	serviceRequest.Header.Set("X-Api-Key", "service-metadata")
 	response = httptest.NewRecorder()
 	server.ServiceHandler().ServeHTTP(response, serviceRequest)
 	if response.Code != http.StatusOK || response.Body.String() != "agent-ok" {
