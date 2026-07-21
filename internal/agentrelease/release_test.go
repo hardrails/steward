@@ -621,7 +621,15 @@ func alternateBase64(t testing.TB, canonical string) string {
 		padding = 1
 	}
 	if padding == 0 {
-		t.Fatalf("base64 value has no unused trailing bits: %q", canonical)
+		// Encoding/base64 accepts CR and LF inside otherwise valid input. Use
+		// that alternate spelling when the encoded length has no unused bits.
+		mutated := canonical[:4] + "\n" + canonical[4:]
+		canonicalBytes, canonicalErr := base64.StdEncoding.DecodeString(canonical)
+		mutatedBytes, mutatedErr := base64.StdEncoding.DecodeString(mutated)
+		if canonicalErr != nil || mutatedErr != nil || !bytes.Equal(canonicalBytes, mutatedBytes) {
+			t.Fatalf("failed to construct alternate base64 spelling")
+		}
+		return mutated
 	}
 	alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 	index := len(canonical) - padding - 1

@@ -42,6 +42,10 @@ func (control *fakeControl) ListNodes(_ context.Context, tenantID, after string,
 	return controlclient.NodeList{Nodes: []controlclient.Node{{NodeID: "node-a", TenantIDs: []string{tenantID}, State: "active"}}}, control.err
 }
 
+func (control *fakeControl) ListInstanceEvents(_ context.Context, tenantID, after string, limit int) (controlclient.InstanceEventList, error) {
+	return controlclient.InstanceEventList{Events: []controlstore.InstanceEvent{}}, control.err
+}
+
 func (control *fakeControl) GetNode(_ context.Context, tenantID, nodeID string) (controlclient.Node, error) {
 	control.calls = append(control.calls, "node-status:"+tenantID+":"+nodeID)
 	return controlclient.Node{NodeID: nodeID, TenantIDs: []string{tenantID}, State: "active"}, control.err
@@ -186,13 +190,14 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 14 {
+	if len(listed) != 15 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
 	for _, name := range []string{
 		"steward_control_tenant_list", "steward_control_tenant_create", "steward_control_node_list",
 		"steward_control_node_status", "steward_control_node_revoke", "steward_control_command_submit",
+		"steward_control_event_list",
 		"steward_control_command_status", "steward_control_operations_summary",
 		"steward_control_attention_list", "steward_control_command_list",
 		"steward_control_incident_timeline",
@@ -226,6 +231,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_operations_summary"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_attention_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_incident_timeline"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_event_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_command_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_agent_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_credential_list"], true, false, true, false)
@@ -245,6 +251,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	for _, toolName := range []string{
 		"steward_control_operations_summary", "steward_control_attention_list",
 		"steward_control_incident_timeline",
+		"steward_control_event_list",
 		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
 	} {
 		schema := definitions[toolName]["inputSchema"].(map[string]any)

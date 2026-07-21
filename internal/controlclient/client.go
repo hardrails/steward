@@ -234,6 +234,11 @@ type DeploymentList struct {
 	NextAfter   string       `json:"next_after,omitempty"`
 }
 
+type InstanceEventList struct {
+	Events    []controlstore.InstanceEvent `json:"events"`
+	NextAfter string                       `json:"next_after,omitempty"`
+}
+
 type NodeRevocation struct {
 	NodeID             string `json:"node_id"`
 	RevokedCredentials int    `json:"revoked_credentials"`
@@ -523,6 +528,38 @@ func (c *Client) ListDeployments(
 	}
 	if page.NextAfter != "" && (len(page.Deployments) == 0 || page.NextAfter != previous) {
 		return DeploymentList{}, errors.New("control deployment page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) ListInstanceEvents(
+	ctx context.Context,
+	tenantID, after string,
+	limit int,
+) (InstanceEventList, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || limit <= 0 || limit > 100 {
+		return InstanceEventList{}, errors.New("instance event list requires a tenant and limit from 1 to 100")
+	}
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/instance-events", after, limit)
+	if err != nil {
+		return InstanceEventList{}, err
+	}
+	var page InstanceEventList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return InstanceEventList{}, err
+	}
+	if page.Events == nil || len(page.Events) > limit {
+		return InstanceEventList{}, errors.New("control instance event page is invalid")
+	}
+	for _, retained := range page.Events {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, retained.ReceivedAt)
+		if retained.Event.TenantID != tenantID || retained.Event.Validate() != nil || parseErr != nil ||
+			parsed.Format(time.RFC3339Nano) != retained.ReceivedAt {
+			return InstanceEventList{}, errors.New("control instance event page contains an invalid event")
+		}
+	}
+	if page.NextAfter != "" && (len(page.Events) == 0 || page.NextAfter != page.Events[len(page.Events)-1].Event.EventID) {
+		return InstanceEventList{}, errors.New("control instance event page cursor is inconsistent")
 	}
 	return page, nil
 }

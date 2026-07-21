@@ -83,11 +83,12 @@ type ResourceLimits struct {
 }
 
 type Capabilities struct {
-	State     bool `json:"state"`
-	Inference bool `json:"inference"`
-	Service   bool `json:"service"`
-	Egress    bool `json:"egress"`
-	Connector bool `json:"connector"`
+	State            bool `json:"state"`
+	Inference        bool `json:"inference"`
+	Service          bool `json:"service"`
+	Egress           bool `json:"egress"`
+	Connector        bool `json:"connector"`
+	ControllerEvents bool `json:"controller_events"`
 }
 
 type ArtifactDigest struct {
@@ -558,7 +559,7 @@ func validateEffectMode(intent InstanceIntent, tenant TenantRule) error {
 func (c Capabilities) SubsetOf(maximum Capabilities) bool {
 	return (!c.State || maximum.State) && (!c.Inference || maximum.Inference) &&
 		(!c.Service || maximum.Service) && (!c.Egress || maximum.Egress) &&
-		(!c.Connector || maximum.Connector)
+		(!c.Connector || maximum.Connector) && (!c.ControllerEvents || maximum.ControllerEvents)
 }
 
 // CanonicalRouteIDs returns a detached, sorted route set for fingerprints and

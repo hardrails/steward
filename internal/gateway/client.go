@@ -74,6 +74,42 @@ func (c *ControlClient) Register(ctx context.Context, grant Grant) error {
 	return c.call(ctx, http.MethodPost, "/v1/grants", grant, http.StatusCreated)
 }
 
+// ListInstanceEvents returns the durable, bounded Gateway outbox. Delivery is
+// at least once: callers acknowledge only after the controller commits the
+// entire returned batch.
+func (c *ControlClient) ListInstanceEvents(ctx context.Context) ([]InstanceEvent, error) {
+	var batch eventBatch
+	if err := c.callInto(ctx, http.MethodGet, "/v1/events", nil, http.StatusOK, &batch); err != nil {
+		return nil, err
+	}
+	if len(batch.Events) > maxInstanceEvents || validateRetainedEvents(batch.Events) != nil {
+		return nil, errors.New("gateway controller event response is invalid")
+	}
+	events := make([]InstanceEvent, len(batch.Events))
+	for index, event := range batch.Events {
+		events[index] = cloneEvent(event)
+	}
+	return events, nil
+}
+
+// AckInstanceEvents durably removes only controller-committed event IDs.
+func (c *ControlClient) AckInstanceEvents(ctx context.Context, eventIDs []string) error {
+	if len(eventIDs) == 0 || len(eventIDs) > maxInstanceEvents {
+		return errors.New("gateway controller event acknowledgement is invalid")
+	}
+	seen := make(map[string]struct{}, len(eventIDs))
+	for _, id := range eventIDs {
+		if !validInstanceEventID(id) {
+			return errors.New("gateway controller event acknowledgement is invalid")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return errors.New("gateway controller event acknowledgement contains a duplicate")
+		}
+		seen[id] = struct{}{}
+	}
+	return c.call(ctx, http.MethodPost, "/v1/events/ack", eventAck{EventIDs: eventIDs}, http.StatusNoContent)
+}
+
 func (c *ControlClient) Inspect(ctx context.Context, grantID string) (Grant, error) {
 	inspection, err := c.InspectWithPolicy(ctx, grantID)
 	return inspection.Grant, err

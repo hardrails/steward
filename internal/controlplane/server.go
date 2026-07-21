@@ -130,6 +130,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments", server.deployments)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}", server.deployment)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout", server.deploymentRollout)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/instance-events", server.instanceEvents)
 	server.mux.HandleFunc("/v1/operations/summary", server.operationsSummary)
 	server.mux.HandleFunc("/v1/operations/freeze", server.siteOperationalFreeze)
 	server.mux.HandleFunc("/v1/operations/attention", server.operationsAttention)
@@ -140,6 +141,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/executor-uplink/poll", server.executorPoll)
 	server.mux.HandleFunc("/executor-uplink/report", server.executorReport)
 	server.mux.HandleFunc("/executor-uplink/scheduling", server.executorScheduling)
+	server.mux.HandleFunc("/executor-uplink/events", server.executorEvents)
 	server.mux.HandleFunc("/evidence-uplink/poll", server.evidencePoll)
 	server.mux.HandleFunc("/evidence-uplink/report", server.evidenceReport)
 	if server.enableMetrics {
@@ -956,6 +958,86 @@ func (server *Server) executorScheduling(writer http.ResponseWriter, request *ht
 		Applied    bool   `json:"applied"`
 		ObservedAt string `json:"observed_at"`
 	}{Applied: applied, ObservedAt: node.Scheduling.ObservedAt})
+}
+
+func (server *Server) executorEvents(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	raw, ok := server.readBody(writer, request)
+	if !ok {
+		return
+	}
+	var batch controlprotocol.InstanceEventBatchRequestV1
+	if dsse.DecodeStrictInto(raw, maxRequestBytes, &batch) != nil || batch.Validate() != nil || batch.NodeID != identity.NodeID {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "executor instance event batch is invalid")
+		return
+	}
+	applied, err := server.store.RetainInstanceEvents(identity, batch, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Applied int `json:"applied"`
+	}{Applied: applied})
+}
+
+func (server *Server) instanceEvents(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	page, ok := parsePage(writer, request)
+	if !ok {
+		return
+	}
+	if page.limit > 100 {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "instance event limit must be between 1 and 100")
+		return
+	}
+	events, err := server.store.ListInstanceEvents(identity, request.PathValue("tenant_id"))
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	selected, next, ok := pageInstanceEvents(events, page)
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "after cursor does not identify a retained instance event")
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Events    []controlstore.InstanceEvent `json:"events"`
+		NextAfter string                       `json:"next_after,omitempty"`
+	}{Events: selected, NextAfter: next})
+}
+
+func pageInstanceEvents(values []controlstore.InstanceEvent, page pageRequest) ([]controlstore.InstanceEvent, string, bool) {
+	start := 0
+	if page.after != "" {
+		found := false
+		for index, event := range values {
+			if event.Event.EventID == page.after {
+				start, found = index+1, true
+				break
+			}
+		}
+		if !found {
+			return nil, "", false
+		}
+	}
+	end := start + page.limit
+	if end >= len(values) {
+		return values[start:], "", true
+	}
+	return values[start:end], values[end-1].Event.EventID, true
 }
 
 func (server *Server) executorReport(writer http.ResponseWriter, request *http.Request) {

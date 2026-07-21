@@ -46,11 +46,12 @@ func BuildIntent(
 		return admission.InstanceIntent{}, err
 	}
 	capabilities := admission.Capabilities{
-		State:     bundle.Definition.State.Persistent,
-		Inference: true,
-		Service:   true,
-		Egress:    len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
-		Connector: len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+		State:            bundle.Definition.State.Persistent,
+		Inference:        true,
+		Service:          true,
+		Egress:           len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
+		Connector:        len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+		ControllerEvents: bundle.Definition.Capabilities.ControllerEvents,
 	}
 	if !capabilities.SubsetOf(capsule.Capabilities) {
 		return admission.InstanceIntent{}, errors.New("agent capabilities exceed the authenticated capsule ceiling")

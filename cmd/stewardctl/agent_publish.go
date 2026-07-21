@@ -97,8 +97,9 @@ func agentPublish(arguments []string, stdout io.Writer) error {
 		},
 		Capabilities: admission.Capabilities{
 			State: bundle.Definition.State.Persistent, Inference: true, Service: true,
-			Egress:    len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
-			Connector: len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+			Egress:           len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
+			Connector:        len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+			ControllerEvents: bundle.Definition.Capabilities.ControllerEvents,
 		},
 		State:   admission.StateShape{SchemaVersion: "v1", Path: contract.statePath},
 		Service: admission.ServiceShape{ID: contract.serviceID, Port: contract.servicePort},

@@ -233,10 +233,13 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/quota", epoch)
         : Promise.resolve(null),
+      tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/instance-events?limit=100", epoch)
+        : Promise.resolve({events: []}),
     ];
-    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -573,6 +576,7 @@ const views = [
   ["commands", "05", "Signed activity"],
   ["credentials", "06", "Access records"],
   ["agents", "07", "Agents"],
+  ["events", "08", "Agent signals"],
 ];
 
 function ControlRoom(props) {
@@ -686,6 +690,7 @@ function ControlRoom(props) {
             ) : null}
             {view === "credentials" ? <CredentialsView page={snapshot.credentials} /> : null}
             {view === "agents" ? <AgentApplicationsView page={snapshot.agents} tenantID={selectedTenant} /> : null}
+            {view === "events" ? <InstanceEventsView page={snapshot.events} tenantID={selectedTenant} /> : null}
           </>
         )}
       </div>
@@ -1064,6 +1069,73 @@ function IncidentTimelineView({page}) {
         </article>
       )}
       {page.next_cursor ? <p className="truncation-note">More incident facts exist. Narrow the tenant projection or use the API continuation cursor.</p> : null}
+    </section>
+  );
+}
+
+function InstanceEventsView({page, tenantID}) {
+  const events = Array.isArray(page?.events) ? page.events : [];
+  return (
+    <section className="view agent-signal-view" aria-labelledby="agent-signals-title">
+      <ViewHeading eyebrow="AGENT-REPORTED · IDENTITY-STAMPED" title="Signals from inside the sandbox">
+        Status updates and research findings emitted by running agents. Steward binds each signal to its node, runtime, policy, and capsule before it leaves the host.
+      </ViewHeading>
+      <aside className="signal-boundary">
+        <strong>READ AS A CLAIM, NOT AS PROOF.</strong>
+        <span>The agent wrote the summary and attributes. These records cannot authorize work, change desired state, or replace Steward's signed evidence chain.</span>
+      </aside>
+      {!tenantID ? (
+        <article className="incident-empty">
+          <span className="panel-index">TENANT PROJECTION REQUIRED</span>
+          <h3>Select one tenant to read its agent signals.</h3>
+          <p>Agent-authored content never crosses tenant projections in the console.</p>
+        </article>
+      ) : events.length ? (
+        <ol className="agent-signal-stream">
+          {events.map((retained) => {
+            const event = retained.event;
+            const attributes = Object.entries(event.attributes || {});
+            return (
+              <li key={event.event_id} className={`agent-signal is-${event.severity}`}>
+                <div className="agent-signal-rail">
+                  <span>{event.kind === "finding" ? "FINDING" : "STATUS"}</span>
+                  <time dateTime={event.accepted_at}>{formatTime(event.accepted_at)}</time>
+                </div>
+                <article>
+                  <header>
+                    <div>
+                      <Badge kind={event.severity === "critical" ? "is-danger" : event.severity === "warning" ? "is-warning" : "is-ok"}>
+                        {event.severity}
+                      </Badge>
+                      <code>{event.code}</code>
+                    </div>
+                    <span>{event.instance_id} · gen {event.generation}</span>
+                  </header>
+                  <h3>{event.summary}</h3>
+                  <dl className="agent-signal-binding">
+                    <div><dt>Node</dt><dd>{event.node_id}</dd></div>
+                    <div><dt>Runtime</dt><dd><code>{event.runtime_ref.slice(0, 22)}…</code></dd></div>
+                    {event.task_id ? <div><dt>Task</dt><dd>{event.task_id}</dd></div> : null}
+                    {event.run_id ? <div><dt>Run</dt><dd>{event.run_id}</dd></div> : null}
+                  </dl>
+                  {attributes.length ? (
+                    <dl className="agent-signal-attributes">
+                      {attributes.map(([key, value]) => <div key={key}><dt>{humanize(key)}</dt><dd>{value}</dd></div>)}
+                    </dl>
+                  ) : null}
+                </article>
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <article className="incident-empty">
+          <span className="panel-index">NO AGENT SIGNALS</span>
+          <h3>No running instance has reported a status or finding.</h3>
+          <p>Enable the controller-events capability for an agent that needs to publish progress or research results.</p>
+        </article>
+      )}
+      {page?.next_after ? <p className="truncation-note">More signals are retained. Continue with the HTTP API, MCP tool, or stewardctl event cursor.</p> : null}
     </section>
   );
 }

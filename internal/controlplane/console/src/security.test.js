@@ -39,6 +39,8 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     "OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.",
     'projectedPath("/v1/operations/agents"',
     'projectedPath("/v1/operations/timeline"',
+    'api("/v1/tenants/" + encodeURIComponent(tenantID) + "/instance-events?limit=100"',
+    "READ AS A CLAIM, NOT AS PROOF.",
     'encodeURIComponent(tenantID) + "/quota"',
     "Fleet-wide resource quota",
     "Existing work is not evicted when a limit is lowered.",

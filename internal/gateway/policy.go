@@ -19,6 +19,7 @@ type routePolicyDocument struct {
 	Egress                      []egressRoutePolicy          `json:"egress,omitempty"`
 	Connectors                  []connectorRoutePolicy       `json:"connectors,omitempty"`
 	ServiceTask                 *serviceTaskRoutePolicy      `json:"service_task,omitempty"`
+	ControllerEvents            bool                         `json:"controller_events,omitempty"`
 	ConnectorReceiptBudgetBytes int64                        `json:"connector_receipt_budget_bytes,omitempty"`
 }
 
@@ -182,19 +183,29 @@ func routeBaseURL(value *url.URL) string {
 // oracle for weak operator-provided bearer tokens.
 func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectors map[string]loadedConnector, serviceOperations map[string]map[string]ServiceOperation, connectorReceiptBudget int64) string {
 	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 &&
-		len(grant.TaskAuthorities) == 0 && grant.EffectMode == "" {
+		len(grant.TaskAuthorities) == 0 && grant.EffectMode == "" && !grant.ControllerEvents {
 		return ""
 	}
 	document := routePolicyDocument{Version: 1}
+	if grant.ControllerEvents {
+		document.Version = 10
+		document.ControllerEvents = true
+	}
 	if grant.EffectMode != "" {
-		document.Version = 7
+		if document.Version < 7 {
+			document.Version = 7
+		}
 		document.EffectMode = grant.EffectMode
 		if grant.ActionApprovalThreshold > 1 {
-			document.Version = 8
+			if document.Version < 8 {
+				document.Version = 8
+			}
 			document.ActionApprovalThreshold = grant.ActionApprovalThreshold
 		}
 		if grant.ActionContextRequired {
-			document.Version = 9
+			if document.Version < 9 {
+				document.Version = 9
+			}
 			document.ActionContextRequired = true
 		}
 		for _, authority := range grant.ActionAuthorities {

@@ -942,7 +942,7 @@ func TestAuthorizedEffectsDenyDowngradeAndRecordOneBoundedDenial(t *testing.T) {
 		t.Fatalf("format summary=%#v err=%v", summary, err)
 	}
 	stateRaw, err := os.ReadFile(rig.config.StateFile)
-	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":7`)) ||
+	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":8`)) ||
 		!bytes.Contains(stateRaw, []byte(`"effect_mode":"authorized"`)) ||
 		!bytes.Contains(stateRaw, []byte(`"action_authorities"`)) {
 		t.Fatalf("authorized state=%s err=%v", stateRaw, err)

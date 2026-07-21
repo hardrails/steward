@@ -53,8 +53,9 @@ type Model struct {
 // runtime's bounded task service are implied by every agent application; raw
 // credentials and upstream origins never belong here.
 type CapabilityRequests struct {
-	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
-	ConnectorIDs   []string `json:"connector_ids,omitempty"`
+	EgressRouteIDs   []string `json:"egress_route_ids,omitempty"`
+	ConnectorIDs     []string `json:"connector_ids,omitempty"`
+	ControllerEvents bool     `json:"controller_events,omitempty"`
 }
 
 type Resources struct {

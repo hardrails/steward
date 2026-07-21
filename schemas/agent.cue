@@ -12,6 +12,11 @@
   model: route: string & !=""
   skills?: [...string]
   mcp_servers?: [...string]
+  capabilities?: {
+    egress_route_ids?: [...string]
+    connector_ids?: [...string]
+    controller_events?: bool
+  }
   resources: {
     cpu_millis: int & >=10 & <=128000
     memory_mib: int & >=64 & <=1048576

@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,8 +27,96 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executor"
+	"github.com/hardrails/steward/internal/gateway"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
+
+func TestPollerPublishesControllerEventsAtLeastOnce(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := commandPolicyFixture(t, public, []string{"read"})
+	credentialPath := filepath.Join(t.TempDir(), "credential.json")
+	if err := os.WriteFile(credentialPath, []byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"bearer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grantID := "grant-" + strings.Repeat("d", 64)
+	idempotencyKey := "finding-1"
+	digest := sha256.Sum256([]byte("steward-instance-event-v1\x00" + grantID + "\x00" + idempotencyKey))
+	event := gateway.InstanceEvent{
+		SchemaVersion: gateway.InstanceEventSchemaV1,
+		EventID:       "event-" + hex.EncodeToString(digest[:]), IdempotencyKey: idempotencyKey,
+		Source: "agent", TenantID: "tenant-a", NodeID: "node-1", InstanceID: "researcher-a", Generation: 1,
+		RuntimeRef: "executor-" + strings.Repeat("a", 64), GrantID: grantID,
+		CapsuleDigest: "sha256:" + strings.Repeat("b", 64), PolicyDigest: "sha256:" + strings.Repeat("c", 64),
+		Kind: "finding", Code: "source-confirmed", Severity: "info", Summary: "Primary source confirmed.",
+		ObservedAt: "2026-07-21T01:00:00Z", AcceptedAt: "2026-07-21T01:00:01Z",
+	}
+	var acknowledgements atomic.Int32
+	// Darwin limits Unix socket addresses to 104 bytes; Go's per-test temporary
+	// directory is intentionally descriptive and can exceed that bound.
+	socket := filepath.Join("/tmp", fmt.Sprintf("steward-events-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/events":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"events": []gateway.InstanceEvent{event}})
+		case "/v1/events/ack":
+			acknowledgements.Add(1)
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	})}
+	go func() { _ = gatewayServer.Serve(listener) }()
+	t.Cleanup(func() { _ = gatewayServer.Close() })
+	gatewayControl, err := gateway.NewControlClient(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts atomic.Int32
+	controller := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/executor-uplink/events" || request.Header.Get("Authorization") != "Bearer bearer" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var batch controlprotocol.InstanceEventBatchRequestV1
+		decodeErr := json.NewDecoder(request.Body).Decode(&batch)
+		if decodeErr != nil || batch.Validate() != nil || len(batch.Events) != 1 {
+			t.Errorf("invalid controller event batch: %+v err=%v", batch, decodeErr)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if attempts.Add(1) == 1 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte(`{"error":"unavailable","message":"retry"}`))
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"applied": 1})
+	}))
+	defer controller.Close()
+	poller, err := NewPoller(Config{
+		BaseURL: controller.URL, CredentialPath: credentialPath, PollInterval: time.Second,
+		HTTPClient: controller.Client(), Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		LocalToken: "local", State: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
+		SecureExecutor: true, SecureNodeID: "node-1", ProtectedTransport: true,
+		CommandPolicy: &policy, ProtocolVersion: 2, GatewayControl: gatewayControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := poller.publishEvents(context.Background()); err == nil || acknowledgements.Load() != 0 {
+		t.Fatalf("failed controller commit err=%v acknowledgements=%d", err, acknowledgements.Load())
+	}
+	if err := poller.publishEvents(context.Background()); err != nil || acknowledgements.Load() != 1 {
+		t.Fatalf("successful controller commit err=%v acknowledgements=%d", err, acknowledgements.Load())
+	}
+}
 
 func TestPollerExecutesAuthenticatedCommandAndReports(t *testing.T) {
 	credentialPath := filepath.Join(t.TempDir(), "credential.json")

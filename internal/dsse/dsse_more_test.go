@@ -24,6 +24,19 @@ func TestDecodeStrictIntoSupportsBoundedRawMessageWithoutDuplicateKeys(t *testin
 	}
 }
 
+func TestDecodeStrictIntoSupportsStringMapsWithoutDuplicateKeys(t *testing.T) {
+	type payload struct {
+		Attributes map[string]string `json:"attributes"`
+	}
+	var decoded payload
+	if err := DecodeStrictInto([]byte(`{"attributes":{"source":"primary"}}`), 1024, &decoded); err != nil || decoded.Attributes["source"] != "primary" {
+		t.Fatalf("decoded=%+v err=%v", decoded, err)
+	}
+	if err := DecodeStrictInto([]byte(`{"attributes":{"source":"one","source":"two"}}`), 1024, &decoded); err == nil {
+		t.Fatal("duplicate map key was accepted")
+	}
+}
+
 func TestSignAndParseRejectInvalidBoundsAndSignatures(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

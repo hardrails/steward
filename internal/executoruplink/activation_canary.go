@@ -617,6 +617,7 @@ func executorAdmissionProjection(
 		EgressRouteIDs:        append([]string(nil), local.EgressRouteIDs...),
 		ConnectorURL:          local.ConnectorURL,
 		ConnectorIDs:          append([]string(nil), local.ConnectorIDs...),
+		EventURL:              local.EventURL,
 		RoutePolicyDigest:     local.RoutePolicyDigest,
 		ActivationID:          local.ActivationID,
 		ActivationBeginDigest: local.ActivationBeginDigest,

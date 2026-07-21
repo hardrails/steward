@@ -127,6 +127,7 @@ type RuntimeGrant struct {
 	TaskAuthorities         []gateway.TaskAuthority        `json:"task_authorities,omitempty"`
 	EgressRouteIDs          []string                       `json:"egress_route_ids,omitempty"`
 	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
+	ControllerEvents        bool                           `json:"controller_events,omitempty"`
 	EffectMode              string                         `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
 	ActionContextRequired   bool                           `json:"action_context_required,omitempty"`

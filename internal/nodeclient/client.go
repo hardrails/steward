@@ -49,6 +49,7 @@ type State struct {
 	EgressRouteIDs          []string          `json:"egress_route_ids,omitempty"`
 	ConnectorURL            string            `json:"connector_url,omitempty"`
 	ConnectorIDs            []string          `json:"connector_ids,omitempty"`
+	EventURL                string            `json:"event_url,omitempty"`
 	EffectMode              string            `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold int               `json:"action_approval_threshold,omitempty"`
 	ActionAuthorities       []ActionAuthority `json:"action_authorities,omitempty"`

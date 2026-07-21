@@ -83,6 +83,7 @@ func TestModeSpecificHTTPServersKeepIndependentTimeoutPolicies(t *testing.T) {
 	inference := newInferenceHTTPServer("127.0.0.1:0", "/run/steward-grant/i.sock")
 	service := newServiceHTTPServer(http.NotFoundHandler())
 	connector := newConnectorHTTPServer(context.Background(), "/run/steward-grant/c.sock")
+	events := newEventHTTPServer("/run/steward-grant/v.sock")
 
 	if inference.ReadHeaderTimeout != 5*time.Second || inference.ReadTimeout != 2*time.Minute ||
 		inference.WriteTimeout != 2*time.Minute || inference.IdleTimeout != 30*time.Second {
@@ -99,7 +100,11 @@ func TestModeSpecificHTTPServersKeepIndependentTimeoutPolicies(t *testing.T) {
 	if connectorGatewayMaximumLifetime != time.Hour || connectorGatewayRoundTripTime <= connectorGatewayMaximumLifetime {
 		t.Fatalf("connector round-trip=%s maximum=%s", connectorGatewayRoundTripTime, connectorGatewayMaximumLifetime)
 	}
-	for name, server := range map[string]*http.Server{"inference": inference, "service": service, "connector": connector} {
+	if events.ReadHeaderTimeout != 5*time.Second || events.ReadTimeout != 15*time.Second ||
+		events.WriteTimeout != 15*time.Second || events.IdleTimeout != 30*time.Second {
+		t.Fatalf("event timeouts changed: %#v", events)
+	}
+	for name, server := range map[string]*http.Server{"inference": inference, "service": service, "connector": connector, "events": events} {
 		if server.MaxHeaderBytes != maxHTTPHeaderBytes {
 			t.Fatalf("%s MaxHeaderBytes=%d", name, server.MaxHeaderBytes)
 		}
@@ -322,6 +327,80 @@ func TestConnectorProxyForwardsOnlyExactOperationsAndFailsClosedAfterRevocation(
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/connectors/tickets/operations/create", nil))
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "connector_unavailable") {
 		t.Fatalf("revoked status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestEventProxyForwardsOnlyExactBoundedEventsAndFailsClosedAfterRevocation(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "srv-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "v.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			t.Error(readErr)
+		}
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/events" || request.URL.RawQuery != "" ||
+			request.Header.Get("Content-Type") != "application/json" || request.Header.Get("Authorization") != "" ||
+			string(body) != `{"schema_version":"steward.instance-event.v1"}` {
+			t.Errorf("request=%s %s?%s headers=%v body=%q", request.Method, request.URL.Path, request.URL.RawQuery, request.Header, body)
+		}
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"event_id":"event-a","status":"accepted"}`))
+	})}
+	go func() { _ = upstream.Serve(listener) }()
+	defer upstream.Close()
+
+	handler := eventProxy(socket)
+	request := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{"schema_version":"steward.instance-event.v1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer agent-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || response.Header().Get("Retry-After") != "5" ||
+		response.Body.String() != `{"event_id":"event-a","status":"accepted"}` {
+		t.Fatalf("status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+
+	for name, denied := range map[string]*http.Request{
+		"method": httptest.NewRequest(http.MethodGet, "/v1/events", nil),
+		"path":   httptest.NewRequest(http.MethodPost, "/v1/other", nil),
+		"query":  httptest.NewRequest(http.MethodPost, "/v1/events?identity=other", nil),
+		"type":   httptest.NewRequest(http.MethodPost, "/v1/events", nil),
+	} {
+		if name != "type" {
+			denied.Header.Set("Content-Type", "application/json")
+		}
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, denied)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("%s status=%d body=%s", name, response.Code, response.Body.String())
+		}
+	}
+	oversized := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(strings.Repeat("x", maxEventRequestBytes+1)))
+	oversized.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, oversized)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "event_gateway_unavailable") {
+		t.Fatalf("revoked status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
