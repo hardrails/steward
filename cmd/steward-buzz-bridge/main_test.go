@@ -191,6 +191,7 @@ func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
 	completed.Phase = "replied"
 	completed.ReplyDigest = sha256Digest([]byte("answer"))
 	completed.ReplyEventID = testReply
+	completed.PublishCreatedAt = time.Now().Unix()
 	if err := writeRecord(recordPath, completed); err != nil {
 		t.Fatal(err)
 	}
@@ -633,7 +634,7 @@ func TestEligibilityRequiresExactCryptographicMentionShape(t *testing.T) {
 
 func TestPollRunsOneTaskAndRecoversWithoutDuplicateReply(t *testing.T) {
 	directory := t.TempDir()
-	now := time.Unix(1_900_000_000, 0)
+	now := time.Now().UTC()
 	eventJSON := fmt.Sprintf(
 		`[{"id":"%s","pubkey":"%s","kind":9,"content":"research this","created_at":%d,"tags":[["h","%s"],["p","%s"]]}]`,
 		testEvent, testAuthor, now.Unix(), testChannel, testAgent,
@@ -837,7 +838,48 @@ esac
 	}
 }
 
-func TestAmbiguousPublishReconcilesWithoutDuplicateSend(t *testing.T) {
+func TestCapacityReclaimsOnlyCompletedRecordsOutsideReplayWindow(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Now().UTC()
+	cfg := validTestConfig(directory)
+	cfg.MaxRecords = 1
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{cfg: cfg, logger: slog.Default(), now: func() time.Time { return now }}
+	first := validEvent(now)
+	if err := b.ingest(testChannel, first); err != nil {
+		t.Fatal(err)
+	}
+	firstPath := filepath.Join(cfg.StateDirectory, "records", first.ID+".json")
+	completed, err := readRecord(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed.Phase = "replied"
+	completed.ReplyDigest = sha256Digest([]byte("answer"))
+	completed.ReplyEventID = testReply
+	completed.PublishCreatedAt = now.Unix()
+	completed.UpdatedAt = now.Add(-cursorReplay - time.Second).Format(time.RFC3339Nano)
+	raw, err := json.Marshal(completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second := validEvent(now)
+	second.ID = strings.Repeat("e", 64)
+	if err := b.ingest(testChannel, second); err != nil {
+		t.Fatal(err)
+	}
+	if fileExists(firstPath) || !fileExists(filepath.Join(cfg.StateDirectory, "records", second.ID+".json")) {
+		t.Fatal("capacity reclamation did not replace the old completed deduplication record")
+	}
+}
+
+func TestAmbiguousPublishRetriesTheSameEventIdentity(t *testing.T) {
 	directory := t.TempDir()
 	now := time.Unix(1_900_000_000, 0)
 	allow := filepath.Join(directory, "allow-thread")
@@ -849,7 +891,7 @@ case " $* " in
       printf '[{"id":"`+testReply+`","pubkey":"`+testAgent+`","kind":9,"content":"answer","created_at":1900000001,"tags":[["h","`+testChannel+`"],["e","`+testEvent+`","","reply"]]}]\n'
     else printf '[]\n'; fi ;;
   *" messages send "*)
-    count=0; [ ! -f '`+sends+`' ] || count=$(cat '`+sends+`'); count=$((count + 1)); printf '%s' "$count" >'`+sends+`'
+    printf '%s\n' "$STEWARD_BUZZ_CREATED_AT" >>'`+sends+`'
     cat >/dev/null; printf '{"event_id":"`+testReply+`"}\n' ;;
   *) exit 2 ;;
 esac
@@ -876,6 +918,7 @@ esac
 	}
 	rec.Phase = "publishing"
 	rec.ReplyDigest = sha256Digest([]byte("answer"))
+	rec.PublishCreatedAt = now.Unix()
 	if err := writeRecord(path, rec); err != nil {
 		t.Fatal(err)
 	}
@@ -891,6 +934,20 @@ esac
 		strings.Contains(listed.String(), "answer") {
 		t.Fatalf("record list=%q error=%v", listed.String(), err)
 	}
+	if err := b.retryDurableRecord(testEvent); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := b.processNext(context.Background()); !worked || err == nil || !strings.Contains(err.Error(), "publish_outcome_unknown") {
+		t.Fatalf("second ambiguous publish worked=%v error=%v", worked, err)
+	}
+	timestamps, err := os.ReadFile(sends)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTimestamps := fmt.Sprintf("%d\n%d\n", now.Unix(), now.Unix())
+	if string(timestamps) != wantTimestamps {
+		t.Fatalf("republished event timestamps=%q want=%q", timestamps, wantTimestamps)
+	}
 	if err := os.WriteFile(allow, []byte("ready"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -900,9 +957,9 @@ esac
 	if worked, err := b.processNext(context.Background()); !worked || err != nil {
 		t.Fatalf("reconcile worked=%v error=%v", worked, err)
 	}
-	count, err := os.ReadFile(sends)
-	if err != nil || string(count) != "1" {
-		t.Fatalf("send count=%q error=%v", count, err)
+	timestamps, err = os.ReadFile(sends)
+	if err != nil || string(timestamps) != wantTimestamps {
+		t.Fatalf("reconciliation republished event timestamps=%q error=%v", timestamps, err)
 	}
 	rec, err = readRecord(path)
 	if err != nil || rec.Phase != "replied" || rec.ReplyEventID != testReply {
@@ -1089,7 +1146,12 @@ func TestReadRecordRejectsIncompleteDurableTransitions(t *testing.T) {
 		{name: "unknown phase", want: "invalid phase", edit: func(rec *record) { rec.Phase = "unknown" }},
 		{name: "unknown resume phase", want: "invalid resume phase", edit: func(rec *record) { rec.ResumePhase = "replied" }},
 		{name: "malformed retry time", want: "invalid retry time", edit: func(rec *record) { rec.NextAttemptAt = "tomorrow" }},
-		{name: "publishing without reply digest", want: "incomplete phase transition", edit: func(rec *record) { rec.Phase = "publishing" }},
+		{name: "malformed update time", want: "invalid update time", edit: func(rec *record) { rec.UpdatedAt = "tomorrow" }},
+		{name: "pending with publish identity", want: "incomplete phase transition", edit: func(rec *record) { rec.PublishCreatedAt = now.Unix() }},
+		{name: "publishing without reply digest", want: "incomplete phase transition", edit: func(rec *record) {
+			rec.Phase = "publishing"
+			rec.PublishCreatedAt = now.Unix()
+		}},
 		{name: "dead letter without resume phase", want: "incomplete phase transition", edit: func(rec *record) { rec.Phase = "dead_letter" }},
 	}
 	for _, test := range tests {

@@ -190,10 +190,13 @@ The first successful poll writes owner-only records and then advances an
 owner-only channel cursor. Task workers run independently of polling. Each task
 ID is deterministic from the tenant, integration, and verified Buzz event ID. If
 the process stops after dispatch, it resubmits the same retained bundle and waits
-for the same result. Before retrying a reply after an ambiguous relay failure, it
-searches the verified thread for the same signed author, parent, and content. A
-send that cannot be verified remains `publish_outcome_unknown`; it is never
-reported as complete and is not blindly sent again.
+for the same result. Before publishing, the bridge stores one immutable Nostr
+creation timestamp. Every retry signs the same author, timestamp, kind, tags,
+and content, which produces the same Nostr event ID. The relay can therefore
+accept a repeated submission after delayed visibility without creating a second
+logical reply. The bridge also searches the verified thread for the same author,
+parent, and content before each submission. A send that cannot be verified
+remains `publish_outcome_unknown`; it is never reported as complete.
 Reply text is sent literally: `@names` and `nostr:` references remain text and do
 not create additional mention tags selected by the agent.
 
@@ -250,8 +253,12 @@ returns message content, model output, task bundles, or credentials.
 - Authentication and invalid-result failures enter `dead_letter` instead of
   retrying forever. Retryable failures stop after ten attempts for operator
   review.
-- `max_records` stops intake without deleting old work. Archive completed record
-  and run directories through a reviewed operator procedure before raising it.
+- `max_records` bounds active and recently completed inbox records. When the
+  limit is reached, the bridge removes only verified `replied` records whose
+  completion is older than the five-minute replay window, oldest first. It
+  retains pending, failed, and recent deduplication records, and stops intake
+  rather than deleting them. Retained task run directories are separate audit
+  evidence; archive them through a reviewed operator procedure.
 - A failed Hermes task is not published as an answer. Inspect the retained signed
   bundle/result path and Gateway receipt chain with the normal task tools.
 

@@ -208,13 +208,16 @@ type record struct {
 	RunDirectory  string `json:"run_directory"`
 	ReplyDigest   string `json:"reply_digest,omitempty"`
 	ReplyEventID  string `json:"reply_event_id,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-	ErrorCode     string `json:"error_code,omitempty"`
-	Retryable     bool   `json:"retryable,omitempty"`
-	Attempts      uint32 `json:"attempts,omitempty"`
-	NextAttemptAt string `json:"next_attempt_at,omitempty"`
-	ResumePhase   string `json:"resume_phase,omitempty"`
-	UpdatedAt     string `json:"updated_at"`
+	// PublishCreatedAt is persisted before the first send. Buzz uses it to
+	// rebuild the same Nostr event ID for every ambiguous-outcome retry.
+	PublishCreatedAt int64  `json:"publish_created_at,omitempty"`
+	LastError        string `json:"last_error,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	Retryable        bool   `json:"retryable,omitempty"`
+	Attempts         uint32 `json:"attempts,omitempty"`
+	NextAttemptAt    string `json:"next_attempt_at,omitempty"`
+	ResumePhase      string `json:"resume_phase,omitempty"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 type channelCursor struct {
@@ -779,18 +782,8 @@ func (b *bridge) loadOrCreateRecord(path, channel string, event buzzEvent) (reco
 		if maximum == 0 {
 			maximum = defaultMaxRecords
 		}
-		entries, readErr := os.ReadDir(filepath.Dir(path))
-		if readErr != nil {
-			return record{}, false, readErr
-		}
-		recordCount := 0
-		for _, entry := range entries {
-			if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
-				recordCount++
-			}
-		}
-		if recordCount >= maximum {
-			return record{}, false, errors.New("durable Buzz inbox reached max_records; intake stopped without dropping work")
+		if err := b.ensureRecordCapacity(filepath.Dir(path), maximum); err != nil {
+			return record{}, false, err
 		}
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
@@ -825,6 +818,64 @@ func (b *bridge) loadOrCreateRecord(path, channel string, event buzzEvent) (reco
 		return record{}, false, errors.New("durable event record does not match the verified event")
 	}
 	return existing, false, nil
+}
+
+func (b *bridge) ensureRecordCapacity(directory string, maximum int) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	type completedRecord struct {
+		path      string
+		updatedAt time.Time
+	}
+	recordCount := 0
+	completed := make([]completedRecord, 0)
+	cutoff := b.now().Add(-cursorReplay)
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		recordCount++
+		path := filepath.Join(directory, entry.Name())
+		rec, err := readRecord(path)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := time.Parse(time.RFC3339Nano, rec.UpdatedAt)
+		if rec.Phase == "replied" && err == nil && updatedAt.Before(cutoff) {
+			completed = append(completed, completedRecord{path: path, updatedAt: updatedAt})
+		}
+	}
+	if recordCount < maximum {
+		return nil
+	}
+	sort.Slice(completed, func(left, right int) bool {
+		if completed[left].updatedAt.Equal(completed[right].updatedAt) {
+			return completed[left].path < completed[right].path
+		}
+		return completed[left].updatedAt.Before(completed[right].updatedAt)
+	})
+	removed := false
+	for _, candidate := range completed {
+		if recordCount < maximum {
+			break
+		}
+		if err := os.Remove(candidate.path); err != nil {
+			return err
+		}
+		recordCount--
+		removed = true
+	}
+	if removed {
+		if err := syncDirectory(directory); err != nil {
+			return err
+		}
+	}
+	if recordCount >= maximum {
+		return errors.New("durable Buzz inbox reached max_records; intake stopped without dropping work")
+	}
+	return nil
 }
 
 func (b *bridge) workerLoop(ctx context.Context) {
@@ -935,7 +986,7 @@ func readRecord(path string) (record, error) {
 		rec.CreatedAt <= 0 || len([]byte(rec.Content)) > maxMessageBytes || sha256Digest([]byte(rec.Content)) != rec.ContentDigest ||
 		!taskIDRE.MatchString(rec.TaskID) || !filepath.IsAbs(rec.RunDirectory) || filepath.Clean(rec.RunDirectory) != rec.RunDirectory ||
 		rec.ReplyDigest != "" && !digestRE.MatchString(rec.ReplyDigest) || rec.ReplyEventID != "" && !hex64RE.MatchString(rec.ReplyEventID) ||
-		rec.Attempts > 10 {
+		rec.PublishCreatedAt < 0 || rec.Attempts > 10 {
 		return record{}, errors.New("durable Buzz event record is invalid")
 	}
 	switch rec.Phase {
@@ -952,8 +1003,12 @@ func readRecord(path string) (record, error) {
 			return record{}, errors.New("durable Buzz event record has an invalid retry time")
 		}
 	}
-	if rec.Phase == "replied" && (rec.ReplyDigest == "" || rec.ReplyEventID == "") ||
-		(rec.Phase == "publishing" || rec.Phase == "publish_outcome_unknown") && rec.ReplyDigest == "" ||
+	if _, err := time.Parse(time.RFC3339Nano, rec.UpdatedAt); err != nil {
+		return record{}, errors.New("durable Buzz event record has an invalid update time")
+	}
+	if rec.Phase == "replied" && (rec.ReplyDigest == "" || rec.ReplyEventID == "" || rec.PublishCreatedAt == 0) ||
+		(rec.Phase == "publishing" || rec.Phase == "publish_outcome_unknown") && (rec.ReplyDigest == "" || rec.PublishCreatedAt == 0) ||
+		(rec.Phase == "pending" || rec.Phase == "dispatched") && rec.PublishCreatedAt != 0 ||
 		rec.Phase == "dead_letter" && rec.ResumePhase == "" {
 		return record{}, errors.New("durable Buzz event record has an incomplete phase transition")
 	}
@@ -1052,6 +1107,10 @@ func (b *bridge) completeRecord(ctx context.Context, path string, rec *record) e
 			return err
 		}
 		rec.ReplyDigest = sha256Digest([]byte(reply))
+		rec.PublishCreatedAt = b.now().Unix()
+		if rec.PublishCreatedAt <= 0 {
+			return &bridgeFailure{code: "publish_time_invalid", retryable: false, cause: errors.New("reply publish timestamp is invalid")}
+		}
 		rec.Phase = "publishing"
 		clearRecordFailure(rec)
 		if err := writeRecord(path, *rec); err != nil {
@@ -1071,7 +1130,7 @@ func (b *bridge) completeRecord(ctx context.Context, path string, rec *record) e
 		return &bridgeFailure{code: "reply_reconciliation_failed", retryable: true, cause: err}
 	}
 	if !found {
-		_, publishErr := b.runBuzz(ctx, []byte(reply), "messages", "send", "--channel", rec.ChannelID,
+		_, publishErr := b.runBuzzAt(ctx, []byte(reply), rec.PublishCreatedAt, "messages", "send", "--channel", rec.ChannelID,
 			"--content", "-", "--reply-to", rec.EventID)
 		found, replyEventID, err = b.findExistingReply(ctx, rec.ChannelID, rec.EventID, reply)
 		if err != nil {
@@ -1270,12 +1329,19 @@ func (b *bridge) findExistingReply(ctx context.Context, channel, parent, content
 }
 
 func (b *bridge) runBuzz(ctx context.Context, stdin []byte, arguments ...string) ([]byte, error) {
+	return b.runBuzzAt(ctx, stdin, 0, arguments...)
+}
+
+func (b *bridge) runBuzzAt(ctx context.Context, stdin []byte, createdAt int64, arguments ...string) ([]byte, error) {
 	commandContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	environment := []string{
 		"HOME=/nonexistent", "PATH=/usr/local/bin:/usr/bin:/bin", "NO_COLOR=1",
 		"STEWARD_BUZZ_LITERAL_CONTENT=1",
 		"BUZZ_RELAY_URL=" + b.cfg.RelayURL, "BUZZ_PRIVATE_KEY=" + b.buzzKey,
+	}
+	if createdAt > 0 {
+		environment = append(environment, "STEWARD_BUZZ_CREATED_AT="+strconv.FormatInt(createdAt, 10))
 	}
 	if b.buzzAuthTag != "" {
 		environment = append(environment, "BUZZ_AUTH_TAG="+b.buzzAuthTag)

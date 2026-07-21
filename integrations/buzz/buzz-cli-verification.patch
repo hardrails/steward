@@ -2,6 +2,11 @@ diff --git a/crates/buzz-cli/src/commands/messages.rs b/crates/buzz-cli/src/comm
 index 290cc59..6faf8cf 100644
 --- a/crates/buzz-cli/src/commands/messages.rs
 +++ b/crates/buzz-cli/src/commands/messages.rs
+@@ -1,3 +1,3 @@
+ use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
+-use nostr::PublicKey;
++use nostr::{PublicKey, Timestamp};
+ use uuid::Uuid;
 @@ -64,9 +64,13 @@ async fn resolve_thread_ref(
      let raw = client.query(&filter).await?;
      let events: serde_json::Value = serde_json::from_str(&raw)
@@ -99,6 +104,26 @@ index 290cc59..6faf8cf 100644
 -
 +
      let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
+@@ -540,4 +572,4 @@ pub async fn cmd_send_message(
+-    let builder = match p.kind {
++    let mut builder = match p.kind {
+         Some(45001) => {
+             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
+                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
+@@ -571,4 +603,12 @@ pub async fn cmd_send_message(
+         }
+     };
+-
++    if literal_content {
++        if let Ok(raw) = std::env::var("STEWARD_BUZZ_CREATED_AT") {
++            let created_at = raw.parse::<u64>().map_err(|_| {
++                CliError::Usage("STEWARD_BUZZ_CREATED_AT must be Unix seconds".into())
++            })?;
++            builder = builder.custom_created_at(Timestamp::from(created_at));
++        }
++    }
++
+     let event = client.sign_event(builder)?;
 @@ -832,6 +864,7 @@ pub async fn dispatch(
              channel,
              limit,

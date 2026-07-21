@@ -38,15 +38,15 @@
   "steward_inputs": [
     {
       "path": "integrations/buzz/buzz-cli-verification.patch",
-      "sha256": "33780baf338077322d70cdbba4774d20795a1053d7bb09c97e45686ea22c6b6e"
+      "sha256": "325ccaf3d178915fcec9fbc7a181c520136d6a40931beecbee8bac4cd787993b"
     },
     {
       "path": "cmd/steward-buzz-bridge/main.go",
-      "sha256": "8986b5bb970068b308f3561295078d912755e37bdb9a766b916809625531e2a2"
+      "sha256": "3be9cfb8ecd2443e874f73ed7563615486d349a0d8e3a71a670e6857aca10941"
     },
     {
       "path": "cmd/steward-buzz-bridge/main_test.go",
-      "sha256": "54743592e0f886f80a45e25b53be610649ef9ff48561a6707a4101278e03a3a5"
+      "sha256": "cda444658b45e427f9025bae3176ff5437004eb59e6f619a1bb5443f94904cde"
     },
     {
       "path": "scripts/build-buzz-bridge.sh",
