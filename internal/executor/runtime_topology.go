@@ -409,7 +409,7 @@ func (s *Server) stopRelayAndConfirm(ctx context.Context, relayName string, want
 }
 
 func (s *Server) gatewayRoutePolicyDigest(ctx context.Context, workload Workload) (string, error) {
-	if workload.Runtime == nil || !workload.Runtime.Inference && len(workload.Runtime.EgressRouteIDs) == 0 && len(workload.Runtime.ConnectorIDs) == 0 {
+	if !runtimeNeedsGatewayPolicy(workload.Runtime) {
 		return "", nil
 	}
 	inspection, err := s.secure.gateway.InspectWithPolicy(ctx, workload.Runtime.GrantID)
@@ -427,10 +427,10 @@ func (s *Server) gatewayRoutePolicyMatches(ctx context.Context, workload Workloa
 }
 
 func (s *Server) inspectGatewayRoutePolicy(ctx context.Context, workload Workload, expected string) error {
-	policyBearing := workload.Runtime != nil && (workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) != 0 || len(workload.Runtime.ConnectorIDs) != 0)
+	policyBearing := runtimeNeedsGatewayPolicy(workload.Runtime)
 	if !policyBearing {
 		if expected != "" {
-			return topologyDrift(runtimeTopologyGateway, "workload without an inference, egress, or connector route has an unexpected route-policy binding")
+			return topologyDrift(runtimeTopologyGateway, "workload without a Gateway-enforced capability has an unexpected route-policy binding")
 		}
 		return nil
 	}

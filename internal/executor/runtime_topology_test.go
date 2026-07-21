@@ -165,7 +165,8 @@ func (f *gatewayFixture) InspectWithPolicy(ctx context.Context, id string) (gate
 		return gateway.GrantInspection{}, err
 	}
 	digest := ""
-	if grant.RouteID != "" || len(grant.EgressRouteIDs) != 0 || len(grant.ConnectorIDs) != 0 {
+	if grant.RouteID != "" || len(grant.EgressRouteIDs) != 0 || len(grant.ConnectorIDs) != 0 ||
+		len(grant.TaskAuthorities) != 0 || grant.EffectMode != "" {
 		digest = f.policyDigest
 		if digest == "" {
 			digest = testGatewayRoutePolicyDigest

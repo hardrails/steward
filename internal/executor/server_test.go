@@ -1691,6 +1691,34 @@ func TestSecureAdmissionProjectsAuthorizedEffectsIntoImmutableRuntimeGrant(t *te
 	}
 }
 
+func TestSecureAdmissionBindsTaskOnlyServiceRoutePolicy(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Service: true})
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	response := submitSecureAdmission(t, server, capsule, intent)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("task-only service admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	var admitted secureProvisionResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &admitted); err != nil {
+		t.Fatal(err)
+	}
+	if admitted.RoutePolicyDigest != testGatewayRoutePolicyDigest || len(admitted.TaskAuthorities) != 1 {
+		t.Fatalf("task-only service admission=%#v", admitted)
+	}
+	committed, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
+	if !ok || committed.RoutePolicyDigest != admitted.RoutePolicyDigest {
+		t.Fatalf("committed route policy=%q response=%q", committed.RoutePolicyDigest, admitted.RoutePolicyDigest)
+	}
+}
+
 func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing.T) {
 	docker := &secureDocker{}
 	server, _ := NewServer(docker, "secret", nil)
