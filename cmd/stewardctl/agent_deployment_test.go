@@ -136,6 +136,30 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			}
 			_ = json.NewEncoder(writer).Encode(view)
 		case http.MethodPut:
+			if strings.HasSuffix(request.URL.Path, "/rollout") {
+				var input struct {
+					ExpectedRevision uint64 `json:"expected_revision"`
+					Paused           bool   `json:"paused"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.ExpectedRevision != 1 {
+					t.Errorf("rollout control input=%+v err=%v", input, err)
+				}
+				controlled := view
+				controlled.Generation = 2
+				controlled.Revision = 2
+				controlled.Phase = controlstore.DeploymentReconciling
+				controlled.Rollout = &controlclient.DeploymentRollout{
+					SourceGeneration: 1, SourceAgentName: view.AgentName,
+					SourceBundleDigest: view.BundleDigest, SourceCapsuleDigest: view.CapsuleDigest,
+					SourceDelegationDigest: view.DelegationDigest,
+					StartedAt:              now.Format(time.RFC3339Nano),
+				}
+				if input.Paused {
+					controlled.Rollout.PausedAt = now.Add(time.Minute).Format(time.RFC3339Nano)
+				}
+				_ = json.NewEncoder(writer).Encode(controlled)
+				return
+			}
 			putCount++
 			var input struct {
 				Generation       uint64                       `json:"generation"`
@@ -186,6 +210,8 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		}, common...),
 		append([]string{"agent", "deployment", "status", "auditor"}, common...),
 		append([]string{"agent", "deployment", "list"}, common...),
+		append([]string{"agent", "deployment", "pause", "auditor"}, common...),
+		append([]string{"agent", "deployment", "resume", "auditor"}, common...),
 		append([]string{"agent", "deployment", "remove", "auditor"}, common...),
 	} {
 		output.Reset()
@@ -203,6 +229,10 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		"PUT /v1/tenants/tenant-a/deployments/auditor," +
 		"GET /v1/tenants/tenant-a/deployments/auditor," +
 		"GET /v1/tenants/tenant-a/deployments?limit=100," +
+		"GET /v1/tenants/tenant-a/deployments/auditor," +
+		"PUT /v1/tenants/tenant-a/deployments/auditor/rollout," +
+		"GET /v1/tenants/tenant-a/deployments/auditor," +
+		"PUT /v1/tenants/tenant-a/deployments/auditor/rollout," +
 		"GET /v1/tenants/tenant-a/deployments/auditor," +
 		"DELETE /v1/tenants/tenant-a/deployments/auditor"
 	if strings.Join(requests, ",") != wantRequests {
