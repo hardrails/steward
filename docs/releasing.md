@@ -53,8 +53,9 @@ The workflow uses six job executions across five job definitions:
    with a read-only token. For a tag build, each job first proves that the commit
    referenced by the tag is reachable from `origin/main`; a tag created from an
    unmerged branch cannot publish. `scripts/release.sh` cross-compiles Linux and Darwin,
-   creates `.tar.gz` archives with `LICENSE` and `README.md`, builds DEB and RPM
-   packages, creates a closed-inventory Linux controller archive, includes both
+	creates `.tar.gz` archives with `LICENSE` and `README.md`, builds DEB and RPM
+   packages, creates closed-inventory Linux controller and cross-platform Buzz
+   integration kits, includes both
    installers, and checks that every host-native binary reports the tag. Each
    Linux node artifact contains a deterministic
    `release.json` that binds the tag, target, binaries, units, templates, and
@@ -84,6 +85,11 @@ authority.
 | linux | arm64 | `steward_vX.Y.Z_linux_arm64.tar.gz` | All seven Steward binaries |
 | darwin | amd64 | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward`, `steward-control`, `stewardctl`, `steward-mcp` |
 | darwin | arm64 | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward`, `steward-control`, `stewardctl`, `steward-mcp` |
+
+Every target also produces
+`steward-buzz_vX.Y.Z_<os>_<arch>.tar.gz`. That separate kit contains the
+target-native bridge and CLI plus the exact recipe for building the pinned Buzz
+CLI. It is not installed into the Executor node payload.
 
 Each Linux target also produces `steward-node_vX.Y.Z_<arch>.deb` and
 `steward-node_vX.Y.Z_<arch>.rpm` plus

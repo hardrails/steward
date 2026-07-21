@@ -1,0 +1,80 @@
+{
+  "schema_version": "steward.buzz-source-lock.v1",
+  "repository": "https://github.com/block/buzz.git",
+  "selection": {
+    "lane": "desktop-source-snapshot",
+    "release": "v0.4.21",
+    "component_identity": "source-commit"
+  },
+  "revision": "e30f1d2006936b65737b111762933bb4e2309ade",
+  "git_tree": "a5c7fb6ebc0c58ab8e884c87f2e622c362e7c5dd",
+  "source_archive_sha256": "d6f44753279bcba25c0584b99596f123b35b7be505d36b0d76960f58541471f9",
+  "components": [
+    {
+      "name": "buzz-cli",
+      "version": "0.1.0",
+      "manifest": "crates/buzz-cli/Cargo.toml",
+      "manifest_sha256": "9db1a034a0561fc7f2c6d38599639eecf5a445b3ae40f768d1db30517d3e3aa0"
+    }
+  ],
+  "inputs": [
+    {
+      "path": "LICENSE",
+      "sha256": "108cb15997e51b75a8d18b0c1e2c52bd3879d051ab02118973387df1e4aab584"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "96a1ea5e61b59e388298cbe82976847273dd884abec79e2faa87b482bdee5a48"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "7e67290c2c86af74654de885b480f83b4487dfbcf5bc25dd35d9b54de673ee95"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "f93d36efbb7a45edf8197259661273bc5d22529eccd4ff6411a851bafa493398"
+    }
+  ],
+  "steward_inputs": [
+    {
+      "path": "integrations/buzz/buzz-cli-verification.patch",
+      "sha256": "81f645be6554d032b4a00ee2e6327b7f23299b78cca3f69e403ae0c2d40c2f22"
+    },
+    {
+      "path": "cmd/steward-buzz-bridge/main.go",
+      "sha256": "6c5869ff350882249e00f775f13561ede8540df7215d8167fbf40cb79db3a4b2"
+    },
+    {
+      "path": "cmd/steward-buzz-bridge/main_test.go",
+      "sha256": "714ec15adf9440dd500ca4f4539c26eef4ca2282c6002c4562451ca7806d1e7a"
+    },
+    {
+      "path": "scripts/build-buzz-bridge.sh",
+      "sha256": "4c2a9b9334f8c28ab6126ff7885d2a435037d0c9cce69641d6e77ee3b7917580"
+    },
+    {
+      "path": "scripts/update-buzz-pin.py",
+      "sha256": "fe2acb669967414078d3cc7f35bf050cd4c41e3df9f70e21f00fa289adcc5175"
+    },
+    {
+      "path": "integrations/buzz/bridge.example.json",
+      "sha256": "ab3c9c260c4acc487f547771f9e5473790c60adbcd8efd9c432bb45b0dba1086"
+    },
+    {
+      "path": "deploy/systemd/steward-buzz-bridge.service",
+      "sha256": "809895ef577531d16101c515eca52f41fefb22100229627e530788ad5bd44c7e"
+    },
+    {
+      "path": "integrations/buzz/build-release-bundle.sh",
+      "sha256": "50355e56c6cb99331034c572e4fce9fa4ff7c1094a1b3df9f22eb17a916638f5"
+    }
+  ],
+  "toolchain": {
+    "rust": "1.95.0"
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "source_sha256": "108cb15997e51b75a8d18b0c1e2c52bd3879d051ab02118973387df1e4aab584"
+  },
+  "qualification_required": true
+}

@@ -1,0 +1,79 @@
+diff --git a/crates/buzz-cli/src/commands/messages.rs b/crates/buzz-cli/src/commands/messages.rs
+index 290cc59..dabd600 100644
+--- a/crates/buzz-cli/src/commands/messages.rs
++++ b/crates/buzz-cli/src/commands/messages.rs
+@@ -68,8 +68,12 @@ async fn resolve_thread_ref(
+     let events: serde_json::Value = serde_json::from_str(&raw)
+         .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+-    let event = events
+-        .as_array()
+-        .and_then(|a| a.first())
++    let events = events
++        .as_array()
++        .ok_or_else(|| CliError::Other("parent event query did not return an array".into()))?;
++    verify_query_events(events)?;
++    let event = events
++        .iter()
++        .find(|event| event.get("id").and_then(|id| id.as_str()) == Some(parent_event_id))
+         .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} not found")))?;
+     let tags = event
+         .get("tags")
+@@ -259,8 +259,22 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
+         crate::OutputFormat::Json => normalized.to_string(),
+     }
+ }
+-
++/// Verify every complete event returned by the relay before any field is used
++/// or normalized. Relay-side verification is not a client trust boundary: a
++/// compromised or misconfigured relay must not be able to fabricate an author,
++/// tag, event ID, or message body for an automation consumer.
++fn verify_query_events(events: &[serde_json::Value]) -> Result<(), CliError> {
++    for raw in events {
++        let event: nostr::Event = serde_json::from_value(raw.clone())
++            .map_err(|_| CliError::Other("query returned a malformed Nostr event".into()))?;
++        event.verify().map_err(|_| {
++            CliError::Other("query returned an event with an invalid id or signature".into())
++        })?;
++    }
++    Ok(())
++}
++
+ pub async fn cmd_get_messages(
+     client: &BuzzClient,
+     channel_id: &str,
+     limit: Option<u32>,
+@@ -296,3 +310,4 @@ pub async fn cmd_get_messages(
+     let resp = client.query(&filter).await?;
+     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
++    verify_query_events(&events)?;
+     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+@@ -332,3 +347,4 @@ pub async fn cmd_get_thread(
+     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
+     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
++    verify_query_events(&events)?;
+     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+@@ -529,10 +545,17 @@ pub async fn cmd_send_message(
+     // Resolve @name mentions in the author-written body only — not the media markdown we
+     // append above, which is derived from upload metadata and can't carry `@names`.
+-    let mut auto_resolved = resolve_content_mentions(client, &p.channel_id, &p.content).await;
+-
+-    // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
+-    let stripped = strip_code_regions(&p.content);
+-    let uri_pubkeys = extract_nostr_uris(&stripped);
+-    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
++    let literal_content = std::env::var("STEWARD_BUZZ_LITERAL_CONTENT").as_deref() == Ok("1");
++    let mut auto_resolved = if literal_content {
++        Vec::new()
++    } else {
++        resolve_content_mentions(client, &p.channel_id, &p.content).await
++    };
++
++    if !literal_content {
++        // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
++        let stripped = strip_code_regions(&p.content);
++        let uri_pubkeys = extract_nostr_uris(&stripped);
++        merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
++    }
+-
++
+     let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();

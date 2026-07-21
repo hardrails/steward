@@ -172,6 +172,21 @@ Images that require raw TCP or UDP, transparent interception, peer discovery,
 arbitrary inbound ports, or a general proxy may not fit Steward's closed runtime.
 Do not add broad host networking to make them fit.
 
+## Buzz integration is a narrow trusted bridge
+
+The Buzz bridge accepts only exact configured authors, channels, kind-9 messages,
+and cryptographic mentions. It creates one signed `hermes.run` task and one
+literal plain-text reply. It does not provide direct messages, attachments,
+administration, general ACP access, open-to-anyone dispatch, or a Steward-operated
+Buzz relay.
+
+The bridge host, its Buzz identity, task authority, Control and Gateway tokens,
+the pinned Buzz CLI, and its route to the node remain trusted. A valid Buzz
+signature proves who authored an event; it does not make the content safe or the
+agent's answer true. Relay outages, unavailable tunnels, and task failures stop
+progress and retain bounded local state instead of silently dropping work. There
+is currently no multi-host active/active bridge or automatic archive procedure.
+
 ## Exact permits have operational tradeoffs
 
 A request-byte permit is intentionally brittle: any change to canonical bytes,

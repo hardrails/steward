@@ -1,0 +1,33 @@
+{
+  "schema_version": "steward.buzz-bridge-config.v1",
+  "integration_id": "buzz-research",
+  "tenant_id": "research",
+  "deployment": "researcher",
+  "relay_url": "https://buzz.example.com",
+  "agent_public_key": "1111111111111111111111111111111111111111111111111111111111111111",
+  "allowed_authors": [
+    "2222222222222222222222222222222222222222222222222222222222222222"
+  ],
+  "channels": [
+    "123e4567-e89b-12d3-a456-426614174000"
+  ],
+  "buzz_private_key_file": "/etc/steward-buzz/buzz.nsec",
+  "buzz_api_token_file": "/etc/steward-buzz/buzz-api.token",
+  "buzz_auth_tag_file": "/etc/steward-buzz/buzz-auth.tag",
+  "state_directory": "/var/lib/steward-buzz",
+  "buzz_binary": "/usr/local/lib/steward-buzz/buzz",
+  "stewardctl_binary": "/usr/local/lib/steward-buzz/stewardctl",
+  "control_url": "https://control.example.com:8443",
+  "control_token_file": "/etc/steward-buzz/control-operator.token",
+  "control_ca_file": "/etc/steward-buzz/control-ca.pem",
+  "gateway_url": "http://127.0.0.1:18091",
+  "gateway_token_file": "/etc/steward-buzz/gateway-service.token",
+  "service_trust_file": "/etc/steward-buzz/service-trust.json",
+  "task_key_file": "/etc/steward-buzz/buzz-task.private.pem",
+  "task_key_id": "buzz-task",
+  "poll_interval_seconds": 5,
+  "max_event_age_seconds": 86400,
+  "task_wait_seconds": 600,
+  "max_records": 1000,
+  "http_listen": "127.0.0.1:9082"
+}

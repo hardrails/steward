@@ -65,7 +65,11 @@ func TestPollerPublishesControllerEventsAtLeastOnce(t *testing.T) {
 	gatewayServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/v1/events":
-			_ = json.NewEncoder(writer).Encode(map[string]any{"events": []gateway.InstanceEvent{event}})
+			events := []gateway.InstanceEvent{event}
+			if acknowledgements.Load() > 0 {
+				events = nil
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"events": events})
 		case "/v1/events/ack":
 			acknowledgements.Add(1)
 			writer.WriteHeader(http.StatusNoContent)

@@ -144,6 +144,33 @@ for target in "${targets[@]}"; do
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-mcp" ./cmd/steward-mcp
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-control" ./cmd/steward-control
+	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-buzz-bridge" ./cmd/steward-buzz-bridge
+	# The Buzz recipe is a separate trusted-integration kit, not part of the
+	# Executor node payload. It carries target-native Steward binaries and the
+	# exact source recipe needed to compile the pinned Buzz CLI online or offline.
+	buzz_stage="$(mktemp -d)"
+	mkdir -p "${buzz_stage}/cmd/steward-buzz-bridge" "${buzz_stage}/deploy/systemd" \
+		"${buzz_stage}/integrations/buzz" "${buzz_stage}/prebuilt" "${buzz_stage}/scripts"
+	install -m 0555 "${stage}/steward-buzz-bridge" "${buzz_stage}/prebuilt/steward-buzz-bridge"
+	install -m 0555 "${stage}/stewardctl" "${buzz_stage}/prebuilt/stewardctl"
+	install -m 0555 scripts/build-buzz-bridge.sh scripts/update-buzz-pin.py "${buzz_stage}/scripts/"
+	install -m 0444 cmd/steward-buzz-bridge/main.go cmd/steward-buzz-bridge/main_test.go \
+		"${buzz_stage}/cmd/steward-buzz-bridge/"
+	install -m 0444 deploy/systemd/steward-buzz-bridge.service "${buzz_stage}/deploy/systemd/"
+	install -m 0444 integrations/buzz/source-lock.json integrations/buzz/buzz-cli-verification.patch \
+		integrations/buzz/bridge.example.json "${buzz_stage}/integrations/buzz/"
+	install -m 0555 integrations/buzz/build-release-bundle.sh "${buzz_stage}/integrations/buzz/"
+	install -m 0555 integrations/buzz/build-release-bundle.sh "${buzz_stage}/build-buzz"
+	install -m 0444 LICENSE README.md "${buzz_stage}/"
+	buzz_archive="${dist}/steward-buzz_${VERSION}_${goos}_${goarch}.tar.gz"
+	buzz_files=(LICENSE README.md build-buzz cmd deploy integrations prebuilt scripts)
+	if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
+		COPYFILE_DISABLE=1 tar --no-xattrs -C "$buzz_stage" -czf "$buzz_archive" "${buzz_files[@]}"
+	else
+		COPYFILE_DISABLE=1 tar -C "$buzz_stage" -czf "$buzz_archive" "${buzz_files[@]}"
+	fi
+	rm -rf "$buzz_stage"
 	files=(steward steward-control stewardctl steward-mcp LICENSE README.md)
 	mkdir -p "${stage}/examples" "${stage}/schemas"
 	cp -R examples/agents examples/policy "${stage}/examples/"
@@ -263,6 +290,7 @@ go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-mcp" ./cm
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-gateway" ./cmd/steward-gateway
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-relay" ./cmd/steward-relay
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-storage-zfs" ./cmd/steward-storage-zfs
+go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-buzz-bridge" ./cmd/steward-buzz-bridge
 reported="$("$native_dir/steward" -version | awk '{print $2}')"
 control_reported="$("$native_dir/steward-control" -version | awk '{print $2}')"
 executor_reported="$("$native_dir/steward-executor" -version | awk '{print $2}')"
@@ -271,6 +299,7 @@ mcp_reported="$("$native_dir/steward-mcp" -version | awk '{print $2}')"
 gateway_reported="$("$native_dir/steward-gateway" -version | awk '{print $2}')"
 relay_reported="$("$native_dir/steward-relay" -version | awk '{print $2}')"
 storage_reported="$("$native_dir/steward-storage-zfs" -version | awk '{print $2}')"
+buzz_reported="$("$native_dir/steward-buzz-bridge" -version | awk '{print $2}')"
 echo "release: host-native steward self-reports version '${reported}'"
 echo "release: host-native steward-control self-reports version '${control_reported}'"
 echo "release: host-native steward-executor self-reports version '${executor_reported}'"
@@ -279,7 +308,8 @@ echo "release: host-native steward-mcp self-reports version '${mcp_reported}'"
 echo "release: host-native steward-gateway self-reports version '${gateway_reported}'"
 echo "release: host-native steward-relay self-reports version '${relay_reported}'"
 echo "release: host-native steward-storage-zfs self-reports version '${storage_reported}'"
-if [ "${reported}" != "${VERSION}" ] || [ "${control_reported}" != "${VERSION}" ] || [ "${executor_reported}" != "${VERSION}" ] || [ "${ctl_reported}" != "${VERSION}" ] || [ "${mcp_reported}" != "${VERSION}" ] || [ "${gateway_reported}" != "${VERSION}" ] || [ "${relay_reported}" != "${VERSION}" ] || [ "${storage_reported}" != "${VERSION}" ]; then
+echo "release: host-native steward-buzz-bridge self-reports version '${buzz_reported}'"
+if [ "${reported}" != "${VERSION}" ] || [ "${control_reported}" != "${VERSION}" ] || [ "${executor_reported}" != "${VERSION}" ] || [ "${ctl_reported}" != "${VERSION}" ] || [ "${mcp_reported}" != "${VERSION}" ] || [ "${gateway_reported}" != "${VERSION}" ] || [ "${relay_reported}" != "${VERSION}" ] || [ "${storage_reported}" != "${VERSION}" ] || [ "${buzz_reported}" != "${VERSION}" ]; then
 	echo "release: FATAL — one or more release binaries do not report version '${VERSION}'." >&2
 	echo "  The explicit release-version linker stamp did not reach every binary," >&2
 	echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
