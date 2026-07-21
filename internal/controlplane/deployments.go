@@ -28,6 +28,11 @@ type deploymentDeleteRequest struct {
 	ExpectedRevision uint64 `json:"expected_revision"`
 }
 
+type deploymentRolloutControlRequest struct {
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Paused           bool   `json:"paused"`
+}
+
 type deploymentResponse struct {
 	TenantID            string                                  `json:"tenant_id"`
 	DeploymentID        string                                  `json:"deployment_id"`
@@ -59,6 +64,7 @@ type deploymentRolloutResponse struct {
 	SourceCapsuleDigest    string `json:"source_capsule_digest"`
 	SourceDelegationDigest string `json:"source_delegation_digest"`
 	StartedAt              string `json:"started_at"`
+	PausedAt               string `json:"paused_at,omitempty"`
 }
 
 type deploymentListResponse struct {
@@ -182,6 +188,35 @@ func (server *Server) deployment(writer http.ResponseWriter, request *http.Reque
 	}
 }
 
+func (server *Server) deploymentRollout(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPut) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input deploymentRolloutControlRequest
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	value, _, err := server.store.SetDeploymentRolloutPaused(
+		identity, request.PathValue("tenant_id"), request.PathValue("deployment_id"),
+		input.ExpectedRevision, input.Paused, server.now(),
+	)
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	view, err := deploymentView(value)
+	if err != nil {
+		server.logger.Error("controlled deployment rollout projection is invalid", "error", err)
+		writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not project deployment state")
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
 func deploymentView(value controlstore.Deployment) (deploymentResponse, error) {
 	delegation, err := admission.InspectCommandDelegation(value.DelegationDSSE, time.Time{})
 	if err != nil {
@@ -209,6 +244,7 @@ func deploymentView(value controlstore.Deployment) (deploymentResponse, error) {
 			SourceCapsuleDigest:    dsse.Digest(value.Rollout.SourceCapsuleDSSE),
 			SourceDelegationDigest: dsse.Digest(value.Rollout.SourceDelegationDSSE),
 			StartedAt:              value.Rollout.StartedAt,
+			PausedAt:               value.Rollout.PausedAt,
 		}
 	}
 	return view, nil

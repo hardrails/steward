@@ -226,6 +226,7 @@ type DeploymentRollout struct {
 	SourceCapsuleDigest    string `json:"source_capsule_digest"`
 	SourceDelegationDigest string `json:"source_delegation_digest"`
 	StartedAt              string `json:"started_at"`
+	PausedAt               string `json:"paused_at,omitempty"`
 }
 
 type DeploymentList struct {
@@ -437,6 +438,33 @@ func (c *Client) ApplyDeployment(
 	}
 	if !deploymentForkResponseEqual(deployment.Fork, input.Fork) {
 		return Deployment{}, errors.New("control deployment response changed the requested fork")
+	}
+	return deployment, nil
+}
+
+func (c *Client) SetDeploymentRolloutPaused(
+	ctx context.Context,
+	tenantID, deploymentID string,
+	expectedRevision uint64,
+	paused bool,
+) (Deployment, error) {
+	path, err := deploymentPath(tenantID, deploymentID)
+	if err != nil {
+		return Deployment{}, err
+	}
+	var deployment Deployment
+	err = c.do(ctx, http.MethodPut, path+"/rollout", struct {
+		ExpectedRevision uint64 `json:"expected_revision"`
+		Paused           bool   `json:"paused"`
+	}{ExpectedRevision: expectedRevision, Paused: paused}, &deployment, true)
+	if err != nil {
+		return Deployment{}, err
+	}
+	if err := validateDeploymentResponse(deployment, tenantID, deploymentID); err != nil {
+		return Deployment{}, err
+	}
+	if deployment.Rollout == nil || (deployment.Rollout.PausedAt != "") != paused {
+		return Deployment{}, errors.New("control deployment response changed the requested rollout state")
 	}
 	return deployment, nil
 }
@@ -1592,6 +1620,12 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 		rolloutStarted, err = time.Parse(time.RFC3339Nano, rollout.StartedAt)
 		if err != nil {
 			return errors.New("control deployment response rollout timestamp is invalid")
+		}
+		if rollout.PausedAt != "" {
+			paused, err := time.Parse(time.RFC3339Nano, rollout.PausedAt)
+			if err != nil || paused.Before(rolloutStarted) {
+				return errors.New("control deployment response rollout pause is invalid")
+			}
 		}
 		sourceCapsuleDigest = rollout.SourceCapsuleDigest
 	}

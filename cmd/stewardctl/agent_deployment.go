@@ -22,7 +22,7 @@ import (
 
 func agentDeployment(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("agent deployment requires apply, wait, status, list, or remove")
+		return errors.New("agent deployment requires apply, wait, status, list, pause, resume, or remove")
 	}
 	switch arguments[0] {
 	case "apply":
@@ -33,11 +33,60 @@ func agentDeployment(arguments []string, stdout io.Writer) error {
 		return agentDeploymentStatus(arguments[1:], stdout)
 	case "list":
 		return agentDeploymentList(arguments[1:], stdout)
+	case "pause":
+		return agentDeploymentRolloutControl(arguments[1:], stdout, true)
+	case "resume":
+		return agentDeploymentRolloutControl(arguments[1:], stdout, false)
 	case "remove":
 		return agentDeploymentRemove(arguments[1:], stdout)
 	default:
-		return fmt.Errorf("unknown agent deployment command %q; expected apply, wait, status, list, or remove", arguments[0])
+		return fmt.Errorf("unknown agent deployment command %q; expected apply, wait, status, list, pause, resume, or remove", arguments[0])
 	}
+}
+
+func agentDeploymentRolloutControl(arguments []string, stdout io.Writer, paused bool) error {
+	leadingName, arguments := deploymentLeadingName(arguments)
+	hydrated, err := applyAgentDeploymentContext(arguments)
+	if err != nil {
+		return err
+	}
+	action := "resume"
+	if paused {
+		action = "pause"
+	}
+	flags := flag.NewFlagSet("agent deployment "+action, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := deploymentTenantFlags(flags)
+	revision := flags.Uint64("revision", 0, "last observed revision; fetched when omitted")
+	if err := flags.Parse(hydrated); err != nil {
+		return err
+	}
+	if *tenantID == "" || leadingName == "" && flags.NArg() != 1 || leadingName != "" && flags.NArg() != 0 {
+		return fmt.Errorf("agent deployment %s requires a tenant and one deployment name", action)
+	}
+	deploymentID := leadingName
+	if deploymentID == "" {
+		deploymentID = flags.Arg(0)
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if *revision == 0 {
+		current, err := client.GetDeployment(ctx, *tenantID, deploymentID)
+		if err != nil {
+			return err
+		}
+		*revision = current.Revision
+	}
+	deployment, err := client.SetDeploymentRolloutPaused(ctx, *tenantID, deploymentID, *revision, paused)
+	if err != nil {
+		return err
+	}
+	return writeAgentJSON(stdout, deployment)
 }
 
 func agentDeploymentApply(arguments []string, stdout io.Writer) error {

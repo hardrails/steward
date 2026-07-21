@@ -1341,6 +1341,51 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/DeploymentID"
+    put:
+      tags: [deployments]
+      operationId: controlDeploymentRollout
+      summary: Pause or resume an active deployment rollout
+      description: |
+        A pause prevents reconciliation from starting another instance
+        replacement. Work already in flight continues to a safe boundary, so
+        the operation cannot strand an instance after its source runtime has
+        been destroyed. The current revision prevents a stale operator from
+        changing a newer rollout.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeploymentRolloutControlRequest"
+      responses:
+        "200":
+          description: Durable rollout control state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/tenants/{tenant_id}/nodes:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -4029,6 +4074,17 @@ components:
           type: integer
           format: int64
           minimum: 1
+    DeploymentRolloutControlRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, paused]
+      properties:
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 1
+        paused:
+          type: boolean
     DeploymentInstanceIntent:
       type: object
       additionalProperties: false
@@ -4220,6 +4276,9 @@ components:
         source_node_id:
           $ref: "#/components/schemas/Identifier128"
         started_at:
+          type: string
+          format: date-time
+        paused_at:
           type: string
           format: date-time
     DeploymentInstanceRollout:

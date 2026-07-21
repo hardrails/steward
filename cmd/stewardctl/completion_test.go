@@ -99,7 +99,7 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "create", "auditor", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
 		t.Fatalf("agent create runtime candidates=%v", candidates)
 	}
-	if candidates := stewardctlCompletionCandidates([]string{"agent", "deployment", ""}); !slices.Equal(candidates, []string{"apply", "list", "remove", "status", "wait"}) {
+	if candidates := stewardctlCompletionCandidates([]string{"agent", "deployment", ""}); !slices.Equal(candidates, []string{"apply", "list", "pause", "remove", "resume", "status", "wait"}) {
 		t.Fatalf("agent deployment candidates=%v", candidates)
 	}
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "service", ""}); !slices.Equal(candidates, []string{"activate"}) {

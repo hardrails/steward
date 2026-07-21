@@ -28,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion            = 1
-	stateFormatWriteVersion              = 14
+	stateFormatWriteVersion              = 15
 	stateFormatMaxReadVersion            = stateFormatWriteVersion
 	stateFormatEvidenceVersion           = 2
 	stateFormatExecutorV4Version         = 3
@@ -43,8 +43,9 @@ const (
 	stateFormatTenantQuotaVersion        = 12
 	stateFormatForkLifecycleVersion      = 13
 	stateFormatSnapshotQuarantineVersion = 14
+	stateFormatRolloutControlVersion     = 15
 	transactionFormatMinReadVersion      = 1
-	transactionFormatWriteVersion        = 14
+	transactionFormatWriteVersion        = 15
 	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
 	transactionEvidenceVersion           = 2
 	transactionExecutorV4Version         = 3
@@ -59,6 +60,7 @@ const (
 	transactionTenantQuotaVersion        = 12
 	transactionForkLifecycleVersion      = 13
 	transactionSnapshotQuarantineVersion = 14
+	transactionRolloutControlVersion     = 15
 	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -496,6 +498,7 @@ type DeploymentRollout struct {
 	SourceCapsuleDSSE    []byte `json:"-"`
 	SourceDelegationDSSE []byte `json:"-"`
 	StartedAt            string `json:"started_at"`
+	PausedAt             string `json:"paused_at,omitempty"`
 }
 
 type EvidenceCaptureState string
@@ -669,6 +672,7 @@ type storedDeploymentRollout struct {
 	SourceCapsuleDSSEBase64    string `json:"source_capsule_dsse_base64"`
 	SourceDelegationDSSEBase64 string `json:"source_delegation_dsse_base64"`
 	StartedAt                  string `json:"started_at"`
+	PausedAt                   string `json:"paused_at,omitempty"`
 }
 
 type state struct {
@@ -916,6 +920,7 @@ func deploymentToStored(deployment Deployment) storedDeployment {
 			SourceCapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(deployment.Rollout.SourceCapsuleDSSE),
 			SourceDelegationDSSEBase64: base64.StdEncoding.EncodeToString(deployment.Rollout.SourceDelegationDSSE),
 			StartedAt:                  deployment.Rollout.StartedAt,
+			PausedAt:                   deployment.Rollout.PausedAt,
 		}
 	}
 	return stored
@@ -954,7 +959,7 @@ func deploymentFromStored(stored storedDeployment) (Deployment, error) {
 			SourceAgentName:    stored.Rollout.SourceAgentName,
 			SourceBundleDigest: stored.Rollout.SourceBundleDigest,
 			SourceCapsuleDSSE:  sourceCapsule, SourceDelegationDSSE: sourceDelegation,
-			StartedAt: stored.Rollout.StartedAt,
+			StartedAt: stored.Rollout.StartedAt, PausedAt: stored.Rollout.PausedAt,
 		}
 	}
 	return deployment, nil
@@ -1323,6 +1328,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if snapshot.Version < stateFormatRolloutVersion && deploymentUsesRolloutFormat(deployment) {
 			return state{}, errors.New("legacy control snapshot contains deployment rollout state")
 		}
+		if snapshot.Version < stateFormatRolloutControlVersion && deploymentUsesRolloutControlFormat(deployment) {
+			return state{}, errors.New("legacy control snapshot contains deployment rollout control state")
+		}
 		if snapshot.Version < stateFormatForkLifecycleVersion && deploymentUsesForkLifecycleFormat(deployment) {
 			return state{}, errors.New("legacy control snapshot contains deployment fork state")
 		}
@@ -1569,6 +1577,9 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionRolloutVersion && deploymentUsesRolloutFormat(deployment) {
 				return state{}, errors.New("legacy deployment mutation contains rollout state")
 			}
+			if value.Version < transactionRolloutControlVersion && deploymentUsesRolloutControlFormat(deployment) {
+				return state{}, errors.New("legacy deployment mutation contains rollout control state")
+			}
 			if value.Version < transactionForkLifecycleVersion && deploymentUsesForkLifecycleFormat(deployment) {
 				return state{}, errors.New("legacy deployment mutation contains fork state")
 			}
@@ -1612,6 +1623,10 @@ func deploymentUsesRolloutFormat(deployment Deployment) bool {
 		}
 	}
 	return false
+}
+
+func deploymentUsesRolloutControlFormat(deployment Deployment) bool {
+	return deployment.Rollout != nil && deployment.Rollout.PausedAt != ""
 }
 
 func deploymentUsesForkLifecycleFormat(deployment Deployment) bool {
@@ -1922,6 +1937,12 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 			len(rollout.SourceDelegationDSSE) == 0 || len(rollout.SourceDelegationDSSE) > limits.MaxCommandBytes ||
 			rolloutTimeErr != nil || rolloutStarted.Before(created) || rolloutStarted.After(updated) {
 			return errors.New("deployment rollout source is invalid")
+		}
+		if rollout.PausedAt != "" {
+			paused, pauseErr := parseTimestamp(rollout.PausedAt)
+			if pauseErr != nil || paused.Before(rolloutStarted) || paused.After(updated) {
+				return errors.New("deployment rollout pause is invalid")
+			}
 		}
 		source, err := admission.InspectCommandDelegation(rollout.SourceDelegationDSSE, time.Time{})
 		if err != nil || source.TenantID != deployment.TenantID || source.Admission == nil ||

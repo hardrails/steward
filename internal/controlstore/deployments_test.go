@@ -166,6 +166,24 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 		target.Generation != 2 || target.Phase != DeploymentReconciling {
 		t.Fatalf("apply rollout = (%+v, %v, %v)", target, changed, err)
 	}
+	paused, changed, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", target.Revision, true, fixture.now.Add(90*time.Second),
+	)
+	if err != nil || !changed || paused.Rollout == nil || paused.Rollout.PausedAt == "" {
+		t.Fatalf("pause rollout = (%+v, %v, %v)", paused, changed, err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceRollout(
+		"tenant-a", "deployment-a", paused.Instances[0].InstanceID, paused.Revision, fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("paused rollout began a new disruption: %v", err)
+	}
+	resumed, changed, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", paused.Revision, false, fixture.now.Add(2*time.Minute),
+	)
+	if err != nil || !changed || resumed.Rollout == nil || resumed.Rollout.PausedAt != "" {
+		t.Fatalf("resume rollout = (%+v, %v, %v)", resumed, changed, err)
+	}
+	target = resumed
 	for _, instance := range target.Instances {
 		_, selected, selectErr := DeploymentAuthorityForInstance(target, instance)
 		if selectErr != nil || bytes.Equal(selected, target.DelegationDSSE) {

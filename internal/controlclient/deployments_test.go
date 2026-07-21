@@ -34,6 +34,26 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch {
+		case request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/rollout"):
+			var body struct {
+				ExpectedRevision uint64 `json:"expected_revision"`
+				Paused           bool   `json:"paused"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body.ExpectedRevision != 1 || !body.Paused {
+				t.Fatalf("deployment rollout body = (%+v, %v)", body, err)
+			}
+			controlled := want
+			controlled.Rollout = &DeploymentRollout{
+				SourceGeneration: 1, SourceAgentName: want.AgentName,
+				SourceBundleDigest: want.BundleDigest, SourceCapsuleDigest: want.CapsuleDigest,
+				SourceDelegationDigest: want.DelegationDigest,
+				StartedAt:              "2026-07-13T20:00:00Z",
+				PausedAt:               "2026-07-13T20:01:00Z",
+			}
+			controlled.Generation = 2
+			controlled.Revision = 2
+			controlled.Fork = nil
+			_ = json.NewEncoder(writer).Encode(controlled)
 		case request.Method == http.MethodPut:
 			var body struct {
 				Generation           uint64                                   `json:"generation"`
@@ -100,7 +120,11 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 		removed.DesiredState != controlstore.DeploymentAbsent {
 		t.Fatalf("remove deployment = (%+v, %v)", removed, err)
 	}
-	if requests != 4 {
+	if paused, err := client.SetDeploymentRolloutPaused(ctx, "tenant-a", "research", 1, true); err != nil ||
+		paused.Rollout == nil || paused.Rollout.PausedAt == "" {
+		t.Fatalf("pause deployment rollout = (%+v, %v)", paused, err)
+	}
+	if requests != 5 {
 		t.Fatalf("deployment request count = %d", requests)
 	}
 }

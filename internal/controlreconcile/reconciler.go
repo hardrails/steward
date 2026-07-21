@@ -305,6 +305,7 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 	}
 	if deployment.DesiredState == controlstore.DeploymentRunning && deployment.Rollout != nil &&
+		deployment.Rollout.PausedAt == "" &&
 		sourceRolloutInstance && instance.Rollout == nil &&
 		instance.Phase == controlstore.DeploymentInstanceRunning {
 		delegationExpiry, parseErr := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
