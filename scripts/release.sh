@@ -160,6 +160,7 @@ for target in "${targets[@]}"; do
 	install -m 0444 deploy/systemd/steward-buzz-bridge.service "${buzz_stage}/deploy/systemd/"
 	install -m 0444 integrations/buzz/source-lock.json integrations/buzz/buzz-cli-verification.patch \
 		integrations/buzz/bridge.example.json "${buzz_stage}/integrations/buzz/"
+	install -m 0555 integrations/buzz/build-release-bundle.sh "${buzz_stage}/integrations/buzz/"
 	install -m 0555 integrations/buzz/build-release-bundle.sh "${buzz_stage}/build-buzz"
 	install -m 0444 LICENSE README.md "${buzz_stage}/"
 	buzz_archive="${dist}/steward-buzz_${VERSION}_${goos}_${goarch}.tar.gz"

@@ -215,6 +215,7 @@ jobs:
             tar -tzf "$buzz_archive" integrations/buzz/source-lock.json >/dev/null
             tar -tzf "$buzz_archive" integrations/buzz/buzz-cli-verification.patch >/dev/null
             tar -tzf "$buzz_archive" integrations/buzz/bridge.example.json >/dev/null
+            tar -tzf "$buzz_archive" integrations/buzz/build-release-bundle.sh >/dev/null
             tar -tzf "$buzz_archive" build-buzz >/dev/null
             tar -tzf "$buzz_archive" scripts/build-buzz-bridge.sh >/dev/null
             tar -tzf "$buzz_archive" scripts/update-buzz-pin.py >/dev/null
