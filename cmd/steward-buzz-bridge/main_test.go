@@ -327,6 +327,11 @@ func TestCommandAndResultBoundariesFailClosed(t *testing.T) {
 		[]string{"PATH=/usr/bin:/bin"}, 32); err == nil || !strings.Contains(err.Error(), "exit 7") {
 		t.Fatalf("exit error=%v", err)
 	}
+	_, classified := runCommand(context.Background(), "/bin/sh", []string{"-c", "printf 'sensitive detail' >&2; exit 2"}, nil,
+		[]string{"PATH=/usr/bin:/bin"}, 32)
+	if classified == nil || publicFailureCode(classified) != "command_failed" || strings.Contains(publicFailureCode(classified), "sensitive") {
+		t.Fatalf("public failure code=%q error=%v", publicFailureCode(classified), classified)
+	}
 	if _, err := runCommand(context.Background(), "/bin/sh", []string{"-c", "printf 123456789"}, nil,
 		[]string{"PATH=/usr/bin:/bin"}, 4); err == nil || !strings.Contains(err.Error(), "byte limit") {
 		t.Fatalf("limit error=%v", err)

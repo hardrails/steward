@@ -54,8 +54,10 @@ const (
 )
 
 var (
-	hex64RE = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	uuidRE  = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
+	hex64RE  = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	uuidRE   = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
+	taskIDRE = regexp.MustCompile(`^task-[a-f0-9]{32}$`)
+	digestRE = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 )
 
 type config struct {
@@ -372,8 +374,8 @@ func runMain(arguments []string, stdout, stderr io.Writer) int {
 	}
 	for {
 		if err := bridge.poll(ctx); err != nil {
-			bridge.logger.Warn("Buzz bridge poll failed", "error", err)
-			bridge.setError(err.Error())
+			bridge.logger.Warn("Buzz bridge poll failed", "error_code", publicFailureCode(err))
+			bridge.setError(publicFailureCode(err))
 		} else {
 			bridge.refreshLastError()
 		}
@@ -542,7 +544,7 @@ func (b *bridge) poll(ctx context.Context) error {
 		if firstFailure == "" {
 			firstFailure = boundedError(err)
 		}
-		b.logger.Warn("Buzz bridge item failed", "error", err)
+		b.logger.Warn("Buzz bridge item failed", "error_code", publicFailureCode(err))
 	}
 	for _, channel := range b.cfg.Channels {
 		if err := b.pollChannel(ctx, channel); err != nil {
@@ -829,8 +831,8 @@ func (b *bridge) workerLoop(ctx context.Context) {
 	for {
 		worked, err := b.processNext(ctx)
 		if err != nil {
-			b.logger.Warn("Buzz bridge worker failed", "error", err)
-			b.setError(err.Error())
+			b.logger.Warn("Buzz bridge worker failed", "error_code", publicFailureCode(err))
+			b.setError(publicFailureCode(err))
 		}
 		if worked {
 			continue
@@ -930,7 +932,10 @@ func readRecord(path string) (record, error) {
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&rec) != nil || decoder.Decode(&struct{}{}) != io.EOF || rec.SchemaVersion != recordSchema ||
 		!hex64RE.MatchString(rec.EventID) || !hex64RE.MatchString(rec.Author) || !uuidRE.MatchString(rec.ChannelID) ||
-		len([]byte(rec.Content)) > maxMessageBytes || sha256Digest([]byte(rec.Content)) != rec.ContentDigest || rec.TaskID == "" {
+		rec.CreatedAt <= 0 || len([]byte(rec.Content)) > maxMessageBytes || sha256Digest([]byte(rec.Content)) != rec.ContentDigest ||
+		!taskIDRE.MatchString(rec.TaskID) || !filepath.IsAbs(rec.RunDirectory) || filepath.Clean(rec.RunDirectory) != rec.RunDirectory ||
+		rec.ReplyDigest != "" && !digestRE.MatchString(rec.ReplyDigest) || rec.ReplyEventID != "" && !hex64RE.MatchString(rec.ReplyEventID) ||
+		rec.Attempts > 10 {
 		return record{}, errors.New("durable Buzz event record is invalid")
 	}
 	switch rec.Phase {
@@ -941,6 +946,16 @@ func readRecord(path string) (record, error) {
 	if rec.ResumePhase != "" && rec.ResumePhase != "pending" && rec.ResumePhase != "dispatched" &&
 		rec.ResumePhase != "publishing" && rec.ResumePhase != "publish_outcome_unknown" {
 		return record{}, errors.New("durable Buzz event record has an invalid resume phase")
+	}
+	if rec.NextAttemptAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, rec.NextAttemptAt); err != nil {
+			return record{}, errors.New("durable Buzz event record has an invalid retry time")
+		}
+	}
+	if rec.Phase == "replied" && (rec.ReplyDigest == "" || rec.ReplyEventID == "") ||
+		(rec.Phase == "publishing" || rec.Phase == "publish_outcome_unknown") && rec.ReplyDigest == "" ||
+		rec.Phase == "dead_letter" && rec.ResumePhase == "" {
+		return record{}, errors.New("durable Buzz event record has an incomplete phase transition")
 	}
 	return rec, nil
 }
@@ -1116,6 +1131,18 @@ func (b *bridge) recordFailure(rec *record, err error) {
 		delay = 5 * time.Minute
 	}
 	rec.NextAttemptAt = b.now().Add(delay).UTC().Format(time.RFC3339Nano)
+}
+
+func publicFailureCode(err error) string {
+	var bridgeErr *bridgeFailure
+	var commandErr *commandFailure
+	if errors.As(err, &bridgeErr) {
+		return bridgeErr.code
+	}
+	if errors.As(err, &commandErr) {
+		return commandErr.code
+	}
+	return "buzz_bridge_operation_failed"
 }
 
 func (b *bridge) runOrRecoverTask(ctx context.Context, event buzzEvent, rec *record, path string) (string, error) {
