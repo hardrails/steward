@@ -184,9 +184,9 @@ jobs:
           grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},' "$stage/release.json"
           grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},' "$stage/release.json"
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
-          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 7, "write": 7},' "$stage/release.json"
+          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 69
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 76
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
@@ -272,6 +272,12 @@ jobs:
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' \
             /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/adapters/hermes-agent/profiles/research/SKILL.md' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/workers/coding/package-lock.json' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/workers/research/research_worker.py' \
+            /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/examples/agents/hermes/agent.json' \
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/examples/agents/nodes.json' \
@@ -307,6 +313,12 @@ jobs:
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/profiles/research/SKILL.md' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/workers/coding/package-lock.json' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/workers/research/research_worker.py' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/examples/agents/hermes/agent.json' \
             /tmp/steward-node-test.rpm.contents
