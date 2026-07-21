@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -370,6 +371,34 @@ func TestRuntimeProfileReferenceMatchesBuiltInRegistry(t *testing.T) {
 			profile.StateSchemaVersion, command, service)
 		if !strings.Contains(string(raw), row) {
 			t.Fatalf("runtime profile reference is missing exact row: %s", row)
+		}
+	}
+}
+
+func TestSignedOperationReferenceMatchesEnforcementSets(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/reference/api.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationList := func(values map[string]struct{}) string {
+		operations := make([]string, 0, len(values))
+		for operation := range values {
+			operations = append(operations, operation)
+		}
+		slices.Sort(operations)
+		for index := range operations {
+			operations[index] = "`" + operations[index] + "`"
+		}
+		return strings.Join(operations, ", ")
+	}
+	flattened := strings.ReplaceAll(string(raw), "\n  ", " ")
+	for label, operations := range map[string]map[string]struct{}{
+		"Tenant operations":       commandOperations,
+		"Site cleanup operations": cleanupCommandOperations,
+	} {
+		contract := "- " + label + ": " + operationList(operations) + "."
+		if !strings.Contains(flattened, contract) {
+			t.Fatalf("signed-operation reference is missing exact contract: %s", contract)
 		}
 	}
 }

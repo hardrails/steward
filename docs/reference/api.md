@@ -612,6 +612,12 @@ instance, runtime, generations, sequence, validity window, kind, and payload to
 Executor's durable admission record. The bearer cannot select a tenant; legacy
 credentials remain single-tenant.
 
+The complete signed-operation sets are release contracts:
+
+- Tenant operations: `activation-canary`, `admit`, `clone-state`, `delete-snapshot`,
+  `destroy`, `purge`, `read`, `renew`, `snapshot-state`, `start`, `stop`.
+- Site cleanup operations: `delete-snapshot`, `destroy`, `purge`, `stop`.
+
 `admit` carries exact `capsule_dsse_base64` and OpenAPI `intent`; identity and
 generation must match the command. `snapshot-state` carries `lineage_id` and
 `snapshot_id` and requires the exact destroyed lifecycle generation. `clone-state`
