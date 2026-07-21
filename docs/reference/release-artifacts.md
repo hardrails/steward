@@ -161,7 +161,7 @@ configuration makes the prospective connector-receipt requirement format 2. A
 multi-party authorization or terminal record requires reader 6. A context-required
 grant requires reader 7.
 
-Current manifests also declare `gateway_state` readers 1 through 7 and writer 7.
+Current manifests also declare `gateway_state` readers 1 through 8 and writer 8.
 Gateway state format 4 retains service identity and tenant task authorities for
 task-authorized grants. Format 5 additionally retains authorized mode and the
 signed-policy-derived connector/action-key scopes, so a retained authorized grant

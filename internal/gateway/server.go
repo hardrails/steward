@@ -198,6 +198,12 @@ type snapshot struct {
 	Events  []InstanceEvent `json:"events,omitempty"`
 }
 
+const (
+	gatewayStateReadMinVersion = 1
+	gatewayStateReadMaxVersion = 8
+	gatewayStateWriteVersion   = 8
+)
+
 type grantLease struct {
 	context context.Context
 	cancel  context.CancelFunc
@@ -1717,7 +1723,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 	}
 	var state snapshot
 	if err := dsse.DecodeStrictInto(raw, maxStateBytes, &state); err != nil ||
-		(state.Version < 1 || state.Version > 8) || len(state.Grants) > 4096 {
+		(state.Version < gatewayStateReadMinVersion || state.Version > gatewayStateReadMaxVersion) || len(state.Grants) > 4096 {
 		return StateSummary{}, errors.New("gateway state is invalid")
 	}
 	contextLocked := false
@@ -1800,7 +1806,7 @@ func (s *Server) persistLocked() error {
 	for index, event := range s.events {
 		events[index] = cloneEvent(event)
 	}
-	raw, err := json.Marshal(snapshot{Version: 8, Grants: grants, Events: events})
+	raw, err := json.Marshal(snapshot{Version: gatewayStateWriteVersion, Grants: grants, Events: events})
 	if err != nil {
 		return err
 	}

@@ -161,7 +161,16 @@ done
 # file, empty directory, symlink, or special file must not ride alongside the
 # signed skill without a digest in release.json.
 adapter_root=$stage/adapters/hermes-agent
-for directory in "$adapter_root" "$adapter_root/fixtures" "$adapter_root/fixtures/connector-skill" "$adapter_root/fixtures/skill"; do
+expected_adapter_directories=(
+	"$adapter_root"
+	"$adapter_root/fixtures"
+	"$adapter_root/fixtures/connector-skill"
+	"$adapter_root/fixtures/skill"
+	"$adapter_root/profiles"
+	"$adapter_root/profiles/developer"
+	"$adapter_root/profiles/research"
+)
+for directory in "${expected_adapter_directories[@]}"; do
 	if [[ ! -d $directory || -L $directory ]]; then
 		echo "write-release-manifest: adapter directory is missing or invalid: $directory" >&2
 		exit 2
@@ -180,7 +189,7 @@ for logical in "${release_files[@]}"; do
 done
 adapter_file_count=$(find "$adapter_root" -type f | wc -l)
 adapter_directory_count=$(find "$adapter_root" -type d | wc -l)
-if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne 4 ]]; then
+if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne ${#expected_adapter_directories[@]} ]]; then
 	echo "write-release-manifest: adapter contains an unexpected file or directory" >&2
 	exit 2
 fi
@@ -198,7 +207,7 @@ trap cleanup EXIT HUP INT TERM
 	printf '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},\n'
 	printf '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},\n'
 	printf '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},\n'
-	printf '    "gateway_state": {"read_min": 1, "read_max": 7, "write": 7},\n'
+	printf '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},\n'
 	printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 	printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 	printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},\n'
