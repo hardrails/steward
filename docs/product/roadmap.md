@@ -339,6 +339,21 @@ The roadmap starts from working primitives rather than a blank design:
   signed inventory verification against an independently pinned site root;
 - a thin protected GitHub issue preset over the generic exact-operation connector,
   with bounded calls and no provider SDK or agent-visible upstream credential;
+- a finite node enrollment handoff that verifies signed site trust, creates the
+  Control tenant, generates the receipt identity on the destination node, and
+  safely resumes a lost enrollment response without changing node authority;
+- a recoverable site connection that spends the initial administrator authority
+  once, retains a tenant-scoped operator in an owner-only file, and selects a
+  least-privilege CLI context without storing bearer values in context metadata;
+- composed agent publication that inspects the exact OCI archive, fixes the
+  qualified Hermes or OpenClaw runtime contract, signs it with the site publisher,
+  and verifies the result against signed site policy before writing it;
+- composed finite deployment authorization that derives the exact admission and
+  placement template, binds the eligible node set and five required lifecycle
+  operations, signs with the tenant command authority, and verifies the result;
+- composed Gateway service activation and task-context connection that install a
+  closed service preset, export bounded service trust, validate tenant and task-key
+  bindings, and record only credential paths in the operator context;
 - authority-preserving in-place rollouts that retain source and target signed
   delegations, spend disruption budget atomically, and switch each instance only
   after a proven destroy; and
@@ -349,12 +364,13 @@ The roadmap starts from working primitives rather than a blank design:
   prompts, bodies, command envelopes, credentials, private keys, result text, or
   logs.
 
-This foundation is not yet the complete product workflow above. The normal
-create, apply, and prompt path is joined, and initial policy/key composition is one
-verified operation, but a fresh site still needs explicit Control tenant and node
-enrollment, deployment delegation, Gateway activation, and service-trust setup.
-The controller also does not yet join
-continuous health recovery, snapshots, protected-secret
+This foundation is not yet the complete product workflow above. The normal site,
+node, publication, finite authorization, service activation, durable apply, and
+prompt path now has composed commands. Explicit human or automation steps still
+cross the boundaries where a privileged installer runs, an image is transferred
+and imported, Control's public controller key is authenticated, Gateway is
+restarted, or non-secret service trust moves between machines. The controller also
+does not yet join continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 
 ### Consolidated production release

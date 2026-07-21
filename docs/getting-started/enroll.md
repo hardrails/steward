@@ -56,6 +56,16 @@ even when the file itself has restrictive permissions.
 
 ## Preferred enrollment path
 
+The shortest safe path is to create the handoff with `stewardctl site node
+prepare` on the trusted operator workstation, transfer it to the intended node,
+and run `stewardctl site node activate` there. The activation command generates
+the receipt identity on that node and prints the complete installer argument array.
+See [Create a site authority]({{ '/getting-started/site-authority/' |
+relative_url }}#prepare-one-node-without-assembling-files-by-hand).
+
+The explicit command below remains the automation contract and the recovery path
+when another enrollment system supplies the individual files.
+
 Run the installer again with the enrollment files. It applies the changes as one
 transaction and restores the previous `/etc/steward` state if validation fails:
 

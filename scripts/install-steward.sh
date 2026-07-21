@@ -896,7 +896,7 @@ extract_verified_node_archive() {
 install_deb() {
 	local output="$work/dpkg-install.log" status deadline=$((SECONDS + 60))
 	while true; do
-		if STEWARD_EXPECTED_VERSION="$version" dpkg -i "$artifact" >"$output" 2>&1; then
+		if STEWARD_EXPECTED_VERSION="$version" STEWARD_NODE_ID="$node_id" dpkg -i "$artifact" >"$output" 2>&1; then
 			cat "$output"
 			return 0
 		else
@@ -1198,7 +1198,7 @@ case "$package_kind" in
 		;;
 	rpm)
 		command -v rpm >/dev/null || { echo "install-steward: rpm is required" >&2; exit 2; }
-		STEWARD_EXPECTED_VERSION="$version" rpm -Uvh "$artifact"
+		STEWARD_EXPECTED_VERSION="$version" STEWARD_NODE_ID="$node_id" rpm -Uvh "$artifact"
 		;;
 	tar)
 		for command in env tar; do
@@ -1210,7 +1210,7 @@ case "$package_kind" in
 		archive_dir="$work/archive"
 		install -d -m 0700 "$archive_dir"
 		if ! extract_verified_node_archive "$artifact" "$archive_dir"; then exit 1; fi
-		STEWARD_EXPECTED_VERSION="$version" /bin/bash -p "$archive_dir/scripts/install-node.sh" \
+		STEWARD_EXPECTED_VERSION="$version" STEWARD_NODE_ID="$node_id" /bin/bash -p "$archive_dir/scripts/install-node.sh" \
 			--expected-version "$version"
 		;;
 esac

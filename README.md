@@ -92,6 +92,39 @@ install or transmit private keys. Move each private key to the custody named in
 the signed inventory before using it. See
 [Create a site authority](https://hardrails.github.io/steward/getting-started/site-authority/).
 
+After Control is installed, use its initial site-administrator token once to create
+the tenant's routine operator identity:
+
+```console
+stewardctl site connect steward-site \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/control/site-admin.token
+```
+
+This creates the tenant if needed, writes a recoverable tenant-scoped operator
+token outside the signed package, and selects a CLI context that uses it. The
+site-administrator bearer is not copied into the context or printed.
+
+Prepare the first node from that least-privilege context:
+
+```console
+stewardctl site node prepare steward-site node-a
+```
+
+The output is one finite, owner-only handoff containing only signed public node
+trust and a short-lived enrollment capability—never the site, tenant, publisher,
+or Control private keys. On the destination node, verify and activate that handoff:
+
+```console
+stewardctl site node verify steward-node-node-a
+stewardctl site node activate steward-node-node-a
+```
+
+Activation creates the node receipt identity locally and prints the exact installer
+argument array. If the network response is lost, rerun the same command: Steward
+reuses the retained receipt key and exchange identity instead of creating ambiguous
+node authority.
+
 ## Install on macOS
 
 The native macOS archive supports agent authoring, CUE/OPA policy checks, the
@@ -133,12 +166,43 @@ Start a portable agent project with:
 stewardctl agent create workspace-auditor -runtime hermes
 cd workspace-auditor
 stewardctl agent build
+stewardctl agent publish ../steward-site \
+  -archive /secure/builds/hermes/image.tar
+stewardctl agent authorize ../steward-site \
+  -controller-public-key /secure/control/controller.public.pem \
+  -node-ids node-a
+```
+
+`agent publish` inspects the complete OCI or Docker archive and signs the exact
+image identity and qualified Hermes or OpenClaw contract. `agent authorize` grants
+Control only the five lifecycle operations needed for this agent, on the named
+nodes, for one hour. Neither artifact contains a reusable credential.
+
+On the enrolled node, configure the private Gateway service and export the
+non-secret trust inventory. Run the exact `systemctl` command returned in the JSON
+result:
+
+```console
+sudo stewardctl agent service activate \
+  -bundle agent.bundle.json \
+  -tenant-id tenant-a \
+  -node-id node-a \
+  -trust-out /secure/steward/service-trust.json
+```
+
+Transfer the service-trust file through an authenticated channel and keep the
+Gateway bearer in an owner-only file reachable through loopback or an SSH tunnel.
+Then join those paths to the tenant operator context created by `site connect`:
+
+```console
+stewardctl site task connect ../steward-site \
+  -trust /secure/steward/service-trust.json \
+  -gateway-token-file /secure/steward/gateway-service.token
 ```
 
 Use the [agent application guide](https://hardrails.github.io/steward/guides/build-agents/)
-to select Hermes or OpenClaw, apply offline OPA policy, explain fleet placement,
-admit and start the workload directly or through Steward Control, and derive a
-temporary or long-lived fork from persistent state.
+for adapter builds, file transfer, policy, placement, service activation, durable
+deployments, and temporary or long-lived forks.
 
 With a CLI context configured as described in the guide, the common path is:
 

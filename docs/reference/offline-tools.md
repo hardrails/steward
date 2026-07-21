@@ -33,6 +33,30 @@ The generated directory is a custody handoff, not a secret store; separate its
 private keys before deployment. See
 [Create a site authority]({{ '/getting-started/site-authority/' | relative_url }}).
 
+The nested node workflow composes that verified offline trust with Control's
+online, one-time enrollment:
+
+```console
+stewardctl site connect steward-site \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/control/site-admin.token
+stewardctl site node prepare steward-site node-a
+stewardctl site node verify steward-node-node-a
+stewardctl site node activate steward-node-node-a
+```
+
+`connect` is the only command in this group that requires a site-administrator
+Control connection. It creates the tenant, writes a recoverable tenant-scoped
+operator bearer, and selects a CLI context without retaining the administrator
+bearer. It accepts `-control-url`, `-token-file`, `-ca-file`, `-context`,
+`-operator-token-out`, `-request-id`, `-node-id`, and
+`-site-root-public-key`. `prepare` uses the resulting tenant operator and accepts
+`-control-url`, `-token-file`, `-ca-file`,
+`-valid-for`, `-request-id`, `-out`, and `-site-root-public-key`; the connection
+flags can come from the current CLI context. `verify` is offline. `activate`
+contacts the Control origin recorded in the prepared package, retains a resumable
+node-local receipt identity, and accepts `-out` and `-site-root-public-key`.
+
 ## Generate and inspect keys
 
 Create an Ed25519 key pair:
@@ -195,6 +219,30 @@ Executor independently verifies the tenant signature, controller signature,
 delegation digest, exact scope, and normal generation and sequence fences. A
 delegation limits authority but does not make a compromised controller available
 or honest inside that scope.
+
+## Compose publication and finite deployment authority
+
+The common Hermes and OpenClaw path derives the verbose signed contracts from an
+agent bundle and a verified site package:
+
+```console
+stewardctl agent publish /secure/steward/site \
+  -archive image.tar
+
+stewardctl agent authorize /secure/steward/site \
+  -controller-public-key controller.public.pem \
+  -node-ids node-a,node-b
+```
+
+`agent publish` performs bounded OCI inspection and refuses a bundle/archive image
+mismatch before the publisher key is used. `agent authorize` binds one exact
+instance, lineage, generation, admission template, node set, and the five durable
+lifecycle operations. Its default validity is one hour and the hard maximum is 24
+hours. Both outputs are verified against signed site policy before they are written.
+
+These commands intentionally depend on the generated handoff key paths. Use the
+individual image, capsule, policy, and `executor-command delegation` tools when an
+external signer owns a key or the contract differs from the qualified defaults.
 
 ## Inspect an offline OCI image
 

@@ -110,6 +110,46 @@ point. A compromised browser can misrepresent the preview or steal the operator
 bearer. Compare the displayed file digest with the signing station and use a
 hardened operator browser profile.
 
+`site connect` uses a site-administrator bearer to create one tenant and issue a
+tenant-scoped operator. Steward writes the new bearer to an owner-only file and
+stores only its path in the selected CLI context. It is not a secret manager: it
+does not rotate, escrow, remotely distribute, or revoke either credential. Move
+long-lived credentials into the operator's chosen secret system and update the
+context path when custody changes.
+
+`site node prepare` creates an owner-only handoff containing a short-lived
+enrollment bearer. Anyone who obtains it before activation can race the intended
+node, although Control still requires a valid receipt-key proof and binds the
+result to the named node and tenant. Transfer the handoff confidentially, keep the
+independent site-root pin separate, use a short expiry, and revoke a node whose
+handoff may have been exposed.
+
+`site node activate` retains the reusable node credential and receipt private key
+in its owner-only output directory so a lost response can be resumed safely. That
+directory is sensitive node identity state. The command does not remotely copy
+files, invoke the privileged installer, attest the host, or prove that the person
+running it is on the intended physical machine.
+
+## Composed setup commands stop at trust boundaries
+
+`agent publish` and `agent authorize` make the common path shorter, but they are
+not a key-management service. By default they read the publisher and tenant-command
+private keys from the protected `site init` handoff directory. Move those roles to
+their intended long-term custody before retiring the handoff and use the lower-level
+signing commands when an offline or hardware-backed signer owns them.
+
+`agent service activate` validates and writes Gateway configuration and exports a
+new or byte-identical service-trust inventory. It prints the required `systemctl`
+action but does not run it, import the image, or copy files to an operator machine.
+An existing Gateway configured with a different receipt identity is not silently
+relabeled or migrated; drain it and begin a deliberately new receipt chain.
+
+The service-trust inventory contains no credential or private key, but it is not
+independently signed. Authenticate its transfer from the enrolled node. `site task
+connect` checks its structure and bindings against the signed site policy before
+recording paths in the CLI context; that validation does not prove who transported
+the file.
+
 ## MCP is privileged local automation
 
 `steward-mcp` can expose node lifecycle and control operations to an MCP client.

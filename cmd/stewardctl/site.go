@@ -74,15 +74,21 @@ type siteOutput struct {
 
 func siteCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("site requires init or verify")
+		return errors.New("site requires init, verify, connect, task, or node")
 	}
 	switch arguments[0] {
 	case "init":
 		return siteInit(arguments[1:], stdout)
 	case "verify":
 		return siteVerify(arguments[1:], stdout)
+	case "connect":
+		return siteConnect(arguments[1:], stdout)
+	case "task":
+		return siteTaskCommand(arguments[1:], stdout)
+	case "node":
+		return siteNodeCommand(arguments[1:], stdout)
 	default:
-		return errors.New("site requires init or verify")
+		return errors.New("site requires init, verify, connect, task, or node")
 	}
 }
 
@@ -93,7 +99,8 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	siteID := flags.String("site-id", "steward-site", "stable site identity")
 	tenantID := flags.String("tenant-id", "default", "initial tenant identity")
 	repository := flags.String("repository", "steward.local/agents", "allowed OCI repository")
-	serviceID := flags.String("service-id", "agent-api", "initial agent service identity")
+	serviceIDsValue := flags.String("service-ids", "hermes-api,openclaw-api", "comma-separated initial agent service identities")
+	serviceID := flags.String("service-id", "", "single initial agent service identity (alias for -service-ids)")
 	connectorID := flags.String("connector-id", "", "optional first protected connector identity")
 	serverNames := flags.String("control-server-names", "localhost,127.0.0.1,::1", "control TLS DNS names and IP addresses")
 	authorizedEffects := flags.String("authorized-effects", "required", "required or optional when a connector is configured")
@@ -104,9 +111,23 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	if flags.NArg() != 1 {
 		return errors.New("site init requires exactly one output directory")
 	}
+	if flagWasVisited(flags, "service-id") && flagWasVisited(flags, "service-ids") {
+		return errors.New("site init accepts either -service-id or -service-ids, not both")
+	}
+	if *serviceID != "" {
+		*serviceIDsValue = *serviceID
+	}
+	serviceIDs, err := canonicalCommandDelegationList(*serviceIDsValue)
+	if err != nil {
+		return fmt.Errorf("site service identities: %w", err)
+	}
+	for _, selected := range serviceIDs {
+		if !validOptionalControlIdentifier(selected, 128) {
+			return errors.New("site, tenant, service, or connector identity is invalid")
+		}
+	}
 	if !validOptionalControlIdentifier(*siteID, 128) || *siteID == "" ||
 		!validOptionalControlIdentifier(*tenantID, 128) || *tenantID == "" ||
-		!validOptionalControlIdentifier(*serviceID, 128) || *serviceID == "" ||
 		(*connectorID != "" && !validOptionalControlIdentifier(*connectorID, 128)) {
 		return errors.New("site, tenant, service, or connector identity is invalid")
 	}
@@ -163,7 +184,7 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	}()
 
 	outputs, policyDigest, rootDigest, inventory, err := buildSitePackage(
-		*siteID, *tenantID, *repository, *serviceID, *connectorID,
+		*siteID, *tenantID, *repository, serviceIDs, *connectorID,
 		*authorizedEffects, dnsNames, ipAddresses, ipStrings,
 	)
 	if err != nil {
@@ -224,7 +245,7 @@ func siteInit(arguments []string, stdout io.Writer) error {
 	})
 }
 
-func buildSitePackage(siteID, tenantID, repository, serviceID, connectorID, effectsMode string,
+func buildSitePackage(siteID, tenantID, repository string, serviceIDs []string, connectorID, effectsMode string,
 	dnsNames []string, ipAddresses []net.IP, ipStrings []string,
 ) ([]siteOutput, string, string, []byte, error) {
 	keys := make(map[string]siteKeyMaterial)
@@ -243,17 +264,18 @@ func buildSitePackage(siteID, tenantID, repository, serviceID, connectorID, effe
 		keys["tenant-action"] = key
 	}
 
-	limits := admission.ResourceLimits{MemoryBytes: 512 << 20, CPUMillis: 1000, PIDs: 128}
+	limits := admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256}
 	tenant := admission.TenantRule{
 		TenantID: tenantID, PublisherKeyIDs: []string{"publisher-1"}, ResourceCeiling: limits,
-		ServiceIDs: []string{serviceID},
+		InferenceRouteIDs: []string{"local"}, InferenceModelAliases: []string{"default"},
+		ServiceIDs: slices.Clone(serviceIDs),
 		CommandKeys: []admission.CommandKey{{
 			KeyID: "tenant-command-1", PublicKey: base64.StdEncoding.EncodeToString(keys["tenant-command"].public),
 			Operations: []string{"admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "delete-snapshot", "activation-canary"},
 		}},
 		TaskKeys: []admission.TaskKey{{
 			KeyID: "tenant-task-1", PublicKey: base64.StdEncoding.EncodeToString(keys["tenant-task"].public),
-			ServiceIDs: []string{serviceID},
+			ServiceIDs: slices.Clone(serviceIDs),
 		}},
 	}
 	if connectorID != "" {
@@ -274,7 +296,11 @@ func buildSitePackage(siteID, tenantID, repository, serviceID, connectorID, effe
 		}},
 		Publishers: []admission.PublisherRule{{
 			KeyID: "publisher-1", PublicKey: base64.StdEncoding.EncodeToString(keys["publisher"].public),
-			AllowedProfiles:     []admission.ProfileRef{{ID: "generic-v1", Version: "v1"}},
+			AllowedProfiles: []admission.ProfileRef{
+				{ID: "generic-v1", Version: "v1"},
+				{ID: "hermes-v1", Version: "v1"},
+				{ID: "openclaw-v1", Version: "v1"},
+			},
 			AllowedRepositories: []string{repository}, ResourceCeiling: limits,
 		}},
 		Tenants: []admission.TenantRule{tenant},
@@ -413,59 +439,79 @@ func siteVerify(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return errors.New("site package directory is invalid")
 	}
-	if err := verifySiteDirectoryLayout(directory); err != nil {
+	verified, err := verifySitePackage(directory, *pinnedRoot)
+	if err != nil {
 		return err
 	}
-	rootPath := *pinnedRoot
+	return writeSiteSummary(stdout, sitePackageSummary{
+		Directory: directory, SiteID: verified.inventory.SiteID, TenantID: verified.inventory.TenantID,
+		PolicyDigest: verified.inventory.PolicyDigest, RootPublicSHA256: verified.rootDigest,
+		FileCount: len(verified.inventory.Files) + 1, Custody: siteCustodySummary(), NextSteps: siteNextSteps(directory),
+	})
+}
+
+type verifiedSitePackage struct {
+	directory    string
+	rootKey      ed25519.PublicKey
+	rootDigest   string
+	inventory    sitePackageInventory
+	policy       admission.SitePolicy
+	inventoryRaw []byte
+}
+
+func verifySitePackage(directory, pinnedRoot string) (verifiedSitePackage, error) {
+	if err := verifySiteDirectoryLayout(directory); err != nil {
+		return verifiedSitePackage{}, err
+	}
+	rootPath := pinnedRoot
 	if rootPath == "" {
 		rootPath = filepath.Join(directory, "public", "site-root.public")
 	}
 	rootKey, err := readPublicKey(rootPath)
 	if err != nil {
-		return fmt.Errorf("read trusted site root: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("read trusted site root: %w", err)
 	}
 	inventoryRaw, err := securefile.Read(filepath.Join(directory, "inventory.dsse.json"), maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
-		return fmt.Errorf("read site inventory: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("read site inventory: %w", err)
 	}
 	payload, _, err := dsse.Verify(inventoryRaw, sitePackagePayloadType, map[string]ed25519.PublicKey{"site-root-1": rootKey})
 	if err != nil {
-		return fmt.Errorf("verify site inventory: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("verify site inventory: %w", err)
 	}
 	var inventory sitePackageInventory
 	if err := dsse.DecodeStrictInto(payload, maxArtifactBytes, &inventory); err != nil {
-		return fmt.Errorf("decode site inventory: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("decode site inventory: %w", err)
 	}
 	if err := validateSiteInventory(inventory); err != nil {
-		return err
+		return verifiedSitePackage{}, err
 	}
 	if err := verifySitePackageFiles(directory, inventory.Files); err != nil {
-		return err
+		return verifiedSitePackage{}, err
 	}
 	policyRaw, err := securefile.Read(filepath.Join(directory, "public", "site-policy.dsse.json"), maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
-		return fmt.Errorf("read site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("read site policy: %w", err)
 	}
 	policyPayload, _, err := dsse.Verify(policyRaw, admission.PolicyPayloadType, map[string]ed25519.PublicKey{"site-root-1": rootKey})
 	if err != nil {
-		return fmt.Errorf("verify site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("verify site policy: %w", err)
 	}
 	var policy admission.SitePolicy
 	if err := dsse.DecodeStrictInto(policyPayload, maxArtifactBytes, &policy); err != nil {
-		return fmt.Errorf("decode site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("decode site policy: %w", err)
 	}
 	if err := policy.Validate(); err != nil {
-		return fmt.Errorf("validate site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("validate site policy: %w", err)
 	}
 	if dsse.Digest(policyRaw) != inventory.PolicyDigest || policy.PolicyID != inventory.SiteID || len(policy.Tenants) != 1 || policy.Tenants[0].TenantID != inventory.TenantID {
-		return errors.New("site inventory and signed policy identities do not match")
+		return verifiedSitePackage{}, errors.New("site inventory and signed policy identities do not match")
 	}
 	rootDigest := sha256.Sum256(rootKey)
-	return writeSiteSummary(stdout, sitePackageSummary{
-		Directory: directory, SiteID: inventory.SiteID, TenantID: inventory.TenantID,
-		PolicyDigest: inventory.PolicyDigest, RootPublicSHA256: "sha256:" + hex.EncodeToString(rootDigest[:]),
-		FileCount: len(inventory.Files) + 1, Custody: siteCustodySummary(), NextSteps: siteNextSteps(directory),
-	})
+	return verifiedSitePackage{
+		directory: directory, rootKey: rootKey, inventory: inventory, policy: policy,
+		rootDigest: "sha256:" + hex.EncodeToString(rootDigest[:]), inventoryRaw: inventoryRaw,
+	}, nil
 }
 
 func sitePositionalLast(arguments []string) []string {

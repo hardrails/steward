@@ -66,6 +66,33 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"site", "init", "new-site", "-authorized-effects", "r"}); !slices.Equal(candidates, []string{"required"}) {
 		t.Fatalf("site effects candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"site", "node", ""}); !slices.Equal(candidates, []string{"activate", "prepare", "verify"}) {
+		t.Fatalf("site node candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"site", ""}); !slices.Equal(candidates, []string{"connect", "init", "node", "task", "verify"}) {
+		t.Fatalf("site candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"site", "task", ""}); !slices.Equal(candidates, []string{"connect"}) {
+		t.Fatalf("site task candidates=%v", candidates)
+	}
+	taskConnectFlags := stewardctlCompletionCandidates([]string{"site", "task", "connect", "steward-site", "-"})
+	for _, expected := range []string{"-context", "-gateway-token-file", "-trust", "-site-root-public-key", "-task-key"} {
+		if !slices.Contains(taskConnectFlags, expected) {
+			t.Fatalf("site task connect flags %v missing %s", taskConnectFlags, expected)
+		}
+	}
+	siteConnectFlags := stewardctlCompletionCandidates([]string{"site", "connect", "steward-site", "-"})
+	for _, expected := range []string{"-context", "-control-url", "-no-context", "-operator-token-out", "-site-root-public-key", "-token-file"} {
+		if !slices.Contains(siteConnectFlags, expected) {
+			t.Fatalf("site connect flags %v missing %s", siteConnectFlags, expected)
+		}
+	}
+	siteNodeFlags := stewardctlCompletionCandidates([]string{"site", "node", "prepare", "-"})
+	for _, expected := range []string{"-control-url", "-no-context", "-out", "-site-root-public-key", "-token-file"} {
+		if !slices.Contains(siteNodeFlags, expected) {
+			t.Fatalf("site node prepare flags %v missing %s", siteNodeFlags, expected)
+		}
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "init", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
 		t.Fatalf("agent runtime candidates=%v", candidates)
 	}
@@ -74,6 +101,18 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	}
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "deployment", ""}); !slices.Equal(candidates, []string{"apply", "list", "remove", "status", "wait"}) {
 		t.Fatalf("agent deployment candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"agent", "service", ""}); !slices.Equal(candidates, []string{"activate"}) {
+		t.Fatalf("agent service candidates=%v", candidates)
+	}
+	for command, expected := range map[string]string{
+		"publish": "-archive", "authorize": "-controller-public-key", "service activate": "-trust-out",
+	} {
+		arguments := append([]string{"agent"}, strings.Fields(command)...)
+		arguments = append(arguments, "-")
+		if flags := stewardctlCompletionCandidates(arguments); !slices.Contains(flags, expected) {
+			t.Fatalf("agent %s flags %v missing %s", command, flags, expected)
+		}
 	}
 	deploymentFlags := stewardctlCompletionCandidates([]string{"agent", "deployment", "apply", "-"})
 	for _, expected := range []string{"-bundle", "-capsule", "-delegation", "-revision", "-tenant"} {

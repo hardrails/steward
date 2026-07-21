@@ -789,7 +789,7 @@ read_machine_id() {
 }
 
 install_gateway_config_atomic() {
-	local source=$1 destination=$2 executor_group_gid=$3 relay_group_gid=$4 machine_id=$5
+	local source=$1 destination=$2 executor_group_gid=$3 relay_group_gid=$4 node_id=$5
 	local directory base pending status=0
 	directory=$(dirname -- "$destination")
 	base=$(basename -- "$destination")
@@ -807,7 +807,7 @@ install_gateway_config_atomic() {
 		exec timeout --signal=TERM --kill-after=1 5 sed \
 			-e "s/@EXECUTOR_GID@/$executor_group_gid/g" \
 			-e "s/@RELAY_GID@/$relay_group_gid/g" \
-			-e "s|@CONNECTOR_RECEIPT_NODE_ID@|steward-$machine_id/gateway|g" \
+			-e "s|@CONNECTOR_RECEIPT_NODE_ID@|$node_id/gateway|g" \
 			-- "$source") >"$pending" || status=$?
 	if (( status != 0 )); then
 		return 2
@@ -1307,15 +1307,21 @@ ensure_gateway_service_token /etc/steward /var/lib/steward-node \
 	steward-gateway steward-gateway
 ensure_connector_receipt_keypair "$release_dir" /etc/steward /var/lib/steward-node \
 	steward-gateway steward-gateway
-machine_id=unused
+gateway_node_id=${STEWARD_NODE_ID:-}
 if [[ ! -e /etc/steward/gateway.json && ! -L /etc/steward/gateway.json ]]; then
-	machine_id=$(read_machine_id) || {
-		echo "install-node: /etc/machine-id must be a bounded, root-owned regular machine ID" >&2
+	if [[ -z $gateway_node_id ]]; then
+		machine_id=$(read_machine_id) || {
+			echo "install-node: /etc/machine-id must be a bounded, root-owned regular machine ID" >&2
+			exit 2
+		}
+		gateway_node_id="steward-$machine_id"
+	elif [[ ! $gateway_node_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+		echo "install-node: STEWARD_NODE_ID is invalid" >&2
 		exit 2
-	}
+	fi
 fi
 install_gateway_config_atomic "$release_config/gateway.json.in" \
-	/etc/steward/gateway.json "$executor_gid" "$relay_gid" "$machine_id"
+	/etc/steward/gateway.json "$executor_gid" "$relay_gid" "$gateway_node_id"
 
 reconcile_selected_release=false
 first_install=false

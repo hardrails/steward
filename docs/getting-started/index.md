@@ -238,32 +238,104 @@ into a tenant signing service. Follow
 [Create a site authority]({{ '/getting-started/site-authority/' | relative_url }})
 to separate key custody and use the generated inputs.
 
-Next, follow [Build and run an agent application]({{ '/guides/build-agents/' |
-relative_url }}) to package Hermes or OpenClaw, admit a task service, and apply a
-durable deployment. Then configure the repeated local paths once and run the first
-task:
+After Control is installed, use its initial site-administrator token once to
+establish routine tenant-scoped access:
 
 ```console
-sudo -H stewardctl context set production \
+stewardctl site connect steward-site \
   -control-url https://control.customer.example:8443 \
-  -ca-file /secure/steward/control-ca.pem \
-  -token-file /secure/steward/operator.token \
-  -tenant-id tenant-a \
-  -gateway-token-file /etc/steward/gateway-service-token \
-  -service-trust /secure/steward/hermes-service-trust.json \
-  -task-key /secure/steward/tenant-task.private.pem \
-  -task-key-id tenant-task-1
+  -token-file /secure/control/site-admin.token
+```
 
-sudo -H stewardctl task run workspace-auditor \
-  -request workspace-audit.request.json \
-  -operation-id hermes.run \
-  -bundle-out workspace-audit.task.json \
-  -result-out workspace-audit.result.json
+The command creates the tenant if needed, issues a recoverable tenant operator,
+writes its bearer to a new owner-only file outside the signed package, and selects
+that least-privilege CLI context. It stores no bearer value in the context or
+command output.
+
+Prepare the node handoff from the resulting context without manually copying
+trust and enrollment fields:
+
+```console
+stewardctl site node prepare steward-site node-a
+```
+
+Transfer the resulting owner-only directory to `node-a`, verify it against the
+independent site-root pin, and activate it there:
+
+```console
+stewardctl site node verify steward-node-node-a \
+  -site-root-public-key /secure/checkpoints/site-a-root.public
+stewardctl site node activate steward-node-node-a \
+  -out /secure/enrollment/node-a
+```
+
+Activation retains the node receipt key before the enrollment exchange, so a lost
+response is recovered by rerunning the same command rather than creating a second
+node identity. Its output supplies the exact installer argument array.
+
+Next, build the chosen Hermes or OpenClaw adapter and create its portable
+definition. Publish the inspected archive and issue finite controller authority
+from the trusted workstation:
+
+```console
+stewardctl agent create workspace-auditor -runtime hermes
+cd workspace-auditor
+stewardctl agent build
+stewardctl agent publish ../steward-site \
+  -archive /secure/builds/hermes/image.tar
+stewardctl agent authorize ../steward-site \
+  -controller-public-key /secure/control/controller.public.pem \
+  -node-ids node-a
+```
+
+On `node-a`, install the built image through the signed import path, place the
+bundle where the node operator can read it, and activate the qualified Gateway
+service:
+
+```console
+sudo stewardctl agent service activate \
+  -bundle agent.bundle.json \
+  -tenant-id tenant-a \
+  -node-id node-a \
+  -trust-out /secure/steward/service-trust.json
+```
+
+Run the exact `systemctl` activation command returned in the JSON. Transfer the
+non-secret trust inventory through an authenticated channel, make Gateway loopback
+reachable directly or through SSH, and join the paths to the tenant context:
+
+```console
+stewardctl site task connect ../steward-site \
+  -trust /secure/steward/service-trust.json \
+  -gateway-token-file /secure/steward/gateway-service.token
+
+stewardctl agent apply workspace-auditor
+stewardctl task run workspace-auditor \
+  "Review the workspace and report one concrete issue"
 ```
 
 The task command does not put the signing key or Gateway credential in the agent.
 It stores only their file paths in the owner-only CLI context, writes the exact
 signed task bundle before dispatch, and leaves that bundle available for safe
-recovery if the terminal or host fails mid-run. See
-[CLI ergonomics and recovery]({{ '/guides/cli/' | relative_url }}) for the shorter
-path and the off-node signing alternative.
+recovery if the terminal or host fails mid-run.
+
+Follow [Build and run an agent application]({{ '/guides/build-agents/' |
+relative_url }}) for the complete adapter, import, deployment, and task workflow.
+The explicit context form remains available for automation and installations that
+use a separate signing system:
+
+```console
+stewardctl context set production \
+  -control-url https://control.customer.example:8443 \
+  -ca-file /secure/steward/control-ca.pem \
+  -token-file /secure/steward/operator.token \
+  -tenant-id tenant-a \
+  -gateway-token-file /secure/steward/gateway-service.token \
+  -service-trust /secure/steward/service-trust.json \
+  -task-key /secure/steward/tenant-task.private.pem \
+  -task-key-id tenant-task-1
+
+stewardctl task run workspace-auditor \
+  -request workspace-audit.request.json \
+  -operation-id hermes.run
+```
