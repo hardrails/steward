@@ -27,6 +27,21 @@ func TestEncodeRegistryAuthProducesDockerScopedHeader(t *testing.T) {
 	}
 }
 
+func TestEncodeRegistryAuthSupportsEachExclusiveTokenMode(t *testing.T) {
+	for field := range map[string]string{"identity_token": "identity", "registry_token": "registry"} {
+		raw := []byte(`{"schema_version":"steward.registry-auth.v1","registry":"registry.site.test","` + field + `":"token"}`)
+		if _, err := EncodeRegistryAuth(raw, "registry.site.test"); err != nil {
+			t.Fatalf("%s mode: %v", field, err)
+		}
+	}
+	if _, err := EncodeRegistryAuth(nil, "registry.site.test"); err == nil {
+		t.Fatal("empty registry authentication was accepted")
+	}
+	if _, err := EncodeRegistryAuth([]byte(`{}`), "HTTPS://registry.site.test"); err == nil {
+		t.Fatal("invalid expected registry authority was accepted")
+	}
+}
+
 func TestEncodeRegistryAuthRejectsAmbiguousOrWrongScope(t *testing.T) {
 	for _, raw := range []string{
 		`{}`,

@@ -3,11 +3,13 @@ package controlstore
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
@@ -94,6 +96,9 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	if err := CheckNodeScheduling(cordoned, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrNodePlacementUnavailable) {
 		t.Fatalf("cordoned placement error = %v", err)
 	}
+	if err := CheckNodeScheduling(Node{ID: "node-1"}, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrNodeSchedulingUnavailable) {
+		t.Fatalf("missing observation error = %v", err)
+	}
 
 	stale := node
 	stale.Scheduling = cloneNodeScheduling(node.Scheduling)
@@ -121,6 +126,21 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	if err := CheckNodeScheduling(tainted, nil, "tenant-a", intent, capsule, placement, now, time.Minute); err != nil {
 		t.Fatalf("signed placement fit: %v", err)
 	}
+	wrongIsolation := *placement
+	wrongIsolation.RequiredIsolation = "native"
+	if schedulingPlacementMatches(tainted.Scheduling.Observation, &wrongIsolation) {
+		t.Fatal("wrong required isolation matched")
+	}
+	missingLabel := *placement
+	missingLabel.RequiredLabels = []admission.CommandDelegationLabel{{Key: "zone", Value: "one"}}
+	if schedulingPlacementMatches(tainted.Scheduling.Observation, &missingLabel) {
+		t.Fatal("missing required label matched")
+	}
+	untolerated := *placement
+	untolerated.Tolerations = []string{}
+	if schedulingPlacementMatches(tainted.Scheduling.Observation, &untolerated) {
+		t.Fatal("untolerated taint matched")
+	}
 
 	tenantFull := cloneNode(node)
 	tenantFull.Scheduling.Observation.Policy.Tenant.Workloads = 1
@@ -147,6 +167,20 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	perWorkloadLimited.Scheduling.Observation.Policy.PerWorkload.MemoryBytes = intent.Resources.MemoryBytes - 1
 	if err := CheckNodeScheduling(perWorkloadLimited, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrWorkloadLimitExceeded) {
 		t.Fatalf("per-workload limit error = %v", err)
+	}
+	overflowIntent := intent
+	overflowIntent.Resources.MemoryBytes = math.MaxInt64
+	overflowIntent.Capabilities.Service = true
+	if _, err := schedulingReservation(overflowIntent, observation.Policy); err == nil {
+		t.Fatal("runtime overhead overflow was accepted")
+	}
+	if err := addSchedulingResources(nil, controlprotocol.ExecutorSchedulingResourcesV1{}); err == nil {
+		t.Fatal("nil scheduling accumulator was accepted")
+	}
+	if _, _, err := (*Store)(nil).ObserveNodeScheduling(
+		controlauth.NodeIdentity{}, observation, now,
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil scheduling store error = %v", err)
 	}
 }
 
