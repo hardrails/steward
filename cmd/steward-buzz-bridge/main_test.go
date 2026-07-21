@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -40,7 +41,7 @@ func TestConfigRejectsBroadOrUnsafeAuthority(t *testing.T) {
 		"gateway port is invalid":  func(value *config) { value.GatewayURL = "http://127.0.0.1:99999" },
 		"listener port is invalid": func(value *config) { value.HTTPListen = "127.0.0.1:nope" },
 		"relative secret":          func(value *config) { value.TaskKeyFile = "task.pem" },
-		"relative optional secret": func(value *config) { value.BuzzAPITokenFile = "buzz.token" },
+		"relative optional secret": func(value *config) { value.BuzzAuthTagFile = "buzz.auth" },
 		"relative Control CA":      func(value *config) { value.ControlCAFile = "control-ca.pem" },
 		"poll interval is invalid": func(value *config) { value.PollIntervalSeconds = 301 },
 		"record cap is invalid":    func(value *config) { value.MaxRecords = 10001 },
@@ -85,10 +86,11 @@ func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, path := range []string{cfg.BuzzBinary, cfg.StewardctlBinary} {
-		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(cfg.BuzzBinary, []byte("#!/bin/sh\nprintf '{\"public_key\":\""+testAgent+"\"}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.StewardctlBinary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
@@ -190,18 +192,6 @@ func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
 	if err := os.Chmod(cfg.GatewayTokenFile, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg.BuzzAPITokenFile = filepath.Join(directory, "missing-buzz-token")
-	raw, err = json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newBridge(configPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "Buzz API token") {
-		t.Fatalf("missing optional Buzz token error=%v", err)
-	}
-	cfg.BuzzAPITokenFile = ""
 	cfg.BuzzAuthTagFile = filepath.Join(directory, "missing-buzz-auth-tag")
 	raw, err = json.Marshal(cfg)
 	if err != nil {
@@ -334,7 +324,7 @@ func TestCommandAndResultBoundariesFailClosed(t *testing.T) {
 		t.Fatalf("command output=%q error=%v", output, err)
 	}
 	if _, err := runCommand(context.Background(), "/bin/sh", []string{"-c", "exit 7"}, nil,
-		[]string{"PATH=/usr/bin:/bin"}, 32); err == nil || !strings.Contains(err.Error(), "exit code 7") {
+		[]string{"PATH=/usr/bin:/bin"}, 32); err == nil || !strings.Contains(err.Error(), "exit 7") {
 		t.Fatalf("exit error=%v", err)
 	}
 	if _, err := runCommand(context.Background(), "/bin/sh", []string{"-c", "printf 123456789"}, nil,
@@ -510,7 +500,7 @@ func TestAdditionalFilesystemAndStateFailureBoundaries(t *testing.T) {
 	now := time.Now().UTC()
 	b := &bridge{cfg: cfg, logger: slog.Default(), now: func() time.Time { return now }}
 	if err := b.process(context.Background(), testChannel, validEvent(now)); err == nil ||
-		!strings.Contains(err.Error(), "acquire event lock") {
+		!strings.Contains(err.Error(), "acquire inbox capacity lock") {
 		t.Fatalf("missing lock directory error=%v", err)
 	}
 	if _, _, err := b.loadOrCreateRecord(filepath.Join(directory, "missing-record-parent", testEvent+".json"),
@@ -572,6 +562,7 @@ func TestPollRunsOneTaskAndRecoversWithoutDuplicateReply(t *testing.T) {
 	)
 	replyCapture := filepath.Join(directory, "reply.txt")
 	buzz := writeExecutable(t, directory, "buzz", `#!/bin/sh
+[ "$STEWARD_BUZZ_PRINT_PUBLIC_KEY" = 1 ] && { printf '{"public_key":"`+testAgent+`"}\n'; exit 0; }
 case " $* " in
   *" messages get "*) printf '%s\n' "$STEWARD_TEST_EVENT" ;;
   *" messages thread "*)
@@ -619,6 +610,9 @@ printf '{}\n'
 	if err := b.poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if err := b.drainReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if content, err := os.ReadFile(replyCapture); err != nil || string(content) != "useful answer" {
 		t.Fatalf("reply=%q error=%v", content, err)
 	}
@@ -656,13 +650,16 @@ printf '{}\n'
 			t.Fatal(err)
 		}
 	}
-	cfg.BuzzAPITokenFile = filepath.Join(directory, "buzz.token")
 	cfg.BuzzAuthTagFile = filepath.Join(directory, "buzz.auth-tag")
 	cfg.ControlCAFile = filepath.Join(directory, "control-ca.pem")
-	for _, path := range []string{cfg.BuzzAPITokenFile, cfg.BuzzAuthTagFile, cfg.ControlCAFile} {
+	for _, path := range []string{cfg.BuzzAuthTagFile, cfg.ControlCAFile} {
 		if err := os.WriteFile(path, []byte("optional\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	emptyWrapper := "#!/bin/sh\nexport STEWARD_TEST_EVENT='[]'\nexport STEWARD_TEST_REPLY='" + replyCapture + "'\nexec '" + buzz + "' \"$@\"\n"
+	if err := os.WriteFile(cfg.BuzzBinary, []byte(emptyWrapper), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	cfg.HTTPListen = "127.0.0.1:19083"
 	configRaw, err := json.Marshal(cfg)
@@ -676,6 +673,233 @@ printf '{}\n'
 	var stdout, stderr bytes.Buffer
 	if code := runMain([]string{"-config", configPath, "-once"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("once code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestBridgeBindsConfiguredIdentityToPrivateKey(t *testing.T) {
+	directory := t.TempDir()
+	cfg := validTestConfig(directory)
+	for _, path := range []string{cfg.BuzzPrivateKeyFile, cfg.ControlTokenFile, cfg.GatewayTokenFile, cfg.ServiceTrustFile, cfg.TaskKeyFile} {
+		if err := os.WriteFile(path, []byte("protected\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrong := strings.Repeat("e", 64)
+	if err := os.WriteFile(cfg.BuzzBinary, []byte("#!/bin/sh\nprintf '{\"public_key\":\""+wrong+"\"}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.StewardctlBinary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "bridge.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(path, slog.Default()); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("identity mismatch error=%v", err)
+	}
+}
+
+func TestCompositePaginationDrainsMoreThanOneRelayPage(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Unix(1_900_000_000, 0)
+	writePage := func(name string, first int) string {
+		t.Helper()
+		events := make([]buzzEvent, maxEventsPerPage)
+		for index := range events {
+			events[index] = buzzEvent{ID: fmt.Sprintf("%064x", first+index), PublicKey: testAuthor, Kind: 9,
+				Content: "queued", CreatedAt: now.Unix(), Tags: [][]string{{"h", testChannel}, {"p", testAgent}}}
+		}
+		raw, err := json.Marshal(events)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	older := writePage("older.json", 1)
+	newer := writePage("newer.json", maxEventsPerPage+1)
+	oldestNewerID := fmt.Sprintf("%064x", maxEventsPerPage+1)
+	oldestOlderID := fmt.Sprintf("%064x", 1)
+	script := `#!/bin/sh
+before_id=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --before-id ]; then shift; before_id=$1; fi
+  shift
+done
+case "$before_id" in
+  "") cat '` + newer + `' ;;
+  '` + oldestNewerID + `') cat '` + older + `' ;;
+  '` + oldestOlderID + `') printf '[]\n' ;;
+  *) exit 2 ;;
+esac
+`
+	cfg := validTestConfig(directory)
+	cfg.BuzzBinary = writeExecutable(t, directory, "buzz-paginated", script)
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{cfg: cfg, logger: slog.Default(), buzzKey: "nsec-fixture", now: func() time.Time { return now }}
+	if err := b.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	queued, _, err := b.recordCounts()
+	if err != nil || queued != 2*maxEventsPerPage {
+		t.Fatalf("queued=%d error=%v", queued, err)
+	}
+	if !fileExists(filepath.Join(cfg.StateDirectory, "cursors", testChannel+".json")) {
+		t.Fatal("cursor did not advance after every relay page was durably accepted")
+	}
+}
+
+func TestAmbiguousPublishReconcilesWithoutDuplicateSend(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Unix(1_900_000_000, 0)
+	allow := filepath.Join(directory, "allow-thread")
+	sends := filepath.Join(directory, "send-count")
+	buzz := writeExecutable(t, directory, "buzz-ambiguous", `#!/bin/sh
+case " $* " in
+  *" messages thread "*)
+    if [ -f '`+allow+`' ]; then
+      printf '[{"id":"`+testReply+`","pubkey":"`+testAgent+`","kind":9,"content":"answer","created_at":1900000001,"tags":[["h","`+testChannel+`"],["e","`+testEvent+`","","reply"]]}]\n'
+    else printf '[]\n'; fi ;;
+  *" messages send "*)
+    count=0; [ ! -f '`+sends+`' ] || count=$(cat '`+sends+`'); count=$((count + 1)); printf '%s' "$count" >'`+sends+`'
+    cat >/dev/null; printf '{"event_id":"`+testReply+`"}\n' ;;
+  *) exit 2 ;;
+esac
+`)
+	cfg := validTestConfig(directory)
+	cfg.BuzzBinary = buzz
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{cfg: cfg, logger: slog.Default(), buzzKey: "nsec-fixture", now: func() time.Time { return now }}
+	if err := b.ingest(testChannel, validEvent(now)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cfg.StateDirectory, "records", testEvent+".json")
+	rec, err := readRecord(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(rec.RunDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rec.RunDirectory, "result.json"), []byte(`{"status":"completed","output":"answer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec.Phase = "publishing"
+	rec.ReplyDigest = sha256Digest([]byte("answer"))
+	if err := writeRecord(path, rec); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := b.processNext(context.Background()); !worked || err == nil || !strings.Contains(err.Error(), "publish_outcome_unknown") {
+		t.Fatalf("first publish worked=%v error=%v", worked, err)
+	}
+	rec, err = readRecord(path)
+	if err != nil || rec.Phase != "publish_outcome_unknown" || rec.ErrorCode != "publish_outcome_unknown" {
+		t.Fatalf("ambiguous record=%+v error=%v", rec, err)
+	}
+	var listed bytes.Buffer
+	if err := b.writeRecordList(&listed); err != nil || !strings.Contains(listed.String(), testEvent) ||
+		strings.Contains(listed.String(), "answer") {
+		t.Fatalf("record list=%q error=%v", listed.String(), err)
+	}
+	if err := os.WriteFile(allow, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.retryDurableRecord(testEvent); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := b.processNext(context.Background()); !worked || err != nil {
+		t.Fatalf("reconcile worked=%v error=%v", worked, err)
+	}
+	count, err := os.ReadFile(sends)
+	if err != nil || string(count) != "1" {
+		t.Fatalf("send count=%q error=%v", count, err)
+	}
+	rec, err = readRecord(path)
+	if err != nil || rec.Phase != "replied" || rec.ReplyEventID != testReply {
+		t.Fatalf("reconciled record=%+v error=%v", rec, err)
+	}
+}
+
+func TestIndependentWorkersDoNotHeadOfLineBlock(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Unix(1_900_000_000, 0)
+	started := filepath.Join(directory, "started")
+	if err := os.Mkdir(started, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stewardctl := writeExecutable(t, directory, "stewardctl-concurrent", `#!/bin/sh
+run=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -run-dir ]; then shift; run=$1; fi
+  shift
+done
+[ -n "$run" ] || exit 2
+mkdir -m 700 "$run"
+touch '`+started+`'/"$(basename "$run")"
+for unused in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$(find '`+started+`' -type f | wc -l | tr -d ' ')" -ge 2 ] && break
+  sleep 0.1
+done
+[ "$(find '`+started+`' -type f | wc -l | tr -d ' ')" -ge 2 ] || exit 7
+printf '{"status":"completed","output":"answer"}\n' >"$run/result.json"
+chmod 600 "$run/result.json"
+printf '{}\n'
+`)
+	buzz := writeExecutable(t, directory, "buzz-concurrent", `#!/bin/sh
+event=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --event ]; then shift; event=$1; fi
+  shift
+done
+[ -n "$event" ] || exit 2
+printf '[{"id":"`+testReply+`","pubkey":"`+testAgent+`","kind":9,"content":"answer","created_at":1900000001,"tags":[["h","`+testChannel+`"],["e","%s","","reply"]]}]\n' "$event"
+`)
+	cfg := validTestConfig(directory)
+	cfg.StewardctlBinary, cfg.BuzzBinary = stewardctl, buzz
+	if err := prepareStateDirectory(cfg.StateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{cfg: cfg, logger: slog.Default(), buzzKey: "nsec-fixture", now: func() time.Time { return now }}
+	first := validEvent(now)
+	second := validEvent(now)
+	second.ID = strings.Repeat("e", 64)
+	for _, event := range []buzzEvent{first, second} {
+		if err := b.ingest(testChannel, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errorsChannel := make(chan error, 2)
+	for worker := 0; worker < 2; worker++ {
+		go func() {
+			worked, err := b.processNext(ctx)
+			if !worked && err == nil {
+				err = errors.New("worker found no durable work")
+			}
+			errorsChannel <- err
+		}()
+	}
+	for worker := 0; worker < 2; worker++ {
+		if err := <-errorsChannel; err != nil {
+			t.Fatal(err)
+		}
+	}
+	queued, failed, err := b.recordCounts()
+	if err != nil || queued != 0 || failed != 0 {
+		t.Fatalf("queued=%d failed=%d error=%v", queued, failed, err)
 	}
 }
 

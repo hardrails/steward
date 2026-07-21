@@ -99,9 +99,14 @@ git -C "$temporary/build-source" apply "$root/integrations/buzz/buzz-cli-verific
 
 [[ $(cd -- "$temporary/build-source" && rustc --version | awk '{print $2}') == "$rust" ]] \
 	|| fail "rustc must be the source-locked version $rust"
-cargo_arguments=(build --locked --release -p buzz-cli)
-$offline && cargo_arguments+=(--offline)
-(cd -- "$temporary/build-source" && cargo "${cargo_arguments[@]}")
+cargo_test_arguments=(test --locked -p buzz-cli --lib)
+cargo_build_arguments=(build --locked --release -p buzz-cli)
+if $offline; then
+	cargo_test_arguments+=(--offline)
+	cargo_build_arguments+=(--offline)
+fi
+(cd -- "$temporary/build-source" && cargo "${cargo_test_arguments[@]}")
+(cd -- "$temporary/build-source" && cargo "${cargo_build_arguments[@]}")
 
 # Re-read the Steward-side recipe after the long Rust build. This closes the
 # local check-then-build window if a checkout is edited concurrently.
@@ -124,5 +129,12 @@ install -m 0444 "$root/integrations/buzz/bridge.example.json" "$output/bridge.ex
 install -m 0444 "$root/deploy/systemd/steward-buzz-bridge.service" "$output/steward-buzz-bridge.service"
 install -m 0444 "$source_dir/LICENSE" "$output/BUZZ-LICENSE"
 install -m 0444 "$root/LICENSE" "$output/STEWARD-LICENSE"
+
+identity=$(HOME=/nonexistent NO_COLOR=1 STEWARD_BUZZ_PRINT_PUBLIC_KEY=1 \
+	BUZZ_RELAY_URL=https://identity.invalid \
+	BUZZ_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001 \
+	"$output/buzz" users get)
+[[ $identity == '{"public_key":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}' ]] \
+	|| fail 'patched Buzz identity binding self-test failed'
 
 printf 'Built the Steward Buzz bridge in %s\n' "$output"
