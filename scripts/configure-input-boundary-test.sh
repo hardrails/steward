@@ -392,12 +392,44 @@ EOF
 	fi
 )
 
+exercise_admission_option_preservation() (
+	set -Eeuo pipefail
+	local helper=$work/admission-option-preservation.sh fixture=$work/admission-options.env
+	awk '
+		$0 == "resolve_admission_option() {" { copying=1 }
+		copying { print }
+		copying && $0 == "}" { exit }
+	' "$root/scripts/configure-admission.sh" >"$helper"
+	# shellcheck source=/dev/null
+	source "$helper"
+	cat >"$fixture" <<'EOF'
+EXECUTOR_ADMISSION_HOST_ADMIN_ARG=-admission-allow-host-admin-intent
+EXECUTOR_STATE_ARG=-allow-unquotaed-state-on-dedicated-host
+EOF
+	[[ $(resolve_admission_option preserve "$fixture" EXECUTOR_ADMISSION_HOST_ADMIN_ARG \
+		-admission-allow-host-admin-intent) == true ]]
+	[[ $(resolve_admission_option preserve "$fixture" EXECUTOR_STATE_ARG \
+		-allow-unquotaed-state-on-dedicated-host) == true ]]
+	[[ $(resolve_admission_option false "$fixture" EXECUTOR_STATE_ARG \
+		-allow-unquotaed-state-on-dedicated-host) == false ]]
+	sed -i 's#EXECUTOR_STATE_ARG=.*#EXECUTOR_STATE_ARG=#' "$fixture"
+	[[ $(resolve_admission_option preserve "$fixture" EXECUTOR_STATE_ARG \
+		-allow-unquotaed-state-on-dedicated-host) == false ]]
+	printf 'EXECUTOR_STATE_ARG=unexpected\n' >>"$fixture"
+	if resolve_admission_option preserve "$fixture" EXECUTOR_STATE_ARG \
+		-allow-unquotaed-state-on-dedicated-host >/dev/null; then
+		echo "configure-input-boundary-test: ambiguous existing admission option was accepted" >&2
+		exit 1
+	fi
+)
+
 exercise_common_boundary "$root/scripts/configure-node.sh" node
 exercise_common_boundary "$root/scripts/configure-admission.sh" admission
 exercise_node_staging
 exercise_admission_staging
 exercise_receipt_pair_presence
 exercise_evidence_config_parser
+exercise_admission_option_preservation
 
 node_stage_line=$(grep -n '^stage_node_input_sources$' "$root/scripts/configure-node.sh" | cut -d: -f1)
 node_mutation_line=$(grep -n '^install -d -o root -g root -m 0755 /etc/steward$' \

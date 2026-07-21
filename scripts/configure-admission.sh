@@ -26,10 +26,13 @@ Optional:
   --receipt-private-key FILE     Owner-only enrollment receipt private key
   --receipt-public-key FILE      Matching base64 Ed25519 receipt public key
   --allow-host-admin-intent      Allow the host-admin credential to select signed tenant intent
+  --disallow-host-admin-intent   Explicitly disable host-admin intent selection
   --allow-unquotaed-state-on-dedicated-host
                                  Allow persistent Docker volumes only when the
                                  signed policy contains exactly one tenant; no
                                  hard byte or inode quota is enforced
+  --disallow-unquotaed-state-on-dedicated-host
+                                 Explicitly disable unquotaed persistent state
   --no-restart                   Validate and commit without restarting an active Executor
   -h, --help                     Show this help
 
@@ -48,8 +51,8 @@ site_root_key_id=
 node_id=
 receipt_private=
 receipt_public=
-allow_host_admin=false
-allow_unquotaed_state=false
+allow_host_admin=preserve
+allow_unquotaed_state=preserve
 restart=true
 node_lock_fd=
 while [[ $# -gt 0 ]]; do
@@ -61,7 +64,9 @@ while [[ $# -gt 0 ]]; do
 		--receipt-private-key) receipt_private=${2:-}; shift 2 ;;
 		--receipt-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
+		--disallow-host-admin-intent) allow_host_admin=false; shift ;;
 		--allow-unquotaed-state-on-dedicated-host) allow_unquotaed_state=true; shift ;;
+		--disallow-unquotaed-state-on-dedicated-host) allow_unquotaed_state=false; shift ;;
 		--no-restart) restart=false; shift ;;
 		--node-lock-fd) node_lock_fd=${2:-}; shift 2 ;;
 		-h | --help) usage; exit 0 ;;
@@ -362,6 +367,46 @@ for path in /usr/local/bin/stewardctl /usr/local/bin/steward-executor \
 	/etc/steward/executor.env; do
 	[[ -e $path ]] || { echo "configure-admission: Steward node is missing $path" >&2; exit 2; }
 done
+
+# Reconfiguration is a patch, not a replacement. An omitted compatibility flag
+# retains its installed value; disabling one requires the matching explicit
+# --disallow flag. Never source this root-owned environment file.
+resolve_admission_option() {
+	local requested=$1 env_file=$2 key=$3 enabled_value=$4 current
+	case "$requested" in
+		true | false) printf '%s\n' "$requested"; return ;;
+		preserve) ;;
+		*) return 2 ;;
+	esac
+	current=$(awk -F= -v key="$key" '$1 == key { count++; value=$2 } END {
+		if (count != 1) exit 2
+		print value
+	}' "$env_file") || return 2
+	case "$current" in
+		"") printf 'false\n' ;;
+		"$enabled_value") printf 'true\n' ;;
+		*) return 2 ;;
+	esac
+}
+
+previous_allow_host_admin=$(resolve_admission_option preserve /etc/steward/executor.env \
+	EXECUTOR_ADMISSION_HOST_ADMIN_ARG -admission-allow-host-admin-intent) || {
+	echo "configure-admission: existing host-admin intent setting is missing or invalid" >&2
+	exit 2
+}
+previous_allow_unquotaed_state=$(resolve_admission_option preserve /etc/steward/executor.env \
+	EXECUTOR_STATE_ARG -allow-unquotaed-state-on-dedicated-host) || {
+	echo "configure-admission: existing unquotaed-state setting is missing or invalid" >&2
+	exit 2
+}
+[[ $allow_host_admin != preserve ]] || allow_host_admin=$previous_allow_host_admin
+[[ $allow_unquotaed_state != preserve ]] || allow_unquotaed_state=$previous_allow_unquotaed_state
+if [[ $allow_host_admin != "$previous_allow_host_admin" ]]; then
+	echo "configure-admission: host-admin intent changes from $previous_allow_host_admin to $allow_host_admin (explicit option)"
+fi
+if [[ $allow_unquotaed_state != "$previous_allow_unquotaed_state" ]]; then
+	echo "configure-admission: unquotaed dedicated-host state changes from $previous_allow_unquotaed_state to $allow_unquotaed_state (explicit option)"
+fi
 receipt_key_pair_state() {
 	local private_path=$1 public_path=$2 private_present=false public_present=false
 	[[ ! -e $private_path && ! -L $private_path ]] || private_present=true
