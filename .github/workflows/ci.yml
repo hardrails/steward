@@ -97,6 +97,8 @@ jobs:
           bash scripts/check-cli-docs-contract.sh
       - name: Hermes pin updater
         run: python3 -I scripts/update-hermes-pin-test.py
+      - name: Buzz pin updater
+        run: python3 -I scripts/update-buzz-pin-test.py
       - name: Installer plan smoke
         run: |
           /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \

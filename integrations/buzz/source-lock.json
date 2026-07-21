@@ -1,0 +1,52 @@
+{
+  "schema_version": "steward.buzz-source-lock.v1",
+  "repository": "https://github.com/block/buzz.git",
+  "selection": {
+    "lane": "desktop-source-snapshot",
+    "release": "v0.4.21",
+    "component_identity": "source-commit"
+  },
+  "revision": "e30f1d2006936b65737b111762933bb4e2309ade",
+  "git_tree": "a5c7fb6ebc0c58ab8e884c87f2e622c362e7c5dd",
+  "source_archive_sha256": "d6f44753279bcba25c0584b99596f123b35b7be505d36b0d76960f58541471f9",
+  "components": [
+    {
+      "name": "buzz-acp",
+      "version": "0.1.0",
+      "manifest": "crates/buzz-acp/Cargo.toml",
+      "manifest_sha256": "cf6bf2bf05969995642e35b259286f11f891a2a128fdce9f4b1400f2ab84a2a2"
+    },
+    {
+      "name": "buzz-cli",
+      "version": "0.1.0",
+      "manifest": "crates/buzz-cli/Cargo.toml",
+      "manifest_sha256": "9db1a034a0561fc7f2c6d38599639eecf5a445b3ae40f768d1db30517d3e3aa0"
+    }
+  ],
+  "inputs": [
+    {
+      "path": "LICENSE",
+      "sha256": "108cb15997e51b75a8d18b0c1e2c52bd3879d051ab02118973387df1e4aab584"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "96a1ea5e61b59e388298cbe82976847273dd884abec79e2faa87b482bdee5a48"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "7e67290c2c86af74654de885b480f83b4487dfbcf5bc25dd35d9b54de673ee95"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "f93d36efbb7a45edf8197259661273bc5d22529eccd4ff6411a851bafa493398"
+    }
+  ],
+  "toolchain": {
+    "rust": "1.95.0"
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "source_sha256": "108cb15997e51b75a8d18b0c1e2c52bd3879d051ab02118973387df1e4aab584"
+  },
+  "qualification_required": true
+}
