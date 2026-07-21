@@ -511,7 +511,7 @@ func serviceTaskRejection(status int) (string, string) {
 		code = "service_task_upstream_not_found"
 	case http.StatusTooManyRequests:
 		code = "service_task_upstream_rate_limited"
-	case http.StatusRequestTimeout:
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		code = "service_task_upstream_timeout"
 	default:
 		switch {

@@ -574,6 +574,7 @@ func TestSignedServiceTaskRecordsUntrustedResponsesWithoutRelayingThem(t *testin
 		{name: "auth failure", status: http.StatusUnauthorized, contentType: "application/json", body: `{"error":"bad key"}`, firstError: "service_task_upstream_unauthorized", replayError: "service_task_upstream_unauthorized"},
 		{name: "forbidden", status: http.StatusForbidden, contentType: "application/json", body: `{"error":"denied"}`, firstError: "service_task_upstream_forbidden", replayError: "service_task_upstream_forbidden"},
 		{name: "missing route", status: http.StatusNotFound, contentType: "application/json", body: `{"error":"missing"}`, firstError: "service_task_upstream_not_found", replayError: "service_task_upstream_not_found"},
+		{name: "gateway timeout", status: http.StatusGatewayTimeout, contentType: "application/json", body: `{"error":"timeout"}`, firstError: "service_task_upstream_timeout", replayError: "service_task_upstream_timeout"},
 		{name: "server error", status: http.StatusBadGateway, contentType: "application/json", body: `{"error":"down"}`, firstError: "service_task_upstream_server_error", replayError: "service_task_upstream_server_error"},
 		{name: "missing run id", status: http.StatusAccepted, contentType: "application/json", body: `{"status":"queued"}`, firstError: "outcome_unknown", replayError: "outcome_unknown"},
 		{name: "duplicate run id", status: http.StatusAccepted, contentType: "application/json", body: `{"run_id":"run_one","run_id":"run_two"}`, firstError: "outcome_unknown", replayError: "outcome_unknown"},
