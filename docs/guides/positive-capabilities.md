@@ -58,19 +58,36 @@ the agent reach its relay but not host services through the bridge gateway.
 Preflight rejects older versions before network creation. A `network=none` workload
 with no network capability can use an older supported Engine.
 
-## 1. Configure the local model route
+## 1. Configure the inference route
 
-The `local-openai` example in `/etc/steward/gateway.json` points to
-`http://127.0.0.1:11434/v1`. Change it for another OpenAI-compatible gateway. For a
-bearer token, create an owner-only file:
+Use an inference preset for a local or hosted provider. This example selects the
+standard local vLLM address:
+
+```console
+sudo stewardctl gateway inference set -provider vllm
+sudo systemctl reload steward-gateway.service
+```
+
+For a hosted provider, first create an owner-only credential file:
 
 ```bash
 sudo install -o steward-gateway -g steward-gateway -m 0600 \
   ./local-model.token /etc/steward/local-model.token
 ```
 
-Add `"credential_file": "/etc/steward/local-model.token"` to the route. Operators,
-not tenants, configure route IDs, URLs, and credentials.
+Then configure a preset such as `openai`, `openrouter`, `anthropic`, or `mistral`:
+
+```console
+sudo stewardctl gateway inference set \
+  -provider openrouter \
+  -credential-file /etc/steward/local-model.token
+sudo systemctl reload steward-gateway.service
+```
+
+Operators, not tenants, configure route IDs, URLs, protocols, and credentials. See
+[inference providers]({{ '/guides/inference/' | relative_url }}) for vLLM, Ollama,
+llama.cpp, LocalAI, LiteLLM, LM Studio, SGLang, TGI, provider-specific paths, and
+custom endpoints.
 
 ## 2. Build the trusted relay without a registry
 
@@ -141,13 +158,15 @@ stopping the agent and relay.
 
 ### Inference request boundary
 
-Gateway allows only `POST /v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, and `/v1/responses`, plus `GET /v1/models`. Every POST body is
-at most 4 MiB and must be one JSON object without duplicate top-level names. It must
+An OpenAI route allows only `POST /v1/chat/completions`, `/v1/completions`,
+`/v1/embeddings`, and `/v1/responses`. An Anthropic route allows only
+`POST /v1/messages` and `/v1/messages/count_tokens`. Both expose `GET /v1/models`,
+which Gateway generates locally with only the granted alias. Every POST body is at
+most 4 MiB and must be one JSON object without duplicate top-level names. It must
 contain exactly one string `model` equal to the signed `model_alias`; Gateway rejects
-missing or different values before upstream. It generates `/v1/models` locally with
-only that alias. The tenant rule must list the alias in `inference_model_aliases`.
-A route credential that reaches other models does not grant access to them.
+missing or different values before upstream. The tenant rule must list the alias in
+`inference_model_aliases`. A route credential that reaches other models does not
+grant access to them.
 Inference responses are limited to 32 MiB. A known-length larger response returns
 `502 response_too_large` before body forwarding. For an unknown-length response,
 Gateway preserves streaming and advertises an `X-Steward-Stream-Status` trailer. A

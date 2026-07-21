@@ -107,7 +107,7 @@ keeping Gateway outside the workload network namespace.
 Gateway is trusted with configured upstream origins and reusable credentials. It
 implements four capability shapes:
 
-- OpenAI-compatible inference routes;
+- bounded OpenAI-compatible and Anthropic Messages inference routes;
 - bounded service operations and lifecycle tasks;
 - named authenticated connector operations; and
 - explicit HTTP(S) egress policy.
