@@ -69,7 +69,14 @@ func TestConfigRejectsUnsafeOriginsAndAddresses(t *testing.T) {
 		func(config *Config) { config.ServiceAddress = "127.0.0.1:not-a-port" },
 		func(config *Config) { config.Routes[0].BaseURL = "file:///etc/passwd" },
 		func(config *Config) { config.Routes[0].BaseURL = "http://user@example.test" },
-		func(config *Config) { config.Routes[0].BaseURL = "http://example.test/path" },
+		func(config *Config) { config.Routes[0].BaseURL = "http://example.test/path//child" },
+		func(config *Config) { config.Routes[0].BaseURL = "http://example.test/a/../path" },
+		func(config *Config) { config.Routes[0].BaseURL = "http://example.test/%70ath" },
+		func(config *Config) { config.Routes[0].BaseURL = "http://example.test/path?key=value" },
+		func(config *Config) { config.Routes[0].BaseURL = "http://example.test/path?" },
+		func(config *Config) { config.Routes[0].Protocol = "other" },
+		func(config *Config) { config.Routes[0].CredentialMode = "other" },
+		func(config *Config) { config.Routes[0].AnthropicVersion = "2023-06-01" },
 		func(config *Config) { config.Routes[0].MaxConcurrent = 0 },
 		func(config *Config) { config.GrantRoot = "/" + strings.Repeat("long/", 30) + "grants" },
 	} {
@@ -78,6 +85,33 @@ func TestConfigRejectsUnsafeOriginsAndAddresses(t *testing.T) {
 		mutate(&config)
 		if _, err := config.validateAndLoadRoutes(); err == nil {
 			t.Fatalf("invalid config accepted: %#v", config)
+		}
+	}
+}
+
+func TestConfigValidatesInferenceProviderProtocolsAndPathPrefixes(t *testing.T) {
+	config := Config{
+		Version: 1, ControlSocket: "/tmp/control.sock", ServiceAddress: "127.0.0.1:8092",
+		ServiceTokenFile: "/tmp/token", StateFile: "/tmp/state", GrantRoot: "/tmp/grants", ExecutorGID: 1, RelayGID: 1,
+		Routes: []Route{
+			{ID: "openrouter", BaseURL: "https://openrouter.ai/api/v1", Protocol: InferenceProtocolOpenAI, CredentialMode: CredentialModeBearer, MaxConcurrent: 2},
+			{ID: "anthropic", BaseURL: "https://api.anthropic.com/v1", Protocol: InferenceProtocolAnthropic, MaxConcurrent: 2},
+		},
+	}
+	routes, err := config.validateAndLoadRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routes["openrouter"].base.Path != "/api/v1" || effectiveInferenceCredentialMode(routes["anthropic"].Route) != CredentialModeXAPIKey ||
+		effectiveAnthropicVersion(routes["anthropic"].Route) != defaultAnthropicVersion {
+		t.Fatalf("routes=%#v", routes)
+	}
+	for _, version := range []string{"2023-13-01", "2023-02-29", "20230601", "latest"} {
+		invalid := config
+		invalid.Routes = append([]Route(nil), config.Routes...)
+		invalid.Routes[1].AnthropicVersion = version
+		if _, err := invalid.validateAndLoadRoutes(); err == nil {
+			t.Fatalf("invalid Anthropic version %q accepted", version)
 		}
 	}
 }

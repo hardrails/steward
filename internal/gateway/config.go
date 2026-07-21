@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
@@ -107,10 +108,13 @@ type ConnectorReceiptTenantBudget struct {
 }
 
 type Route struct {
-	ID             string `json:"id"`
-	BaseURL        string `json:"base_url"`
-	CredentialFile string `json:"credential_file,omitempty"`
-	MaxConcurrent  int    `json:"max_concurrent"`
+	ID               string            `json:"id"`
+	BaseURL          string            `json:"base_url"`
+	Protocol         InferenceProtocol `json:"protocol,omitempty"`
+	CredentialFile   string            `json:"credential_file,omitempty"`
+	CredentialMode   CredentialMode    `json:"credential_mode,omitempty"`
+	AnthropicVersion string            `json:"anthropic_version,omitempty"`
+	MaxConcurrent    int               `json:"max_concurrent"`
 }
 
 type loadedRoute struct {
@@ -144,13 +148,22 @@ type loadedEgressRoute struct {
 	destinations []loadedEgressDestination
 }
 
-// CredentialMode is the complete connector credential-injection vocabulary.
-// A connector cannot select an arbitrary header name.
+// CredentialMode names the bounded credential headers understood by Gateway.
+// Each capability type accepts only its documented subset.
 type CredentialMode string
+
+// InferenceProtocol selects one bounded agent-facing inference API shape.
+type InferenceProtocol string
 
 const (
 	CredentialModeBearer  CredentialMode = "bearer"
 	CredentialModeXAPIKey CredentialMode = "x-api-key"
+	CredentialModeAPIKey  CredentialMode = "api-key"
+
+	InferenceProtocolOpenAI    InferenceProtocol = "openai"
+	InferenceProtocolAnthropic InferenceProtocol = "anthropic"
+
+	defaultAnthropicVersion = "2023-06-01"
 )
 
 // ActionAuthority is one non-secret Ed25519 verification key trusted to issue
@@ -733,10 +746,24 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 		if _, exists := loaded[route.ID]; exists {
 			return nil, fmt.Errorf("duplicate gateway route %q", route.ID)
 		}
+		protocol := effectiveInferenceProtocol(route)
+		credentialMode := effectiveInferenceCredentialMode(route)
+		if protocol != InferenceProtocolOpenAI && protocol != InferenceProtocolAnthropic {
+			return nil, fmt.Errorf("gateway route %q protocol must be openai or anthropic", route.ID)
+		}
+		if credentialMode != CredentialModeBearer && credentialMode != CredentialModeXAPIKey && credentialMode != CredentialModeAPIKey {
+			return nil, fmt.Errorf("gateway route %q credential_mode must be bearer, x-api-key, or api-key", route.ID)
+		}
+		if protocol == InferenceProtocolAnthropic {
+			if !validAnthropicVersion(effectiveAnthropicVersion(route)) {
+				return nil, fmt.Errorf("gateway route %q anthropic_version must be YYYY-MM-DD", route.ID)
+			}
+		} else if route.AnthropicVersion != "" {
+			return nil, fmt.Errorf("gateway route %q anthropic_version requires the anthropic protocol", route.ID)
+		}
 		base, err := url.Parse(route.BaseURL)
-		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil ||
-			base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/v1" && base.Path != "/v1/") {
-			return nil, fmt.Errorf("gateway route %q base_url must be an exact HTTP(S) origin optionally ending in /v1", route.ID)
+		if err != nil || !validInferenceBaseURL(base) {
+			return nil, fmt.Errorf("gateway route %q base_url must be an exact HTTP(S) URL with a canonical path prefix and no query or fragment", route.ID)
 		}
 		credential := ""
 		if route.CredentialFile != "" {
@@ -766,6 +793,63 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 		loaded[route.ID] = loadedRoute{Route: route, base: base, credential: credential}
 	}
 	return loaded, nil
+}
+
+func effectiveInferenceProtocol(route Route) InferenceProtocol {
+	if route.Protocol == "" {
+		return InferenceProtocolOpenAI
+	}
+	return route.Protocol
+}
+
+func effectiveInferenceCredentialMode(route Route) CredentialMode {
+	if route.CredentialMode != "" {
+		return route.CredentialMode
+	}
+	if effectiveInferenceProtocol(route) == InferenceProtocolAnthropic {
+		return CredentialModeXAPIKey
+	}
+	return CredentialModeBearer
+}
+
+func effectiveAnthropicVersion(route Route) string {
+	if route.AnthropicVersion == "" {
+		return defaultAnthropicVersion
+	}
+	return route.AnthropicVersion
+}
+
+func validAnthropicVersion(value string) bool {
+	parsed, err := time.Parse("2006-01-02", value)
+	return err == nil && parsed.Format("2006-01-02") == value
+}
+
+func validInferenceBaseURL(base *url.URL) bool {
+	if base == nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil ||
+		base.RawQuery != "" || base.ForceQuery || base.Fragment != "" || base.RawPath != "" || len(base.Path) > 512 {
+		return false
+	}
+	if base.Path == "" || base.Path == "/" {
+		return true
+	}
+	canonicalPath := strings.TrimSuffix(base.Path, "/")
+	if !strings.HasPrefix(canonicalPath, "/") || pathpkg.Clean(canonicalPath) != canonicalPath {
+		return false
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(canonicalPath, "/"), "/") {
+		if segment == "" {
+			return false
+		}
+		for index := 0; index < len(segment); index++ {
+			character := segment[index]
+			if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+				strings.ContainsRune("-._~", rune(character)) {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func (c Config) reservedRouteCredentialPath(path string) bool {
