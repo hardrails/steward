@@ -22,7 +22,7 @@ optional extraction credential must be files owned by UID `65532` with mode
 `0600` inside the container.
 
 ```console
-docker run --rm --read-only --user 65532:65532 --cap-drop ALL \
+docker run --rm --read-only --runtime runsc --user 65532:65532 --cap-drop ALL \
   --security-opt no-new-privileges:true --pids-limit 64 --memory 256m \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
   -p 127.0.0.1:9080:8080 \

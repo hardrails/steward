@@ -13,6 +13,18 @@ Gateway checks the request path and model before it contacts the provider.
 Steward does not run or schedule the model server. The provider can be a local
 service, a service elsewhere in your private network, or a public API.
 
+## API keys, not consumer subscriptions
+
+Hermes inference requires an API credential accepted by the configured provider
+or a local gateway that needs no credential. A ChatGPT or Claude consumer
+subscription does not provide a generic OpenAI or Anthropic API key, so Steward
+cannot use that subscription as Hermes's model route.
+
+Steward can separately let Hermes delegate repository work to an isolated
+official Codex or Claude Code CLI. That worker may use the CLI's first-party
+subscription login without exposing it to Hermes. See
+[Let Hermes use Codex or Claude Code]({{ '/guides/coding-workers/' | relative_url }}).
+
 ## Choose a preset
 
 `stewardctl gateway inference set -provider PROVIDER` supplies the usual protocol,

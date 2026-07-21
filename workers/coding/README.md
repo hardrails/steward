@@ -17,11 +17,14 @@ behind a dedicated inference proxy and tightly restrict worker egress. A user ma
 instead sign in through the official CLI and mount its dedicated credential
 volume. Steward does not implement, proxy, or collect that login.
 
-For Codex, use the official device login from an interactive one-off container:
+For Codex, create a dedicated bind directory owned by the worker, then use the
+official device login from an interactive one-off container. A new Docker named
+volume is root-owned by default and is not writable by UID `65532`.
 
 ```console
+sudo install -d -o 65532 -g 65532 -m 0700 /var/lib/steward-coding/codex-auth
 docker run --rm -it --user 65532:65532 \
-  -v steward-codex-auth:/home/worker/.codex \
+  --mount type=bind,src=/var/lib/steward-coding/codex-auth,dst=/home/worker/.codex \
   --entrypoint /opt/worker/node_modules/.bin/codex steward-coding-worker login --device-auth
 ```
 
@@ -49,7 +52,7 @@ docker run --rm --read-only --runtime runsc --user 65532:65532 \
   -e STEWARD_CODING_ENGINE=codex \
   -e STEWARD_WORKER_TOKEN_FILE=/run/secrets/worker-token \
   --mount type=bind,src="$PWD/repository",dst=/workspace \
-  --mount type=volume,src=steward-codex-auth,dst=/home/worker/.codex \
+  --mount type=bind,src=/var/lib/steward-coding/codex-auth,dst=/home/worker/.codex \
   --mount type=bind,src="$PWD/worker-token",dst=/run/secrets/worker-token,readonly \
   steward-coding-worker
 ```

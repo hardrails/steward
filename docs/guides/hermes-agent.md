@@ -30,6 +30,23 @@ This page is the supported path for building, qualifying, configuring, admitting
 and testing the adapter. It keeps task signing outside the agent and uses Gateway's
 service-task receipts for offline review.
 
+## Choose a finite tool profile
+
+All profiles use the same qualified Hermes adapter and inference path. Their
+immutable skills and admitted capabilities differ:
+
+| Tool profile | Intended work | Additional boundary |
+| --- | --- | --- |
+| `workspace` | General tasks and the bounded workspace audit | No research or coding worker |
+| `research` | Search, extract, compare sources, and report findings | Two exact research connectors and controller events; bounded internal delegation |
+| `developer` | Ask Codex or Claude Code to inspect or change a repository | Separate isolated coding worker and credential store |
+
+Start with [web research]({{ '/guides/research-agents/' | relative_url }}) or
+[coding workers]({{ '/guides/coding-workers/' | relative_url }}) when those are
+the actual task. A profile is not a prompt preference: it selects a different
+signed capsule contract and fails admission when its required skill or connector
+is absent.
+
 ## Why the official image remains inadmissible
 
 At the pinned revision, the official image starts as root through `/init`, uses
@@ -153,11 +170,10 @@ for the qualified inputs. CI recomputes the adapter file-set, builder, Dockerfil
 source-input, and acceptance-harness digests and fails if they no longer match the
 evidence. The files contain no prompt, response, workspace content, credential, or
 log. They are release-bound qualification records, not independently signed
-attestations. The retained integration record completed on 2026-07-13. The harness
-checked five independently signed task bundles, each with format-4 task-local
-sequences 1, 2, and 3 for authorization, dispatch, and terminal observation. Its
-Gateway chain ended at sequence 17—two connector records plus fifteen lifecycle
-records—and its Executor chain ended at sequence 14. The harness checked each
+attestations. The evidence files are the authority for the exact run date,
+sequence counts, and terminal hashes; the guide deliberately does not copy those
+mutable values. The harness checks independently signed task bundles, format-4
+authorization, dispatch, and terminal observations, both receipt chains, and each
 terminal result's digest, length, run ID, status, and expected skill output before
 writing the metadata-only record.
 

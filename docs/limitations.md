@@ -248,6 +248,26 @@ revision, adapter, base image, platform, or capability set. Qualification is tes
 evidence, not deployment authority; signed site policy and live admission remain
 separate.
 
+## Research and coding workers add trust boundaries
+
+The optional research worker normalizes SearXNG and Firecrawl-compatible APIs. It
+blocks obvious private URLs, but the service that resolves and fetches a hostname
+must enforce the final SSRF policy. Retrieved text remains untrusted and can contain
+prompt injection. Source URLs and multiple documents improve review; they do not
+prove an agent's conclusion.
+
+The optional coding worker runs the official Codex or Claude Code CLI in a
+separate container and reports changed paths. It does not prove a patch is correct,
+review the diff, commit, push, or merge. Subscription mode places a reusable
+first-party login in that worker's credential store. Output scanning can catch the
+exact credential and common encodings, but it cannot replace restricted worker
+egress, a disposable worktree, account controls, and credential rotation.
+
+Controller events are at-least-once, finite-retention agent claims. They are not
+signed enforcement evidence, authorization, a complete audit log, or a large
+artifact channel. Consumers must deduplicate them and treat their summary and
+attributes as untrusted text.
+
 ## Capacity and recovery are finite
 
 Steward's journals, receipt stores, replay indexes, command inventory, evidence
