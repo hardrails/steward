@@ -45,6 +45,10 @@ func TestDeploymentHTTPContractAppliesProjectsListsAndRemoves(t *testing.T) {
 		len(created.AllowedNodeIDs) != 1 || created.AllowedNodeIDs[0] != "node-1" {
 		t.Fatalf("created deployment response = %+v", created)
 	}
+	requireError(t, fixture.request(
+		t, http.MethodPut, "/v1/tenants/tenant-a/deployments/research/rollout", fixture.adminToken,
+		`{"expected_revision":1,"paused":true}`,
+	), http.StatusConflict, "conflict")
 
 	response = fixture.request(
 		t, http.MethodPut, "/v1/tenants/tenant-a/deployments/research", fixture.adminToken,
