@@ -11,12 +11,6 @@
   "source_archive_sha256": "d6f44753279bcba25c0584b99596f123b35b7be505d36b0d76960f58541471f9",
   "components": [
     {
-      "name": "buzz-acp",
-      "version": "0.1.0",
-      "manifest": "crates/buzz-acp/Cargo.toml",
-      "manifest_sha256": "cf6bf2bf05969995642e35b259286f11f891a2a128fdce9f4b1400f2ab84a2a2"
-    },
-    {
       "name": "buzz-cli",
       "version": "0.1.0",
       "manifest": "crates/buzz-cli/Cargo.toml",
@@ -39,6 +33,24 @@
     {
       "path": "rust-toolchain.toml",
       "sha256": "f93d36efbb7a45edf8197259661273bc5d22529eccd4ff6411a851bafa493398"
+    }
+  ],
+  "steward_inputs": [
+    {
+      "path": "integrations/buzz/buzz-cli-verification.patch",
+      "sha256": "2e500fe6f9962ad9cf7f2e61849793c44be987974346db0005cfa81b337166d1"
+    },
+    {
+      "path": "cmd/steward-buzz-bridge/main.go",
+      "sha256": "e8a4aaf821c51928cb7a2024381eade774c4b597904fc07e9ca4cd7050dec456"
+    },
+    {
+      "path": "cmd/steward-buzz-bridge/main_test.go",
+      "sha256": "0fb314340ad1d6f8681b86000e58d5edffd1a99959ffce7f86bfff004294dcc2"
+    },
+    {
+      "path": "scripts/build-buzz-bridge.sh",
+      "sha256": "d35af13b271d8b994d95e6733df3608cda21f0200667374eb3dcbd6264d31834"
     }
   ],
   "toolchain": {

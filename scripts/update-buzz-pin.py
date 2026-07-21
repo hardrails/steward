@@ -23,7 +23,13 @@ REVISION_RE = re.compile(r"[a-f0-9]{40}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
 MAX_SOURCE_FILE_BYTES = 64 << 20
 INPUTS = ("LICENSE", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
-COMPONENTS = ("buzz-acp", "buzz-cli")
+COMPONENTS = ("buzz-cli",)
+STEWARD_INPUTS = (
+    "integrations/buzz/buzz-cli-verification.patch",
+    "cmd/steward-buzz-bridge/main.go",
+    "cmd/steward-buzz-bridge/main_test.go",
+    "scripts/build-buzz-bridge.sh",
+)
 
 
 def fail(message: str) -> NoReturn:
@@ -220,6 +226,10 @@ def main() -> int:
         "source_archive_sha256": archive_hash,
         "components": component_entries,
         "inputs": [{"path": name, "sha256": input_hashes[name]} for name in INPUTS],
+        "steward_inputs": [
+            {"path": name, "sha256": digest(read_source_file(root, name))}
+            for name in STEWARD_INPUTS
+        ],
         "toolchain": {"rust": rust},
         "license": {
             "spdx": "Apache-2.0",

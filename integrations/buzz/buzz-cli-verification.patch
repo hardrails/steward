@@ -1,0 +1,24 @@
+diff --git a/crates/buzz-cli/src/commands/messages.rs b/crates/buzz-cli/src/commands/messages.rs
+index 290cc59..dabd600 100644
+--- a/crates/buzz-cli/src/commands/messages.rs
++++ b/crates/buzz-cli/src/commands/messages.rs
+@@ -262,0 +263,15 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
++/// Verify every complete event returned by the relay before any field is used
++/// or normalized. Relay-side verification is not a client trust boundary: a
++/// compromised or misconfigured relay must not be able to fabricate an author,
++/// tag, event ID, or message body for an automation consumer.
++fn verify_query_events(events: &[serde_json::Value]) -> Result<(), CliError> {
++    for raw in events {
++        let event: nostr::Event = serde_json::from_value(raw.clone())
++            .map_err(|_| CliError::Other("query returned a malformed Nostr event".into()))?;
++        event
++            .verify()
++            .map_err(|_| CliError::Other("query returned an event with an invalid id or signature".into()))?;
++    }
++    Ok(())
++}
++
+@@ -297,0 +313 @@ pub async fn cmd_get_messages(
++    verify_query_events(&events)?;
+@@ -333,0 +350 @@ pub async fn cmd_get_thread(
++    verify_query_events(&events)?;

@@ -30,7 +30,13 @@ class BuzzPinUpdaterTest(unittest.TestCase):
         self.steward = base / "steward"
         self.source = base / "buzz"
         (self.steward / "integrations/buzz").mkdir(parents=True)
+        (self.steward / "cmd/steward-buzz-bridge").mkdir(parents=True)
         shutil.copy2(ROOT / "integrations/buzz/source-lock.json", self.steward / "integrations/buzz/source-lock.json")
+        shutil.copy2(ROOT / "integrations/buzz/buzz-cli-verification.patch", self.steward / "integrations/buzz/buzz-cli-verification.patch")
+        shutil.copy2(ROOT / "cmd/steward-buzz-bridge/main.go", self.steward / "cmd/steward-buzz-bridge/main.go")
+        shutil.copy2(ROOT / "cmd/steward-buzz-bridge/main_test.go", self.steward / "cmd/steward-buzz-bridge/main_test.go")
+        (self.steward / "scripts").mkdir()
+        shutil.copy2(ROOT / "scripts/build-buzz-bridge.sh", self.steward / "scripts/build-buzz-bridge.sh")
         for directory in (self.source / "crates/buzz-acp", self.source / "crates/buzz-cli"):
             directory.mkdir(parents=True)
         fixtures = {
@@ -67,7 +73,7 @@ class BuzzPinUpdaterTest(unittest.TestCase):
         self.assertEqual(result["changed"], ["integrations/buzz/source-lock.json"])
         lock = json.loads((self.steward / "integrations/buzz/source-lock.json").read_text())
         self.assertEqual(lock["revision"], revision)
-        self.assertEqual([entry["version"] for entry in lock["components"]], ["9.8.7", "9.8.7"])
+        self.assertEqual([entry["version"] for entry in lock["components"]], ["9.8.7"])
         checked = self.update("--check")
         self.assertEqual(checked.returncode, 0, checked.stderr)
         self.assertEqual(json.loads(checked.stdout)["changed"], [])
