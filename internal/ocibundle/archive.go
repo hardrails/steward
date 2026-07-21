@@ -131,7 +131,7 @@ func InspectContext(ctx context.Context, archivePath string, limits Limits) (Ima
 	}
 	var index imageIndex
 	if err := decodeStrictJSONContext(ctx, scan.index, &index); err != nil || index.SchemaVersion != 2 ||
-		index.MediaType != ociIndexMediaType || len(index.Manifests) != 1 {
+		index.MediaType != "" && index.MediaType != ociIndexMediaType || len(index.Manifests) != 1 {
 		if contextErr := contextError(ctx); contextErr != nil {
 			return Image{}, contextErr
 		}

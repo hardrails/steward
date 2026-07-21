@@ -53,6 +53,17 @@ func TestInspectAcceptsGzipAndRejectsDeclaredVolumes(t *testing.T) {
 	}
 }
 
+func TestInspectAcceptsOptionalIndexMediaType(t *testing.T) {
+	archive, identity := testArchive(t, archiveOptions{omitIndexMediaType: true})
+	image, err := Inspect(archive, DefaultLimits())
+	if err != nil {
+		t.Fatalf("index without optional mediaType: %v", err)
+	}
+	if image.Identity != identity {
+		t.Fatalf("image identity = %#v, want %#v", image.Identity, identity)
+	}
+}
+
 func TestInspectRejectsUnsafeOrAmbiguousArchives(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -146,7 +157,7 @@ type archiveOptions struct {
 	gzip, volumes, corruptLayer, duplicateConfigKey, twoManifests bool
 	linkEntry, unsafePath, wrongLayerSize, wrongDockerLayer       bool
 	extraBlob, repositories                                       bool
-	omitDockerManifest                                            bool
+	omitDockerManifest, omitIndexMediaType                        bool
 }
 
 func testArchive(t *testing.T, options archiveOptions) (string, Identity) {
@@ -185,7 +196,11 @@ func testArchive(t *testing.T, options archiveOptions) (string, Identity) {
 	if options.twoManifests {
 		manifests = append(manifests, descriptor)
 	}
-	index, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": ociIndexMediaType, "manifests": manifests})
+	indexObject := map[string]any{"schemaVersion": 2, "manifests": manifests}
+	if !options.omitIndexMediaType {
+		indexObject["mediaType"] = ociIndexMediaType
+	}
+	index, _ := json.Marshal(indexObject)
 	dockerLayer := "blobs/sha256/" + strings.TrimPrefix(layerDigest, "sha256:")
 	if options.wrongDockerLayer {
 		dockerLayer = "blobs/sha256/" + strings.Repeat("f", 64)
