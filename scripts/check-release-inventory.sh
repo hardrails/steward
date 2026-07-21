@@ -45,6 +45,21 @@ if ! cmp -s "$work/manifest" "$work/installer"; then
 	exit 1
 fi
 
+# The Debian builder copies selected top-level trees rather than the complete
+# stage. Derive those trees from the canonical inventory so adding a new payload
+# directory cannot produce a manifest that the package itself does not contain.
+awk -F/ '/^integration\// { print $2 }' "$work/manifest" | sort -u >"$work/integration-trees"
+while IFS= read -r tree; do
+	if ! grep -Fq '"$stage/'"$tree"'"' "$root/scripts/build-deb.sh"; then
+		echo "check-release-inventory: Debian builder does not copy integration tree $tree" >&2
+		exit 1
+	fi
+done <"$work/integration-trees"
+if ! grep -Fq 'cp -a %{_sourcedir}/release/.' "$root/packaging/rpm/steward-node.spec.in"; then
+	echo "check-release-inventory: RPM builder does not copy the complete release stage" >&2
+	exit 1
+fi
+
 read_state_formats() {
 	local script=$1 output=$2
 	awk '
