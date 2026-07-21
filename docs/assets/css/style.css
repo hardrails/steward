@@ -63,6 +63,8 @@ a:hover { color: var(--signal); }
 
 .content { min-width: 0; }
 .page-kicker { margin-bottom: 1rem; color: var(--signal-dark); font: 700 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.docs-source-note { margin: 0 0 1.5rem; padding: .8rem 1rem; border-left: 4px solid var(--signal); background: var(--paper-deep); color: var(--muted); font-size: .82rem; }
+.docs-source-note strong { color: var(--ink); }
 h1, h2, h3, h4 { font-family: var(--display); line-height: 1.08; text-wrap: balance; }
 h1 { max-width: 850px; margin: 0 0 1.5rem; font-size: clamp(2.55rem, 7vw, 5rem); letter-spacing: -.045em; }
 h2 { margin: 3.8rem 0 1.2rem; padding-top: .4rem; border-top: 1px solid var(--line); font-size: clamp(1.75rem, 3.5vw, 2.6rem); letter-spacing: -.025em; }

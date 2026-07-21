@@ -103,7 +103,7 @@ func (values *repeatedFlag) Set(value string) error {
 
 func gatewayCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("gateway command requires validate, route, connector, service, or effects")
+		return errors.New("gateway command requires validate, identity, route, connector, service, or effects")
 	}
 	switch arguments[0] {
 	case "validate":
@@ -125,6 +125,8 @@ func gatewayCommand(arguments []string, stdout io.Writer) error {
 		}
 		_, err = fmt.Fprintln(stdout, "gateway configuration valid")
 		return err
+	case "identity":
+		return gatewayIdentityCommand(arguments[1:], stdout)
 	case "route":
 		return gatewayRouteCommand(arguments[1:], stdout)
 	case "connector":
@@ -136,6 +138,55 @@ func gatewayCommand(arguments []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unsupported gateway command %q", arguments[0])
 	}
+}
+
+func gatewayIdentityCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 || arguments[0] != "set" {
+		return errors.New("gateway identity requires set")
+	}
+	flags := flag.NewFlagSet("gateway identity set", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
+	nodeID := flags.String("node-id", "", "exact enrolled node identity")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || !validGatewayNodeID(*nodeID) {
+		return errors.New("gateway identity set requires one valid -node-id and no positional arguments")
+	}
+	config, _, _, _, err := gateway.LoadConfig(*path)
+	if err != nil {
+		return err
+	}
+	receiptNodeID := gateway.ServiceTaskReceiptNodeID(*nodeID)
+	changed := config.ConnectorReceiptNodeID != receiptNodeID
+	if changed {
+		config.ConnectorReceiptNodeID = receiptNodeID
+		if err := writeGatewayConfig(*path, config); err != nil {
+			return err
+		}
+	}
+	return json.NewEncoder(stdout).Encode(map[string]any{
+		"changed":                   changed,
+		"node_id":                   *nodeID,
+		"connector_receipt_node_id": receiptNodeID,
+		"reload":                    "systemctl restart steward-gateway",
+	})
+}
+
+func validGatewayNodeID(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-' || character == ':') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func gatewayServiceCommand(arguments []string, stdout io.Writer) error {

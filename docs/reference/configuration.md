@@ -702,6 +702,13 @@ may retain another stable receipt identity. Before adding service-task operation
 to such a setup, drain all grants and start a new empty receipt chain with the
 derived identity, a new key, and a new epoch. Never relabel an existing chain.
 
+When `configure-node --node-id` enrolls a node, it updates this Gateway identity in
+the same rollback-protected transaction as Executor's admission identity. The
+update validates existing Gateway state and the signed receipt chain first. If the
+old identity already has grants or receipts, configuration stops and restores the
+previous files; drain the node and deliberately rotate the receipt chain instead of
+relabeling existing evidence.
+
 Receipt paths must be separate from credentials, Gateway state, audit, token,
 control socket, and the grant directory. The packaged installer creates an
 independent Gateway key and writes its public half to

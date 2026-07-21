@@ -240,13 +240,13 @@ run_bounded_command() {
 	[[ $max_bytes =~ ^[0-9]+$ && $file_limit_bytes =~ ^[0-9]+$ &&
 		$timeout_seconds =~ ^[0-9]+$ && $memory_kib =~ ^[0-9]+$ ]] || return 1
 	(( max_bytes > 0 && file_limit_bytes >= max_bytes && file_limit_bytes % 1024 == 0 &&
-		timeout_seconds > 0 && memory_kib > 0 )) || return 1
+		timeout_seconds > 0 && memory_kib >= 0 )) || return 1
 	output_blocks=$((file_limit_bytes / 1024))
 	rm -f -- "$stdout" "$stderr"
 	if ! (
 		ulimit -c 0
 		ulimit -f "$output_blocks"
-		ulimit -v "$memory_kib"
+		(( memory_kib == 0 )) || ulimit -v "$memory_kib"
 		exec timeout --signal=TERM --kill-after=5 "$timeout_seconds" "$@"
 	) >"$stdout" 2>"$stderr"; then
 		rm -f -- "$stdout" "$stderr"
@@ -734,7 +734,7 @@ fi
 bounded_docker_info() {
 	local output=$1 format=$2
 	run_bounded_command "$output" "$work/docker-info.stderr" \
-		65536 65536 15 262144 \
+		65536 65536 15 0 \
 		docker info --format "$format"
 }
 

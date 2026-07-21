@@ -578,6 +578,7 @@ targets=(
 	/etc/steward/steward.json
 	/etc/steward/executor.env
 	/etc/steward/executor-gateway.env
+	/etc/steward/gateway.json
 	/etc/steward/uplink-credential.json
 	/etc/steward/executor-uplink.json
 	/etc/steward/executor-token
@@ -890,6 +891,16 @@ if (( admission_required == 3 )); then
 	[[ $allow_unquotaed_state == false ]] ||
 		admission_args+=(--allow-unquotaed-state-on-dedicated-host)
 	/usr/local/libexec/steward/configure-admission "${admission_args[@]}"
+fi
+
+# Task-bearing Gateway grants bind the admitted node identity into their signed
+# receipt policy. Keep that identity in the same transaction as Executor's
+# admission node ID. The CLI validates retained grants and receipt history before
+# replacing the config, so an unsafe re-enrollment fails and the outer rollback
+# restores every node configuration file.
+if [[ -n $node_id ]]; then
+	/usr/local/bin/stewardctl gateway identity set \
+		-config /etc/steward/gateway.json -node-id "$node_id" >/dev/null
 fi
 
 admission_env_complete() {

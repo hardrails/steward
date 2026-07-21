@@ -118,10 +118,57 @@ func TestGatewayRouteSetIsValidatedAndAtomic(t *testing.T) {
 	}
 }
 
+func TestGatewayIdentitySetAtomicallyBindsEnrolledNode(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "sgi-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	token := filepath.Join(directory, "token")
+	if err := os.WriteFile(token, []byte("service-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptPrivate := filepath.Join(directory, "receipts.private.pem")
+	if err := run([]string{"keygen", "-private-out", receiptPrivate, "-public-out", filepath.Join(directory, "receipts.public")}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	config := gateway.Config{
+		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8091",
+		ServiceTokenFile: token, StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
+		ExecutorGID: os.Getgid(), RelayGID: os.Getgid(), ConnectorReceiptFile: filepath.Join(directory, "receipts.ndjson"),
+		ConnectorReceiptKeyFile: receiptPrivate, ConnectorReceiptNodeID: "install-derived/gateway", ConnectorReceiptEpoch: 1,
+	}
+	if config.ExecutorGID == 0 {
+		config.ExecutorGID, config.RelayGID = 1, 1
+	}
+	raw, _ := json.Marshal(config)
+	path := filepath.Join(directory, "gateway.json")
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := run([]string{"gateway", "identity", "set", "-config", path, "-node-id", "node:explicit"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, _, err := gateway.LoadConfig(path)
+	if err != nil || loaded.ConnectorReceiptNodeID != "node:explicit/gateway" || !strings.Contains(output.String(), `"changed":true`) {
+		t.Fatalf("identity=%q output=%q err=%v", loaded.ConnectorReceiptNodeID, output.String(), err)
+	}
+	before, _ := os.ReadFile(path)
+	if err := run([]string{"gateway", "identity", "set", "-config", path, "-node-id", "bad/node"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("invalid node identity accepted")
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected identity update changed gateway config")
+	}
+}
+
 func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 	var output bytes.Buffer
 	for _, arguments := range [][]string{
 		{"gateway"}, {"gateway", "unknown"}, {"gateway", "route"}, {"gateway", "route", "remove"},
+		{"gateway", "identity"}, {"gateway", "identity", "remove"},
 		{"gateway", "connector"}, {"gateway", "connector", "remove"},
 		{"gateway", "service"}, {"gateway", "service", "remove"},
 		{"gateway", "route", "set", "-id", "web"}, {"gateway", "route", "set", "-id", "web", "-destination", "missing-port"},
