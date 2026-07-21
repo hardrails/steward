@@ -56,7 +56,8 @@ var completionTree = map[string][]string{
 	"evidence":                 {"verify", "export"},
 	"node":                     {"whoami", "admit", "status", "logs", "egress", "start", "stop", "destroy", "snapshot-state", "clone-state", "delete-snapshot", "purge-state", "maintenance"},
 	"node maintenance":         {"status", "enter", "drain", "exit"},
-	"gateway":                  {"validate", "route", "connector", "service", "effects"},
+	"gateway":                  {"validate", "identity", "route", "connector", "service", "effects"},
+	"gateway identity":         {"set"},
 	"gateway route":            {"add", "remove", "list"},
 	"gateway connector":        {"set", "list", "trust"},
 	"gateway service":          {"set", "list", "trust"},
@@ -126,6 +127,7 @@ var completionFlags = map[string][]string{
 	"permit bundle audit":               {"-in", "-plan", "-trust", "-authority", "-receipts", "-receipt-public-key", "-receipt-node-id", "-receipt-epoch", "-max-validity", "-expected-sequence", "-expected-chain-hash"},
 	"node":                              {"-node-url", "-token-file", "-no-context", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation", "-reason", "-apply"},
 	"gateway":                           {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
+	"gateway identity set":              {"-config", "-node-id"},
 	"gateway connector set":             {"-preset", "-repository", "-id", "-base-url", "-credential-file", "-credential-mode", "-credential-epoch", "-allow-cidr", "-operation", "-tenant-budget", "-action-authority", "-action-authority-tenant", "-action-node-id", "-max-action-permit-seconds", "-max-concurrent", "-max-request-bytes", "-max-response-bytes", "-max-seconds", "-max-calls-per-grant"},
 }
 

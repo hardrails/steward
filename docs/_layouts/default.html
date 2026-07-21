@@ -100,6 +100,12 @@
       <main id="main-content" class="content" tabindex="-1">
         {% unless page.home %}
           <div class="page-kicker">Steward · {{ page.section | default: "Documentation" }}</div>
+          <div class="docs-source-note" role="note">
+            <strong>Match these instructions to your installation.</strong>
+            This site follows current source and can lead an older installed release. Run
+            <code>stewardctl -version</code>, then use the documentation under that matching
+            Git tag or <a href="{{ site.release_url }}">upgrade every Steward binary together</a>.
+          </div>
         {% endunless %}
         {{ content }}
         {% unless page.home %}

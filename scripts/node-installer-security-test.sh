@@ -92,14 +92,20 @@ node_lock_directory="$fixture/nss"
 install -d -o root -g root -m 0700 "$node_lock_directory"
 
 # Docker is a privileged but independent local service and can wedge or emit a
-# hostile response. Both installer probes must have a deadline, memory limit,
-# and file-size limit before any response is parsed.
+# hostile response. Both installer probes have a deadline and file-size limit
+# before any response is parsed. They deliberately do not apply ulimit -v: the
+# Go runtime reserves a large virtual address range even when resident memory is
+# small, so that limit crashes current Docker clients before they contact Docker.
 install -d -m 0700 "$fixture/fake-docker"
 cat >"$fixture/fake-docker/docker" <<'EOF'
 #!/bin/bash -p
 set -euo pipefail
 case "${FAKE_DOCKER_MODE:?}" in
 	ready)
+		if [[ $(ulimit -v) != unlimited ]]; then
+			echo 'docker probe inherited a virtual-memory limit' >&2
+			exit 3
+		fi
 		if [[ $* == *Runtimes* ]]; then
 			printf '%s\n' '{"io.containerd.runc.v2":{},"runsc":{}}'
 		else
