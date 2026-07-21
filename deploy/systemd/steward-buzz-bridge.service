@@ -1,0 +1,35 @@
+[Unit]
+Description=Steward Buzz integration bridge
+Documentation=https://hardrails.github.io/steward/guides/buzz/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=steward-buzz
+Group=steward-buzz
+ExecStart=/usr/local/lib/steward-buzz/steward-buzz-bridge -config /etc/steward-buzz/bridge.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/steward-buzz
+ReadWritePaths=/var/lib/steward-buzz
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

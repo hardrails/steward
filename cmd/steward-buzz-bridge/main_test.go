@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,12 +26,15 @@ func TestConfigRejectsBroadOrUnsafeAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]func(*config){
-		"author is not canonical": func(value *config) { value.AllowedAuthors = []string{strings.ToUpper(testAuthor)} },
-		"agent author is allowed": func(value *config) { value.AllowedAuthors = []string{testAgent} },
-		"relay has userinfo":      func(value *config) { value.RelayURL = "https://user@buzz.example" },
-		"remote gateway":          func(value *config) { value.GatewayURL = "https://node.example" },
-		"relative secret":         func(value *config) { value.TaskKeyFile = "task.pem" },
-		"duplicate channel":       func(value *config) { value.Channels = []string{testChannel, testChannel} },
+		"author is not canonical":  func(value *config) { value.AllowedAuthors = []string{strings.ToUpper(testAuthor)} },
+		"agent author is allowed":  func(value *config) { value.AllowedAuthors = []string{testAgent} },
+		"relay has userinfo":       func(value *config) { value.RelayURL = "https://user@buzz.example" },
+		"relay has path":           func(value *config) { value.RelayURL = "https://buzz.example/api" },
+		"remote gateway":           func(value *config) { value.GatewayURL = "https://node.example" },
+		"gateway port is invalid":  func(value *config) { value.GatewayURL = "http://127.0.0.1:99999" },
+		"listener port is invalid": func(value *config) { value.HTTPListen = "127.0.0.1:nope" },
+		"relative secret":          func(value *config) { value.TaskKeyFile = "task.pem" },
+		"duplicate channel":        func(value *config) { value.Channels = []string{testChannel, testChannel} },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -42,6 +46,56 @@ func TestConfigRejectsBroadOrUnsafeAuthority(t *testing.T) {
 				t.Fatal("unsafe configuration was accepted")
 			}
 		})
+	}
+}
+
+func TestMalformedVerifiedEventsAreIgnoredWithoutPoisoningTheChannel(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	b := &bridge{cfg: validTestConfig(t.TempDir()), now: func() time.Time { return now }}
+	malformed := validEvent(now)
+	malformed.Tags = [][]string{{"h"}}
+	if eligible, err := b.eligible(testChannel, malformed); err != nil || eligible {
+		t.Fatalf("malformed event eligible=%v error=%v", eligible, err)
+	}
+	oversized := validEvent(now)
+	oversized.Content = strings.Repeat("x", maxMessageBytes+1)
+	if eligible, err := b.eligible(testChannel, oversized); err != nil || eligible {
+		t.Fatalf("oversized event eligible=%v error=%v", eligible, err)
+	}
+}
+
+func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
+	directory := t.TempDir()
+	cfg := validTestConfig(directory)
+	for _, path := range []string{
+		cfg.BuzzPrivateKeyFile, cfg.ControlTokenFile, cfg.GatewayTokenFile,
+		cfg.ServiceTrustFile, cfg.TaskKeyFile,
+	} {
+		if err := os.WriteFile(path, []byte("protected\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{cfg.BuzzBinary, cfg.StewardctlBinary} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "bridge.json")
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(configPath, slog.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.GatewayTokenFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(configPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "gateway.token") {
+		t.Fatalf("unsafe Gateway token error=%v", err)
 	}
 }
 

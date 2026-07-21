@@ -23,6 +23,7 @@ installer, and a SHA-256 manifest.
 | `steward-node_<version>_arm64.rpm` | RPM-family node package (`aarch64` metadata) |
 | `steward_<version>_darwin_amd64.tar.gz` | macOS development supervisor, controller, CLI, and MCP adapter |
 | `steward_<version>_darwin_arm64.tar.gz` | macOS development supervisor, controller, CLI, and MCP adapter |
+| `steward-buzz_<version>_<os>_<arch>.tar.gz` | Optional Buzz integration recipe, target-native bridge and CLI, exact source lock, reviewed patch, and service/configuration examples |
 | `install-steward.sh` | Interactive and unattended top-level installer |
 | `install-control.sh` | Interactive and unattended controller installer for systemd Linux |
 | `checksums.txt` | SHA-256 values for every other release asset |
@@ -88,6 +89,25 @@ Set `HERMES_INTEGRATION_EVIDENCE_OUT` to a new path when an owner-only,
 metadata-only qualification record is required. The detailed
 [Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}) explains the
 qualification evidence and its limits.
+
+## Buzz bridge build output
+
+Steward does not redistribute a mutable or independently versioned Buzz binary.
+Each Linux and macOS release includes a small target-native Buzz kit. Its
+`./build-buzz --output <new-directory>` command builds one local bundle containing
+the exact pinned and locally verified Buzz CLI,
+`steward-buzz-bridge`, `stewardctl`, both licenses, the immutable source lock, and
+the service/configuration examples. The build fails if the Buzz tag, commit, tree,
+source inputs, Rust toolchain, Steward patch, or bridge inputs differ from the
+reviewed lock.
+
+The scheduled `buzz-pin.yml` workflow proposes stable upstream source updates as
+pull requests. It waits through an observation window and never auto-merges. CI
+then rebuilds the complete patched CLI from that exact source. See the [Buzz
+integration guide]({{ '/guides/buzz/' | relative_url }}) for online and air-gapped
+builds. The kit includes target-native Steward binaries, so building Buzz does not
+require Go. It does require the source-locked Rust toolchain and either network
+access to the exact source and locked Cargo dependencies or an operator mirror.
 
 ## Verify a downloaded release
 

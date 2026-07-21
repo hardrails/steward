@@ -59,6 +59,8 @@ jobs:
           scripts/control-install-smoke.sh scripts/bundled-control-node-test.sh
           scripts/control-acceptance.sh scripts/uninstall-node.sh scripts/node-removal-guard.sh
           scripts/build-deb.sh scripts/build-rpm.sh scripts/build-hermes-adapter.sh
+          scripts/build-buzz-bridge.sh
+          integrations/buzz/build-release-bundle.sh
           scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh
           scripts/write-release-manifest.sh scripts/check-release-inventory.sh
           scripts/node-upgrade-smoke.sh scripts/privileged-shell-test.sh
@@ -351,6 +353,37 @@ jobs:
 
       - name: Controller installer transaction smoke
         run: bash scripts/control-install-smoke.sh
+
+  buzz-bridge:
+    name: pinned Buzz bridge / build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          check-latest: false
+      - name: Build the exact patched Buzz source
+        shell: bash
+        run: |
+          set -euo pipefail
+          release=$(python3 -I -c 'import json; print(json.load(open("integrations/buzz/source-lock.json"))["selection"]["release"])')
+          rust=$(python3 -I -c 'import json; print(json.load(open("integrations/buzz/source-lock.json"))["toolchain"]["rust"])')
+          source=$(mktemp -d)
+          output=$(mktemp -d)/bundle
+          git -c init.defaultBranch=main init -q "$source"
+          git -C "$source" remote add origin https://github.com/block/buzz.git
+          git -C "$source" fetch -q --depth=1 origin "refs/tags/$release:refs/tags/$release"
+          git -C "$source" checkout -q --detach "$release"
+          rustup toolchain install "$rust" --profile minimal
+          scripts/build-buzz-bridge.sh --source-dir "$source" --output "$output"
+          test -x "$output/buzz"
+          test -x "$output/steward-buzz-bridge"
+          test -x "$output/stewardctl"
+          test -f "$output/source-lock.json"
+          test -f "$output/bridge.example.json"
+          test -f "$output/steward-buzz-bridge.service"
 
   lint:
     name: golangci-lint

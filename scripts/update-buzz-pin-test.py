@@ -37,6 +37,11 @@ class BuzzPinUpdaterTest(unittest.TestCase):
         shutil.copy2(ROOT / "cmd/steward-buzz-bridge/main_test.go", self.steward / "cmd/steward-buzz-bridge/main_test.go")
         (self.steward / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts/build-buzz-bridge.sh", self.steward / "scripts/build-buzz-bridge.sh")
+        shutil.copy2(ROOT / "scripts/update-buzz-pin.py", self.steward / "scripts/update-buzz-pin.py")
+        shutil.copy2(ROOT / "integrations/buzz/bridge.example.json", self.steward / "integrations/buzz/bridge.example.json")
+        shutil.copy2(ROOT / "integrations/buzz/build-release-bundle.sh", self.steward / "integrations/buzz/build-release-bundle.sh")
+        (self.steward / "deploy/systemd").mkdir(parents=True)
+        shutil.copy2(ROOT / "deploy/systemd/steward-buzz-bridge.service", self.steward / "deploy/systemd/steward-buzz-bridge.service")
         for directory in (self.source / "crates/buzz-acp", self.source / "crates/buzz-cli"):
             directory.mkdir(parents=True)
         fixtures = {

@@ -8,6 +8,7 @@ fail() {
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source_dir=
+steward_binaries=
 output=
 offline=false
 
@@ -23,6 +24,11 @@ while (($#)); do
 		output=$2
 		shift 2
 		;;
+	--steward-binaries)
+		(($# >= 2)) || fail '--steward-binaries requires a directory'
+		steward_binaries=$2
+		shift 2
+		;;
 	--offline)
 		offline=true
 		shift
@@ -35,9 +41,18 @@ done
 [[ ! -e $output ]] || fail 'output path already exists'
 output_parent=$(cd -- "$(dirname -- "$output")" && pwd -P) || fail 'output parent does not exist'
 output=$output_parent/$(basename -- "$output")
-for command in git python3 cargo go install; do
+required_commands=(git python3 cargo rustc install)
+[[ -n $steward_binaries ]] || required_commands+=(go)
+for command in "${required_commands[@]}"; do
 	command -v "$command" >/dev/null || fail "required command is unavailable: $command"
 done
+if [[ -n $steward_binaries ]]; then
+	steward_binaries=$(cd -- "$steward_binaries" && pwd -P) || fail 'Steward binary directory does not exist'
+	for binary in steward-buzz-bridge stewardctl; do
+		[[ -f $steward_binaries/$binary && ! -L $steward_binaries/$binary && -x $steward_binaries/$binary ]] \
+			|| fail "prebuilt Steward binary is unavailable: $binary"
+	done
+fi
 
 pin_field() {
 	python3 -I - "$root/integrations/buzz/source-lock.json" "$1" <<'PY'
@@ -88,12 +103,25 @@ cargo_arguments=(build --locked --release -p buzz-cli)
 $offline && cargo_arguments+=(--offline)
 (cd -- "$temporary/build-source" && cargo "${cargo_arguments[@]}")
 
+# Re-read the Steward-side recipe after the long Rust build. This closes the
+# local check-then-build window if a checkout is edited concurrently.
+python3 -I "$root/scripts/update-buzz-pin.py" \
+	--source-dir "$source_dir" --release-tag "$release" --repository-root "$root" --check \
+	|| fail 'Steward bridge inputs changed during the build'
+
 mkdir -m 0700 -- "$output"
-(cd -- "$root" && go build -trimpath -o "$output/steward-buzz-bridge" ./cmd/steward-buzz-bridge)
-(cd -- "$root" && go build -trimpath -o "$output/stewardctl" ./cmd/stewardctl)
+if [[ -n $steward_binaries ]]; then
+	install -m 0555 "$steward_binaries/steward-buzz-bridge" "$output/steward-buzz-bridge"
+	install -m 0555 "$steward_binaries/stewardctl" "$output/stewardctl"
+else
+	(cd -- "$root" && go build -trimpath -o "$output/steward-buzz-bridge" ./cmd/steward-buzz-bridge)
+	(cd -- "$root" && go build -trimpath -o "$output/stewardctl" ./cmd/stewardctl)
+fi
 install -m 0555 "$temporary/build-source/target/release/buzz" "$output/buzz"
 install -m 0444 "$root/integrations/buzz/source-lock.json" "$output/source-lock.json"
 install -m 0444 "$root/integrations/buzz/buzz-cli-verification.patch" "$output/buzz-cli-verification.patch"
+install -m 0444 "$root/integrations/buzz/bridge.example.json" "$output/bridge.example.json"
+install -m 0444 "$root/deploy/systemd/steward-buzz-bridge.service" "$output/steward-buzz-bridge.service"
 install -m 0444 "$source_dir/LICENSE" "$output/BUZZ-LICENSE"
 install -m 0444 "$root/LICENSE" "$output/STEWARD-LICENSE"
 

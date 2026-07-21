@@ -76,3 +76,12 @@ require Go. The Go module has no third-party dependencies.
 
 The packaged Hermes adapter builder is currently qualified only on `linux/amd64`.
 This is narrower than the Executor node and release-artifact matrix above.
+
+The optional Buzz integration bridge builds natively on supported Linux and macOS
+operator hosts. It is not an Executor node and does not require Docker or gVisor.
+The released build recipe compiles the exact pinned Buzz CLI with its pinned Rust
+toolchain, then builds the dependency-free Steward bridge and CLI. Steward ships a
+hardened systemd service recipe for Linux; macOS operators must supervise the
+bridge with their normal service manager. The bridge reaches Gateway only through
+a literal-loopback endpoint, normally an operator-owned SSH or private-network
+tunnel to the selected Linux node.

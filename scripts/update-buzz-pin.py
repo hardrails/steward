@@ -29,6 +29,10 @@ STEWARD_INPUTS = (
     "cmd/steward-buzz-bridge/main.go",
     "cmd/steward-buzz-bridge/main_test.go",
     "scripts/build-buzz-bridge.sh",
+    "scripts/update-buzz-pin.py",
+    "integrations/buzz/bridge.example.json",
+    "deploy/systemd/steward-buzz-bridge.service",
+    "integrations/buzz/build-release-bundle.sh",
 )
 
 

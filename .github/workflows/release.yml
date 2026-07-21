@@ -207,6 +207,23 @@ jobs:
           tar -tzf "$darwin_archive" steward-control >/dev/null
           tar -tzf "$darwin_archive" examples/agents/hermes/agent.json >/dev/null
           tar -tzf "$darwin_archive" schemas/agent.cue >/dev/null
+          linux_buzz_archive="dist/steward-buzz_${STEWARD_RELEASE_VERSION}_linux_${{ matrix.goarch }}.tar.gz"
+          darwin_buzz_archive="dist/steward-buzz_${STEWARD_RELEASE_VERSION}_darwin_${{ matrix.goarch }}.tar.gz"
+          for buzz_archive in "$linux_buzz_archive" "$darwin_buzz_archive"; do
+            tar -tzf "$buzz_archive" prebuilt/steward-buzz-bridge >/dev/null
+            tar -tzf "$buzz_archive" prebuilt/stewardctl >/dev/null
+            tar -tzf "$buzz_archive" integrations/buzz/source-lock.json >/dev/null
+            tar -tzf "$buzz_archive" integrations/buzz/buzz-cli-verification.patch >/dev/null
+            tar -tzf "$buzz_archive" integrations/buzz/bridge.example.json >/dev/null
+            tar -tzf "$buzz_archive" build-buzz >/dev/null
+            tar -tzf "$buzz_archive" scripts/build-buzz-bridge.sh >/dev/null
+            tar -tzf "$buzz_archive" scripts/update-buzz-pin.py >/dev/null
+          done
+          buzz_verify=$(mktemp -d)
+          tar -xzf "$linux_buzz_archive" -C "$buzz_verify" prebuilt/steward-buzz-bridge
+          test "$("$buzz_verify/prebuilt/steward-buzz-bridge" -version)" = \
+            "steward-buzz-bridge ${STEWARD_RELEASE_VERSION}"
+          rm -rf "$buzz_verify"
           control_archive="dist/steward-control_${STEWARD_RELEASE_VERSION}_linux_${{ matrix.goarch }}.tar.gz"
           control_inventory_raw=$(mktemp)
           control_inventory_stderr=$(mktemp)
@@ -287,6 +304,7 @@ jobs:
           name: steward-dist-${{ matrix.goarch }}
           path: |
             dist/steward_*.tar.gz
+            dist/steward-buzz_*.tar.gz
             dist/steward-control_*.tar.gz
             dist/steward-node_*.deb
             dist/steward-node_*.rpm
@@ -319,6 +337,10 @@ jobs:
             "steward_${STEWARD_RELEASE_VERSION}_linux_arm64.tar.gz"
             "steward_${STEWARD_RELEASE_VERSION}_darwin_amd64.tar.gz"
             "steward_${STEWARD_RELEASE_VERSION}_darwin_arm64.tar.gz"
+            "steward-buzz_${STEWARD_RELEASE_VERSION}_linux_amd64.tar.gz"
+            "steward-buzz_${STEWARD_RELEASE_VERSION}_linux_arm64.tar.gz"
+            "steward-buzz_${STEWARD_RELEASE_VERSION}_darwin_amd64.tar.gz"
+            "steward-buzz_${STEWARD_RELEASE_VERSION}_darwin_arm64.tar.gz"
             "steward-control_${STEWARD_RELEASE_VERSION}_linux_amd64.tar.gz"
             "steward-control_${STEWARD_RELEASE_VERSION}_linux_arm64.tar.gz"
             "steward-node_${STEWARD_RELEASE_VERSION}_amd64.deb"
@@ -384,6 +406,7 @@ jobs:
             --verify-tag \
             "${prerelease[@]}" \
             dist/steward_*.tar.gz \
+            dist/steward-buzz_*.tar.gz \
             dist/steward-control_*.tar.gz \
             dist/steward-node_*.deb \
             dist/steward-node_*.rpm \

@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +27,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/hardrails/steward/internal/buildinfo"
 )
 
 const (
@@ -85,8 +89,7 @@ func (cfg config) validate() error {
 		!identifier(cfg.Deployment) || !identifier(cfg.TaskKeyID) || !hex64RE.MatchString(cfg.AgentPublicKey) {
 		return errors.New("configuration identity is invalid")
 	}
-	if !strings.HasPrefix(cfg.RelayURL, "https://") || strings.ContainsAny(cfg.RelayURL, "?#") ||
-		strings.Contains(cfg.RelayURL, "@") || strings.HasSuffix(cfg.RelayURL, "/") {
+	if !exactHTTPOrigin(cfg.RelayURL, false) {
 		return errors.New("relay_url must be one exact https origin without userinfo, query, fragment, or trailing slash")
 	}
 	if len(cfg.AllowedAuthors) == 0 || len(cfg.AllowedAuthors) > 128 || len(cfg.Channels) == 0 || len(cfg.Channels) > 128 {
@@ -110,7 +113,7 @@ func (cfg config) validate() error {
 	if cfg.ControlCAFile != "" && (!filepath.IsAbs(cfg.ControlCAFile) || filepath.Clean(cfg.ControlCAFile) != cfg.ControlCAFile) {
 		return errors.New("control_ca_file must be an absolute clean path")
 	}
-	if !absoluteHTTPOrigin(cfg.ControlURL, false) || !absoluteHTTPOrigin(cfg.GatewayURL, true) {
+	if !exactHTTPOrigin(cfg.ControlURL, false) || !exactHTTPOrigin(cfg.GatewayURL, true) {
 		return errors.New("control_url must be HTTPS and gateway_url must be one literal-loopback HTTP origin")
 	}
 	if cfg.PollIntervalSeconds != 0 && (cfg.PollIntervalSeconds < 1 || cfg.PollIntervalSeconds > 300) ||
@@ -121,7 +124,7 @@ func (cfg config) validate() error {
 	if cfg.MaxRecords != 0 && (cfg.MaxRecords < 1 || cfg.MaxRecords > 10000) {
 		return errors.New("max_records must be 1 through 10000")
 	}
-	if cfg.HTTPListen != "" && !strings.HasPrefix(cfg.HTTPListen, "127.0.0.1:") {
+	if cfg.HTTPListen != "" && !literalLoopbackAddress(cfg.HTTPListen) {
 		return errors.New("http_listen must use literal IPv4 loopback")
 	}
 	return nil
@@ -149,12 +152,29 @@ func canonicalUnique(values []string, expression *regexp.Regexp) bool {
 	return true
 }
 
-func absoluteHTTPOrigin(value string, loopback bool) bool {
-	prefix := "https://"
-	if loopback {
-		prefix = "http://127.0.0.1:"
+func exactHTTPOrigin(value string, loopback bool) bool {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.Host == "" {
+		return false
 	}
-	return strings.HasPrefix(value, prefix) && !strings.ContainsAny(value, "?#@") && !strings.HasSuffix(value, "/")
+	if loopback {
+		return parsed.Scheme == "http" && parsed.Hostname() == "127.0.0.1" && validPort(parsed.Port(), true)
+	}
+	return parsed.Scheme == "https" && validPort(parsed.Port(), false)
+}
+
+func literalLoopbackAddress(value string) bool {
+	host, port, err := net.SplitHostPort(value)
+	return err == nil && host == "127.0.0.1" && validPort(port, true)
+}
+
+func validPort(value string, required bool) bool {
+	if value == "" {
+		return !required
+	}
+	port, err := strconv.Atoi(value)
+	return err == nil && port > 0 && port <= 65535 && strconv.Itoa(port) == value
 }
 
 type buzzEvent struct {
@@ -203,7 +223,12 @@ func main() {
 	configPath := flag.String("config", "", "owner-only Buzz bridge configuration")
 	once := flag.Bool("once", false, "poll each configured channel once and exit")
 	check := flag.Bool("check-config", false, "validate configuration and secrets without network access")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("steward-buzz-bridge %s\n", buildinfo.Resolve())
+		return
+	}
 	if *configPath == "" || flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "steward-buzz-bridge: -config is required")
 		os.Exit(2)
@@ -290,6 +315,25 @@ func newBridge(path string, logger *slog.Logger) (*bridge, error) {
 			return nil, fmt.Errorf("read Buzz owner attestation: %w", err)
 		}
 	}
+	for _, protected := range []struct {
+		path    string
+		maximum int64
+		secret  bool
+	}{
+		{cfg.ControlTokenFile, maxSecretBytes, true},
+		{cfg.GatewayTokenFile, maxSecretBytes, true},
+		{cfg.ServiceTrustFile, maxConfigBytes, false},
+		{cfg.TaskKeyFile, maxConfigBytes, true},
+	} {
+		if _, err := readSecureFile(protected.path, protected.maximum, protected.secret); err != nil {
+			return nil, fmt.Errorf("validate protected input %s: %w", protected.path, err)
+		}
+	}
+	if cfg.ControlCAFile != "" {
+		if _, err := readSecureFile(cfg.ControlCAFile, maxConfigBytes, false); err != nil {
+			return nil, fmt.Errorf("validate Control CA: %w", err)
+		}
+	}
 	for _, executable := range []string{cfg.BuzzBinary, cfg.StewardctlBinary} {
 		info, err := os.Stat(executable)
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
@@ -298,7 +342,8 @@ func newBridge(path string, logger *slog.Logger) (*bridge, error) {
 	}
 	return &bridge{
 		cfg: cfg, logger: logger, buzzKey: strings.TrimSpace(string(key)),
-		buzzToken: strings.TrimSpace(string(token)), buzzAuthTag: strings.TrimSpace(string(authTag)), now: time.Now,
+		buzzToken: strings.TrimSpace(string(token)), buzzAuthTag: strings.TrimSpace(string(authTag)),
+		now: time.Now, lastError: "initial_poll_pending",
 	}, nil
 }
 
@@ -311,8 +356,16 @@ func readSecureFile(path string, maximum int64, secret bool) ([]byte, error) {
 	file := os.NewFile(uintptr(descriptor), path)
 	defer file.Close()
 	before, err := file.Stat()
-	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0o077 != 0 || before.Sys().(*syscall.Stat_t).Nlink != 1 || before.Size() <= 0 || before.Size() > maximum {
-		return nil, errors.New("file must be one owner-only bounded regular file")
+	if err != nil {
+		return nil, err
+	}
+	permissions := before.Mode().Perm()
+	unsafePermissions := permissions&0o007 != 0 || permissions&0o030 != 0
+	if secret {
+		unsafePermissions = permissions&0o077 != 0
+	}
+	if !before.Mode().IsRegular() || unsafePermissions || before.Sys().(*syscall.Stat_t).Nlink != 1 || before.Size() <= 0 || before.Size() > maximum {
+		return nil, errors.New("file must be one bounded regular file without unsafe group or world access")
 	}
 	if secret && before.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
 		return nil, errors.New("secret file must be owned by the bridge user")
@@ -359,10 +412,20 @@ func prepareStateDirectory(path string) error {
 }
 
 func (b *bridge) poll(ctx context.Context) error {
+	failures := 0
+	firstFailure := ""
+	recordFailure := func(err error) {
+		failures++
+		if firstFailure == "" {
+			firstFailure = boundedError(err)
+		}
+		b.logger.Warn("Buzz bridge item failed", "error", err)
+	}
 	for _, channel := range b.cfg.Channels {
 		events, err := b.fetchEvents(ctx, channel)
 		if err != nil {
-			return fmt.Errorf("poll channel %s: %w", channel, err)
+			recordFailure(fmt.Errorf("poll channel %s: %w", channel, err))
+			continue
 		}
 		sort.Slice(events, func(i, j int) bool {
 			if events[i].CreatedAt != events[j].CreatedAt {
@@ -372,9 +435,12 @@ func (b *bridge) poll(ctx context.Context) error {
 		})
 		for _, event := range events {
 			if err := b.process(ctx, channel, event); err != nil {
-				return fmt.Errorf("process event %s: %w", event.ID, err)
+				recordFailure(fmt.Errorf("process event %s: %w", event.ID, err))
 			}
 		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("poll completed with %d failed items; first failure: %s", failures, firstFailure)
 	}
 	b.mu.Lock()
 	b.lastPoll = b.now().UTC().Format(time.RFC3339Nano)
@@ -467,7 +533,7 @@ func (b *bridge) process(ctx context.Context, channel string, event buzzEvent) e
 
 func (b *bridge) eligible(channel string, event buzzEvent) (bool, error) {
 	if !hex64RE.MatchString(event.ID) || !hex64RE.MatchString(event.PublicKey) || event.Kind != 9 || len([]byte(event.Content)) > maxMessageBytes {
-		return false, errors.New("verified event has an invalid bounded shape")
+		return false, nil
 	}
 	if event.PublicKey == b.cfg.AgentPublicKey || !slices.Contains(b.cfg.AllowedAuthors, event.PublicKey) {
 		return false, nil
@@ -483,7 +549,7 @@ func (b *bridge) eligible(channel string, event buzzEvent) (bool, error) {
 	hCount, mentionCount := 0, 0
 	for _, tag := range event.Tags {
 		if len(tag) < 2 || len(tag) > 8 {
-			return false, errors.New("verified event contains a malformed tag")
+			return false, nil
 		}
 		switch tag[0] {
 		case "h":
@@ -582,6 +648,15 @@ func (b *bridge) runOrRecoverTask(ctx context.Context, event buzzEvent, rec *rec
 		}
 		return readTaskReply(result)
 	}
+	if _, err := os.Lstat(rec.RunDirectory); err == nil {
+		recovery, recoveryErr := b.nextRunDirectory(rec.TaskID)
+		if recoveryErr != nil {
+			return "", recoveryErr
+		}
+		rec.RunDirectory = recovery
+		bundle = filepath.Join(recovery, "task.bundle.json")
+		result = filepath.Join(recovery, "result.json")
+	}
 	prompt := taskPrompt(event)
 	arguments := []string{"task", "run", b.cfg.Deployment,
 		"-tenant", b.cfg.TenantID, "-control-url", b.cfg.ControlURL, "-control-token-file", b.cfg.ControlTokenFile,
@@ -601,6 +676,18 @@ func (b *bridge) runOrRecoverTask(ctx context.Context, event buzzEvent, rec *rec
 		return "", err
 	}
 	return readTaskReply(result)
+}
+
+func (b *bridge) nextRunDirectory(taskID string) (string, error) {
+	for attempt := 1; attempt <= 100; attempt++ {
+		candidate := filepath.Join(b.cfg.StateDirectory, "runs", fmt.Sprintf("%s-recovery-%d", taskID, attempt))
+		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", errors.New("task recovery exhausted 100 retained run directories")
 }
 
 func taskPrompt(event buzzEvent) string {
@@ -637,17 +724,30 @@ func (b *bridge) findExistingReply(ctx context.Context, channel, parent, content
 		return false, "", err
 	}
 	var events []buzzEvent
-	if json.Unmarshal(output, &events) != nil || len(events) > 200 {
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&events) != nil || decoder.Decode(&struct{}{}) != io.EOF || len(events) > 200 {
 		return false, "", errors.New("Buzz returned an invalid verified thread")
 	}
 	for _, event := range events {
-		if event.PublicKey != b.cfg.AgentPublicKey || event.Content != content || event.Kind != 9 {
+		if !hex64RE.MatchString(event.ID) || event.PublicKey != b.cfg.AgentPublicKey ||
+			event.Content != content || event.Kind != 9 || len([]byte(event.Content)) > maxReplyBytes {
 			continue
 		}
+		hCount, parentCount := 0, 0
 		for _, tag := range event.Tags {
-			if len(tag) >= 4 && tag[0] == "e" && tag[1] == parent && (tag[3] == "root" || tag[3] == "reply") {
-				return true, event.ID, nil
+			if len(tag) < 2 || len(tag) > 8 {
+				continue
 			}
+			if tag[0] == "h" && tag[1] == channel {
+				hCount++
+			}
+			if len(tag) >= 4 && tag[0] == "e" && tag[1] == parent && (tag[3] == "root" || tag[3] == "reply") {
+				parentCount++
+			}
+		}
+		if hCount == 1 && parentCount >= 1 {
+			return true, event.ID, nil
 		}
 	}
 	return false, "", nil
@@ -658,6 +758,7 @@ func (b *bridge) runBuzz(ctx context.Context, stdin []byte, arguments ...string)
 	defer cancel()
 	environment := []string{
 		"HOME=/nonexistent", "PATH=/usr/local/bin:/usr/bin:/bin", "NO_COLOR=1",
+		"STEWARD_BUZZ_LITERAL_CONTENT=1",
 		"BUZZ_RELAY_URL=" + b.cfg.RelayURL, "BUZZ_PRIVATE_KEY=" + b.buzzKey,
 	}
 	if b.buzzToken != "" {
