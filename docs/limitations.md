@@ -238,7 +238,7 @@ authenticate the party that supplied both the file and checksum.
 
 ## Agent qualification is narrow
 
-The included Hermes and OpenClaw procedures cover exact pinned adapters, platforms,
+The included Hermes procedure covers an exact pinned adapter, platform,
 skills, and bounded service APIs. They do not establish the safety of arbitrary
 plugins, channels, browser tools, MCP servers, models, prompts, or future upstream
 versions.
@@ -247,6 +247,27 @@ Re-run the documented feasibility and acceptance gates for every changed source
 revision, adapter, base image, platform, or capability set. Qualification is test
 evidence, not deployment authority; signed site policy and live admission remain
 separate.
+
+## Research and coding workers add trust boundaries
+
+The optional research worker normalizes SearXNG results and extracts bounded text
+from public HTML, XHTML, and plain-text pages. It rejects non-public DNS answers,
+pins the selected address for each connection, and rechecks every redirect. It
+does not execute JavaScript or provide browser-grade rendering. Retrieved text
+remains untrusted and can contain prompt injection. Source URLs and multiple
+documents improve review; they do not prove an agent's conclusion.
+
+The optional coding worker runs the official Codex or Claude Code CLI in a
+separate container and reports changed paths. It does not prove a patch is correct,
+review the diff, commit, push, or merge. Subscription mode places a reusable
+first-party login in that worker's credential store. Output scanning can catch the
+exact credential and common encodings, but it cannot replace restricted worker
+egress, a disposable worktree, account controls, and credential rotation.
+
+Controller events are at-least-once, finite-retention agent claims. They are not
+signed enforcement evidence, authorization, a complete audit log, or a large
+artifact channel. Consumers must deduplicate them and treat their summary and
+attributes as untrusted text.
 
 ## Capacity and recovery are finite
 

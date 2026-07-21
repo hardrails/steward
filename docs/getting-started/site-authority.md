@@ -47,7 +47,7 @@ stewardctl site init steward-site \
 ```
 
 The default repository is `steward.local/agents`. The initial policy admits the
-qualified `hermes-api` and `openclaw-api` service identities, and the default TLS
+qualified `hermes-api` service identity, and the default TLS
 names are loopback-only. Supply the actual Control hostname or IP address before a
 remote deployment. The generated resource ceiling is 1 GiB, 1 CPU, and 256
 processes, which matches the generated agent project. Review and replace the signed

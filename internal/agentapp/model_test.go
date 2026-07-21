@@ -49,6 +49,41 @@ func TestBuildIsDeterministicAndTamperEvident(t *testing.T) {
 	}
 }
 
+func TestToolProfilesRequireTheirExactPositiveCapabilities(t *testing.T) {
+	tests := []struct {
+		name       string
+		profile    string
+		skills     []string
+		connectors []string
+		events     bool
+		wantError  string
+	}{
+		{name: "workspace", profile: "workspace"},
+		{name: "research", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-research-search", "steward-research-extract"}, events: true},
+		{name: "research missing events", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-research-search", "steward-research-extract"}, wantError: "controller events"},
+		{name: "developer codex", profile: "developer", skills: []string{"steward-coding-worker"}, connectors: []string{"steward-codex"}},
+		{name: "developer claude", profile: "developer", skills: []string{"steward-coding-worker"}, connectors: []string{"steward-claude-code"}},
+		{name: "developer missing worker", profile: "developer", skills: []string{"steward-coding-worker"}, wantError: "coding-worker connector"},
+		{name: "unknown", profile: "browser", wantError: "tool_profile"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			definition := validDefinition()
+			definition.ToolProfile = test.profile
+			definition.Skills = append(definition.Skills, test.skills...)
+			definition.Capabilities.ConnectorIDs = append([]string(nil), test.connectors...)
+			definition.Capabilities.ControllerEvents = test.events
+			err := definition.Validate()
+			if test.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("error=%v, want substring %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	bundle, err := Build(validDefinition(), nil)
 	if err != nil {
@@ -112,6 +147,60 @@ func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	if _, err := BuildIntent(tampered, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil ||
 		!strings.Contains(err.Error(), "image") {
 		t.Fatalf("mismatched image error=%v", err)
+	}
+	if _, err := BuildIntent(bundle, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 0); err == nil {
+		t.Fatal("zero generation accepted")
+	}
+	invalidBundle := bundle
+	invalidBundle.Definition.Name = ""
+	if _, err := BuildIntent(invalidBundle, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil {
+		t.Fatal("invalid agent bundle accepted")
+	}
+	wrongProfile := verified
+	wrongProfile.Capsule.Profile.ID = "hermes-research-v1"
+	if _, err := BuildIntent(bundle, wrongProfile, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil {
+		t.Fatal("mismatched capsule profile accepted")
+	}
+	wrongService := verified
+	wrongService.Capsule.Service.Port = 0
+	if _, err := BuildIntent(bundle, wrongService, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil {
+		t.Fatal("missing capsule service accepted")
+	}
+	excess := bundle
+	excess.Definition.Capabilities.ControllerEvents = true
+	excess.SourceDigest, _ = DigestJSON(excess.Definition)
+	if _, err := BuildIntent(excess, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil {
+		t.Fatal("capability above capsule ceiling accepted")
+	}
+	denied := verified
+	denied.SitePolicy.Tenants = append([]admission.TenantRule(nil), verified.SitePolicy.Tenants...)
+	denied.SitePolicy.Tenants[0].InferenceRouteIDs = nil
+	if _, err := BuildIntent(bundle, denied, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil {
+		t.Fatal("site policy inference denial accepted")
+	}
+	resumed := bundle
+	resumed.Definition.State.SnapshotID = "snapshot-a"
+	resumed.SourceDigest, _ = DigestJSON(resumed.Definition)
+	resumeIntent, err := BuildIntent(resumed, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1)
+	if err != nil || resumeIntent.StateDisposition != "resume" {
+		t.Fatalf("resume intent=(%+v, %v)", resumeIntent, err)
+	}
+	for name, policy := range map[string]admission.SitePolicy{
+		"optional": {Tenants: []admission.TenantRule{{TenantID: "tenant-a", AuthorizedEffects: &admission.AuthorizedEffectsPolicy{Mode: admission.AuthorizedEffectsOptional}}}},
+		"required": {Tenants: []admission.TenantRule{{TenantID: "tenant-a", AuthorizedEffects: &admission.AuthorizedEffectsPolicy{Mode: admission.AuthorizedEffectsRequired}}}},
+	} {
+		if mode, err := defaultEffectMode(policy, "tenant-a"); err != nil || mode == "" {
+			t.Fatalf("%s effect mode=(%q, %v)", name, mode, err)
+		}
+	}
+	invalidEffects := admission.SitePolicy{Tenants: []admission.TenantRule{{
+		TenantID: "tenant-a", AuthorizedEffects: &admission.AuthorizedEffectsPolicy{Mode: "invalid"},
+	}}}
+	if _, err := defaultEffectMode(invalidEffects, "tenant-a"); err == nil {
+		t.Fatal("invalid authorized-effects policy accepted")
+	}
+	if _, err := defaultEffectMode(admission.SitePolicy{}, "tenant-a"); err == nil {
+		t.Fatal("missing tenant policy accepted")
 	}
 }
 

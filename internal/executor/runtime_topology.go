@@ -100,6 +100,7 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 		ActionApprovalThreshold: workload.Runtime.ActionApprovalThreshold,
 		ActionContextRequired:   workload.Runtime.ActionContextRequired,
 		ActionAuthorities:       cloneGrantActionAuthorities(workload.Runtime.ActionAuthorities),
+		ControllerEvents:        workload.Runtime.ControllerEvents,
 	}
 	if imageConfigDigest.MatchString(workload.Runtime.CapsuleDigest) && imageConfigDigest.MatchString(workload.Runtime.PolicyDigest) {
 		grant.RuntimeRef = RuntimeRef(workload.TenantID, workload.InstanceID)
@@ -128,7 +129,7 @@ func cloneGrantActionAuthorities(authorities []gateway.GrantActionAuthority) []g
 
 func (s *Server) desiredRelay(workload Workload) RelaySpec {
 	grantDir := ""
-	if workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) > 0 || len(workload.Runtime.ConnectorIDs) > 0 || workload.Runtime.ServicePort > 0 {
+	if workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) > 0 || len(workload.Runtime.ConnectorIDs) > 0 || workload.Runtime.ControllerEvents || workload.Runtime.ServicePort > 0 {
 		grantDir = gateway.GrantDirectory(s.secure.grantRoot, workload.Runtime.GrantID)
 	}
 	return RelaySpec{
@@ -137,7 +138,7 @@ func (s *Server) desiredRelay(workload Workload) RelaySpec {
 		GrantDir: grantDir, TenantID: workload.TenantID, InstanceID: workload.InstanceID,
 		Generation: workload.Runtime.Generation, RelayGID: s.secure.relayGID,
 		Inference: workload.Runtime.Inference, Connector: len(workload.Runtime.ConnectorIDs) > 0,
-		Egress: len(workload.Runtime.EgressRouteIDs) > 0, ServicePort: workload.Runtime.ServicePort,
+		Egress: len(workload.Runtime.EgressRouteIDs) > 0, ControllerEvents: workload.Runtime.ControllerEvents, ServicePort: workload.Runtime.ServicePort,
 		RelayIP: workload.Runtime.RelayIP, AgentIP: workload.Runtime.AgentIP,
 		MemoryBytes: defaultRelayMemory, CPUMillis: defaultRelayCPU, PIDs: defaultRelayPIDs,
 	}

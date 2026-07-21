@@ -273,7 +273,7 @@ Activation retains the node receipt key before the enrollment exchange, so a los
 response is recovered by rerunning the same command rather than creating a second
 node identity. Its output supplies the exact installer argument array.
 
-Next, build the chosen Hermes or OpenClaw adapter and create its portable
+Next, build the Hermes adapter and create its portable
 definition. Publish the inspected archive and issue finite controller authority
 from the trusted workstation:
 

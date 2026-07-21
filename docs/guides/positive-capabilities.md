@@ -18,7 +18,10 @@ replace unrestricted container privileges.
 - service is one capsule-declared port reached through an authenticated loopback
   gateway path, not a raw agent container port. For configured POST operations, a
   service-scoped off-node tenant key can additionally authorize one exact JSON task
-  request.
+  request; and
+- controller events let an admitted instance publish bounded status and findings
+  over a durable at-least-once node uplink. Gateway derives the workload identity,
+  and the event carries no command authority.
 
 Signed HTTP(S) egress uses separate named routes. Steward provides no raw TCP/UDP,
 default-allow network, host bind mount, caller-selected environment, or Docker socket.
@@ -31,6 +34,8 @@ tenant-scoped action permit that signs the exact request bytes. The signing key
 stays off-node; Gateway spends the authorization and records the permit and request
 digests before the effect. See
 [Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
+See [Receive events from running agents]({{ '/guides/controller-events/' |
+relative_url }}) for event delivery, retention, and trust limits.
 For sensitive effects, signed tenant policy can require this boundary, pin action
 keys and an approval threshold to connector IDs, prohibit generic egress, and
 require exact single-request or bounded-bundle authority with format-5 or format-6

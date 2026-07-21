@@ -32,7 +32,7 @@ var completionTree = map[string][]string{
 	"task":                        {"run", "issue", "verify", "audit", "submit", "status", "observe", "wait"},
 	"executor-command":            {"delegation", "issue", "verify"},
 	"executor-command delegation": {"issue", "verify"},
-	"control":                     {"pki", "tenant", "operator", "enrollment", "node", "node-credential", "snapshot", "operations", "quota", "freeze", "attention", "incident", "agent", "command", "credential", "evidence", "evidence-capture", "support-bundle"},
+	"control":                     {"pki", "tenant", "operator", "enrollment", "node", "node-credential", "snapshot", "operations", "quota", "freeze", "attention", "incident", "agent", "event", "command", "credential", "evidence", "evidence-capture", "support-bundle"},
 	"control pki":                 {"create"},
 	"control tenant":              {"create", "list"},
 	"control operator":            {"issue", "revoke"},
@@ -48,6 +48,7 @@ var completionTree = map[string][]string{
 	"control attention":        {"list"},
 	"control incident":         {"timeline"},
 	"control agent":            {"list"},
+	"control event":            {"list"},
 	"control command":          {"submit", "status", "list"},
 	"control credential":       {"list"},
 	"control evidence":         {"status", "export", "verify"},
@@ -70,7 +71,7 @@ var completionTree = map[string][]string{
 }
 
 var completionFlags = map[string][]string{
-	"site init":                         {"-site-id", "-tenant-id", "-repository", "-service-id", "-service-ids", "-connector-id", "-control-server-names", "-authorized-effects", "-dry-run"},
+	"site init":                         {"-site-id", "-tenant-id", "-repository", "-service-id", "-service-ids", "-connector-id", "-connector-ids", "-control-server-names", "-authorized-effects", "-dry-run"},
 	"site verify":                       {"-site-root-public-key"},
 	"site connect":                      {"-context", "-operator-token-out", "-request-id", "-node-id", "-site-root-public-key", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"site task connect":                 {"-context", "-trust", "-gateway-url", "-gateway-token-file", "-task-key", "-task-key-id", "-site-root-public-key"},
@@ -108,6 +109,7 @@ var completionFlags = map[string][]string{
 	"control attention list":            {"-tenant-id", "-reason", "-cursor", "-limit"},
 	"control incident timeline":         {"-tenant-id", "-node-id", "-kind", "-severity", "-cursor", "-limit"},
 	"control agent list":                {"-tenant-id", "-node-id", "-status", "-cursor", "-limit"},
+	"control event list":                {"-tenant-id", "-after", "-limit", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"control command submit":            {"-tenant-id", "-node-id", "-command"},
 	"control command status":            {"-tenant-id", "-node-id", "-command-id"},
 	"control command list":              {"-tenant-id", "-node-id", "-state", "-terminal-status", "-cursor", "-limit"},
@@ -351,10 +353,16 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 		leaf := completionLeafPath(arguments[:len(arguments)-2])
 		if previous == "-agent" || previous == "-runtime" &&
 			(leaf == "agent init" || leaf == "agent create" || strings.HasPrefix(leaf, "agent create ")) {
-			return matchingCandidates([]string{"hermes", "openclaw"}, current)
+			return matchingCandidates([]string{"hermes"}, current)
 		}
 		if previous == "-preset" && leaf == "gateway connector set" {
-			return matchingCandidates([]string{"github-issues"}, current)
+			return matchingCandidates([]string{
+				"claude-code-worker",
+				"codex-worker",
+				"github-issues",
+				"research-extract",
+				"research-search",
+			}, current)
 		}
 		if previous == "-provider" && leaf == "gateway inference set" {
 			return matchingCandidates([]string{"anthropic", "compatible", "litellm", "llamacpp", "lmstudio", "localai", "mistral", "ollama", "openai", "openrouter", "sglang", "tgi", "vllm"}, current)

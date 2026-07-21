@@ -190,6 +190,7 @@ const runtimeRelayIPLabel = "io.hardrails.runtime.relay-ip"
 const runtimeAgentIPLabel = "io.hardrails.runtime.agent-ip"
 const runtimeEgressRoutesLabel = "io.hardrails.runtime.egress-routes"
 const runtimeConnectorsLabel = "io.hardrails.runtime.connectors"
+const runtimeControllerEventsLabel = "io.hardrails.runtime.controller-events"
 const runtimeEffectModeLabel = "io.hardrails.runtime.effect-mode"
 const runtimeActionApprovalThresholdLabel = "io.hardrails.runtime.action-approval-threshold"
 const runtimeActionContextRequiredLabel = "io.hardrails.runtime.action-context-required"
@@ -556,7 +557,7 @@ func reservationFromLabels(labels map[string]string) (CapacityReservation, strin
 	reservation := CapacityReservation{Workloads: 1, MemoryBytes: memory, CPUMillis: cpu, PIDs: pids}
 	runtimeLabels := []string{runtimeGrantLabel, runtimeNodeIDLabel, runtimeInferenceLabel, runtimeModelLabel, runtimeRouteLabel,
 		runtimeServicePortLabel, runtimeServiceIDLabel, runtimeTaskAuthoritiesLabel, runtimeGenerationLabel, runtimeSubnetLabel, runtimeGatewayLabel,
-		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel, runtimeConnectorsLabel, runtimeEffectModeLabel, runtimeActionAuthoritiesLabel,
+		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel, runtimeConnectorsLabel, runtimeControllerEventsLabel, runtimeEffectModeLabel, runtimeActionAuthoritiesLabel,
 		runtimeActionApprovalThresholdLabel, runtimeActionContextRequiredLabel,
 		runtimeCapsuleDigestLabel, runtimePolicyDigestLabel, runtimeActivationIDLabel, runtimeActivationBeginDigestLabel}
 	hasRuntimeMetadata := labels[runtimeNetworkLabel] != ""
@@ -770,6 +771,7 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		labels[runtimeAgentIPLabel] = w.Runtime.AgentIP
 		labels[runtimeEgressRoutesLabel] = strings.Join(w.Runtime.EgressRouteIDs, ",")
 		labels[runtimeConnectorsLabel] = strings.Join(w.Runtime.ConnectorIDs, ",")
+		labels[runtimeControllerEventsLabel] = strconv.FormatBool(w.Runtime.ControllerEvents)
 		labels[runtimeEffectModeLabel] = w.Runtime.EffectMode
 		if w.Runtime.ActionApprovalThreshold > 0 {
 			labels[runtimeActionApprovalThresholdLabel] = strconv.Itoa(w.Runtime.ActionApprovalThreshold)
@@ -787,6 +789,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		labels[runtimeActivationBeginDigestLabel] = w.Runtime.ActivationBeginDigest
 	}
 	environment := []string{"HOME=" + home, "TMPDIR=/tmp"}
+	if toolProfile, ok := hermesToolProfileForProfileID(w.ProfileID); ok {
+		environment = append(environment, "STEWARD_HERMES_PROFILE="+toolProfile)
+	}
 	if w.Runtime != nil && w.Runtime.Inference {
 		environment = append(environment,
 			"OPENAI_BASE_URL=http://steward-relay:8080/v1", "OPENAI_API_BASE=http://steward-relay:8080/v1",
@@ -801,6 +806,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 	}
 	if w.Runtime != nil && len(w.Runtime.ConnectorIDs) > 0 {
 		environment = append(environment, "STEWARD_CONNECTOR_URL=http://steward-relay:8081")
+	}
+	if w.Runtime != nil && w.Runtime.ControllerEvents {
+		environment = append(environment, "STEWARD_EVENT_URL=http://steward-relay:8083/v1/events")
 	}
 	dns := []string(nil)
 	if w.Runtime != nil {
@@ -940,8 +948,12 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs}) && hasExactStateMount(payload.Mounts, *state)
 	}
 	var runtimeGrant *RuntimeGrant
+	toolProfileHardened := true
+	if toolProfile, ok := hermesToolProfileForProfileID(labels["io.hardrails.profile"]); ok {
+		toolProfileHardened = contains(payload.Config.Env, "STEWARD_HERMES_PROFILE="+toolProfile)
+	}
 	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == "" &&
-		labels[runtimeNodeIDLabel] == "" && labels[runtimeConnectorsLabel] == "" && labels[runtimeServiceIDLabel] == "" && labels[runtimeTaskAuthoritiesLabel] == "" &&
+		labels[runtimeNodeIDLabel] == "" && labels[runtimeConnectorsLabel] == "" && labels[runtimeControllerEventsLabel] == "" && labels[runtimeServiceIDLabel] == "" && labels[runtimeTaskAuthoritiesLabel] == "" &&
 		labels[runtimeEffectModeLabel] == "" && labels[runtimeActionApprovalThresholdLabel] == "" && labels[runtimeActionContextRequiredLabel] == "" && labels[runtimeActionAuthoritiesLabel] == "" &&
 		labels[runtimeCapsuleDigestLabel] == "" && labels[runtimePolicyDigestLabel] == "" &&
 		labels[runtimeActivationIDLabel] == "" && labels[runtimeActivationBeginDigestLabel] == "" &&
@@ -949,6 +961,10 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	if labels[runtimeNetworkLabel] != "" || labels[runtimeGrantLabel] != "" {
 		servicePort, serviceErr := strconv.Atoi(labels[runtimeServicePortLabel])
 		inference, inferenceErr := strconv.ParseBool(labels[runtimeInferenceLabel])
+		controllerEvents, controllerEventsErr := false, error(nil)
+		if labels[runtimeControllerEventsLabel] != "" {
+			controllerEvents, controllerEventsErr = strconv.ParseBool(labels[runtimeControllerEventsLabel])
+		}
 		generation, generationErr := strconv.ParseUint(labels[runtimeGenerationLabel], 10, 64)
 		approvalThreshold, approvalThresholdErr := 0, error(nil)
 		if labels[runtimeActionApprovalThresholdLabel] != "" {
@@ -975,6 +991,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			RelayIP: labels[runtimeRelayIPLabel], AgentIP: labels[runtimeAgentIPLabel],
 			EgressRouteIDs:          splitRouteIDs(labels[runtimeEgressRoutesLabel]),
 			ConnectorIDs:            splitRouteIDs(labels[runtimeConnectorsLabel]),
+			ControllerEvents:        controllerEvents,
 			EffectMode:              labels[runtimeEffectModeLabel],
 			ActionApprovalThreshold: approvalThreshold,
 			ActionContextRequired:   contextRequired,
@@ -984,12 +1001,12 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			ActivationBeginDigest: labels[runtimeActivationBeginDigestLabel],
 		}
 		authorizedEffects := runtimeGrant.EffectMode == gateway.EffectModeAuthorized
-		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && approvalThresholdErr == nil && contextRequiredErr == nil &&
+		runtimeHardened = serviceErr == nil && inferenceErr == nil && controllerEventsErr == nil && generationErr == nil && approvalThresholdErr == nil && contextRequiredErr == nil &&
 			taskAuthorityErr == nil && actionAuthorityErr == nil && generation > 0 &&
 			(len(taskAuthorities) == 0 && runtimeGrant.ServiceID == "" ||
 				len(taskAuthorities) > 0 && egressRouteID.MatchString(runtimeGrant.ServiceID) && servicePort > 0) &&
-			((len(taskAuthorities) > 0 || authorizedEffects) && boundedText(runtimeGrant.NodeID, 128) ||
-				len(taskAuthorities) == 0 && !authorizedEffects && runtimeGrant.NodeID == "") &&
+			((len(taskAuthorities) > 0 || authorizedEffects || runtimeGrant.ControllerEvents) && boundedText(runtimeGrant.NodeID, 128) ||
+				len(taskAuthorities) == 0 && !authorizedEffects && !runtimeGrant.ControllerEvents && runtimeGrant.NodeID == "") &&
 			validRuntimeEffectAuthority(
 				runtimeGrant.EffectMode, runtimeGrant.ActionApprovalThreshold, runtimeGrant.ActionContextRequired,
 				runtimeGrant.EgressRouteIDs, runtimeGrant.ConnectorIDs, actionAuthorities,
@@ -1020,6 +1037,9 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		if len(runtimeGrant.ConnectorIDs) > 0 {
 			runtimeHardened = runtimeHardened && contains(payload.Config.Env, "STEWARD_CONNECTOR_URL=http://steward-relay:8081")
 		}
+		if runtimeGrant.ControllerEvents {
+			runtimeHardened = runtimeHardened && contains(payload.Config.Env, "STEWARD_EVENT_URL=http://steward-relay:8083/v1/events")
+		}
 	}
 	return ObservedWorkload{
 		ImageID: observedImageID, RuntimeImageID: payload.Image,
@@ -1049,7 +1069,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			labels[workloadMemoryLabel] == strconv.FormatInt(payload.HostConfig.Memory, 10) &&
 			labels[workloadCPULabel] == strconv.FormatInt(payload.HostConfig.NanoCPUs/1_000_000, 10) &&
 			labels[workloadPIDsLabel] == strconv.FormatInt(payload.HostConfig.Pids, 10) &&
-			stateHardened &&
+			stateHardened && toolProfileHardened &&
 			contains(payload.Config.Env, "TMPDIR=/tmp") &&
 			payload.HostConfig.Runtime == "runsc" && runtimeHardened &&
 			payload.HostConfig.namespacesHardened() && payload.HostConfig.lifecycleHardened() &&
@@ -1070,6 +1090,19 @@ func splitRouteIDs(value string) []string {
 		return nil
 	}
 	return strings.Split(value, ",")
+}
+
+func hermesToolProfileForProfileID(profileID string) (string, bool) {
+	switch profileID {
+	case "hermes-v1@v1":
+		return "workspace", true
+	case "hermes-research-v1@v1":
+		return "research", true
+	case "hermes-developer-v1@v1":
+		return "developer", true
+	default:
+		return "", false
+	}
 }
 
 func decodeTaskAuthorityLabel(value string) ([]gateway.TaskAuthority, error) {

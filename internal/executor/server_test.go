@@ -450,7 +450,7 @@ func (d *fakeDocker) Logs(context.Context, string) (string, error) {
 }
 
 func validWorkload() string {
-	return `{"instance_id":"tenant-a/agent-1","tenant_id":"tenant-a","profile_id":"openclaw-v1","image":"registry.local/openclaw@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":["agent"],"resources":{"memory_bytes":1048576,"cpu_millis":100,"pids":64},"egress":{}}`
+	return `{"instance_id":"tenant-a/agent-1","tenant_id":"tenant-a","profile_id":"generic-v1","image":"registry.local/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":["agent"],"resources":{"memory_bytes":1048576,"cpu_millis":100,"pids":64},"egress":{}}`
 }
 
 func TestSecureAdmissionCreatesOnlyFromSignedIntersection(t *testing.T) {
@@ -3387,7 +3387,7 @@ func TestProvisionCreatesValidatedWorkload(t *testing.T) {
 	if res.Code != http.StatusCreated {
 		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
 	}
-	if len(docker.created) != 1 || docker.created[0].ProfileID != "openclaw-v1" {
+	if len(docker.created) != 1 || docker.created[0].ProfileID != "generic-v1" {
 		t.Fatalf("creates = %#v", docker.created)
 	}
 	if !strings.Contains(res.Body.String(), `"status":"created"`) {
@@ -3409,8 +3409,8 @@ func TestProvisionMapsMissingCreateDependencyToConflict(t *testing.T) {
 
 func TestProvisionIsIdempotentOnlyForTheSameImmutableWorkload(t *testing.T) {
 	w := Workload{
-		InstanceID: "tenant-a/agent-1", TenantID: "tenant-a", ProfileID: "openclaw-v1",
-		Image:     "registry.local/openclaw@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		InstanceID: "tenant-a/agent-1", TenantID: "tenant-a", ProfileID: "generic-v1",
+		Image:     "registry.local/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Command:   []string{"agent"},
 		Resources: Resources{MemoryBytes: 1048576, CPUMillis: 100, PIDs: 64},
 	}

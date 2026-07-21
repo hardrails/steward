@@ -68,7 +68,7 @@ func agentPublish(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	contract, ok := agentPublicationContractFor(bundle.Definition.Runtime.Engine)
+	contract, ok := agentPublicationContractFor(bundle.Definition.Runtime.Engine, bundle.Definition.EffectiveToolProfile())
 	if !ok {
 		return errors.New("agent runtime has no publishable Steward contract")
 	}
@@ -97,8 +97,9 @@ func agentPublish(arguments []string, stdout io.Writer) error {
 		},
 		Capabilities: admission.Capabilities{
 			State: bundle.Definition.State.Persistent, Inference: true, Service: true,
-			Egress:    len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
-			Connector: len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+			Egress:           len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
+			Connector:        len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+			ControllerEvents: bundle.Definition.Capabilities.ControllerEvents,
 		},
 		State:   admission.StateShape{SchemaVersion: "v1", Path: contract.statePath},
 		Service: admission.ServiceShape{ID: contract.serviceID, Port: contract.servicePort},
@@ -149,13 +150,17 @@ func agentPublish(arguments []string, stdout io.Writer) error {
 	})
 }
 
-func agentPublicationContractFor(runtime string) (agentPublicationContract, bool) {
+func agentPublicationContractFor(runtime, toolProfile string) (agentPublicationContract, bool) {
 	var ref admission.ProfileRef
 	switch runtime {
 	case "hermes":
-		ref = admission.ProfileRef{ID: "hermes-v1", Version: "v1"}
-	case "openclaw":
-		ref = admission.ProfileRef{ID: "openclaw-v1", Version: "v1"}
+		profileID, ok := map[string]string{
+			"workspace": "hermes-v1", "research": "hermes-research-v1", "developer": "hermes-developer-v1",
+		}[toolProfile]
+		if !ok {
+			return agentPublicationContract{}, false
+		}
+		ref = admission.ProfileRef{ID: profileID, Version: "v1"}
 	default:
 		return agentPublicationContract{}, false
 	}

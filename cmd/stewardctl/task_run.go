@@ -189,8 +189,6 @@ func createPromptTaskArtifacts(deploymentPath, prompt, taskID, requestedDirector
 	switch deployment.Admission.ServiceID {
 	case "hermes-api":
 		operationID, requestField = "hermes.run", "input"
-	case "openclaw-api":
-		operationID, requestField = "openclaw.run", "message"
 	default:
 		return promptTaskArtifacts{}, fmt.Errorf("task prompt mode does not recognize admitted service %q; use expert request flags", deployment.Admission.ServiceID)
 	}

@@ -25,20 +25,20 @@ import (
 func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	directory := t.TempDir()
 	var output bytes.Buffer
-	if err := run([]string{"agent", "init", "-runtime", "openclaw", "-name", "auditor", directory}, &output, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"agent", "init", "-runtime", "hermes", "-name", "auditor", directory}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	cueRaw, err := os.ReadFile(filepath.Join(directory, "Stewardfile.cue"))
-	if err != nil || !bytes.Contains(cueRaw, []byte(`adapter_contract: "steward.openclaw.v1"`)) {
+	if err != nil || !bytes.Contains(cueRaw, []byte(`adapter_contract: "steward.hermes-agent.v1"`)) {
 		t.Fatalf("Stewardfile=%s err=%v", cueRaw, err)
 	}
 	output.Reset()
-	if err := run([]string{"agent", "init", "-force", "-runtime", "openclaw", "-name", "auditor", directory}, &output, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"agent", "init", "-force", "-runtime", "hermes", "-name", "auditor", directory}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatalf("force init: %v", err)
 	}
 	definition := agentapp.Definition{
 		Schema: agentapp.DefinitionSchema, Name: "auditor",
-		Runtime:   agentapp.Runtime{Engine: "openclaw", Image: "example.invalid/openclaw@sha256:" + strings.Repeat("a", 64), AdapterContract: "steward.openclaw.v1"},
+		Runtime:   agentapp.Runtime{Engine: "hermes", Image: "example.invalid/hermes@sha256:" + strings.Repeat("a", 64), AdapterContract: "steward.hermes-agent.v1"},
 		Model:     agentapp.Model{Route: "local/default"},
 		Resources: agentapp.Resources{CPUMillis: 1000, MemoryMiB: 1024, DiskMiB: 2048, PIDs: 256},
 		Placement: agentapp.Placement{Architectures: []string{"amd64"}, Isolation: "hardened"},
@@ -62,7 +62,7 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	if err := run([]string{"agent", "build", "-file", definitionPath, "-out", bundlePath}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"runtime":"openclaw"`) {
+	if !strings.Contains(output.String(), `"runtime":"hermes"`) {
 		t.Fatalf("build output=%s", output.String())
 	}
 	policyPath := filepath.Join(directory, "policy.tar.gz")
@@ -115,7 +115,7 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	}
 	snapshot := agentapp.Snapshot{
 		Schema: agentapp.SnapshotSchema, ID: "snapshot-a", BundleDigest: bundleDigest,
-		RuntimeEngine: "openclaw", StateDigest: "sha256:" + strings.Repeat("b", 64),
+		RuntimeEngine: "hermes", StateDigest: "sha256:" + strings.Repeat("b", 64),
 		SourceLineage: "lineage-parent", CreatedAt: "2026-07-19T12:00:00Z",
 	}
 	snapshotRaw, _ := json.Marshal(snapshot)
@@ -161,12 +161,12 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 func TestAgentCreateUsesTheCanonicalInitPath(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "auditor")
 	var output bytes.Buffer
-	if err := run([]string{"agent", "create", "auditor", "-runtime", "openclaw", directory}, &output, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"agent", "create", "auditor", "-runtime", "hermes", directory}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(directory, "Stewardfile.cue"))
 	if err != nil || !bytes.Contains(raw, []byte(`name: "auditor"`)) ||
-		!bytes.Contains(raw, []byte(`engine: "openclaw"`)) {
+		!bytes.Contains(raw, []byte(`engine: "hermes"`)) {
 		t.Fatalf("Stewardfile=%s err=%v", raw, err)
 	}
 	if err := run([]string{"agent", "create", "auditor", "-name", "other", directory}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
@@ -190,12 +190,12 @@ func TestAgentCreateDefaultsToSameNamedProjectDirectory(t *testing.T) {
 	})
 
 	var output bytes.Buffer
-	if err := run([]string{"agent", "create", "auditor", "-runtime", "openclaw"}, &output, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"agent", "create", "auditor", "-runtime", "hermes"}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(root, "auditor", "Stewardfile.cue"))
 	if err != nil || !bytes.Contains(raw, []byte(`name: "auditor"`)) ||
-		!bytes.Contains(raw, []byte(`engine: "openclaw"`)) {
+		!bytes.Contains(raw, []byte(`engine: "hermes"`)) {
 		t.Fatalf("Stewardfile=%s err=%v", raw, err)
 	}
 	if strings.Contains(output.String(), `"file":"Stewardfile.cue"`) {
@@ -223,6 +223,7 @@ func TestAgentValidateAndForkRejectAmbiguousArguments(t *testing.T) {
 		{[]string{"agent"}, "agent requires"},
 		{[]string{"agent", "unknown"}, "unknown agent command"},
 		{[]string{"agent", "init", "-runtime", "unknown"}, "runtime must be"},
+		{[]string{"agent", "init", "-runtime", "openclaw"}, "runtime must be hermes"},
 		{[]string{"agent", "init", "-name", "INVALID"}, "agent name"},
 		{[]string{"agent", "init", "one", "two"}, "at most one"},
 		{[]string{"agent", "init", existing}, "already exists"},

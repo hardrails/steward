@@ -87,7 +87,7 @@ func TestComposedAgentCommandsRejectIncompleteAndConflictingInputs(t *testing.T)
 	if err := validateGeneratedTenantCommandKey(verified.policy, unrelated); err == nil {
 		t.Fatal("unrelated tenant command key was accepted")
 	}
-	if _, ok := agentPublicationContractFor("unsupported"); ok {
+	if _, ok := agentPublicationContractFor("unsupported", "workspace"); ok {
 		t.Fatal("unsupported runtime received a publication contract")
 	}
 	template := agentDelegationTemplate(admission.InstanceIntent{}, agentapp.Placement{
@@ -100,7 +100,7 @@ func TestComposedAgentCommandsRejectIncompleteAndConflictingInputs(t *testing.T)
 		t.Fatalf("derived placement template = %+v", template.Placement)
 	}
 	archive, manifestDigest, _, _ := writeImageImportArchive(t, directory)
-	bundle := publishedAgentBundle(t, "openclaw", "steward.local/agents@"+manifestDigest)
+	bundle := publishedAgentBundle(t, "hermes", "steward.local/agents@"+manifestDigest)
 	bundleRaw, err := agentapp.MarshalCanonical(bundle)
 	if err != nil {
 		t.Fatal(err)

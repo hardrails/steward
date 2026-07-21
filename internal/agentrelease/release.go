@@ -33,19 +33,12 @@ const (
 	MaxArchiveBytes       = int64(20 << 30)
 
 	CanaryKindHermesWorkspaceAuditV1        = "hermes_workspace_audit_v1"
-	CanaryKindOpenClawWorkspaceAuditV1      = "openclaw_workspace_audit_v1"
 	HermesServiceID                         = "hermes-api"
 	HermesOperationID                       = "hermes.run"
 	HermesWorkspaceAuditInput               = "STEWARD_WORKSPACE_AUDIT"
 	HermesSessionIDPrefix                   = "steward-activation"
 	HermesWorkspaceAuditEmptyFixtureID      = "steward.workspace-audit.empty.v1"
 	HermesWorkspaceAuditEmptyManifestDigest = "sha256:44bb67d3ad826643e50057a69657757316fd25dcd700a918a6db0a38924acec6"
-	OpenClawServiceID                       = "openclaw-api"
-	OpenClawOperationID                     = "openclaw.run"
-	OpenClawWorkspaceAuditMessage           = "Run the Steward workspace audit."
-	OpenClawSessionIDPrefix                 = "steward-activation"
-	OpenClawWorkspaceAuditFixtureID         = "steward.workspace-audit.qualification.v1"
-	OpenClawWorkspaceAuditManifestDigest    = "sha256:8a88036085cd27e3e0a85ab10f3fbfed492633fa76fd18a85bb478747c4d56d5"
 	SkillManifestArtifactKind               = "skill-manifest"
 )
 
@@ -144,11 +137,6 @@ type Verified struct {
 
 type hermesCanaryRequest struct {
 	Input     string `json:"input"`
-	SessionID string `json:"session_id"`
-}
-
-type openClawCanaryRequest struct {
-	Message   string `json:"message"`
 	SessionID string `json:"session_id"`
 }
 
@@ -262,8 +250,6 @@ func BuildCanaryRequest(recipe RequestRecipe, activationID string) ([]byte, erro
 	switch contract.Kind {
 	case CanaryKindHermesWorkspaceAuditV1:
 		request, err = json.Marshal(hermesCanaryRequest{Input: recipe.Input, SessionID: sessionID})
-	case CanaryKindOpenClawWorkspaceAuditV1:
-		request, err = json.Marshal(openClawCanaryRequest{Message: recipe.Input, SessionID: sessionID})
 	default:
 		return nil, invalid("request recipe contract is unavailable")
 	}
@@ -284,14 +270,6 @@ func CanaryContractForKind(kind string) (CanaryContract, bool) {
 			FixtureID:                       HermesWorkspaceAuditEmptyFixtureID,
 			ExpectedWorkspaceManifestDigest: HermesWorkspaceAuditEmptyManifestDigest,
 		}, true
-	case CanaryKindOpenClawWorkspaceAuditV1:
-		return CanaryContract{
-			Kind: kind, Profile: admission.ProfileRef{ID: "openclaw-v1", Version: "v1"},
-			ServiceID: OpenClawServiceID, OperationID: OpenClawOperationID,
-			Request:                         RequestRecipe{Input: OpenClawWorkspaceAuditMessage, SessionIDPrefix: OpenClawSessionIDPrefix},
-			FixtureID:                       OpenClawWorkspaceAuditFixtureID,
-			ExpectedWorkspaceManifestDigest: OpenClawWorkspaceAuditManifestDigest,
-		}, true
 	default:
 		return CanaryContract{}, false
 	}
@@ -299,7 +277,7 @@ func CanaryContractForKind(kind string) (CanaryContract, bool) {
 
 // CanaryContractForRequest rejects every request recipe outside the compiled-in set.
 func CanaryContractForRequest(request RequestRecipe) (CanaryContract, bool) {
-	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1, CanaryKindOpenClawWorkspaceAuditV1} {
+	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1} {
 		contract, _ := CanaryContractForKind(kind)
 		if contract.Request == request {
 			return contract, true
@@ -310,7 +288,7 @@ func CanaryContractForRequest(request RequestRecipe) (CanaryContract, bool) {
 
 // CanaryContractForOperation rejects every service operation outside the compiled-in set.
 func CanaryContractForOperation(serviceID, operationID string) (CanaryContract, bool) {
-	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1, CanaryKindOpenClawWorkspaceAuditV1} {
+	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1} {
 		contract, _ := CanaryContractForKind(kind)
 		if contract.ServiceID == serviceID && contract.OperationID == operationID {
 			return contract, true
@@ -321,7 +299,7 @@ func CanaryContractForOperation(serviceID, operationID string) (CanaryContract, 
 
 // CanaryContractForService rejects every service outside the compiled-in set.
 func CanaryContractForService(serviceID string) (CanaryContract, bool) {
-	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1, CanaryKindOpenClawWorkspaceAuditV1} {
+	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1} {
 		contract, _ := CanaryContractForKind(kind)
 		if contract.ServiceID == serviceID {
 			return contract, true

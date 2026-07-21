@@ -607,7 +607,7 @@ service` directly to choose non-default limits or inspect the policy atomically:
 ```console
 sudo stewardctl gateway service set \
   -config /etc/steward/gateway.json \
-  -agent openclaw \
+  -agent hermes \
   -tenant-budget tenant-a=4194304
 sudo stewardctl gateway service list -config /etc/steward/gateway.json
 sudo stewardctl gateway service trust \
@@ -615,7 +615,7 @@ sudo stewardctl gateway service trust \
   > hermes-service-trust.json
 ```
 
-Use `-agent hermes` for the built-in Hermes contract. These presets select only
+The `-agent hermes` preset selects only
 the compiled-in service ID, operation, `POST /v1/runs` path, lifecycle status
 prefix, and hardened limits. They cannot be combined with `-service-id`,
 `-operation`, or `-lifecycle`. Use the explicit flags below for another finite

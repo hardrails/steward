@@ -63,6 +63,7 @@ type Grant struct {
 	TaskAuthorities         []TaskAuthority        `json:"task_authorities,omitempty"`
 	EgressRouteIDs          []string               `json:"egress_route_ids,omitempty"`
 	ConnectorIDs            []string               `json:"connector_ids,omitempty"`
+	ControllerEvents        bool                   `json:"controller_events,omitempty"`
 	Active                  bool                   `json:"active"`
 }
 
@@ -96,6 +97,7 @@ type grantResponse struct {
 	ServicePath       string `json:"service_path,omitempty"`
 	EgressSocket      string `json:"egress_socket,omitempty"`
 	ConnectorSocket   string `json:"connector_socket,omitempty"`
+	EventSocket       string `json:"event_socket,omitempty"`
 	RoutePolicyDigest string `json:"route_policy_digest,omitempty"`
 	Active            bool   `json:"active"`
 }
@@ -129,6 +131,7 @@ type retainedGrant struct {
 	TaskAuthorities         []TaskAuthority         `json:"task_authorities,omitempty"`
 	EgressRouteIDs          []string                `json:"egress_route_ids,omitempty"`
 	ConnectorIDs            []string                `json:"connector_ids,omitempty"`
+	ControllerEvents        bool                    `json:"controller_events,omitempty"`
 	Active                  bool                    `json:"active"`
 	RoutePolicyDigest       string                  `json:"route_policy_digest,omitempty"`
 	CredentialBindingDigest string                  `json:"credential_binding_digest,omitempty"`
@@ -150,7 +153,7 @@ func retainGrant(grant Grant, policyDigest, credentialDigest string, callMaps ..
 		RouteID:           grant.RouteID, ModelAlias: grant.ModelAlias, Service: grant.Service, ServiceID: grant.ServiceID, ServiceURL: grant.ServiceURL,
 		TaskAuthorities: append([]TaskAuthority(nil), grant.TaskAuthorities...),
 		EgressRouteIDs:  append([]string(nil), grant.EgressRouteIDs...), Active: grant.Active,
-		ConnectorIDs:      append([]string(nil), grant.ConnectorIDs...),
+		ConnectorIDs: append([]string(nil), grant.ConnectorIDs...), ControllerEvents: grant.ControllerEvents,
 		RoutePolicyDigest: policyDigest, CredentialBindingDigest: credentialDigest,
 	}
 	if len(callMaps) > 0 {
@@ -179,7 +182,7 @@ func (retained retainedGrant) grant() Grant {
 		RouteID:           retained.RouteID, ModelAlias: retained.ModelAlias, Service: retained.Service, ServiceID: retained.ServiceID, ServiceURL: retained.ServiceURL,
 		TaskAuthorities: append([]TaskAuthority(nil), retained.TaskAuthorities...),
 		EgressRouteIDs:  append([]string(nil), retained.EgressRouteIDs...),
-		ConnectorIDs:    append([]string(nil), retained.ConnectorIDs...), Active: retained.Active,
+		ConnectorIDs:    append([]string(nil), retained.ConnectorIDs...), ControllerEvents: retained.ControllerEvents, Active: retained.Active,
 	}
 	if grant.EffectMode == EffectModeAuthorized && grant.ActionApprovalThreshold == 0 {
 		// Gateway state format 5 predates explicit thresholds and accepted one
@@ -192,7 +195,14 @@ func (retained retainedGrant) grant() Grant {
 type snapshot struct {
 	Version int             `json:"version"`
 	Grants  []retainedGrant `json:"grants"`
+	Events  []InstanceEvent `json:"events,omitempty"`
 }
+
+const (
+	gatewayStateReadMinVersion = 1
+	gatewayStateReadMaxVersion = 8
+	gatewayStateWriteVersion   = 8
+)
 
 type grantLease struct {
 	context context.Context
@@ -238,6 +248,8 @@ type Server struct {
 	listeners                map[string]net.Listener
 	egressListeners          map[string]net.Listener
 	connectorListeners       map[string]net.Listener
+	eventListeners           map[string]net.Listener
+	events                   []InstanceEvent
 	egressStats              map[string]EgressStats
 	connectorCalls           map[string]map[string][]string
 	connectorSpends          map[string]connectorSpendOwner
@@ -309,7 +321,7 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		connectorGlobalSemaphore: make(chan struct{}, maxConnectorGlobalConcurrent),
 		connectorGrantSemaphores: make(map[string]chan struct{}),
 		grants:                   make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
-		listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener), connectorListeners: make(map[string]net.Listener),
+		listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener), connectorListeners: make(map[string]net.Listener), eventListeners: make(map[string]net.Listener),
 		serviceSemaphores: make(map[string]chan struct{}), egressStats: make(map[string]EgressStats),
 		connectorCalls:  make(map[string]map[string][]string),
 		connectorSpends: receiptIndex.spends, serviceTasks: receiptIndex.tasks, serviceTaskPermits: receiptIndex.permits,
@@ -586,6 +598,12 @@ func (s *Server) Start(ctx context.Context) error {
 				return fmt.Errorf("restore connector grant %q: %w", id, err)
 			}
 		}
+		if grant.ControllerEvents {
+			if err := s.listenEventGrantLocked(id); err != nil {
+				s.mu.Unlock()
+				return fmt.Errorf("restore controller event grant %q: %w", id, err)
+			}
+		}
 	}
 	s.mu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(s.config.ControlSocket), 0o750); err != nil {
@@ -635,6 +653,8 @@ func (s *Server) ControlHandler() http.Handler {
 	mux.HandleFunc("GET /v1/grants/{id}", s.getGrant)
 	mux.HandleFunc("GET /v1/grants/{id}/egress", s.getEgressStats)
 	mux.HandleFunc("DELETE /v1/grants/{id}", s.unregister)
+	mux.HandleFunc("GET /v1/events", s.listInstanceEvents)
+	mux.HandleFunc("POST /v1/events/ack", s.ackInstanceEvents)
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -758,6 +778,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	hadInferenceListener := s.listeners[grant.GrantID] != nil
 	hadEgressListener := s.egressListeners[grant.GrantID] != nil
 	hadConnectorListener := s.connectorListeners[grant.GrantID] != nil
+	hadEventListener := s.eventListeners[grant.GrantID] != nil
 	grantDirectory := GrantDirectory(s.config.GrantRoot, grant.GrantID)
 	_, directoryErr := os.Stat(grantDirectory)
 	hadGrantDirectory := directoryErr == nil
@@ -789,6 +810,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 			_ = s.connectorListeners[grant.GrantID].Close()
 			delete(s.connectorListeners, grant.GrantID)
 			_ = os.Remove(connectorSocketPath(s.config.GrantRoot, grant.GrantID))
+		}
+		if !hadEventListener && s.eventListeners[grant.GrantID] != nil {
+			_ = s.eventListeners[grant.GrantID].Close()
+			delete(s.eventListeners, grant.GrantID)
+			_ = os.Remove(eventSocketPath(s.config.GrantRoot, grant.GrantID))
 		}
 		if !hadGrantDirectory {
 			_ = os.RemoveAll(grantDirectory)
@@ -831,6 +857,13 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if grant.ControllerEvents {
+		if err := s.listenEventGrantLocked(grant.GrantID); err != nil {
+			rollback()
+			writeGatewayError(w, http.StatusServiceUnavailable, "socket_unavailable", err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusCreated, s.response(grant))
 }
 
@@ -848,7 +881,8 @@ func validServiceEnrichment(current, next Grant) bool {
 		slices.EqualFunc(current.ActionAuthorities, next.ActionAuthorities, grantActionAuthoritiesEqual) &&
 		current.RouteID == next.RouteID && current.ModelAlias == next.ModelAlias && current.Service == next.Service &&
 		current.ServiceID == next.ServiceID && slices.Equal(current.TaskAuthorities, next.TaskAuthorities) &&
-		slices.Equal(current.EgressRouteIDs, next.EgressRouteIDs) && slices.Equal(current.ConnectorIDs, next.ConnectorIDs)
+		slices.Equal(current.EgressRouteIDs, next.EgressRouteIDs) && slices.Equal(current.ConnectorIDs, next.ConnectorIDs) &&
+		current.ControllerEvents == next.ControllerEvents
 }
 
 func grantsEqual(left, right Grant) bool {
@@ -862,7 +896,8 @@ func grantsEqual(left, right Grant) bool {
 		left.RouteID == right.RouteID && left.ModelAlias == right.ModelAlias &&
 		left.Service == right.Service && left.ServiceID == right.ServiceID && left.ServiceURL == right.ServiceURL &&
 		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
-		left.Active == right.Active && slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
+		left.Active == right.Active && slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs) &&
+		left.ControllerEvents == right.ControllerEvents
 }
 
 func GrantsEqual(left, right Grant) bool { return grantsEqual(left, right) }
@@ -953,6 +988,10 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 		_ = listener.Close()
 		delete(s.connectorListeners, id)
 	}
+	if listener := s.eventListeners[id]; listener != nil {
+		_ = listener.Close()
+		delete(s.eventListeners, id)
+	}
 	delete(s.egressStats, id)
 	delete(s.serviceSemaphores, id)
 	delete(s.connectorGrantSemaphores, id)
@@ -965,7 +1004,7 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 func (s *Server) validGrant(grant Grant) bool {
 	if !validGrantID(grant.GrantID) || !bounded(grant.TenantID, 128) || !bounded(grant.InstanceID, 256) || grant.Generation == 0 ||
 		grant.GrantID != GrantID(grant.TenantID, grant.InstanceID, grant.Generation) ||
-		(grant.RouteID == "" && !grant.Service && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0) ||
+		(grant.RouteID == "" && !grant.Service && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 && !grant.ControllerEvents) ||
 		len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) ||
 		(!grant.Service && (grant.ServiceID != "" || len(grant.TaskAuthorities) != 0)) ||
 		(grant.EffectMode != "" && grant.EffectMode != EffectModeStandard && grant.EffectMode != EffectModeAuthorized) ||
@@ -977,7 +1016,7 @@ func (s *Server) validGrant(grant Grant) bool {
 	if grant.ServiceID != "" && !routeID(grant.ServiceID) {
 		return false
 	}
-	nodeRequired := len(grant.TaskAuthorities) > 0 || grant.EffectMode == EffectModeAuthorized
+	nodeRequired := len(grant.TaskAuthorities) > 0 || grant.EffectMode == EffectModeAuthorized || grant.ControllerEvents
 	if nodeRequired && !bounded(grant.NodeID, 128) || !nodeRequired && grant.NodeID != "" ||
 		len(grant.TaskAuthorities) == 0 && grant.ServiceID != "" {
 		return false
@@ -1038,6 +1077,9 @@ func (s *Server) validGrant(grant Grant) bool {
 		}
 	}
 	if len(grant.ConnectorIDs) > 0 && grant.RuntimeRef == "" {
+		return false
+	}
+	if grant.ControllerEvents && grant.RuntimeRef == "" {
 		return false
 	}
 	if len(grant.ConnectorIDs) > 0 {
@@ -1259,6 +1301,9 @@ func (s *Server) response(grant Grant) grantResponse {
 	}
 	if len(grant.ConnectorIDs) > 0 {
 		result.ConnectorSocket = connectorSocketPath(s.config.GrantRoot, grant.GrantID)
+	}
+	if grant.ControllerEvents {
+		result.EventSocket = eventSocketPath(s.config.GrantRoot, grant.GrantID)
 	}
 	return result
 }
@@ -1678,7 +1723,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 	}
 	var state snapshot
 	if err := dsse.DecodeStrictInto(raw, maxStateBytes, &state); err != nil ||
-		(state.Version < 1 || state.Version > 7) || len(state.Grants) > 4096 {
+		(state.Version < gatewayStateReadMinVersion || state.Version > gatewayStateReadMaxVersion) || len(state.Grants) > 4096 {
 		return StateSummary{}, errors.New("gateway state is invalid")
 	}
 	contextLocked := false
@@ -1700,7 +1745,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 			return StateSummary{}, errors.New("gateway state contains a retained grant without a durable route policy binding")
 		}
 		if len(grant.ConnectorIDs) > 0 && state.Version != 3 {
-			if state.Version < 4 || state.Version > 7 {
+			if state.Version < 4 || state.Version > 8 {
 				return StateSummary{}, errors.New("gateway state contains a connector grant without durable call accounting")
 			}
 		}
@@ -1715,6 +1760,9 @@ func (s *Server) loadExisting() (StateSummary, error) {
 		}
 		if grant.ActionContextRequired && state.Version < 7 {
 			return StateSummary{}, errors.New("gateway state contains context-bound action authority without its durable state format")
+		}
+		if grant.ControllerEvents && state.Version < 8 {
+			return StateSummary{}, errors.New("gateway state contains controller event authority without its durable state format")
 		}
 		contextLocked = contextLocked || grant.ActionContextRequired
 		if retained.RoutePolicyDigest != effectivePolicyDigest || retained.CredentialBindingDigest != effectiveCredentialDigest {
@@ -1731,6 +1779,16 @@ func (s *Server) loadExisting() (StateSummary, error) {
 			s.connectorCalls[grant.GrantID] = calls
 		}
 	}
+	if state.Version < 8 && len(state.Events) != 0 {
+		return StateSummary{}, errors.New("gateway state contains controller events without their durable state format")
+	}
+	if err := validateRetainedEvents(state.Events); err != nil {
+		return StateSummary{}, err
+	}
+	s.events = make([]InstanceEvent, len(state.Events))
+	for index, event := range state.Events {
+		s.events[index] = cloneEvent(event)
+	}
 	return StateSummary{
 		Present: true, FormatVersion: state.Version, RetainedGrants: len(state.Grants), contextLocked: contextLocked,
 	}, nil
@@ -1744,7 +1802,11 @@ func (s *Server) persistLocked() error {
 		))
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].GrantID < grants[j].GrantID })
-	raw, err := json.Marshal(snapshot{Version: 7, Grants: grants})
+	events := make([]InstanceEvent, len(s.events))
+	for index, event := range s.events {
+		events[index] = cloneEvent(event)
+	}
+	raw, err := json.Marshal(snapshot{Version: gatewayStateWriteVersion, Grants: grants, Events: events})
 	if err != nil {
 		return err
 	}
@@ -1839,6 +1901,10 @@ func (s *Server) closeGrantListeners() {
 	for id, listener := range s.connectorListeners {
 		_ = listener.Close()
 		delete(s.connectorListeners, id)
+	}
+	for id, listener := range s.eventListeners {
+		_ = listener.Close()
+		delete(s.eventListeners, id)
 	}
 }
 

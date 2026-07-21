@@ -26,14 +26,13 @@ import (
 const (
 	PlanSchemaV1 = "steward.activation-plan.v1"
 
-	TransportNodeLocal                    = "node_local"
-	TransportControlUplink                = "control_uplink"
-	CanaryHermesWorkspaceAuditV1          = agentrelease.CanaryKindHermesWorkspaceAuditV1
-	CanaryOpenClawWorkspaceAuditV1        = agentrelease.CanaryKindOpenClawWorkspaceAuditV1
-	MaxPlanBytes                          = 64 << 10
-	MaxActivationArchiveBytes      int64  = ocibundle.DefaultMaxArchiveBytes
-	MinStepTimeoutSeconds          uint32 = 1
-	MaxStepTimeoutSeconds          uint32 = 24 * 60 * 60
+	TransportNodeLocal                  = "node_local"
+	TransportControlUplink              = "control_uplink"
+	CanaryHermesWorkspaceAuditV1        = agentrelease.CanaryKindHermesWorkspaceAuditV1
+	MaxPlanBytes                        = 64 << 10
+	MaxActivationArchiveBytes    int64  = ocibundle.DefaultMaxArchiveBytes
+	MinStepTimeoutSeconds        uint32 = 1
+	MaxStepTimeoutSeconds        uint32 = 24 * 60 * 60
 )
 
 var (

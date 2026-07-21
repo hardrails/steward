@@ -1,0 +1,66 @@
+---
+title: Receive events from running agents
+description: Use Steward's durable instance-to-controller event channel for bounded status, findings, and progress without granting command authority.
+section: How-to guide
+---
+
+# Receive events from running agents
+
+A long-running agent sometimes needs to report a finding or status change when no
+task request is waiting. Controller events provide that path. They are small,
+structured messages from an admitted instance to Steward Control.
+
+An event is not a command and carries no authority back into the node. Its tenant,
+node, instance, lineage, generation, runtime, and policy identity come from the
+active Gateway grant; the workload cannot choose those fields.
+
+## Delivery contract
+
+- Relay accepts events only on the fixed local event socket.
+- Gateway requires an active grant with the controller-event capability, bounds
+  and validates the message, persists it before acknowledgement, and queues it for
+  the node uplink.
+- Executor publishes queued events through its authenticated outbound Control
+  connection. Control retains them under the derived tenant and node identity.
+- Delivery is **at least once**. A retry can reproduce an event, so consumers must
+  deduplicate by event ID or the workload-supplied idempotency key.
+- A full local queue returns backpressure to the workload. Events are never
+  silently converted into best-effort log lines.
+
+The payload contains a kind, stable code, severity, short summary, optional bounded
+attributes, and an idempotency key. It is suitable for progress, findings, and
+operator attention—not full prompts, page bodies, binary artifacts, or secrets.
+
+## Read events
+
+The React control room has an **Agent signals** view. From a trusted terminal:
+
+```console
+stewardctl control event list \
+  -tenant-id research \
+  -limit 100 \
+  -token-file /etc/steward/control-operator.token
+```
+
+Pass the returned `next_after` value to `-after` for the next page. The HTTP API
+and MCP server expose the same tenant-scoped retained data; see
+[APIs and schemas]({{ '/reference/api/' | relative_url }}) and
+[MCP operations]({{ '/guides/mcp/' | relative_url }}).
+
+## Trust and retention
+
+Event content is untrusted agent output. Display it as data, do not execute markup
+or commands from it, and do not use it as authorization. The control room escapes
+rendered content and never turns an event into a mutation.
+
+Control retains the newest 1,024 events per tenant and 4,096 across the site,
+evicting the oldest records in the same durable transaction that accepts newer
+ones. Gateway's undelivered outbox is separately capped at 16 events per grant,
+32 per tenant, and 64 per node. If Control is unavailable, the node retries
+without discarding an acknowledged event; when the outbox is full, new events fail
+visibly until delivery frees capacity. Include enough source or task context in
+the bounded attributes to investigate, but keep large evidence in a separately
+governed artifact store.
+
+The [web research profile]({{ '/guides/research-agents/' | relative_url }}) uses
+this channel to report source-linked findings after one signed top-level task.

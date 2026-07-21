@@ -354,6 +354,7 @@ type secureProvisionResponse struct {
 	EgressRouteIDs          []string                       `json:"egress_route_ids,omitempty"`
 	ConnectorURL            string                         `json:"connector_url,omitempty"`
 	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
+	EventURL                string                         `json:"event_url,omitempty"`
 	EffectMode              string                         `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
 	ActionContextRequired   bool                           `json:"action_context_required,omitempty"`
@@ -506,7 +507,7 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 	// Every mount, network and grant identifier is Executor-derived. The signed
 	// request selects only finite capabilities already authorized by capsule and
 	// site policy; it never supplies a host path or Docker topology primitive.
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector {
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector || effective.Intent.Capabilities.ControllerEvents {
 		if s.secure.topology == nil || s.secure.gateway == nil {
 			writeError(w, http.StatusNotImplemented, "capability_unavailable", "inference, service, egress, and connector capabilities require the configured gateway topology")
 			return
@@ -516,14 +517,17 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 			GrantID:     gateway.GrantID(effective.Intent.TenantID, effective.Intent.InstanceID, effective.Intent.Generation),
 			Generation:  effective.Intent.Generation,
 			Inference:   effective.Intent.Capabilities.Inference, ModelAlias: effective.Intent.ModelAlias,
-			RouteID:        effective.Intent.InferenceRouteID,
-			EgressRouteIDs: admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs),
-			ConnectorIDs:   admission.CanonicalConnectorIDs(effective.Intent.ConnectorIDs),
-			EffectMode:     effective.Intent.EffectMode,
-			CapsuleDigest:  effective.CapsuleDigest, PolicyDigest: effective.PolicyDigest,
+			RouteID:          effective.Intent.InferenceRouteID,
+			EgressRouteIDs:   admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs),
+			ConnectorIDs:     admission.CanonicalConnectorIDs(effective.Intent.ConnectorIDs),
+			ControllerEvents: effective.Intent.Capabilities.ControllerEvents,
+			EffectMode:       effective.Intent.EffectMode,
+			CapsuleDigest:    effective.CapsuleDigest, PolicyDigest: effective.PolicyDigest,
+		}
+		if effective.Intent.EffectMode == admission.EffectModeAuthorized || effective.Intent.Capabilities.ControllerEvents {
+			workload.Runtime.NodeID = effective.Intent.NodeID
 		}
 		if effective.Intent.EffectMode == admission.EffectModeAuthorized {
-			workload.Runtime.NodeID = effective.Intent.NodeID
 			approvalThreshold, err := effective.AuthorizedActionApprovalThreshold()
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed action approval threshold could not be projected into the runtime grant")
@@ -1596,6 +1600,9 @@ func (s *Server) secureResponse(
 		response.ConnectorURL = "http://steward-relay:8081"
 		response.ConnectorIDs = append([]string(nil), runtime.ConnectorIDs...)
 	}
+	if runtime.ControllerEvents {
+		response.EventURL = "http://steward-relay:8083/v1/events"
+	}
 	response.EffectMode = runtime.EffectMode
 	response.ActionApprovalThreshold = runtime.ActionApprovalThreshold
 	response.ActionContextRequired = runtime.ActionContextRequired
@@ -1608,7 +1615,7 @@ func (s *Server) secureResponse(
 func runtimeNeedsGatewayPolicy(runtime *RuntimeGrant) bool {
 	return runtime != nil &&
 		(runtime.Inference || len(runtime.EgressRouteIDs) > 0 ||
-			len(runtime.ConnectorIDs) > 0 || len(runtime.TaskAuthorities) > 0 || runtime.EffectMode != "")
+			len(runtime.ConnectorIDs) > 0 || len(runtime.TaskAuthorities) > 0 || runtime.EffectMode != "" || runtime.ControllerEvents)
 }
 
 func admittedTaskAuthorities(effective admission.EffectiveAdmission) ([]gateway.TaskAuthority, error) {

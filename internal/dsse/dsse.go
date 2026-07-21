@@ -265,7 +265,7 @@ func validateJSONValue(decoder *json.Decoder, expected reflect.Type, depth int) 
 	if depth > 32 {
 		return errors.New("JSON nesting exceeds limit")
 	}
-	allowNull := expected.Kind() == reflect.Pointer || expected.Kind() == reflect.Slice
+	allowNull := expected.Kind() == reflect.Pointer || expected.Kind() == reflect.Slice || expected.Kind() == reflect.Map
 	for expected.Kind() == reflect.Pointer {
 		expected = expected.Elem()
 	}
@@ -327,6 +327,33 @@ func validateJSONValue(decoder *json.Decoder, expected reflect.Type, depth int) 
 		end, err := decoder.Token()
 		if err != nil || end != json.Delim(']') {
 			return errors.New("unterminated array")
+		}
+		return nil
+	case reflect.Map:
+		if expected.Key().Kind() != reflect.String || token != json.Delim('{') {
+			return fmt.Errorf("expected string-keyed object for %s", expected)
+		}
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate JSON field %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := validateJSONValue(decoder, expected.Elem(), depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("unterminated object")
 		}
 		return nil
 	case reflect.String:

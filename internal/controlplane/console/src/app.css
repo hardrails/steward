@@ -1534,6 +1534,156 @@ progress::-moz-progress-bar {
   padding: clamp(28px, 5vw, 56px);
 }
 
+.signal-boundary {
+  display: grid;
+  margin: 0 0 28px;
+  border: 1px solid var(--blue);
+  background:
+    repeating-linear-gradient(135deg, rgb(122 200 255 / 0.08) 0 8px, transparent 8px 16px),
+    var(--ink-soft);
+  grid-template-columns: minmax(180px, 0.34fr) 1fr;
+}
+
+.signal-boundary strong,
+.signal-boundary span {
+  padding: 15px 18px;
+}
+
+.signal-boundary strong {
+  border-right: 1px solid var(--blue);
+  color: var(--blue);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.signal-boundary span {
+  color: var(--paper-muted);
+}
+
+.agent-signal-stream {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 12px;
+  list-style: none;
+}
+
+.agent-signal {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--ink-soft);
+  grid-template-columns: 148px minmax(0, 1fr);
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.agent-signal:hover {
+  transform: translateX(3px);
+  border-color: var(--line-bright);
+}
+
+.agent-signal.is-warning {
+  border-left: 3px solid var(--warning);
+}
+
+.agent-signal.is-critical {
+  border-left: 3px solid var(--danger);
+}
+
+.agent-signal-rail {
+  display: flex;
+  min-height: 160px;
+  flex-direction: column;
+  justify-content: space-between;
+  border-right: 1px solid var(--line);
+  background: rgb(255 255 255 / 0.02);
+  padding: 18px;
+}
+
+.agent-signal-rail span,
+.agent-signal-rail time {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.agent-signal-rail span {
+  color: var(--blue);
+  font-weight: 800;
+}
+
+.agent-signal-rail time {
+  color: var(--paper-dim);
+}
+
+.agent-signal > article {
+  padding: 18px 22px 22px;
+}
+
+.agent-signal header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  gap: 14px;
+}
+
+.agent-signal header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-signal h3 {
+  max-width: 900px;
+  margin: 22px 0;
+  font-family: var(--display);
+  font-size: clamp(20px, 2.2vw, 30px);
+  font-weight: 500;
+  line-height: 1.16;
+}
+
+.agent-signal-binding,
+.agent-signal-attributes {
+  display: grid;
+  margin: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.agent-signal-binding div,
+.agent-signal-attributes div {
+  min-width: 0;
+  background: var(--panel);
+  padding: 10px 12px;
+}
+
+.agent-signal-binding dt,
+.agent-signal-attributes dt {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.agent-signal-binding dd,
+.agent-signal-attributes dd {
+  overflow-wrap: anywhere;
+  margin: 4px 0 0;
+  color: var(--paper-muted);
+  font-size: 12px;
+}
+
+.agent-signal-attributes {
+  margin-top: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .command-courier {
   border: 1px solid var(--line);
   border-top: 4px solid var(--signal);
@@ -2034,6 +2184,32 @@ td small {
   .freeze-banner dl {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .signal-boundary,
+  .agent-signal {
+    grid-template-columns: 1fr;
+  }
+
+  .signal-boundary strong,
+  .agent-signal-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .agent-signal-rail {
+    min-height: auto;
+    flex-direction: row;
+  }
+
+  .agent-signal header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .agent-signal-binding,
+  .agent-signal-attributes {
+    grid-template-columns: 1fr;
   }
 }
 

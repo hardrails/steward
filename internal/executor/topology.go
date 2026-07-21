@@ -41,24 +41,25 @@ type ObservedNetwork struct {
 }
 
 type RelaySpec struct {
-	Name        string
-	Image       string
-	NetworkName string
-	GrantID     string
-	GrantDir    string
-	TenantID    string
-	InstanceID  string
-	Generation  uint64
-	RelayGID    int
-	Inference   bool
-	Connector   bool
-	Egress      bool
-	ServicePort int
-	RelayIP     string
-	AgentIP     string
-	MemoryBytes int64
-	CPUMillis   int64
-	PIDs        int64
+	Name             string
+	Image            string
+	NetworkName      string
+	GrantID          string
+	GrantDir         string
+	TenantID         string
+	InstanceID       string
+	Generation       uint64
+	RelayGID         int
+	Inference        bool
+	Connector        bool
+	Egress           bool
+	ControllerEvents bool
+	ServicePort      int
+	RelayIP          string
+	AgentIP          string
+	MemoryBytes      int64
+	CPUMillis        int64
+	PIDs             int64
 }
 
 type ObservedRelay struct {
@@ -233,7 +234,7 @@ func (d *DockerHTTP) CreateRelay(ctx context.Context, spec RelaySpec) error {
 	}
 	command := relayCommand(spec)
 	mounts := []map[string]any(nil)
-	if spec.Inference || spec.Connector || spec.Egress || spec.ServicePort > 0 {
+	if spec.Inference || spec.Connector || spec.Egress || spec.ControllerEvents || spec.ServicePort > 0 {
 		mounts = []map[string]any{{"Type": "bind", "Source": spec.GrantDir, "Target": "/run/steward-grant", "ReadOnly": false}}
 	}
 	body := map[string]any{
@@ -334,9 +335,10 @@ func (d *DockerHTTP) InspectRelay(ctx context.Context, name string) (ObservedRel
 		Name: name, Image: payload.Config.Image, NetworkName: labels[runtimeNetworkLabel], GrantID: labels[runtimeGrantLabel],
 		TenantID: labels["io.hardrails.tenant"], InstanceID: labels["io.hardrails.instance"], Generation: generation,
 		RelayGID: relayGID(payload.Config.User), Inference: hasArgument(payload.Config.Cmd, "-inference-socket=/run/steward-grant/i.sock"),
-		Connector:   hasArgument(payload.Config.Cmd, "-connector-socket=/run/steward-grant/c.sock"),
-		Egress:      hasArgument(payload.Config.Cmd, "-egress-socket=/run/steward-grant/e.sock"),
-		ServicePort: serviceTargetPort(payload.Config.Cmd), MemoryBytes: payload.HostConfig.Memory,
+		Connector:        hasArgument(payload.Config.Cmd, "-connector-socket=/run/steward-grant/c.sock"),
+		Egress:           hasArgument(payload.Config.Cmd, "-egress-socket=/run/steward-grant/e.sock"),
+		ControllerEvents: hasArgument(payload.Config.Cmd, "-event-socket=/run/steward-grant/v.sock"),
+		ServicePort:      serviceTargetPort(payload.Config.Cmd), MemoryBytes: payload.HostConfig.Memory,
 		CPUMillis: payload.HostConfig.NanoCPUs / 1_000_000, PIDs: payload.HostConfig.PidsLimit,
 	}
 	// Docker leaves IPAddress empty until a created container starts. The
@@ -346,7 +348,7 @@ func (d *DockerHTTP) InspectRelay(ctx context.Context, name string) (ObservedRel
 	if len(payload.HostConfig.ExtraHosts) == 1 && strings.HasPrefix(payload.HostConfig.ExtraHosts[0], "agent:") {
 		spec.AgentIP = strings.TrimPrefix(payload.HostConfig.ExtraHosts[0], "agent:")
 	}
-	if (spec.Inference || spec.Connector || spec.Egress || spec.ServicePort > 0) && len(payload.Mounts) == 1 {
+	if (spec.Inference || spec.Connector || spec.Egress || spec.ControllerEvents || spec.ServicePort > 0) && len(payload.Mounts) == 1 {
 		mount := payload.Mounts[0]
 		if mount.Type == "bind" && mount.Destination == "/run/steward-grant" && mount.RW {
 			spec.GrantDir = mount.Source
@@ -393,7 +395,7 @@ func (d *DockerHTTP) InspectRelay(ctx context.Context, name string) (ObservedRel
 }
 
 func hasExactRelayMounts(mounts []dockerMount, spec RelaySpec) bool {
-	if !spec.Inference && !spec.Connector && !spec.Egress && spec.ServicePort == 0 {
+	if !spec.Inference && !spec.Connector && !spec.Egress && !spec.ControllerEvents && spec.ServicePort == 0 {
 		return len(mounts) == 0
 	}
 	return len(mounts) == 1 && mounts[0].Type == "bind" && mounts[0].Source == spec.GrantDir &&
@@ -406,16 +408,16 @@ func validateRelaySpec(spec RelaySpec) error {
 		!relayImageDigest.MatchString(spec.Image) || !strings.HasPrefix(spec.GrantID, "grant-") || len(spec.GrantID) != len("grant-")+64 ||
 		!boundedText(spec.TenantID, 128) || !boundedText(spec.InstanceID, 256) || spec.Generation == 0 ||
 		spec.RelayGID <= 0 || spec.MemoryBytes <= 0 || spec.CPUMillis <= 0 || spec.PIDs <= 0 ||
-		spec.ServicePort < 0 || spec.ServicePort > 65535 || !spec.Inference && !spec.Connector && !spec.Egress && spec.ServicePort == 0 {
+		spec.ServicePort < 0 || spec.ServicePort > 65535 || !spec.Inference && !spec.Connector && !spec.Egress && !spec.ControllerEvents && spec.ServicePort == 0 {
 		return &PolicyError{"internal relay specification is invalid"}
 	}
 	if !validRuntimeAddresses(spec.RelayIP, spec.AgentIP) {
 		return &PolicyError{"internal relay addresses are invalid"}
 	}
-	if (spec.Inference || spec.Connector || spec.Egress || spec.ServicePort > 0) && !validGrantDirectory(spec.GrantDir) {
+	if (spec.Inference || spec.Connector || spec.Egress || spec.ControllerEvents || spec.ServicePort > 0) && !validGrantDirectory(spec.GrantDir) {
 		return &PolicyError{"internal capability grant directory is invalid"}
 	}
-	if !spec.Inference && !spec.Connector && !spec.Egress && spec.ServicePort == 0 && spec.GrantDir != "" {
+	if !spec.Inference && !spec.Connector && !spec.Egress && !spec.ControllerEvents && spec.ServicePort == 0 && spec.GrantDir != "" {
 		return &PolicyError{"relay without capabilities cannot receive a capability grant directory"}
 	}
 	return nil
@@ -431,6 +433,9 @@ func relayCommand(spec RelaySpec) []string {
 	}
 	if spec.Egress {
 		command = append(command, "-egress-socket=/run/steward-grant/e.sock")
+	}
+	if spec.ControllerEvents {
+		command = append(command, "-event-socket=/run/steward-grant/v.sock")
 	}
 	if spec.ServicePort > 0 {
 		command = append(command, "-service-socket=/run/steward-grant/s.sock", "-service-target=http://agent:"+strconv.Itoa(spec.ServicePort))

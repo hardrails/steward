@@ -18,7 +18,7 @@ func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	bundle := publishedAgentBundle(t, "openclaw", "registry.example/agent@sha256:"+strings.Repeat("a", 64))
+	bundle := publishedAgentBundle(t, "hermes", "registry.example/agent@sha256:"+strings.Repeat("a", 64))
 	bundleRaw, err := agentapp.MarshalCanonical(bundle)
 	if err != nil {
 		t.Fatal(err)
@@ -87,13 +87,13 @@ func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testi
 	if err := json.Unmarshal(output.Bytes(), &summary); err != nil {
 		t.Fatal(err)
 	}
-	if summary.AgentName != "workspace-auditor" || summary.Runtime != "openclaw" ||
-		summary.ServiceID != "openclaw-api" || summary.TenantID != "tenant-a" || summary.NodeID != "node-a" ||
+	if summary.AgentName != "workspace-auditor" || summary.Runtime != "hermes" ||
+		summary.ServiceID != "hermes-api" || summary.TenantID != "tenant-a" || summary.NodeID != "node-a" ||
 		summary.TrustFile != trustPath || summary.Activation != "systemctl restart steward-gateway.service" || summary.ServiceReplaced {
 		t.Fatalf("service activation summary = %+v", summary)
 	}
 	loaded, _, _, _, err := gateway.LoadConfig(configPath)
-	if err != nil || len(loaded.ServiceOperations) != 1 || loaded.ServiceOperations[0].ID != "openclaw.run" ||
+	if err != nil || len(loaded.ServiceOperations) != 1 || loaded.ServiceOperations[0].ID != "hermes.run" ||
 		len(loaded.ConnectorReceiptTenantBudgets) != 1 || loaded.ConnectorReceiptTenantBudgets[0].TenantID != "tenant-a" ||
 		loaded.ConnectorReceiptTenantBudgets[0].Bytes != 4<<20 {
 		t.Fatalf("activated Gateway = %+v, err=%v", loaded, err)
@@ -104,8 +104,8 @@ func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testi
 	}
 	var trust serviceTrustInventory
 	if err := json.Unmarshal(trustRaw, &trust); err != nil || trust.NodeID != "node-a" || trust.TenantID != "tenant-a" ||
-		len(trust.Services) != 1 || trust.Services[0].ServiceID != "openclaw-api" ||
-		len(trust.Services[0].Operations) != 1 || trust.Services[0].Operations[0].ID != "openclaw.run" {
+		len(trust.Services) != 1 || trust.Services[0].ServiceID != "hermes-api" ||
+		len(trust.Services[0].Operations) != 1 || trust.Services[0].Operations[0].ID != "hermes.run" {
 		t.Fatalf("service trust = %+v, err=%v", trust, err)
 	}
 	output.Reset()

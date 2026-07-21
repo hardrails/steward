@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -37,6 +39,21 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-v1\x00agent-a"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
+	grantID := "grant-" + strings.Repeat("d", 64)
+	eventDigest := sha256.Sum256([]byte("steward-instance-event-v1\x00" + grantID + "\x00finding-1"))
+	eventID := "event-" + hex.EncodeToString(eventDigest[:])
+	retainedEvent := controlstore.InstanceEvent{
+		Event: controlprotocol.InstanceEventV1{
+			SchemaVersion: controlprotocol.InstanceEventSchemaV1,
+			EventID:       eventID, IdempotencyKey: "finding-1",
+			Source: "agent", TenantID: "tenant-a", NodeID: "node-1", InstanceID: "researcher-a", Generation: 1,
+			RuntimeRef: "executor-" + strings.Repeat("a", 64), GrantID: grantID,
+			CapsuleDigest: "sha256:" + strings.Repeat("b", 64), PolicyDigest: "sha256:" + strings.Repeat("c", 64),
+			Kind: "finding", Code: "source-confirmed", Severity: "info", Summary: "Primary source confirmed.",
+			ObservedAt: "2026-07-21T01:00:00Z", AcceptedAt: "2026-07-21T01:00:01Z",
+		},
+		ReceivedAt: "2026-07-21T01:00:02Z",
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/enroll" && request.Header.Get("Authorization") != "Bearer admin-secret" {
 			t.Fatalf("authorization=%q path=%q", request.Header.Get("Authorization"), request.URL.Path)
@@ -141,6 +158,14 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 				t.Fatalf("agent inventory request=%s %s", request.Method, request.URL.String())
 			}
 			_, _ = w.Write([]byte(`{"agents":[{"tenant_id":"tenant-a","node_id":"node-1","runtime_ref":"executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","instance_generation":1,"observed_status":"running","latest_command_id":"command-1","latest_command_kind":"start","latest_command_state":"terminal","latest_terminal_status":"done","created_at":"2026-07-16T11:00:00Z","updated_at":"2026-07-16T11:01:00Z"}],"next_cursor":"next-agent"}`))
+		case "/v1/tenants/tenant-a/instance-events":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("after") != "event-before" || query.Get("limit") != "1" {
+				t.Fatalf("instance event request=%s %s", request.Method, request.URL.String())
+			}
+			_ = json.NewEncoder(w).Encode(controlclient.InstanceEventList{
+				Events: []controlstore.InstanceEvent{retainedEvent}, NextAfter: eventID,
+			})
 		case "/v1/operations/credentials":
 			query := request.URL.Query()
 			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
@@ -338,6 +363,16 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 		t.Fatalf("agent inventory output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
+	eventListArguments := append([]string{"control", "event", "list"}, common...)
+	eventListArguments = append(
+		eventListArguments, "-tenant-id", "tenant-a", "-after", "event-before", "-limit", "1",
+	)
+	if err := run(eventListArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"event_id":"`+eventID+`"`) ||
+		!strings.Contains(output.String(), `"next_after":"`+eventID+`"`) {
+		t.Fatalf("instance event output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
 	commandListArguments := append([]string{"control", "command", "list"}, common...)
 	commandListArguments = append(
 		commandListArguments, "-tenant-id", "tenant-a", "-node-id", "node-1",
@@ -412,6 +447,11 @@ func TestControlOperationsCommandsRejectInvalidFilters(t *testing.T) {
 		{name: "agent status", call: controlAgentList, args: []string{"-status", "destroyed"}},
 		{name: "agent node", call: controlAgentList, args: []string{"-node-id", "-node"}},
 		{name: "agent cursor", call: controlAgentList, args: []string{"-cursor", validCursor + "="}},
+		{name: "event tenant", call: controlEventList, args: nil},
+		{name: "event zero limit", call: controlEventList, args: []string{"-tenant-id", "tenant-a", "-limit", "0"}},
+		{name: "event oversized limit", call: controlEventList, args: []string{"-tenant-id", "tenant-a", "-limit", "101"}},
+		{name: "event positional", call: controlEventList, args: []string{"-tenant-id", "tenant-a", "unexpected"}},
+		{name: "event invalid flag", call: controlEventList, args: []string{"-tenant-id", "tenant-a", "-limit", "not-a-number"}},
 		{name: "command state", call: controlCommandList, args: []string{"-state", "running"}},
 		{name: "command terminal without state", call: controlCommandList, args: []string{"-terminal-status", "failed"}},
 		{name: "command terminal status", call: controlCommandList, args: []string{"-state", "terminal", "-terminal-status", "running"}},
@@ -431,6 +471,9 @@ func TestControlOperationsCommandsRejectInvalidFilters(t *testing.T) {
 				t.Fatalf("invalid arguments accepted: %#v", test.args)
 			}
 		})
+	}
+	if err := controlEventList([]string{"-tenant-id", "tenant-a"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Fatalf("event list without token error=%v", err)
 	}
 }
 

@@ -1598,6 +1598,50 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/instance-events:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tenants]
+      operationId: listInstanceEvents
+      summary: List recent agent status and finding events
+      description: |
+        Returns newest-first, bounded telemetry for one authorized tenant.
+        Event summaries and attributes are agent-authored and therefore
+        untrusted. Gateway-derived node, instance, generation, runtime, grant,
+        capsule, and policy fields identify the workload that emitted them.
+        The page limit is 100 so the response remains below the controller's
+        1 MiB wire bound.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: A bounded page of retained instance events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceEventPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/operations/freeze:
     get:
       tags: [operations]
@@ -2147,6 +2191,57 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/events:
+    post:
+      tags: [executor-uplink]
+      operationId: retainExecutorInstanceEvents
+      summary: Durably retain bounded agent status and finding events
+      description: |
+        Accepts only a node-authenticated batch whose node ID matches the
+        bearer credential. Each event identity was stamped from the active
+        Gateway grant. Events are untrusted telemetry: they never authorize
+        commands, mutate desired state, or become signed evidence. Exact
+        retries are idempotent, and retention is bounded per tenant and site.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceEventBatchRequest"
+      responses:
+        "200":
+          description: The batch was durably retained or recognized as an exact retry.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [applied]
+                properties:
+                  applied:
+                    type: integer
+                    minimum: 0
+                    maximum: 64
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -4003,6 +4098,134 @@ components:
         observed_at:
           type: string
           format: date-time
+    InstanceEventBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, node_id, events]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.instance-event-batch.v1]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        events:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/InstanceEvent"
+    InstanceEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - event_id
+        - idempotency_key
+        - source
+        - tenant_id
+        - node_id
+        - instance_id
+        - generation
+        - runtime_ref
+        - grant_id
+        - capsule_digest
+        - policy_digest
+        - kind
+        - code
+        - severity
+        - summary
+        - observed_at
+        - accepted_at
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.instance-event.v1]
+        event_id:
+          type: string
+          pattern: '^event-[0-9a-f]{64}$'
+        idempotency_key:
+          $ref: "#/components/schemas/Identifier128"
+        source:
+          type: string
+          enum: [agent]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        grant_id:
+          type: string
+          pattern: '^grant-[0-9a-f]{64}$'
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        kind:
+          type: string
+          enum: [status, finding]
+        code:
+          $ref: "#/components/schemas/Identifier128"
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        attributes:
+          type: object
+          maxProperties: 16
+          additionalProperties:
+            type: string
+            minLength: 1
+            maxLength: 1024
+        task_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        run_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        observed_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: string
+          format: date-time
+    RetainedInstanceEvent:
+      type: object
+      additionalProperties: false
+      required: [event, received_at]
+      properties:
+        event:
+          $ref: "#/components/schemas/InstanceEvent"
+        received_at:
+          type: string
+          format: date-time
+    InstanceEventPage:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RetainedInstanceEvent"
+        next_after:
+          type: string
+          pattern: '^event-[0-9a-f]{64}$'
     NodeList:
       type: object
       additionalProperties: false
@@ -4175,6 +4398,8 @@ components:
         egress:
           type: boolean
         connector:
+          type: boolean
+        controller_events:
           type: boolean
     DeploymentInstance:
       type: object
@@ -4961,6 +5186,9 @@ components:
         connector_url:
           type: string
           enum: [http://steward-relay:8081]
+        event_url:
+          type: string
+          enum: [http://steward-relay:8083/v1/events]
         connector_ids:
           type: array
           minItems: 1

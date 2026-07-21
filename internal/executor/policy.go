@@ -127,6 +127,7 @@ type RuntimeGrant struct {
 	TaskAuthorities         []gateway.TaskAuthority        `json:"task_authorities,omitempty"`
 	EgressRouteIDs          []string                       `json:"egress_route_ids,omitempty"`
 	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
+	ControllerEvents        bool                           `json:"controller_events,omitempty"`
 	EffectMode              string                         `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
 	ActionContextRequired   bool                           `json:"action_context_required,omitempty"`
@@ -382,10 +383,8 @@ type profileLayout struct {
 
 func profileLayoutFor(profileID string) profileLayout {
 	switch profileID {
-	case "hermes-v1@v1":
+	case "hermes-v1@v1", "hermes-research-v1@v1", "hermes-developer-v1@v1":
 		return profileLayout{StatePath: "/opt/data", Home: "/opt/data/home", WorkDir: "/opt/data"}
-	case "openclaw-v1@v1":
-		return profileLayout{StatePath: "/home/node/.openclaw", Home: "/home/node", WorkDir: "/home/node/.openclaw/workspace"}
 	default:
 		return profileLayout{StatePath: "/state", Home: "/state", WorkDir: "/state"}
 	}

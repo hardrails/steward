@@ -23,6 +23,7 @@ const (
 	MaxExecutorReportBytes                  = 16 << 10
 	executorEgressProxyV1                   = "http://steward-relay:8082"
 	executorConnectorURLV1                  = "http://steward-relay:8081"
+	executorEventURLV1                      = "http://steward-relay:8083/v1/events"
 	maxExecutorTaskAuthorities              = 8
 	maxExecutorAdmissionRouteOrConnectorIDs = 32
 )
@@ -80,6 +81,7 @@ type ExecutorAdmissionProjectionV1 struct {
 	EgressRouteIDs        []string                  `json:"egress_route_ids,omitempty"`
 	ConnectorURL          string                    `json:"connector_url,omitempty"`
 	ConnectorIDs          []string                  `json:"connector_ids,omitempty"`
+	EventURL              string                    `json:"event_url,omitempty"`
 	RoutePolicyDigest     string                    `json:"route_policy_digest,omitempty"`
 	ActivationID          string                    `json:"activation_id,omitempty"`
 	ActivationBeginDigest string                    `json:"activation_begin_digest,omitempty"`
@@ -244,9 +246,12 @@ func (projection ExecutorAdmissionProjectionV1) Validate() error {
 	); err != nil {
 		return err
 	}
+	if projection.EventURL != "" && projection.EventURL != executorEventURLV1 {
+		return errors.New("admission projection controller event URL is invalid")
+	}
 	if len(projection.TaskAuthorities) > 0 ||
 		len(projection.EgressRouteIDs) > 0 ||
-		len(projection.ConnectorIDs) > 0 {
+		len(projection.ConnectorIDs) > 0 || projection.EventURL != "" {
 		if projection.RoutePolicyDigest == "" {
 			return errors.New("admission projection policy-bearing grant requires a route policy digest")
 		}
@@ -270,6 +275,7 @@ func (projection ExecutorAdmissionProjectionV1) hasRuntimeTopology() bool {
 		projection.EgressRouteIDs != nil ||
 		projection.ConnectorURL != "" ||
 		projection.ConnectorIDs != nil ||
+		projection.EventURL != "" ||
 		projection.RoutePolicyDigest != "" ||
 		projection.ActivationID != "" ||
 		projection.ActivationBeginDigest != ""

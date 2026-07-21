@@ -20,10 +20,12 @@ import threading
 import time
 from typing import Any
 
-REVISION = "095b9eed3801c251796df93f48a8f2a527ff6e70"
+REVISION = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
 STATE = pathlib.Path("/opt/data")
 FIXTURE = pathlib.Path("/opt/steward/skills/steward.workspace-audit")
 CONNECTOR_FIXTURE = pathlib.Path("/opt/steward/skills/steward.connector-work")
+RESEARCH_SKILL = pathlib.Path("/opt/steward/profiles/research")
+DEVELOPER_SKILL = pathlib.Path("/opt/steward/profiles/developer")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 RUN_PATH_RE = re.compile(r"^/v1/runs/run_[a-f0-9]{32}$")
 INTERNAL_API_HOST = "127.0.0.1"
@@ -63,6 +65,37 @@ CONNECTOR_SKILL_AUTHORITY = {
     "logical_base_url": "http://steward-relay:8081",
     "operation_id": "perform",
     "operation_path": "/v1/connectors/local-work/operations/perform",
+}
+PROFILE_SKILLS = {
+    "research": {
+        "path": RESEARCH_SKILL,
+        "name": "steward-research",
+        "entrypoint": "research.py",
+        "public_key_sha256": "b8e13bf2e90dd3f360f5b5ddfb34bddc79df47d2b6d3456dc3f7d67a5be16e35",
+        "connector_ids": ["steward-research-extract", "steward-research-search"],
+        "limits": {
+            "max_extract_urls": 10,
+            "max_request_bytes": 65536,
+            "max_response_bytes": 1048576,
+            "max_search_results": 20,
+            "timeout_seconds": 30,
+        },
+        "files": {"SKILL.md": ("read", 0o444), "research.py": ("execute", 0o555)},
+    },
+    "developer": {
+        "path": DEVELOPER_SKILL,
+        "name": "steward-coding-worker",
+        "entrypoint": "coding_worker.py",
+        "public_key_sha256": "0b131eeb43a3f6fd4e5ed8a16c5b4a20501860400d74fb95a7b2f4e9e73e6fac",
+        "connector_ids": ["steward-claude-code", "steward-codex"],
+        "limits": {
+            "max_request_bytes": 65536,
+            "max_response_bytes": 1048576,
+            "max_task_bytes": 16384,
+            "max_timeout_seconds": 900,
+        },
+        "files": {"SKILL.md": ("read", 0o444), "coding_worker.py": ("execute", 0o555)},
+    },
 }
 NEGOTIATION = {
     "schema_version": "steward.adapter-negotiation.v1",
@@ -380,6 +413,8 @@ def verify_skill() -> dict[str, bytes]:
     if set(verified) != set(SKILL_FILES):
         fail("signed fixture file inventory is incomplete")
     verify_connector_skill()
+    for profile in PROFILE_SKILLS.values():
+        verify_profile_skill(profile)
     return verified
 
 
@@ -457,12 +492,83 @@ def verify_connector_skill() -> dict[str, bytes]:
     return verified
 
 
-def seed_state(model: str, qualification_mcp: bool) -> None:
+def verify_profile_skill(expected: dict[str, Any]) -> None:
+    root = expected["path"]
+    files = expected["files"]
+    directory_fd = os.open(root, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        directory_stat = os.fstat(directory_fd)
+        if directory_stat.st_uid != 0 or directory_stat.st_gid != 0 or stat.S_IMODE(directory_stat.st_mode) & 0o022:
+            fail("profile skill directory ownership or mode is invalid")
+        require_exact_directory_entries(directory_fd, set(files) | {"manifest.json", "manifest.sig", "public.pem"})
+    finally:
+        os.close(directory_fd)
+    manifest = read_regular_nofollow(root / "manifest.json", 16384, 0o444)
+    signature_text = read_regular_nofollow(root / "manifest.sig", 256, 0o444)
+    public_key = read_regular_nofollow(root / "public.pem", 1024, 0o444)
+    if hashlib.sha256(public_key).hexdigest() != expected["public_key_sha256"]:
+        fail("profile skill public key does not match the adapter trust root")
+    signature = base64.b64decode(signature_text.strip(), validate=True)
+    if len(signature) != 64:
+        fail("profile skill signature length is invalid")
+    try:
+        from cryptography.hazmat.primitives import serialization
+
+        key = serialization.load_pem_public_key(public_key)
+        key.verify(signature, manifest)
+    except Exception as exc:
+        fail(f"profile skill verification failed: {type(exc).__name__}")
+    try:
+        descriptor = json.loads(manifest)
+    except (TypeError, ValueError):
+        fail("profile skill manifest is not valid JSON")
+    canonical = json.dumps(descriptor, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    if manifest != canonical or not isinstance(descriptor, dict) or set(descriptor) != {
+        "connector_ids", "entrypoint", "files", "limits", "name", "schema_version", "version"
+    }:
+        fail("profile skill manifest is not canonical or has unknown fields")
+    if (
+        descriptor["schema_version"] != "steward.profile-skill-manifest.v1"
+        or descriptor["name"] != expected["name"]
+        or descriptor["version"] != "1"
+        or descriptor["entrypoint"] != expected["entrypoint"]
+        or descriptor["connector_ids"] != expected["connector_ids"]
+        or descriptor["limits"] != expected["limits"]
+    ):
+        fail("profile skill manifest semantics are invalid")
+    descriptors = descriptor["files"]
+    if not isinstance(descriptors, list) or len(descriptors) != len(files):
+        fail("profile skill file inventory is invalid")
+    prior = ""
+    for item in descriptors:
+        if not isinstance(item, dict) or set(item) != {"mode", "path", "sha256"}:
+            fail("profile skill file descriptor is invalid")
+        name = item.get("path")
+        if not isinstance(name, str) or name <= prior or name not in files:
+            fail("profile skill file order or name is invalid")
+        data = read_regular_nofollow(root / name, 1 << 20, files[name][1])
+        if item.get("mode") != files[name][0] or hashlib.sha256(data).hexdigest() != item.get("sha256"):
+            fail("profile skill file authority is invalid")
+        prior = name
+
+
+def seed_state(model: str, qualification_mcp: bool, profile: str) -> None:
     if os.getuid() != 65532 or os.getgid() != 65532:
         fail("runtime identity must be exactly 65532:65532")
     for relative in ("home", "sessions", "logs", "memories", "skills", "workspace", "steward"):
         directory_fd = open_state_directory(relative)
         os.close(directory_fd)
+    disabled = {
+        "workspace": ["browser", "computer_use", "cronjob", "delegation", "discord", "discord_admin", "feishu_doc", "feishu_drive", "homeassistant", "image_gen", "project", "spotify", "tts", "video", "video_gen", "vision", "web", "x_search"],
+        "research": ["browser", "computer_use", "cronjob", "discord", "discord_admin", "feishu_doc", "feishu_drive", "homeassistant", "image_gen", "project", "spotify", "tts", "video", "video_gen", "vision", "web", "x_search"],
+        "developer": ["browser", "computer_use", "cronjob", "delegation", "discord", "discord_admin", "feishu_doc", "feishu_drive", "homeassistant", "image_gen", "project", "spotify", "tts", "video", "video_gen", "vision", "web", "x_search"],
+    }[profile]
+    max_turns = {"workspace": 90, "research": 32, "developer": 32}[profile]
+    external_dirs = ["/opt/steward/skills"]
+    if profile in PROFILE_SKILLS:
+        external_dirs.append(str(PROFILE_SKILLS[profile]["path"]))
+    disabled_yaml = "\n".join(f"    - {toolset}" for toolset in disabled)
+    external_yaml = "\n".join(f"    - {path}" for path in external_dirs)
     config = f"""model:
   provider: custom
   name: {model}
@@ -471,11 +577,23 @@ def seed_state(model: str, qualification_mcp: bool) -> None:
   api_mode: chat_completions
 security:
   allow_lazy_installs: false
+agent:
+  max_turns: {max_turns}
+  disabled_toolsets:
+{disabled_yaml}
 skills:
   external_dirs:
-    - /opt/steward/skills
+{external_yaml}
 terminal:
   backend: local
+"""
+    if profile == "research":
+        config += """delegation:
+  max_iterations: 12
+  max_concurrent_children: 4
+  max_spawn_depth: 1
+  child_timeout_seconds: 180
+  subagent_auto_approve: false
 """
     if qualification_mcp:
         config += """mcp_servers:
@@ -661,8 +779,11 @@ def main() -> int:
     qualification_mcp = os.environ.get("STEWARD_HERMES_QUALIFICATION_MCP", "disabled")
     if qualification_mcp not in {"disabled", "enabled"}:
         fail("STEWARD_HERMES_QUALIFICATION_MCP must be disabled or enabled")
+    profile = os.environ.get("STEWARD_HERMES_PROFILE", "workspace")
+    if profile not in {"workspace", "research", "developer"}:
+        fail("STEWARD_HERMES_PROFILE must be workspace, research, or developer")
     verify_skill()
-    seed_state(model, qualification_mcp == "enabled")
+    seed_state(model, qualification_mcp == "enabled", profile)
     environment = os.environ.copy()
     environment.update(
         {

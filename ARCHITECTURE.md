@@ -122,7 +122,7 @@ set is task-oriented; detailed protocol controls may remain as subcommands.
 Private keys are accepted only by explicit local signing operations. Context files
 store paths to token files, never token values.
 
-The `agent` command compiles and validates Hermes or OpenClaw application
+The `agent` command compiles and validates Hermes application
 definitions, records optional OPA policy decisions, explains deterministic node
 placement, and derives new state-fork lineage. These are portable authorization
 inputs. They do not give the CLI Docker authority or bypass signed Executor

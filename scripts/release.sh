@@ -175,8 +175,9 @@ for target in "${targets[@]}"; do
 			COPYFILE_DISABLE=1 tar -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
 		fi
 		rm -rf "$control_stage"
-		mkdir -p "${stage}/adapters" "${stage}/deploy" "${stage}/scripts"
-		cp -R adapters/hermes-agent adapters/openclaw "${stage}/adapters/"
+		mkdir -p "${stage}/adapters" "${stage}/deploy" "${stage}/scripts" "${stage}/workers"
+		cp -R adapters/hermes-agent "${stage}/adapters/"
+		cp -R workers/coding workers/research "${stage}/workers/"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		# Controller deployment assets belong only to the dedicated archive. The
 		# node archive and native packages retain the binary for operator tooling,
@@ -187,15 +188,14 @@ for target in "${targets[@]}"; do
 			scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
 			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
 			scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
-			scripts/hermes-steward-acceptance.sh scripts/build-openclaw-adapter.sh \
-			scripts/openclaw-feasibility.sh \
+			scripts/hermes-steward-acceptance.sh \
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
 		# Bind the exact node payload before wrapping it in an archive or native
 		# package. The canonical manifest records the target and SHA-256 of every
 		# binaries plus every integration file installed with that release.
 		/bin/bash -p scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
-		files=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs release.json LICENSE README.md adapters deploy scripts examples schemas)
+		files=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs release.json LICENSE README.md adapters deploy scripts examples schemas workers)
 	fi
 	# Ship the license and readme alongside every binary so the download is
 	# self-contained and license-compliant.

@@ -1,0 +1,17 @@
+{
+  "schema": "steward.agent.v1",
+  "name": "developer",
+  "runtime": {
+    "engine": "hermes",
+    "image": "replace.invalid/steward-hermes@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "adapter_contract": "steward.hermes-agent.v1"
+  },
+  "tool_profile": "developer",
+  "model": {"route": "local/default"},
+  "skills": ["steward-coding-worker"],
+  "capabilities": {"connector_ids": ["steward-codex"]},
+  "resources": {"cpu_millis": 1000, "memory_mib": 1536, "disk_mib": 4096, "pids": 256},
+  "placement": {"architectures": ["amd64"], "isolation": "hardened"},
+  "state": {"persistent": true},
+  "lifetime": {"mode": "service"}
+}

@@ -62,6 +62,7 @@ type Status struct {
 	Enrollments int    `json:"enrollments"`
 	Commands    int    `json:"commands"`
 	Deployments int    `json:"deployments"`
+	Events      int    `json:"instance_events"`
 }
 
 // Initialize exclusively creates an empty store in an owner-only directory.
@@ -298,7 +299,7 @@ func (store *Store) Status() (Status, error) {
 		Generation: store.generation, Sequence: store.sequence, Tenants: len(store.current.tenants),
 		Nodes: len(store.current.nodes), Credentials: len(store.current.credentials),
 		Enrollments: len(store.current.enrollments), Commands: len(store.current.commands),
-		Deployments: len(store.current.deployments),
+		Deployments: len(store.current.deployments), Events: len(store.current.events),
 	}, nil
 }
 

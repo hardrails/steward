@@ -24,8 +24,10 @@ func BuildIntent(
 		return admission.InstanceIntent{}, errors.New("agent admission generation must be positive")
 	}
 	capsule := verified.Capsule
-	profileID := map[string]string{"hermes": "hermes-v1", "openclaw": "openclaw-v1"}[bundle.Definition.Runtime.Engine]
-	serviceID := map[string]string{"hermes": "hermes-api", "openclaw": "openclaw-api"}[bundle.Definition.Runtime.Engine]
+	profileID := map[string]string{
+		"workspace": "hermes-v1", "research": "hermes-research-v1", "developer": "hermes-developer-v1",
+	}[bundle.Definition.EffectiveToolProfile()]
+	serviceID := map[string]string{"hermes": "hermes-api"}[bundle.Definition.Runtime.Engine]
 	if capsule.Profile != (admission.ProfileRef{ID: profileID, Version: "v1"}) {
 		return admission.InstanceIntent{}, errors.New("agent runtime does not match the authenticated capsule profile")
 	}
@@ -46,11 +48,12 @@ func BuildIntent(
 		return admission.InstanceIntent{}, err
 	}
 	capabilities := admission.Capabilities{
-		State:     bundle.Definition.State.Persistent,
-		Inference: true,
-		Service:   true,
-		Egress:    len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
-		Connector: len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+		State:            bundle.Definition.State.Persistent,
+		Inference:        true,
+		Service:          true,
+		Egress:           len(bundle.Definition.Capabilities.EgressRouteIDs) > 0,
+		Connector:        len(bundle.Definition.Capabilities.ConnectorIDs) > 0,
+		ControllerEvents: bundle.Definition.Capabilities.ControllerEvents,
 	}
 	if !capabilities.SubsetOf(capsule.Capabilities) {
 		return admission.InstanceIntent{}, errors.New("agent capabilities exceed the authenticated capsule ceiling")

@@ -19,14 +19,18 @@ not present in the tree.
 
 The adapter replaces upstream's root-only s6 initialization with `entrypoint.py`.
 That shim performs only fixed-path, non-root initialization, verifies the signed
-`steward.workspace-audit` and `steward.connector-work` skills from an immutable
-external skill directory, starts the upstream gateway, and provides the service
-endpoint on port 8766. The workspace skill creates a bounded canonical inventory
-of `/opt/data/workspace`; it rejects links, special files, limit violations, and
-concurrent mutation. The connector skill performs one fixed JSON job through
-Steward's logical connector path without being configured with the upstream origin
-or credential. The adapter does not change Hermes core source or seed workspace
-content into the image.
+skills shipped in immutable external skill directories, starts the upstream
+gateway, and provides the service endpoint on port 8766. The workspace skill
+creates a bounded canonical inventory of `/opt/data/workspace`; it rejects links,
+special files, limit violations, and concurrent mutation. The connector skill
+performs one fixed JSON job through Steward's logical connector path without being
+configured with the upstream origin or credential. The adapter also contains two
+explicit tool profiles. `research` exposes fixed search, extraction, and finding
+commands. `developer` exposes a fixed client for separately isolated Codex and
+Claude Code workers. Both profile skills are signed and verified at startup. They
+know only logical Steward connector names; provider credentials and upstream
+origins never enter Hermes state. The adapter does not change Hermes core source
+or seed workspace content into the image.
 
 The port 8766 service is intended to sit behind a Steward authenticated service
 grant. It serves `GET /steward/v1/negotiation` itself and forwards only

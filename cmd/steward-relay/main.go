@@ -32,6 +32,9 @@ const (
 	maxConnectorResponseBytes    = 32 << 20
 	maxConnectorConcurrent       = 4
 	connectorAddress             = "0.0.0.0:8081"
+	eventAddress                 = "0.0.0.0:8083"
+	maxEventRequestBytes         = 8 << 10
+	maxEventResponseBytes        = 4 << 10
 	connectorRequestBodyLifetime = 30 * time.Second
 	connectorResponseWriteTime   = 30 * time.Second
 	connectorStreamStatusTrailer = "X-Steward-Stream-Status"
@@ -58,6 +61,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	inferenceAddress := flags.String("inference-addr", ":8080", "private-network inference listener")
 	inferenceSocket := flags.String("inference-socket", "", "mounted per-grant gateway Unix socket")
 	connectorSocket := flags.String("connector-socket", "", "mounted per-grant gateway connector Unix socket")
+	eventSocket := flags.String("event-socket", "", "mounted per-grant gateway controller-event Unix socket")
 	egressAddress := flags.String("egress-addr", ":8082", "private-network HTTP(S) proxy listener")
 	egressSocket := flags.String("egress-socket", "", "mounted per-grant gateway egress Unix socket")
 	serviceSocket := flags.String("service-socket", "", "mounted per-grant gateway service Unix socket")
@@ -69,7 +73,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "steward-relay "+buildinfo.Resolve())
 		return 0
 	}
-	if *inferenceSocket == "" && *connectorSocket == "" && *serviceSocket == "" && *egressSocket == "" {
+	if *inferenceSocket == "" && *connectorSocket == "" && *serviceSocket == "" && *egressSocket == "" && *eventSocket == "" {
 		fmt.Fprintln(stderr, "steward-relay: at least one gateway or service socket is required")
 		return 2
 	}
@@ -115,6 +119,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		connectorServer := newConnectorHTTPServer(ctx, *connectorSocket)
 		servers = append(servers, connectorServer)
 		serverListeners[connectorServer] = connectorListener
+	}
+	if *eventSocket != "" {
+		eventListener, err := net.Listen("tcp4", eventAddress)
+		if err != nil {
+			fmt.Fprintln(stderr, "steward-relay: controller event listener:", err)
+			return 1
+		}
+		defer eventListener.Close()
+		eventServer := newEventHTTPServer(*eventSocket)
+		servers = append(servers, eventServer)
+		serverListeners[eventServer] = eventListener
 	}
 	if *egressSocket != "" {
 		var err error
@@ -207,6 +222,69 @@ func newConnectorHTTPServer(ctx context.Context, socket string) *http.Server {
 		IdleTimeout: 15 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
+}
+
+func newEventHTTPServer(socket string) *http.Server {
+	return &http.Server{
+		Addr: eventAddress, Handler: eventProxy(socket),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second,
+		MaxHeaderBytes: maxHTTPHeaderBytes,
+	}
+}
+
+func eventProxy(socket string) http.Handler {
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", socket)
+		},
+		DisableKeepAlives: true, ResponseHeaderTimeout: 10 * time.Second,
+		MaxResponseHeaderBytes: maxHTTPHeaderBytes,
+	}
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return http.HandlerFunc(func(w http.ResponseWriter, incoming *http.Request) {
+		if incoming.Method != http.MethodPost || incoming.URL.Path != "/v1/events" || incoming.URL.RawQuery != "" ||
+			incoming.Header.Get("Content-Type") != "application/json" {
+			writeConnectorError(w, http.StatusForbidden, "event_denied", "controller event method, path, query, or content type is not allowed")
+			return
+		}
+		if incoming.ContentLength > maxEventRequestBytes {
+			writeConnectorError(w, http.StatusRequestEntityTooLarge, "event_too_large", "controller event exceeds the byte limit")
+			return
+		}
+		incoming.Body = http.MaxBytesReader(w, incoming.Body, maxEventRequestBytes)
+		raw, err := io.ReadAll(incoming.Body)
+		if err != nil {
+			writeConnectorError(w, http.StatusRequestEntityTooLarge, "event_too_large", "controller event exceeds the byte limit")
+			return
+		}
+		request, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, "http://steward-gateway/v1/events", bytes.NewReader(raw))
+		if err != nil {
+			writeConnectorError(w, http.StatusBadRequest, "invalid_event", "controller event request could not be constructed")
+			return
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			writeConnectorError(w, http.StatusBadGateway, "event_gateway_unavailable", "controller event gateway unavailable")
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(response.Body, maxEventResponseBytes+1))
+		if err != nil || len(body) > maxEventResponseBytes {
+			writeConnectorError(w, http.StatusBadGateway, "event_response_invalid", "controller event gateway response exceeded its limit")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if retry := response.Header.Get("Retry-After"); retry != "" {
+			w.Header().Set("Retry-After", retry)
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(response.StatusCode)
+		_, _ = w.Write(body)
+	})
 }
 
 func connectorProxy(socket string) http.Handler {

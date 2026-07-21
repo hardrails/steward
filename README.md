@@ -13,7 +13,7 @@ limits where that agent runs. It does not decide whether the agent may send an
 email, change an account, call an internal service, or spend a reusable API key.
 
 Steward is the open-source agent application runtime and enforcement plane for
-that missing boundary. It packages Hermes or OpenClaw agents behind one portable
+that missing boundary. It packages Hermes agents behind one portable
 contract, places them on customer-controlled infrastructure, mediates their
 network capabilities, and records which exact authority produced each managed
 external action.
@@ -31,6 +31,8 @@ they can verify without a vendor service.
 | Prompt injection reaching a powerful tool | Keeps reusable connector credentials outside the workload. A protected action can require a tenant signature over the exact operation and request bytes. |
 | Replayed or stale authority | Spends one-use permits before network dispatch and rejects old instance generations and command sequences. |
 | Inference and service credentials | Gateway injects credentials only at the trusted outbound boundary. Agents receive a scoped route, not the upstream secret. |
+| Web research over hostile content | A bounded Hermes profile reaches search and extraction through credential-isolating connectors, then reports source-linked findings over a durable event channel. |
+| Repository work with coding agents | Hermes delegates to Codex or Claude Code in a separate isolated worker with its own clean Git worktree and authentication store. |
 | Disconnected and sovereign sites | Uses local keys, static Go binaries, local state, offline OCI archives, and customer-operated control services. No hosted service is required after transfer. |
 | Incident review and audit | Writes signed, hash-linked Executor and Gateway receipts. Receipt exports can be verified offline and omit prompt, request, response, and secret plaintext. |
 
@@ -147,12 +149,14 @@ for repeatable infrastructure.
 
 ## Run an agent
 
-Steward supports containerized agents that expose bounded service APIs. The
-included adapters make Hermes Agent and OpenClaw usable behind Steward's fixed
+Steward supports containerized Hermes agents through a bounded service API. The
+included adapter makes a qualified Hermes surface usable behind Steward's fixed
 security boundary.
 
 - [Run Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/)
-- [Run OpenClaw](https://hardrails.github.io/steward/guides/openclaw/)
+- [Run a web research agent](https://hardrails.github.io/steward/guides/research-agents/)
+- [Let Hermes use Codex or Claude Code](https://hardrails.github.io/steward/guides/coding-workers/)
+- [Receive events from running agents](https://hardrails.github.io/steward/guides/controller-events/)
 - [Understand workload admission](https://hardrails.github.io/steward/guides/signed-admission/)
 - [Configure inference, services, connectors, and egress](https://hardrails.github.io/steward/guides/positive-capabilities/)
 
@@ -161,6 +165,12 @@ OpenRouter, Anthropic, Mistral, vLLM, Ollama, llama.cpp, LocalAI, LiteLLM, LM St
 SGLang, TGI, and other compatible endpoints without placing the upstream credential
 in the agent.
 See [inference providers](https://hardrails.github.io/steward/guides/inference/).
+
+An OpenAI or Anthropic API key can power Hermes through Gateway. A ChatGPT or
+Claude consumer subscription is different: it is not a general inference API
+credential. The isolated coding-worker path can use the official Codex or Claude
+Code CLI's first-party login, but Steward never mounts that login into Hermes or
+brokers it for another user.
 
 Start a portable agent project with:
 
@@ -176,7 +186,7 @@ stewardctl agent authorize ../steward-site \
 ```
 
 `agent publish` inspects the complete OCI or Docker archive and signs the exact
-image identity and qualified Hermes or OpenClaw contract. `agent authorize` grants
+image identity and qualified Hermes contract. `agent authorize` grants
 Control only the five lifecycle operations needed for this agent, on the named
 nodes, for one hour. Neither artifact contains a reusable credential.
 

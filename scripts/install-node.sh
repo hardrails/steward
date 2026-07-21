@@ -867,7 +867,8 @@ release_files=(
 	steward-storage-zfs
 	stewardctl
 	integration/examples/agents/hermes/agent.json
-	integration/examples/agents/openclaw/agent.json
+	integration/examples/agents/developer/agent.json
+	integration/examples/agents/researcher/agent.json
 	integration/examples/agents/nodes.json
 	integration/examples/policy/steward.rego
 	integration/schemas/agent.cue
@@ -891,18 +892,26 @@ release_files=(
 	integration/adapters/hermes-agent/fixtures/skill/public.pem
 	integration/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json
 	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
+	integration/adapters/hermes-agent/profiles/developer/SKILL.md
+	integration/adapters/hermes-agent/profiles/developer/coding_worker.py
+	integration/adapters/hermes-agent/profiles/developer/manifest.json
+	integration/adapters/hermes-agent/profiles/developer/manifest.sig
+	integration/adapters/hermes-agent/profiles/developer/public.pem
+	integration/adapters/hermes-agent/profiles/research/SKILL.md
+	integration/adapters/hermes-agent/profiles/research/manifest.json
+	integration/adapters/hermes-agent/profiles/research/manifest.sig
+	integration/adapters/hermes-agent/profiles/research/public.pem
+	integration/adapters/hermes-agent/profiles/research/research.py
 	integration/adapters/hermes-agent/license-inventory.json
 	integration/adapters/hermes-agent/source-inputs.sha256
-	integration/adapters/openclaw/Dockerfile
-	integration/adapters/openclaw/adapter.json
-	integration/adapters/openclaw/entrypoint.mjs
-	integration/adapters/openclaw/fixture_model.mjs
-	integration/adapters/openclaw/fixtures/skill/SKILL.md
-	integration/adapters/openclaw/fixtures/skill/workspace_audit.mjs
-	integration/adapters/openclaw/fixtures/workspace/qualification/input/alpha.txt
-	integration/adapters/openclaw/fixtures/workspace/qualification/input/nested.json
-	integration/adapters/openclaw/result.mjs
-	integration/adapters/openclaw/source-inputs.sha256
+	integration/workers/coding/Dockerfile
+	integration/workers/coding/README.md
+	integration/workers/coding/coding_worker.py
+	integration/workers/coding/package-lock.json
+	integration/workers/coding/package.json
+	integration/workers/research/Dockerfile
+	integration/workers/research/README.md
+	integration/workers/research/research_worker.py
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -915,14 +924,12 @@ release_files=(
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
 	integration/scripts/build-hermes-adapter.sh
-	integration/scripts/build-openclaw-adapter.sh
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
-	integration/scripts/openclaw-feasibility.sh
 	integration/scripts/node-doctor.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
@@ -964,7 +971,7 @@ write_canonical_manifest() {
 		printf '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},\n'
 		printf '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},\n'
-		printf '    "gateway_state": {"read_min": 1, "read_max": 7, "write": 7},\n'
+		printf '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},\n'
@@ -1176,21 +1183,21 @@ for binary in steward steward-control stewardctl steward-mcp steward-executor st
 done
 install -d -o root -g root -m 0755 "$incoming/integration" \
 	"$incoming/integration/examples" "$incoming/integration/examples/agents" \
-	"$incoming/integration/examples/agents/hermes" "$incoming/integration/examples/agents/openclaw" \
+	"$incoming/integration/examples/agents/hermes" \
+	"$incoming/integration/examples/agents/developer" \
+	"$incoming/integration/examples/agents/researcher" \
 	"$incoming/integration/examples/policy" "$incoming/integration/schemas" \
 	"$incoming/integration/adapters" "$incoming/integration/adapters/hermes-agent" \
 	"$incoming/integration/adapters/hermes-agent/fixtures" \
 	"$incoming/integration/adapters/hermes-agent/fixtures/connector-skill" \
 	"$incoming/integration/adapters/hermes-agent/fixtures/skill" \
-	"$incoming/integration/adapters/openclaw" \
-	"$incoming/integration/adapters/openclaw/fixtures" \
-	"$incoming/integration/adapters/openclaw/fixtures/skill" \
-	"$incoming/integration/adapters/openclaw/fixtures/workspace" \
-	"$incoming/integration/adapters/openclaw/fixtures/workspace/qualification" \
-	"$incoming/integration/adapters/openclaw/fixtures/workspace/qualification/input" \
+	"$incoming/integration/adapters/hermes-agent/profiles/developer" \
+	"$incoming/integration/adapters/hermes-agent/profiles/research" \
+	"$incoming/integration/workers" "$incoming/integration/workers/coding" \
+	"$incoming/integration/workers/research" \
 	"$incoming/integration/deploy" "$incoming/integration/deploy/config" \
 	"$incoming/integration/deploy/systemd" "$incoming/integration/scripts"
-for file in agents/hermes/agent.json agents/openclaw/agent.json agents/nodes.json \
+for file in agents/hermes/agent.json agents/developer/agent.json agents/researcher/agent.json agents/nodes.json \
 	policy/steward.rego; do
 	install -o root -g root -m 0644 "$root/examples/$file" "$incoming/integration/examples/$file"
 done
@@ -1209,17 +1216,21 @@ for file in SKILL.md manifest.json manifest.sig public.pem workspace-fixture-con
 	install -o root -g root -m 0644 "$root/adapters/hermes-agent/fixtures/skill/$file" \
 		"$incoming/integration/adapters/hermes-agent/fixtures/skill/$file"
 done
-for file in Dockerfile adapter.json entrypoint.mjs fixture_model.mjs result.mjs source-inputs.sha256; do
-	install -o root -g root -m 0644 "$root/adapters/openclaw/$file" \
-		"$incoming/integration/adapters/openclaw/$file"
+for file in SKILL.md coding_worker.py manifest.json manifest.sig public.pem; do
+	install -o root -g root -m 0644 "$root/adapters/hermes-agent/profiles/developer/$file" \
+		"$incoming/integration/adapters/hermes-agent/profiles/developer/$file"
 done
-for file in SKILL.md workspace_audit.mjs; do
-	install -o root -g root -m 0644 "$root/adapters/openclaw/fixtures/skill/$file" \
-		"$incoming/integration/adapters/openclaw/fixtures/skill/$file"
+for file in SKILL.md research.py manifest.json manifest.sig public.pem; do
+	install -o root -g root -m 0644 "$root/adapters/hermes-agent/profiles/research/$file" \
+		"$incoming/integration/adapters/hermes-agent/profiles/research/$file"
 done
-for file in alpha.txt nested.json; do
-	install -o root -g root -m 0644 "$root/adapters/openclaw/fixtures/workspace/qualification/input/$file" \
-		"$incoming/integration/adapters/openclaw/fixtures/workspace/qualification/input/$file"
+for file in Dockerfile README.md coding_worker.py package-lock.json package.json; do
+	install -o root -g root -m 0644 "$root/workers/coding/$file" \
+		"$incoming/integration/workers/coding/$file"
+done
+for file in Dockerfile README.md research_worker.py; do
+	install -o root -g root -m 0644 "$root/workers/research/$file" \
+		"$incoming/integration/workers/research/$file"
 done
 for file in deploy/config/executor-gateway.env deploy/config/executor.env \
 	deploy/config/gateway.json.in deploy/config/steward-local.json deploy/config/steward.json deploy/config/storage-zfs.json.in \
@@ -1227,8 +1238,8 @@ for file in deploy/config/executor-gateway.env deploy/config/executor.env \
 	deploy/systemd/steward.service; do
 	install -o root -g root -m 0644 "$root/$file" "$incoming/integration/$file"
 done
-for script in activate-node-release.sh build-hermes-adapter.sh build-openclaw-adapter.sh build-relay-image.sh configure-admission.sh \
-	configure-node.sh hermes-feasibility.sh hermes-steward-acceptance.sh openclaw-feasibility.sh install-node.sh node-doctor.sh node-preflight.sh node-removal-guard.sh \
+for script in activate-node-release.sh build-hermes-adapter.sh build-relay-image.sh configure-admission.sh \
+	configure-node.sh hermes-feasibility.sh hermes-steward-acceptance.sh install-node.sh node-doctor.sh node-preflight.sh node-removal-guard.sh \
 	uninstall-node.sh; do
 	install -o root -g root -m 0755 "$root/scripts/$script" "$incoming/integration/scripts/$script"
 done
@@ -1378,9 +1389,7 @@ if [[ $reconcile_selected_release == true ]]; then
 		uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 		node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 		build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-		build-openclaw-adapter:/opt/steward/current/integration/scripts/build-openclaw-adapter.sh \
 		build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
-		openclaw-feasibility:/opt/steward/current/integration/scripts/openclaw-feasibility.sh \
 		hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 		name=${mapping%%:*}
 		target=${mapping#*:}
@@ -1429,9 +1438,7 @@ if [[ $reconcile_selected_release == true ]]; then
 		uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 		node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 		build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-		build-openclaw-adapter:/opt/steward/current/integration/scripts/build-openclaw-adapter.sh \
 		build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
-		openclaw-feasibility:/opt/steward/current/integration/scripts/openclaw-feasibility.sh \
 		hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 		name=${mapping%%:*}
 		target=${mapping#*:}

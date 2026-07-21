@@ -28,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion            = 1
-	stateFormatWriteVersion              = 15
+	stateFormatWriteVersion              = 16
 	stateFormatMaxReadVersion            = stateFormatWriteVersion
 	stateFormatEvidenceVersion           = 2
 	stateFormatExecutorV4Version         = 3
@@ -44,8 +44,9 @@ const (
 	stateFormatForkLifecycleVersion      = 13
 	stateFormatSnapshotQuarantineVersion = 14
 	stateFormatRolloutControlVersion     = 15
+	stateFormatInstanceEventsVersion     = 16
 	transactionFormatMinReadVersion      = 1
-	transactionFormatWriteVersion        = 15
+	transactionFormatWriteVersion        = 16
 	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
 	transactionEvidenceVersion           = 2
 	transactionExecutorV4Version         = 3
@@ -61,6 +62,7 @@ const (
 	transactionForkLifecycleVersion      = 13
 	transactionSnapshotQuarantineVersion = 14
 	transactionRolloutControlVersion     = 15
+	transactionInstanceEventsVersion     = 16
 	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -595,6 +597,7 @@ type snapshotState struct {
 	Commands    []storedCommand         `json:"commands"`
 	Captures    []storedEvidenceCapture `json:"captures"`
 	Deployments []storedDeployment      `json:"deployments"`
+	Events      []InstanceEvent         `json:"instance_events"`
 }
 
 type storedCredential struct {
@@ -685,6 +688,7 @@ type state struct {
 	commands    map[string]Command
 	captures    map[string]storedEvidenceCapture
 	deployments map[string]Deployment
+	events      map[string]InstanceEvent
 }
 
 type transaction struct {
@@ -707,6 +711,8 @@ type mutation struct {
 	Capture      *storedEvidenceCapture `json:"capture,omitempty"`
 	CaptureID    string                 `json:"capture_id,omitempty"`
 	Deployment   *storedDeployment      `json:"deployment,omitempty"`
+	Event        *InstanceEvent         `json:"instance_event,omitempty"`
+	EventID      string                 `json:"instance_event_id,omitempty"`
 }
 
 type commandReference struct {
@@ -721,19 +727,21 @@ type nodeRevocation struct {
 }
 
 const (
-	mutationTenant             = "tenant_upsert"
-	mutationOperationalFreeze  = "operational_freeze_upsert"
-	mutationSnapshotQuarantine = "snapshot_quarantine_upsert"
-	mutationNode               = "node_upsert"
-	mutationCredential         = "credential_upsert"
-	mutationEnrollment         = "enrollment_upsert"
-	mutationCommand            = "command_upsert"
-	mutationEnrollmentDelete   = "enrollment_delete"
-	mutationCommandDelete      = "command_delete"
-	mutationNodeRevoke         = "node_revoke"
-	mutationCapture            = "evidence_capture_upsert"
-	mutationCaptureDelete      = "evidence_capture_delete"
-	mutationDeployment         = "deployment_upsert"
+	mutationTenant              = "tenant_upsert"
+	mutationOperationalFreeze   = "operational_freeze_upsert"
+	mutationSnapshotQuarantine  = "snapshot_quarantine_upsert"
+	mutationNode                = "node_upsert"
+	mutationCredential          = "credential_upsert"
+	mutationEnrollment          = "enrollment_upsert"
+	mutationCommand             = "command_upsert"
+	mutationEnrollmentDelete    = "enrollment_delete"
+	mutationCommandDelete       = "command_delete"
+	mutationNodeRevoke          = "node_revoke"
+	mutationCapture             = "evidence_capture_upsert"
+	mutationCaptureDelete       = "evidence_capture_delete"
+	mutationDeployment          = "deployment_upsert"
+	mutationInstanceEvent       = "instance_event_upsert"
+	mutationInstanceEventDelete = "instance_event_delete"
 )
 
 func emptyState() state {
@@ -742,7 +750,7 @@ func emptyState() state {
 		quarantines: make(map[string]SnapshotQuarantine), nodes: make(map[string]Node),
 		credentials: make(map[string]controlauth.Credential), enrollments: make(map[string]controlauth.Enrollment),
 		commands: make(map[string]Command), captures: make(map[string]storedEvidenceCapture),
-		deployments: make(map[string]Deployment),
+		deployments: make(map[string]Deployment), events: make(map[string]InstanceEvent),
 	}
 }
 
@@ -784,6 +792,9 @@ func (current state) clone() state {
 	}
 	for key, deployment := range current.deployments {
 		next.deployments[key] = cloneDeployment(deployment)
+	}
+	for key, event := range current.events {
+		next.events[key] = cloneInstanceEvent(event)
 	}
 	return next
 }
@@ -1117,7 +1128,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
 		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Freezes: []OperationalFreeze{}, Quarantines: []SnapshotQuarantine{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
-		Deployments: []storedDeployment{},
+		Deployments: []storedDeployment{}, Events: []InstanceEvent{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
@@ -1151,6 +1162,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, deployment := range current.deployments {
 		snapshot.Deployments = append(snapshot.Deployments, deploymentToStored(deployment))
 	}
+	for _, event := range current.events {
+		snapshot.Events = append(snapshot.Events, cloneInstanceEvent(event))
+	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Freezes, func(i, j int) bool {
 		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
@@ -1183,6 +1197,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 		}
 		return left.ID < right.ID
 	})
+	sort.Slice(snapshot.Events, func(i, j int) bool { return snapshot.Events[i].Event.EventID < snapshot.Events[j].Event.EventID })
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, err
@@ -1208,7 +1223,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		snapshot.Version >= stateFormatCaptureVersion && snapshot.Captures == nil ||
 		snapshot.Version < stateFormatCaptureVersion && snapshot.Captures != nil ||
 		snapshot.Version >= stateFormatDeploymentVersion && snapshot.Deployments == nil ||
-		snapshot.Version < stateFormatDeploymentVersion && snapshot.Deployments != nil {
+		snapshot.Version < stateFormatDeploymentVersion && snapshot.Deployments != nil ||
+		snapshot.Version >= stateFormatInstanceEventsVersion && snapshot.Events == nil ||
+		snapshot.Version < stateFormatInstanceEventsVersion && len(snapshot.Events) != 0 {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
 	current := emptyState()
@@ -1340,6 +1357,15 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		current.deployments[key] = cloneDeployment(deployment)
 	}
+	for _, event := range snapshot.Events {
+		if !validInstanceEvent(event) {
+			return state{}, errors.New("control snapshot contains an invalid instance event")
+		}
+		if _, duplicate := current.events[event.Event.EventID]; duplicate {
+			return state{}, errors.New("control snapshot contains a duplicate instance event")
+		}
+		current.events[event.Event.EventID] = cloneInstanceEvent(event)
+	}
 	return current, nil
 }
 
@@ -1403,6 +1429,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 			present++
 		}
 		if change.Deployment != nil {
+			present++
+		}
+		if change.Event != nil {
+			present++
+		}
+		if change.EventID != "" {
 			present++
 		}
 		if present != 1 {
@@ -1584,6 +1616,19 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("legacy deployment mutation contains fork state")
 			}
 			next.deployments[deploymentKey(deployment.TenantID, deployment.ID)] = cloneDeployment(deployment)
+		case mutationInstanceEvent:
+			if value.Version < transactionInstanceEventsVersion || change.Event == nil || !validInstanceEvent(*change.Event) {
+				return state{}, errors.New("instance event mutation is invalid for this transaction version")
+			}
+			next.events[change.Event.Event.EventID] = cloneInstanceEvent(*change.Event)
+		case mutationInstanceEventDelete:
+			if value.Version < transactionInstanceEventsVersion || change.EventID == "" {
+				return state{}, errors.New("instance event deletion is invalid for this transaction version")
+			}
+			if _, exists := next.events[change.EventID]; !exists {
+				return state{}, errors.New("instance event deletion references missing state")
+			}
+			delete(next.events, change.EventID)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -1648,7 +1693,7 @@ func validateState(current state, limits Limits) error {
 		len(current.quarantines) > MaxSnapshotQuarantines || len(current.nodes) > limits.MaxNodes ||
 		len(current.credentials) > limits.MaxCredentials || len(current.enrollments) > limits.MaxEnrollments ||
 		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained ||
-		len(current.deployments) > limits.MaxDeployments {
+		len(current.deployments) > limits.MaxDeployments || len(current.events) > MaxInstanceEventsRetained {
 		return ErrCapacityExceeded
 	}
 	for key, tenant := range current.tenants {
@@ -1664,6 +1709,20 @@ func validateState(current state, limits Limits) error {
 			if changed.Before(created) {
 				return errors.New("tenant resource quota predates tenant creation")
 			}
+		}
+	}
+	eventsByTenant := make(map[string]int)
+	for key, event := range current.events {
+		if key != event.Event.EventID || !validInstanceEvent(event) {
+			return errors.New("control state contains an invalid instance event")
+		}
+		node, nodeOK := current.nodes[event.Event.NodeID]
+		if _, tenantOK := current.tenants[event.Event.TenantID]; !nodeOK || !tenantOK || !tenantMember(node.TenantIDs, event.Event.TenantID) {
+			return errors.New("instance event references an unknown tenant node")
+		}
+		eventsByTenant[event.Event.TenantID]++
+		if eventsByTenant[event.Event.TenantID] > MaxInstanceEventsPerTenant {
+			return ErrCapacityExceeded
 		}
 	}
 	for key, freeze := range current.freezes {

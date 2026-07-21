@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -75,7 +73,6 @@ func TestActivationCanaryClosedContractRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if verified.Hermes().RunID != fixture.result.RunID ||
-		verified.OpenClaw() != (activation.OpenClawCanaryResultV1{}) ||
 		verified.Gateway().Canary.TaskDigest != fixture.result.TaskDigest ||
 		!bytes.Equal(verified.TerminalResult(), fixture.terminal) ||
 		!bytes.Equal(verified.GatewayReceipts(), fixture.receipts) {
@@ -102,25 +99,6 @@ func TestActivationCanaryClosedContractRoundTrip(t *testing.T) {
 		"canonical result=%d bytes (terminal=%d, portable receipts=%d, protocol projection limit=%d)",
 		len(fixture.resultRaw), len(fixture.terminal), len(fixture.receipts), MaxResultBytes,
 	)
-}
-
-func TestOpenClawActivationCanaryClosedContractRoundTrip(t *testing.T) {
-	fixture := newCanaryFixtureForKind(t, agentrelease.CanaryKindOpenClawWorkspaceAuditV1)
-	verified, err := VerifyResultV1(fixture.verified, fixture.resultRaw, fixture.receiptPublic)
-	if err != nil {
-		t.Fatal(err)
-	}
-	observed := verified.OpenClaw()
-	if observed.RunID != fixture.result.RunID ||
-		observed.SessionID != agentrelease.OpenClawSessionIDPrefix+"-"+fixture.command.ActivationID ||
-		observed.ManifestDigest != agentrelease.OpenClawWorkspaceAuditManifestDigest ||
-		verified.Canary().Kind != agentrelease.CanaryKindOpenClawWorkspaceAuditV1 ||
-		verified.Hermes() != (activation.HermesCanaryResultV1{}) {
-		t.Fatalf("verified OpenClaw result = %#v / %#v", observed, verified.Canary())
-	}
-	if err := VerifyCheckpointV1(fixture.verified, verified, fixture.checkpointRaw); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestBuildCommandV1ConstructsOnlyClosedRequest(t *testing.T) {
@@ -332,7 +310,7 @@ func TestVerifyCommandV1RejectsAdmissionAndPermitSubstitution(t *testing.T) {
 		"capsule":        func(value *taskpermit.Statement) { value.CapsuleDigest = digestOf("other capsule") },
 		"policy":         func(value *taskpermit.Statement) { value.PolicyDigest = digestOf("other policy") },
 		"route policy":   func(value *taskpermit.Statement) { value.RoutePolicyDigest = digestOf("other route") },
-		"service":        func(value *taskpermit.Statement) { value.ServiceID = "openclaw-api" },
+		"service":        func(value *taskpermit.Statement) { value.ServiceID = "other-api" },
 		"operation":      func(value *taskpermit.Statement) { value.OperationID = "other.run" },
 		"request digest": func(value *taskpermit.Statement) { value.RequestDigest = digestOf("other request") },
 		"request bytes":  func(value *taskpermit.Statement) { value.RequestBytes++ },
@@ -766,9 +744,6 @@ func newCanaryFixtureForKind(t *testing.T, kind string) canaryFixture {
 	taskPublic, taskPrivate := generateKey(t)
 	receiptPublic, receiptPrivate := generateKey(t)
 	instanceID := "hermes-a"
-	if kind == agentrelease.CanaryKindOpenClawWorkspaceAuditV1 {
-		instanceID = "openclaw-a"
-	}
 	statement := taskpermit.Statement{
 		SchemaVersion: taskpermit.SchemaV1,
 		NodeID:        "node-a", TenantID: "tenant-a", InstanceID: instanceID,
@@ -845,9 +820,6 @@ func newCanaryFixtureForKind(t *testing.T, kind string) canaryFixture {
 		t.Fatal(err)
 	}
 	terminal := validHermesTerminal(t, activationID)
-	if kind == agentrelease.CanaryKindOpenClawWorkspaceAuditV1 {
-		terminal = validOpenClawTerminal(t, activationID)
-	}
 	fixture := canaryFixture{
 		now: now, command: command, commandRaw: commandRaw, verified: verified,
 		admission: admission, statement: statement, taskPrivate: taskPrivate,
@@ -995,59 +967,6 @@ func validHermesTerminal(t *testing.T, activationID string) []byte {
 	terminal.Usage.OutputTokens = 1
 	terminal.Usage.TotalTokens = 3
 	return mustJSON(t, terminal)
-}
-
-func validOpenClawTerminal(t *testing.T, activationID string) []byte {
-	t.Helper()
-	result := struct {
-		Payloads []struct {
-			Text     string          `json:"text"`
-			MediaURL json.RawMessage `json:"media_url"`
-		} `json:"payloads"`
-		Meta struct {
-			DurationMS   int64    `json:"duration_ms"`
-			Model        string   `json:"model"`
-			Provider     string   `json:"provider"`
-			ToolCalls    int      `json:"tool_calls"`
-			ToolFailures int      `json:"tool_failures"`
-			Tools        []string `json:"tools"`
-		} `json:"meta"`
-	}{}
-	result.Payloads = append(result.Payloads, struct {
-		Text     string          `json:"text"`
-		MediaURL json.RawMessage `json:"media_url"`
-	}{Text: activation.OpenClawSuccessText, MediaURL: json.RawMessage("null")})
-	result.Meta.DurationMS = 7701
-	result.Meta.Model = "steward-openclaw-fixture"
-	result.Meta.Provider = "steward"
-	result.Meta.ToolCalls = 1
-	result.Meta.Tools = []string{"exec"}
-	resultRaw := mustJSON(t, result)
-	var canonicalValue any
-	if err := json.Unmarshal(resultRaw, &canonicalValue); err != nil {
-		t.Fatal(err)
-	}
-	canonical := mustJSON(t, canonicalValue)
-	sum := sha256.Sum256(canonical)
-	terminal := struct {
-		RunID         string          `json:"run_id"`
-		SessionID     string          `json:"session_id"`
-		Status        string          `json:"status"`
-		Result        json.RawMessage `json:"result"`
-		ResultSHA256  string          `json:"result_sha256"`
-		Qualification struct {
-			FixtureID               string `json:"fixture_id"`
-			WorkspaceManifestDigest string `json:"workspace_manifest_digest"`
-		} `json:"qualification"`
-	}{
-		RunID:     "run_0123456789abcdef0123456789abcdef",
-		SessionID: agentrelease.OpenClawSessionIDPrefix + "-" + activationID,
-		Status:    activation.OpenClawCompletedStatus, Result: resultRaw,
-		ResultSHA256: hex.EncodeToString(sum[:]),
-	}
-	terminal.Qualification.FixtureID = agentrelease.OpenClawWorkspaceAuditFixtureID
-	terminal.Qualification.WorkspaceManifestDigest = agentrelease.OpenClawWorkspaceAuditManifestDigest
-	return append(mustJSON(t, terminal), '\n')
 }
 
 func mustFixedRequest(t *testing.T, activationID string) []byte {

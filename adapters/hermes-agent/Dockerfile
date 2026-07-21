@@ -34,6 +34,16 @@ COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/connector-fixture
 COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/manifest.json /opt/steward/skills/steward.connector-work/manifest.json
 COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/manifest.sig /opt/steward/skills/steward.connector-work/manifest.sig
 COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/public.pem /opt/steward/skills/steward.connector-work/public.pem
+COPY --chown=0:0 --chmod=0555 adapter/profiles/research/research.py /opt/steward/profiles/research/research.py
+COPY --chown=0:0 --chmod=0444 adapter/profiles/research/SKILL.md /opt/steward/profiles/research/SKILL.md
+COPY --chown=0:0 --chmod=0444 adapter/profiles/research/manifest.json /opt/steward/profiles/research/manifest.json
+COPY --chown=0:0 --chmod=0444 adapter/profiles/research/manifest.sig /opt/steward/profiles/research/manifest.sig
+COPY --chown=0:0 --chmod=0444 adapter/profiles/research/public.pem /opt/steward/profiles/research/public.pem
+COPY --chown=0:0 --chmod=0555 adapter/profiles/developer/coding_worker.py /opt/steward/profiles/developer/coding_worker.py
+COPY --chown=0:0 --chmod=0444 adapter/profiles/developer/SKILL.md /opt/steward/profiles/developer/SKILL.md
+COPY --chown=0:0 --chmod=0444 adapter/profiles/developer/manifest.json /opt/steward/profiles/developer/manifest.json
+COPY --chown=0:0 --chmod=0444 adapter/profiles/developer/manifest.sig /opt/steward/profiles/developer/manifest.sig
+COPY --chown=0:0 --chmod=0444 adapter/profiles/developer/public.pem /opt/steward/profiles/developer/public.pem
 
 USER 65532:65532
 WORKDIR /opt/data

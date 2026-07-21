@@ -1279,6 +1279,8 @@ components:
           type: boolean
         connector:
           type: boolean
+        controller_events:
+          type: boolean
       description: Omitted capability fields are false. Positive capabilities require their configured enforcement topology; otherwise admission fails closed with 501. Persistent state also requires an explicit dedicated-host compatibility setting and signed policy with exactly one tenant because local Docker volumes have no portable hard byte or inode quota.
     StatePurgeRequest:
       type: object
@@ -1497,6 +1499,9 @@ components:
         connector_url:
           type: string
           enum: ["http://steward-relay:8081"]
+        event_url:
+          type: string
+          enum: ["http://steward-relay:8083/v1/events"]
         connector_ids:
           type: array
           minItems: 1
@@ -1627,6 +1632,9 @@ components:
         connector_url:
           type: string
           enum: ["http://steward-relay:8081"]
+        event_url:
+          type: string
+          enum: ["http://steward-relay:8083/v1/events"]
         connector_ids:
           type: array
           minItems: 1

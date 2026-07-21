@@ -29,6 +29,7 @@ type Definition struct {
 	Schema       string             `json:"schema"`
 	Name         string             `json:"name"`
 	Runtime      Runtime            `json:"runtime"`
+	ToolProfile  string             `json:"tool_profile,omitempty"`
 	Model        Model              `json:"model"`
 	Skills       []string           `json:"skills,omitempty"`
 	MCP          []string           `json:"mcp_servers,omitempty"`
@@ -53,8 +54,9 @@ type Model struct {
 // runtime's bounded task service are implied by every agent application; raw
 // credentials and upstream origins never belong here.
 type CapabilityRequests struct {
-	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
-	ConnectorIDs   []string `json:"connector_ids,omitempty"`
+	EgressRouteIDs   []string `json:"egress_route_ids,omitempty"`
+	ConnectorIDs     []string `json:"connector_ids,omitempty"`
+	ControllerEvents bool     `json:"controller_events,omitempty"`
 }
 
 type Resources struct {
@@ -189,13 +191,31 @@ func (value Definition) Validate() error {
 	if err := ValidateName(value.Name); err != nil {
 		return err
 	}
-	wantContract := map[string]string{"hermes": "steward.hermes-agent.v1", "openclaw": "steward.openclaw.v1"}
+	wantContract := map[string]string{"hermes": "steward.hermes-agent.v1"}
 	contract, ok := wantContract[value.Runtime.Engine]
 	if !ok || value.Runtime.AdapterContract != contract {
-		return errors.New("runtime must select hermes or openclaw with its exact Steward adapter contract")
+		return errors.New("runtime must select hermes with its exact Steward adapter contract")
 	}
 	if !validImage(value.Runtime.Image) {
 		return errors.New("runtime image must be a bounded OCI reference pinned by sha256 digest")
+	}
+	switch value.EffectiveToolProfile() {
+	case "workspace":
+	case "research":
+		if !value.Capabilities.ControllerEvents ||
+			!slices.Contains(value.Capabilities.ConnectorIDs, "steward-research-search") ||
+			!slices.Contains(value.Capabilities.ConnectorIDs, "steward-research-extract") ||
+			!slices.Contains(value.Skills, "steward-research") {
+			return errors.New("research tool profile requires its signed skill, search and extract connectors, and controller events")
+		}
+	case "developer":
+		if !slices.Contains(value.Skills, "steward-coding-worker") ||
+			!slices.Contains(value.Capabilities.ConnectorIDs, "steward-codex") &&
+				!slices.Contains(value.Capabilities.ConnectorIDs, "steward-claude-code") {
+			return errors.New("developer tool profile requires its signed skill and at least one coding-worker connector")
+		}
+	default:
+		return errors.New("tool_profile must be workspace, research, or developer")
 	}
 	if _, _, err := ParseModelRoute(value.Model.Route); err != nil {
 		return err
@@ -278,6 +298,15 @@ func (value Definition) Validate() error {
 		return errors.New("lifetime mode must be task, service, or temporary")
 	}
 	return nil
+}
+
+// EffectiveToolProfile preserves existing workspace definitions while keeping
+// research and coding authority explicit in newly authored artifacts.
+func (value Definition) EffectiveToolProfile() string {
+	if value.ToolProfile == "" {
+		return "workspace"
+	}
+	return value.ToolProfile
 }
 
 // ParseModelRoute converts the portable route/alias shorthand into the two

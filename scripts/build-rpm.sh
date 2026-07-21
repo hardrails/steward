@@ -32,7 +32,6 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
 	scripts/node-removal-guard.sh scripts/build-hermes-adapter.sh scripts/build-relay-image.sh \
 	scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh \
-	scripts/build-openclaw-adapter.sh scripts/openclaw-feasibility.sh \
 	adapters/hermes-agent/Dockerfile adapters/hermes-agent/README.md \
 	adapters/hermes-agent/adapter.json adapters/hermes-agent/entrypoint.py \
 	adapters/hermes-agent/fixture_connector.py adapters/hermes-agent/fixture_mcp.py \
@@ -49,15 +48,14 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	adapters/hermes-agent/fixtures/skill/public.pem \
 	adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json \
 	adapters/hermes-agent/fixtures/skill/workspace_audit.py \
+	adapters/hermes-agent/profiles/research/SKILL.md adapters/hermes-agent/profiles/research/research.py \
+	adapters/hermes-agent/profiles/research/manifest.json adapters/hermes-agent/profiles/research/manifest.sig adapters/hermes-agent/profiles/research/public.pem \
+	adapters/hermes-agent/profiles/developer/SKILL.md adapters/hermes-agent/profiles/developer/coding_worker.py \
+	adapters/hermes-agent/profiles/developer/manifest.json adapters/hermes-agent/profiles/developer/manifest.sig adapters/hermes-agent/profiles/developer/public.pem \
 	adapters/hermes-agent/license-inventory.json adapters/hermes-agent/source-inputs.sha256 \
-	adapters/openclaw/Dockerfile adapters/openclaw/adapter.json \
-	adapters/openclaw/entrypoint.mjs adapters/openclaw/fixture_model.mjs \
-	adapters/openclaw/result.mjs adapters/openclaw/source-inputs.sha256 \
-	adapters/openclaw/fixtures/skill/SKILL.md \
-	adapters/openclaw/fixtures/skill/workspace_audit.mjs \
-	adapters/openclaw/fixtures/workspace/qualification/input/alpha.txt \
-	adapters/openclaw/fixtures/workspace/qualification/input/nested.json \
-	examples/agents/hermes/agent.json examples/agents/openclaw/agent.json \
+	workers/coding/Dockerfile workers/coding/README.md workers/coding/coding_worker.py workers/coding/package-lock.json workers/coding/package.json \
+	workers/research/Dockerfile workers/research/README.md workers/research/research_worker.py \
+	examples/agents/hermes/agent.json examples/agents/researcher/agent.json examples/agents/developer/agent.json \
 	examples/agents/nodes.json examples/policy/steward.rego schemas/agent.cue \
 	release.json LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then

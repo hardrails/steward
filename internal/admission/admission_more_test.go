@@ -321,7 +321,6 @@ func TestDefaultProfilesIncludeFixedAgentStateLayouts(t *testing.T) {
 	for _, test := range []struct{ id, path string }{
 		{"generic-v1", "/state"},
 		{"hermes-v1", "/opt/data"},
-		{"openclaw-v1", "/home/node/.openclaw"},
 	} {
 		profile, ok := profiles.Lookup(ProfileRef{ID: test.id, Version: "v1"})
 		if !ok || profile.StatePath != test.path || profile.UID != 65532 || profile.GID != 65532 {

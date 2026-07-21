@@ -222,7 +222,7 @@ or honest inside that scope.
 
 ## Compose publication and finite deployment authority
 
-The common Hermes and OpenClaw path derives the verbose signed contracts from an
+The common Hermes path derives the verbose signed contracts from an
 agent bundle and a verified site package:
 
 ```console
@@ -338,7 +338,7 @@ for a complete configured example.
 ## Authorize and recover a service task
 
 A task bundle contains one exact tenant-signed request for a configured lifecycle
-service such as the bounded Hermes or OpenClaw adapter.
+service such as the bounded Hermes adapter.
 
 Issue and verify the owner-only bundle on a signing station:
 

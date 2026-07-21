@@ -25,6 +25,21 @@ Four permissions always agree:
 
 If any layer is missing, admission fails closed.
 
+Steward also includes fixed presets for its optional research and coding workers:
+
+| Preset | Connector identity | Exact operation |
+| --- | --- | --- |
+| `research-search` | `steward-research-search` | `POST /v1/search` |
+| `research-extract` | `steward-research-extract` | `POST /v1/extract` |
+| `codex-worker` | `steward-codex` | `POST /v1/run` |
+| `claude-code-worker` | `steward-claude-code` | `POST /v1/run` |
+
+These presets fix the operation and safety budgets but require the operator to
+name the separately deployed worker origin and credential file. Follow the
+[web research]({{ '/guides/research-agents/' | relative_url }}) or
+[coding worker]({{ '/guides/coding-workers/' | relative_url }}) guide for the
+complete boundary.
+
 For a connector that requires independent approval of each effect, enable a fifth
 layer: a tenant-scoped action authority signs a short-lived **action permit** for
 one exact request, or a bounded bundle of exact requests. Gateway then requires

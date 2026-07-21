@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -54,6 +55,16 @@ type connectorSkillManifest struct {
 	Network       bool              `json:"network"`
 	SchemaVersion string            `json:"schema_version"`
 	Version       string            `json:"version"`
+}
+
+type profileSkillManifest struct {
+	ConnectorIDs  []string       `json:"connector_ids"`
+	Entrypoint    string         `json:"entrypoint"`
+	Files         []skillFile    `json:"files"`
+	Limits        map[string]int `json:"limits"`
+	Name          string         `json:"name"`
+	SchemaVersion string         `json:"schema_version"`
+	Version       string         `json:"version"`
 }
 
 func TestHermesWorkspaceSkillSignatureAndInventory(t *testing.T) {
@@ -202,6 +213,140 @@ func TestHermesConnectorSkillSignatureAndInventory(t *testing.T) {
 	}
 }
 
+func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
+	tests := []struct {
+		profile, name, entrypoint, publicDigest string
+		connectors                              []string
+		limits                                  map[string]int
+	}{
+		{
+			profile: "research", name: "steward-research", entrypoint: "research.py",
+			publicDigest: "b8e13bf2e90dd3f360f5b5ddfb34bddc79df47d2b6d3456dc3f7d67a5be16e35",
+			connectors:   []string{"steward-research-extract", "steward-research-search"},
+			limits: map[string]int{"max_extract_urls": 10, "max_request_bytes": 65536, "max_response_bytes": 1048576,
+				"max_search_results": 20, "timeout_seconds": 30},
+		},
+		{
+			profile: "developer", name: "steward-coding-worker", entrypoint: "coding_worker.py",
+			publicDigest: "0b131eeb43a3f6fd4e5ed8a16c5b4a20501860400d74fb95a7b2f4e9e73e6fac",
+			connectors:   []string{"steward-claude-code", "steward-codex"},
+			limits: map[string]int{"max_request_bytes": 65536, "max_response_bytes": 1048576,
+				"max_task_bytes": 16384, "max_timeout_seconds": 900},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.profile, func(t *testing.T) {
+			root := filepath.Join(hermesAdapterRoot(t), "profiles", test.profile)
+			manifestBytes := readBounded(t, filepath.Join(root, "manifest.json"), 16<<10)
+			publicPEM := readBounded(t, filepath.Join(root, "public.pem"), 1<<10)
+			digest := sha256.Sum256(publicPEM)
+			if hex.EncodeToString(digest[:]) != test.publicDigest {
+				t.Fatalf("public-key digest = %x", digest)
+			}
+			block, rest := pem.Decode(publicPEM)
+			if block == nil || len(rest) != 0 || block.Type != "PUBLIC KEY" {
+				t.Fatal("public key is not one canonical PEM block")
+			}
+			parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			publicKey, ok := parsed.(ed25519.PublicKey)
+			if !ok {
+				t.Fatalf("public key type = %T", parsed)
+			}
+			signature, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(string(readBounded(t, filepath.Join(root, "manifest.sig"), 256))))
+			if err != nil || !ed25519.Verify(publicKey, manifestBytes, signature) {
+				t.Fatalf("profile signature is invalid: %v", err)
+			}
+			var generic any
+			if err := json.Unmarshal(manifestBytes, &generic); err != nil {
+				t.Fatal(err)
+			}
+			canonical, err := json.Marshal(generic)
+			if err != nil || !bytes.Equal(manifestBytes, append(canonical, '\n')) {
+				t.Fatalf("profile manifest is not canonical: %v", err)
+			}
+			decoder := json.NewDecoder(bytes.NewReader(manifestBytes))
+			decoder.DisallowUnknownFields()
+			var manifest profileSkillManifest
+			if err := decoder.Decode(&manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := requireEOF(decoder); err != nil {
+				t.Fatal(err)
+			}
+			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" || manifest.Version != "1" ||
+				manifest.Name != test.name || manifest.Entrypoint != test.entrypoint ||
+				!valuesEqual(manifest.ConnectorIDs, test.connectors) || !valuesEqual(manifest.Limits, test.limits) || len(manifest.Files) != 2 {
+				t.Fatalf("unexpected profile authority: %#v", manifest)
+			}
+			prior := ""
+			for _, file := range manifest.Files {
+				if file.Path <= prior || file.Mode != map[string]string{"SKILL.md": "read", test.entrypoint: "execute"}[file.Path] {
+					t.Fatalf("invalid profile file descriptor: %#v", file)
+				}
+				content := readBounded(t, filepath.Join(root, file.Path), 1<<20)
+				fileDigest := sha256.Sum256(content)
+				if hex.EncodeToString(fileDigest[:]) != file.SHA256 {
+					t.Fatalf("digest mismatch for %s", file.Path)
+				}
+				prior = file.Path
+			}
+		})
+	}
+}
+
+func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *testing.T) {
+	root := filepath.Join(hermesAdapterRoot(t), "profiles")
+	research := string(readBounded(t, filepath.Join(root, "research", "research.py"), 1<<20))
+	researchSkill := string(readBounded(t, filepath.Join(root, "research", "SKILL.md"), 1<<20))
+	developer := string(readBounded(t, filepath.Join(root, "developer", "coding_worker.py"), 1<<20))
+	developerSkill := string(readBounded(t, filepath.Join(root, "developer", "SKILL.md"), 1<<20))
+	for _, contract := range []struct {
+		name, source string
+		required     []string
+	}{
+		{
+			name: "research", source: research,
+			required: []string{
+				`CONNECTOR_ORIGIN = "http://steward-relay:8081"`,
+				`EVENT_ORIGIN = "http://steward-relay:8083"`,
+				`/v1/connectors/steward-research-search/operations/search`,
+				`/v1/connectors/steward-research-extract/operations/extract`,
+				`/v1/events`,
+			},
+		},
+		{
+			name: "developer", source: developer,
+			required: []string{
+				`CONNECTOR_ORIGIN = "http://steward-relay:8081"`,
+				`connector = "steward-codex" if arguments.worker == "codex" else "steward-claude-code"`,
+				`/operations/run`,
+			},
+		},
+	} {
+		for _, required := range contract.required {
+			if !strings.Contains(contract.source, required) {
+				t.Fatalf("%s helper is missing contract %q", contract.name, required)
+			}
+		}
+		for _, forbidden := range []string{"os.environ", "API_KEY", "Authorization"} {
+			if strings.Contains(contract.source, forbidden) {
+				t.Fatalf("%s helper accepts or carries forbidden authority %q", contract.name, forbidden)
+			}
+		}
+	}
+	if !strings.Contains(strings.ToLower(researchSkill), "untrusted") ||
+		!strings.Contains(strings.ToLower(researchSkill), "prompt injection") {
+		t.Fatal("research skill does not identify retrieved material as untrusted prompt-injection input")
+	}
+	if !strings.Contains(developerSkill, "separate security boundary") ||
+		!strings.Contains(developerSkill, "Do not install a CLI") {
+		t.Fatal("developer skill does not explain the isolated-worker boundary")
+	}
+}
+
 func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	dockerfile := string(readBounded(t, filepath.Join(root, "Dockerfile"), 64<<10))
@@ -221,6 +366,13 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	for _, forbidden := range []string{"uv sync", "uv pip install", "/opt/steward/fixtures/skill"} {
 		if strings.Contains(dockerfile, forbidden) {
 			t.Fatalf("Dockerfile executes or installs through forbidden path %q", forbidden)
+		}
+	}
+	for profile, executable := range map[string]string{"research": "research.py", "developer": "coding_worker.py"} {
+		executableCopy := strings.Index(dockerfile, "--chmod=0555 adapter/profiles/"+profile+"/"+executable)
+		readOnlyCopy := strings.Index(dockerfile, "--chmod=0444 adapter/profiles/"+profile+"/SKILL.md")
+		if executableCopy < 0 || readOnlyCopy < 0 || executableCopy > readOnlyCopy {
+			t.Fatalf("%s profile directory is not created by its searchable 0555 copy", profile)
 		}
 	}
 	if strings.Contains(dockerfile, "# syntax=") {
@@ -258,8 +410,17 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	for _, required := range []string{
 		`FIXTURE = pathlib.Path("/opt/steward/skills/steward.workspace-audit")`,
 		`CONNECTOR_FIXTURE = pathlib.Path("/opt/steward/skills/steward.connector-work")`,
+		`RESEARCH_SKILL = pathlib.Path("/opt/steward/profiles/research")`,
+		`DEVELOPER_SKILL = pathlib.Path("/opt/steward/profiles/developer")`,
 		`{"id": "skill", "fixture_id": "steward.connector-work"}`,
-		"skills:\n  external_dirs:\n    - /opt/steward/skills",
+		`external_dirs = ["/opt/steward/skills"]`,
+		`"STEWARD_HERMES_PROFILE", "workspace"`,
+		`max_turns = {"workspace": 90, "research": 32, "developer": 32}[profile]`,
+		`"developer": ["browser", "computer_use", "cronjob", "delegation"`,
+		`max_concurrent_children: 4`,
+		`max_spawn_depth: 1`,
+		`child_timeout_seconds: 180`,
+		`subagent_auto_approve: false`,
 	} {
 		if !strings.Contains(entrypoint, required) {
 			t.Fatalf("entrypoint does not bind immutable skill property %q", required)
@@ -278,6 +439,19 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	repositoryRoot := filepath.Join(root, "..", "..")
+	var adapter struct {
+		Upstream struct {
+			Release  string `json:"release"`
+			Revision string `json:"revision"`
+			Version  string `json:"version"`
+		} `json:"upstream"`
+	}
+	decodeEvidence(t, filepath.Join(root, "adapter.json"), &adapter)
+	if !regexp.MustCompile(`^v[0-9]+(?:\.[0-9]+){2}$`).MatchString(adapter.Upstream.Release) ||
+		!regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(adapter.Upstream.Revision) ||
+		!regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(adapter.Upstream.Version) {
+		t.Fatalf("invalid Hermes release pin: %#v", adapter.Upstream)
+	}
 	for _, name := range []string{"build-hermes-adapter.sh", "hermes-feasibility.sh", "hermes-steward-acceptance.sh"} {
 		script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", name), 2<<20))
 		for _, line := range strings.Split(script, "\n") {
@@ -355,7 +529,7 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-feasibility.json"), &feasibility)
 	if feasibility.SchemaVersion != "steward.agent-feasibility.v1" || feasibility.Overall != "passed" ||
 		feasibility.ContainsContent || feasibility.Runtime != "runsc" || feasibility.Platform != "linux/amd64" ||
-		feasibility.UpstreamRevision != "095b9eed3801c251796df93f48a8f2a527ff6e70" {
+		feasibility.UpstreamRevision != adapter.Upstream.Revision {
 		t.Fatalf("invalid Hermes feasibility evidence authority: %#v", feasibility)
 	}
 	if !validSHA256Hex(feasibility.AdapterArchiveSHA256) ||
@@ -900,7 +1074,7 @@ class Thread:
         events.append("thread")
 
 module.verify_skill = lambda: None
-module.seed_state = lambda model, qualification_mcp: None
+module.seed_state = lambda model, qualification_mcp, profile: None
 module.subprocess.Popen = popen
 module.wait_for_internal_api = lambda child: events.append("ready")
 module.BoundedHTTPServer = Server

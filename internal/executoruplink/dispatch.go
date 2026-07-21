@@ -130,6 +130,7 @@ type executorAdmissionResponse struct {
 	EgressRouteIDs        []string                                  `json:"egress_route_ids,omitempty"`
 	ConnectorURL          string                                    `json:"connector_url,omitempty"`
 	ConnectorIDs          []string                                  `json:"connector_ids,omitempty"`
+	EventURL              string                                    `json:"event_url,omitempty"`
 	EffectMode            string                                    `json:"effect_mode,omitempty"`
 	RoutePolicyDigest     string                                    `json:"route_policy_digest,omitempty"`
 	ActivationID          string                                    `json:"activation_id,omitempty"`

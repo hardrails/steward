@@ -5,13 +5,19 @@
   schema: "steward.agent.v1"
   name: =~"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
   runtime: {
-    engine: "hermes" | "openclaw"
+    engine: "hermes"
     image: string & =~"@sha256:[0-9a-f]{64}$"
     adapter_contract: string
   }
+  tool_profile?: "workspace" | "research" | "developer"
   model: route: string & !=""
   skills?: [...string]
   mcp_servers?: [...string]
+  capabilities?: {
+    egress_route_ids?: [...string]
+    connector_ids?: [...string]
+    controller_events?: bool
+  }
   resources: {
     cpu_millis: int & >=10 & <=128000
     memory_mib: int & >=64 & <=1048576

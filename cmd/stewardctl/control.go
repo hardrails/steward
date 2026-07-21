@@ -96,6 +96,8 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlIncidentTimeline(arguments[2:], stdout)
 	case "agent list":
 		return controlAgentList(arguments[2:], stdout)
+	case "event list":
+		return controlEventList(arguments[2:], stdout)
 	case "command submit":
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
@@ -130,7 +132,33 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+}
+
+func controlEventList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control event list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	after := flags.String("after", "", "exclusive event ID cursor")
+	limit := flags.Int("limit", 100, "maximum events to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *tenantID == "" || *limit <= 0 || *limit > 100 || flags.NArg() != 0 {
+		return errors.New("control event list requires tenant and a limit between 1 and 100")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	events, err := client.ListInstanceEvents(ctx, *tenantID, *after, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, events)
 }
 
 type controlFlags struct {

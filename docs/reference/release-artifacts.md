@@ -56,7 +56,7 @@ On an installed Linux node, the packaged interactive builder is:
 
 For unattended operation, add `--non-interactive`. Without `--source-dir`, the
 builder downloads only Hermes commit
-`095b9eed3801c251796df93f48a8f2a527ff6e70` into a temporary directory. An operator
+`3ef6bbd201263d354fd83ec55b3c306ded2eb72a` into a temporary directory. An operator
 can instead transfer an exact clean checkout and pass
 `--source-dir /path/to/hermes-agent`; that prevents the source download. The
 digest-pinned base image and locked build dependencies must still be present locally
@@ -88,34 +88,6 @@ Set `HERMES_INTEGRATION_EVIDENCE_OUT` to a new path when an owner-only,
 metadata-only qualification record is required. The detailed
 [Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}) explains the
 qualification evidence and its limits.
-
-## OpenClaw adapter build outputs
-
-Linux `amd64` node packages include the exact OpenClaw adapter source, its atomic
-bundle builder, and its disposable-host qualification harness:
-
-```console
-/usr/local/libexec/steward/build-openclaw-adapter \
-  --output "$HOME/steward-openclaw/bundle"
-
-STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
-  /usr/local/libexec/steward/openclaw-feasibility \
-  --bundle "$HOME/steward-openclaw/bundle" \
-  --output "$HOME/steward-openclaw/feasibility.json"
-```
-
-The builder accepts either an exact committed Steward checkout or the adapter and
-builder bytes authenticated by the installed release manifest. It publishes one
-new owner-only directory containing `image.tar` and `attestation.json`. The
-attestation binds the upstream release and image, adapter source inventory, archive
-hash, OCI manifest and config digests, and Docker runtime image ID. It contains no
-agent content and is not a signature.
-
-The qualification requires Docker, registered `runsc`, Python 3, `stewardctl`, and
-standard GNU userland on a disposable Linux `amd64` host. It loads and removes the
-image, containers, private network, and volume used by the test. Its output is a
-metadata-only result; use `--keep-failed` only when a diagnostic directory that may
-contain failed agent state is acceptable.
 
 ## Verify a downloaded release
 
@@ -189,7 +161,7 @@ configuration makes the prospective connector-receipt requirement format 2. A
 multi-party authorization or terminal record requires reader 6. A context-required
 grant requires reader 7.
 
-Current manifests also declare `gateway_state` readers 1 through 7 and writer 7.
+Current manifests also declare `gateway_state` readers 1 through 8 and writer 8.
 Gateway state format 4 retains service identity and tenant task authorities for
 task-authorized grants. Format 5 additionally retains authorized mode and the
 signed-policy-derived connector/action-key scopes, so a retained authorized grant

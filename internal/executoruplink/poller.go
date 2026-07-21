@@ -71,9 +71,9 @@ type Config struct {
 	// 4 is never selected implicitly.
 	ProtocolVersion int
 	DeliveryState   *DeliveryStore
-	// GatewayControl enables only the finite activation-canary protocol. The
-	// node advertises that capability only for protocol 4 when this exact
-	// host-local client is configured.
+	// GatewayControl enables the finite activation-canary protocol and the
+	// bounded controller-event outbox. The node advertises activation canaries
+	// only for protocol 4 when this exact host-local client is configured.
 	GatewayControl *gateway.ControlClient
 	// StateSnapshots is true only when Executor configured a
 	// production-qualified persistent-state backend.
@@ -92,22 +92,23 @@ type Config struct {
 }
 
 type Poller struct {
-	pollURL, reportURL, schedulingURL string
-	credentialPath                    string
-	expected                          *stewarduplink.Credential
-	interval                          time.Duration
-	client                            *http.Client
-	logger                            *slog.Logger
-	dispatcher                        dispatcher
-	security                          stewarduplink.CredentialSecurity
-	commandPolicy                     *admission.SitePolicy
-	now                               func() time.Time
-	protocolVersion                   int
-	deliveryState                     *DeliveryStore
-	canaryRunner                      *activationCanaryRunner
-	scheduling                        *controlprotocol.ExecutorSchedulingObservationV1
-	schedulingProvider                func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error)
-	stateSnapshots                    bool
+	pollURL, reportURL, schedulingURL, eventsURL string
+	credentialPath                               string
+	expected                                     *stewarduplink.Credential
+	interval                                     time.Duration
+	client                                       *http.Client
+	logger                                       *slog.Logger
+	dispatcher                                   dispatcher
+	security                                     stewarduplink.CredentialSecurity
+	commandPolicy                                *admission.SitePolicy
+	now                                          func() time.Time
+	protocolVersion                              int
+	deliveryState                                *DeliveryStore
+	canaryRunner                                 *activationCanaryRunner
+	scheduling                                   *controlprotocol.ExecutorSchedulingObservationV1
+	schedulingProvider                           func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error)
+	eventGateway                                 *gateway.ControlClient
+	stateSnapshots                               bool
 }
 
 func NewPoller(cfg Config) (*Poller, error) {
@@ -216,6 +217,7 @@ func NewPoller(cfg Config) (*Poller, error) {
 	pollURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "poll")
 	reportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "report")
 	schedulingURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "scheduling")
+	eventsURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "events")
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
@@ -233,7 +235,7 @@ func NewPoller(cfg Config) (*Poller, error) {
 		cfg.GatewayControl,
 	)
 	return &Poller{
-		pollURL: pollURL, reportURL: reportURL, schedulingURL: schedulingURL,
+		pollURL: pollURL, reportURL: reportURL, schedulingURL: schedulingURL, eventsURL: eventsURL,
 		credentialPath: cfg.CredentialPath,
 		expected:       credential, interval: cfg.PollInterval, client: client, logger: logger,
 		security: security, commandPolicy: cfg.CommandPolicy, now: now,
@@ -243,6 +245,7 @@ func NewPoller(cfg Config) (*Poller, error) {
 		),
 		scheduling:         cloneSchedulingObservation(cfg.Scheduling),
 		schedulingProvider: cfg.SchedulingProvider,
+		eventGateway:       cfg.GatewayControl,
 		stateSnapshots:     cfg.StateSnapshots,
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
@@ -276,6 +279,9 @@ func (p *Poller) Run(ctx context.Context) {
 	if p.scheduling != nil || p.schedulingProvider != nil {
 		go p.runScheduling(ctx)
 	}
+	if p.eventGateway != nil && p.expected.NodeScoped() {
+		go p.runEvents(ctx)
+	}
 	failures := 0
 	for {
 		if err := p.pollOnce(ctx); err != nil {
@@ -301,6 +307,89 @@ func (p *Poller) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
+	}
+}
+
+func (p *Poller) runEvents(ctx context.Context) {
+	for {
+		if err := p.publishEvents(ctx); err != nil && ctx.Err() == nil {
+			p.logger.Warn("executor controller event publication failed", "error", err)
+		}
+		timer := time.NewTimer(p.interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (p *Poller) publishEvents(ctx context.Context) error {
+	credential, err := stewarduplink.LoadCredentialWithSecurity(p.credentialPath, p.security)
+	if err != nil {
+		return err
+	}
+	if credential.Version != p.expected.Version || credential.Scope != p.expected.Scope ||
+		credential.TenantID != p.expected.TenantID || credential.NodeID != p.expected.NodeID {
+		return errors.New("rotated uplink credential changed version, scope, tenant_id, or node_id; refusing it")
+	}
+	events, err := p.eventGateway.ListInstanceEvents(ctx)
+	if err != nil || len(events) == 0 {
+		return err
+	}
+	batch := controlprotocol.InstanceEventBatchRequestV1{
+		SchemaVersion: controlprotocol.InstanceEventBatchV1, NodeID: credential.NodeID,
+		Events: make([]controlprotocol.InstanceEventV1, len(events)),
+	}
+	ids := make([]string, len(events))
+	for index, event := range events {
+		batch.Events[index] = controllerEvent(event)
+		ids[index] = event.EventID
+	}
+	if err := batch.Validate(); err != nil {
+		return fmt.Errorf("validate Gateway controller event batch: %w", err)
+	}
+	raw, err := json.Marshal(batch)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.eventsURL, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+credential.Credential)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return wireError("controller events", response)
+	}
+	if _, err := readBounded(response.Body, maxWireBytes); err != nil {
+		return fmt.Errorf("read controller event response: %w", err)
+	}
+	if err := p.eventGateway.AckInstanceEvents(ctx, ids); err != nil {
+		return fmt.Errorf("acknowledge published controller events: %w", err)
+	}
+	return nil
+}
+
+func controllerEvent(event gateway.InstanceEvent) controlprotocol.InstanceEventV1 {
+	attributes := make(map[string]string, len(event.Attributes))
+	for key, value := range event.Attributes {
+		attributes[key] = value
+	}
+	return controlprotocol.InstanceEventV1{
+		SchemaVersion: event.SchemaVersion, EventID: event.EventID, IdempotencyKey: event.IdempotencyKey,
+		Source: event.Source, TenantID: event.TenantID, NodeID: event.NodeID, InstanceID: event.InstanceID,
+		Generation: event.Generation, RuntimeRef: event.RuntimeRef, GrantID: event.GrantID,
+		CapsuleDigest: event.CapsuleDigest, PolicyDigest: event.PolicyDigest,
+		Kind: event.Kind, Code: event.Code, Severity: event.Severity, Summary: event.Summary,
+		Attributes: attributes, TaskID: event.TaskID, RunID: event.RunID,
+		ObservedAt: event.ObservedAt, AcceptedAt: event.AcceptedAt,
 	}
 }
 

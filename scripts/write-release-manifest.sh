@@ -59,7 +59,8 @@ release_files=(
 	steward-storage-zfs
 	stewardctl
 	integration/examples/agents/hermes/agent.json
-	integration/examples/agents/openclaw/agent.json
+	integration/examples/agents/developer/agent.json
+	integration/examples/agents/researcher/agent.json
 	integration/examples/agents/nodes.json
 	integration/examples/policy/steward.rego
 	integration/schemas/agent.cue
@@ -83,18 +84,26 @@ release_files=(
 	integration/adapters/hermes-agent/fixtures/skill/public.pem
 	integration/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json
 	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
+	integration/adapters/hermes-agent/profiles/developer/SKILL.md
+	integration/adapters/hermes-agent/profiles/developer/coding_worker.py
+	integration/adapters/hermes-agent/profiles/developer/manifest.json
+	integration/adapters/hermes-agent/profiles/developer/manifest.sig
+	integration/adapters/hermes-agent/profiles/developer/public.pem
+	integration/adapters/hermes-agent/profiles/research/SKILL.md
+	integration/adapters/hermes-agent/profiles/research/manifest.json
+	integration/adapters/hermes-agent/profiles/research/manifest.sig
+	integration/adapters/hermes-agent/profiles/research/public.pem
+	integration/adapters/hermes-agent/profiles/research/research.py
 	integration/adapters/hermes-agent/license-inventory.json
 	integration/adapters/hermes-agent/source-inputs.sha256
-	integration/adapters/openclaw/Dockerfile
-	integration/adapters/openclaw/adapter.json
-	integration/adapters/openclaw/entrypoint.mjs
-	integration/adapters/openclaw/fixture_model.mjs
-	integration/adapters/openclaw/fixtures/skill/SKILL.md
-	integration/adapters/openclaw/fixtures/skill/workspace_audit.mjs
-	integration/adapters/openclaw/fixtures/workspace/qualification/input/alpha.txt
-	integration/adapters/openclaw/fixtures/workspace/qualification/input/nested.json
-	integration/adapters/openclaw/result.mjs
-	integration/adapters/openclaw/source-inputs.sha256
+	integration/workers/coding/Dockerfile
+	integration/workers/coding/README.md
+	integration/workers/coding/coding_worker.py
+	integration/workers/coding/package-lock.json
+	integration/workers/coding/package.json
+	integration/workers/research/Dockerfile
+	integration/workers/research/README.md
+	integration/workers/research/research_worker.py
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -107,14 +116,12 @@ release_files=(
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
 	integration/scripts/build-hermes-adapter.sh
-	integration/scripts/build-openclaw-adapter.sh
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
-	integration/scripts/openclaw-feasibility.sh
 	integration/scripts/node-doctor.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
@@ -154,7 +161,16 @@ done
 # file, empty directory, symlink, or special file must not ride alongside the
 # signed skill without a digest in release.json.
 adapter_root=$stage/adapters/hermes-agent
-for directory in "$adapter_root" "$adapter_root/fixtures" "$adapter_root/fixtures/connector-skill" "$adapter_root/fixtures/skill"; do
+expected_adapter_directories=(
+	"$adapter_root"
+	"$adapter_root/fixtures"
+	"$adapter_root/fixtures/connector-skill"
+	"$adapter_root/fixtures/skill"
+	"$adapter_root/profiles"
+	"$adapter_root/profiles/developer"
+	"$adapter_root/profiles/research"
+)
+for directory in "${expected_adapter_directories[@]}"; do
 	if [[ ! -d $directory || -L $directory ]]; then
 		echo "write-release-manifest: adapter directory is missing or invalid: $directory" >&2
 		exit 2
@@ -173,35 +189,8 @@ for logical in "${release_files[@]}"; do
 done
 adapter_file_count=$(find "$adapter_root" -type f | wc -l)
 adapter_directory_count=$(find "$adapter_root" -type d | wc -l)
-if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne 4 ]]; then
+if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne ${#expected_adapter_directories[@]} ]]; then
 	echo "write-release-manifest: adapter contains an unexpected file or directory" >&2
-	exit 2
-fi
-
-openclaw_root=$stage/adapters/openclaw
-for directory in "$openclaw_root" "$openclaw_root/fixtures" "$openclaw_root/fixtures/skill" \
-	"$openclaw_root/fixtures/workspace" "$openclaw_root/fixtures/workspace/qualification" \
-	"$openclaw_root/fixtures/workspace/qualification/input"; do
-	if [[ ! -d $directory || -L $directory ]]; then
-		echo "write-release-manifest: OpenClaw adapter directory is missing or invalid: $directory" >&2
-		exit 2
-	fi
-done
-if find "$openclaw_root" -mindepth 1 -type l -print -quit | grep -q . ||
-	find "$openclaw_root" -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
-	echo "write-release-manifest: OpenClaw adapter contains a symlink or special file" >&2
-	exit 2
-fi
-expected_openclaw_file_count=0
-for logical in "${release_files[@]}"; do
-	case "$logical" in
-	integration/adapters/openclaw/*) ((expected_openclaw_file_count += 1)) ;;
-	esac
-done
-openclaw_file_count=$(find "$openclaw_root" -type f | wc -l)
-openclaw_directory_count=$(find "$openclaw_root" -type d | wc -l)
-if [[ $openclaw_file_count -ne $expected_openclaw_file_count || $openclaw_directory_count -ne 6 ]]; then
-	echo "write-release-manifest: OpenClaw adapter contains an unexpected file or directory" >&2
 	exit 2
 fi
 
@@ -218,7 +207,7 @@ trap cleanup EXIT HUP INT TERM
 	printf '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},\n'
 	printf '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},\n'
 	printf '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},\n'
-	printf '    "gateway_state": {"read_min": 1, "read_max": 7, "write": 7},\n'
+	printf '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},\n'
 	printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 	printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 	printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},\n'

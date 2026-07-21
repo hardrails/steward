@@ -282,9 +282,8 @@ func TestGatewayAgentServicePresetsAreFinite(t *testing.T) {
 	if !ok || hermes.ServiceID != "hermes-api" || hermes.OperationID != "hermes.run" {
 		t.Fatalf("Hermes preset=%#v ok=%t", hermes, ok)
 	}
-	openClaw, ok := gatewayAgentServicePreset("openclaw")
-	if !ok || openClaw.ServiceID != "openclaw-api" || openClaw.OperationID != "openclaw.run" {
-		t.Fatalf("OpenClaw preset=%#v ok=%t", openClaw, ok)
+	if contract, ok := gatewayAgentServicePreset("openclaw"); ok || contract != (agentServicePreset{}) {
+		t.Fatalf("retired OpenClaw preset=%#v ok=%t", contract, ok)
 	}
 	if contract, ok := gatewayAgentServicePreset("custom"); ok || contract != (agentServicePreset{}) {
 		t.Fatalf("unknown preset=%#v ok=%t", contract, ok)
@@ -501,33 +500,10 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 		t.Fatalf("trusted lifecycle=%#v", trustedLifecycle)
 	}
 
-	output.Reset()
 	if err := run([]string{
 		"gateway", "service", "set", "-config", path, "-agent", "openclaw",
-	}, &output, &bytes.Buffer{}); err != nil {
-		t.Fatalf("apply OpenClaw service preset: %v", err)
-	}
-	loaded, _, _, _, err = gateway.LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var openClaw *gateway.ServiceOperation
-	for index := range loaded.ServiceOperations {
-		if loaded.ServiceOperations[index].ServiceID == "openclaw-api" {
-			openClaw = &loaded.ServiceOperations[index]
-		}
-	}
-	if openClaw == nil || openClaw.ID != "openclaw.run" ||
-		openClaw.Path != "/v1/runs" || openClaw.StatusPathPrefix != "/v1/runs/" ||
-		openClaw.TaskProtocol != gateway.TaskProtocolLifecycleV1 ||
-		!strings.Contains(output.String(), "systemctl reload") {
-		t.Fatalf("OpenClaw preset did not install the closed lifecycle operation: %#v output=%q", openClaw, output.String())
-	}
-	if err := run([]string{
-		"gateway", "service", "set", "-config", path, "-agent", "openclaw",
-		"-service-id", "other",
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
-		t.Fatal("OpenClaw preset accepted a conflicting manual service identity")
+		t.Fatal("retired OpenClaw preset was accepted")
 	}
 }
 
