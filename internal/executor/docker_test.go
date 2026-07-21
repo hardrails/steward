@@ -102,6 +102,46 @@ func TestCachedImageConfigDigestsRejectsUntrustedDockerResponses(t *testing.T) {
 	}
 }
 
+func TestPullSignedImageUsesExactDockerReferenceAndBoundedAuth(t *testing.T) {
+	reference := "registry.site.test/agents/hermes@sha256:" + strings.Repeat("a", 64)
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1.41/images/create" ||
+			r.URL.Query().Get("fromImage") != reference || r.Header.Get("X-Registry-Auth") != "encoded-auth" {
+			t.Fatalf("image pull request = %s %s auth=%q", r.Method, r.URL.String(), r.Header.Get("X-Registry-Auth"))
+		}
+		_, _ = w.Write([]byte("{\"status\":\"pulling\"}\n{\"status\":\"complete\"}\n"))
+	})
+	if err := docker.PullSignedImage(context.Background(), reference, "encoded-auth"); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.PullSignedImage(context.Background(), "registry.site.test/agents/hermes:latest", ""); err == nil {
+		t.Fatal("mutable image pull was accepted")
+	}
+}
+
+func TestPullSignedImageRejectsDaemonAndUnboundedProgress(t *testing.T) {
+	reference := "registry.site.test/agents/hermes@sha256:" + strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "daemon status", status: http.StatusBadGateway, body: `{"message":"registry unavailable"}`},
+		{name: "daemon stream error", status: http.StatusOK, body: `{"errorDetail":{"message":"digest rejected"}}`},
+		{name: "oversized progress", status: http.StatusOK, body: strings.Repeat("x", (1<<20)+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			})
+			if err := docker.PullSignedImage(context.Background(), reference, ""); err == nil {
+				t.Fatal("untrusted Docker pull response was accepted")
+			}
+		})
+	}
+}
+
 func dockerTestClient(t *testing.T, handler http.HandlerFunc) *DockerHTTP {
 	t.Helper()
 	file, err := os.CreateTemp("/tmp", "se-docker-")

@@ -81,6 +81,13 @@ type ImageInventoryDocker interface {
 	CachedImageConfigDigests(context.Context) ([]string, error)
 }
 
+// SignedImagePullDocker is the optional Docker surface used to fetch one exact
+// signed repository digest from an operator-approved registry. Pulling content
+// is not admission; Executor inspects and validates it again before use.
+type SignedImagePullDocker interface {
+	PullSignedImage(context.Context, string, string) error
+}
+
 // ObservedImage is the security-relevant projection of Docker image inspect.
 // DeclaredVolumes is sorted so policy decisions and tests are deterministic.
 type ObservedImage struct {
@@ -147,7 +154,10 @@ type ObservedWorkload struct {
 
 // DockerHTTP is a standard-library Docker Engine client over the local Unix socket.
 // It deliberately does not expose a general request method to the HTTP API layer.
-type DockerHTTP struct{ client *http.Client }
+type DockerHTTP struct {
+	client         *http.Client
+	administrative *http.Client
+}
 
 const managedWorkloadLabel = "io.hardrails.executor.managed"
 const workloadFingerprintLabel = "io.hardrails.workload-sha256"
@@ -282,7 +292,7 @@ const dockerLogMaxFiles = "3"
 const dockerLogCompress = "true"
 
 func NewDockerHTTP(socket string) *DockerHTTP {
-	return NewDockerHTTPWithTimeout(socket, 10*time.Second)
+	return newDockerHTTP(socket, 10*time.Second, 30*time.Minute)
 }
 
 // NewDockerHTTPWithTimeout permits bounded long-running administrative calls,
@@ -292,11 +302,18 @@ func NewDockerHTTPWithTimeout(socket string, timeout time.Duration) *DockerHTTP 
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
+	return newDockerHTTP(socket, timeout, timeout)
+}
+
+func newDockerHTTP(socket string, operationTimeout, administrativeTimeout time.Duration) *DockerHTTP {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return dialer.DialContext(ctx, "unix", socket)
 	}}
-	return &DockerHTTP{client: &http.Client{Transport: transport, Timeout: timeout}}
+	return &DockerHTTP{
+		client:         &http.Client{Transport: transport, Timeout: operationTimeout},
+		administrative: &http.Client{Transport: transport, Timeout: administrativeTimeout},
+	}
 }
 
 // LoadImage streams one already-verified Docker/OCI archive into the local
@@ -312,7 +329,7 @@ func (d *DockerHTTP) LoadImage(ctx context.Context, archive io.Reader) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-tar")
-	resp, err := d.client.Do(req)
+	resp, err := d.administrative.Do(req)
 	if err != nil {
 		return err
 	}
@@ -320,12 +337,46 @@ func (d *DockerHTTP) LoadImage(ctx context.Context, archive io.Reader) error {
 	if resp.StatusCode != http.StatusOK {
 		return dockerError(resp)
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	return decodeDockerProgress(resp.Body, "image import")
+}
+
+// PullSignedImage asks Docker to fetch one immutable repository digest. The
+// caller has already matched the repository to host policy; this method keeps
+// the Docker request exact and treats every daemon progress response as
+// untrusted bounded input.
+func (d *DockerHTTP) PullSignedImage(ctx context.Context, imageReference, registryAuth string) error {
+	if !imageDigest.MatchString(imageReference) || len(registryAuth) > 64<<10 ||
+		strings.ContainsAny(registryAuth, "\r\n") {
+		return &PolicyError{"image pull requires an exact signed reference and bounded registry authentication"}
+	}
+	query := url.Values{"fromImage": []string{imageReference}}
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, "http://docker/v1.41/images/create?"+query.Encode(), nil,
+	)
 	if err != nil {
-		return fmt.Errorf("read Docker image import response: %w", err)
+		return err
+	}
+	if registryAuth != "" {
+		req.Header.Set("X-Registry-Auth", registryAuth)
+	}
+	resp, err := d.administrative.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return dockerError(resp)
+	}
+	return decodeDockerProgress(resp.Body, "image pull")
+}
+
+func decodeDockerProgress(body io.Reader, operation string) error {
+	responseBody, err := io.ReadAll(io.LimitReader(body, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read Docker %s response: %w", operation, err)
 	}
 	if len(responseBody) > 1<<20 {
-		return errors.New("Docker image import response exceeds 1 MiB")
+		return fmt.Errorf("Docker %s response exceeds 1 MiB", operation)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(responseBody))
 	for {
@@ -338,7 +389,7 @@ func (d *DockerHTTP) LoadImage(ctx context.Context, archive io.Reader) error {
 		if err := decoder.Decode(&message); errors.Is(err, io.EOF) {
 			return nil
 		} else if err != nil {
-			return fmt.Errorf("decode Docker image import response: %w", err)
+			return fmt.Errorf("decode Docker %s response: %w", operation, err)
 		}
 		if message.ErrorDetail.Message != "" {
 			return errors.New(message.ErrorDetail.Message)
