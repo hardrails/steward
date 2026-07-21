@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -187,7 +188,11 @@ func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) 
 	}
 	providerObservation := observation
 	var providerCalls atomic.Int32
+	var providerFails atomic.Bool
 	provider := func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error) {
+		if providerFails.Load() {
+			return nil, errors.New("Docker inventory unavailable")
+		}
 		refreshed := providerObservation
 		refreshed.CachedImageConfigDigests = []string{fmt.Sprintf("sha256:%064x", providerCalls.Add(1))}
 		return &refreshed, nil
@@ -231,6 +236,14 @@ func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) 
 	}
 	if published := <-received; published.CachedImageConfigDigests[0] != fmt.Sprintf("sha256:%064x", 2) {
 		t.Fatalf("refreshed scheduling observation = %+v", published)
+	}
+	providerFails.Store(true)
+	if err := poller.publishScheduling(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if published := <-received; published.CachedImageConfigDigests != nil ||
+		published.NodeID != "node-1" || published.Architecture != "amd64" {
+		t.Fatalf("failed refresh did not clear stale image locality = %+v", published)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

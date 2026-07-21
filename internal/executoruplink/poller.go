@@ -332,7 +332,10 @@ func (p *Poller) publishScheduling(ctx context.Context) error {
 	if p.schedulingProvider != nil {
 		observation, err = p.schedulingProvider(ctx)
 		if err != nil {
-			return fmt.Errorf("refresh executor scheduling observation: %w", err)
+			observation = cloneSchedulingObservation(p.scheduling)
+			if observation != nil {
+				observation.CachedImageConfigDigests = nil
+			}
 		}
 	}
 	if observation == nil || observation.Validate() != nil || observation.NodeID != credential.NodeID ||
