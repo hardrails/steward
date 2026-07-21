@@ -228,6 +228,42 @@ func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
 	}
 }
 
+func TestDeploymentRolloutControlRejectsTransportAndStateContradictions(t *testing.T) {
+	response := validClientDeployment()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte(`{"error":"unavailable","message":"try later"}`))
+			return
+		}
+		if requests == 3 {
+			response.Generation = 2
+			response.Rollout = &DeploymentRollout{
+				SourceGeneration: 1, SourceAgentName: response.AgentName,
+				SourceBundleDigest: response.BundleDigest, SourceCapsuleDigest: response.CapsuleDigest,
+				SourceDelegationDigest: response.DelegationDigest,
+				StartedAt:              response.UpdatedAt,
+			}
+		}
+		_ = json.NewEncoder(writer).Encode(response)
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "operator", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		if _, err := client.SetDeploymentRolloutPaused(
+			context.Background(), "tenant-a", "research", 1, true,
+		); err == nil {
+			t.Fatalf("rollout control contradiction %d was accepted", index)
+		}
+	}
+}
+
 func TestDeploymentClientRejectsMalformedProjectionFields(t *testing.T) {
 	validPlacement := validClientDeployment()
 	validPlacement.Instances[0].NodeID = "node-1"

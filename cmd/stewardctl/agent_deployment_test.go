@@ -240,6 +240,35 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 	}
 }
 
+func TestAgentDeploymentRolloutControlRejectsInvalidInputAndLookupFailure(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"auditor", "-no-context"},
+		{"auditor", "extra", "-tenant", "tenant-a", "-no-context"},
+		{"auditor", "-tenant", "tenant-a", "-control-url", "://bad", "-token-file", "missing", "-no-context"},
+	} {
+		if err := agentDeploymentRolloutControl(arguments, &bytes.Buffer{}, true); err == nil {
+			t.Fatalf("invalid rollout control arguments were accepted: %v", arguments)
+		}
+	}
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"error":"unavailable","message":"try later"}`))
+	}))
+	defer server.Close()
+	if err := agentDeploymentRolloutControl([]string{
+		"auditor", "-tenant", "tenant-a", "-control-url", server.URL,
+		"-token-file", tokenPath, "-no-context",
+	}, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("rollout control accepted a failed revision lookup")
+	}
+}
+
 func TestAgentDeploymentWaitExportsOneTaskReadyInstance(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	directory := t.TempDir()
