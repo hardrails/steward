@@ -29,14 +29,22 @@ verified conversation that triggered the task.
 Reuse the Apache-2.0 Buzz protocol and cryptography crates at an exact source
 commit, behind a separate tenant-specific `steward-buzz-bridge`. Apply a small,
 reviewed compatibility and isolation patch during the reproducible bridge build.
-The bridge verifies events locally, applies exact author and channel gates,
-persists inbox and outbox transitions, issues one existing Steward signed service
-task, and publishes one reply whose destination comes from the verified event.
+The bridge verifies events locally, follows Buzz's composite pagination cursor,
+applies exact author and channel gates, persists inbox, cursor, task, and outbox
+transitions, issues existing Steward signed service tasks through a bounded
+worker pool, and publishes replies whose destinations come from verified events.
+It binds the configured agent public key to the signing key before startup and
+does not call an ambiguous publication complete until the signed reply is
+observable through Buzz again.
 
 Hermes receives a reference and bounded untrusted conversation text through fixed
 connector operations. It never receives Buzz or Steward signing keys, a raw Buzz
 CLI, arbitrary relay access, or authority to choose a channel, thread, event kind,
 service, instance, or operation.
+
+**Decision:** use open-source: keep Buzz as the signed collaboration and protocol
+substrate, and build only Steward's admission, durability, isolation, and
+evidence boundary.
 
 **Tradeoff:** Steward owns a narrow bridge and must requalify its upstream patch
 when Buzz changes. It avoids owning Nostr cryptography, operating Buzz's data
@@ -46,7 +54,9 @@ plane, or weakening Steward's task and secret boundaries.
 PostgreSQL, Redis, object storage, and their upgrades. Implementing Nostr inside
 Steward would expand the stdlib-only enforcement core. Running `buzz-acp`
 unchanged or mounting `buzz-cli` into Hermes would expose the signing identity to
-untrusted agent execution.
+untrusted agent execution. Reimplementing Nostr or its cryptography in Steward
+would duplicate a security-sensitive commodity and expand the stdlib-only Go
+enforcement core.
 
 ## Consequences
 
@@ -57,12 +67,13 @@ one bounded Hermes task and one plain-text reply. DMs, forum-wide subscriptions,
 uploads, administration, workflows, Git operations, arbitrary ACP/MCP commands,
 and open-to-anyone dispatch are excluded.
 
-The source pin advances only through a scheduled, reviewable pull request. It
+The source pin advances only through a daily, reviewable pull request. It
 records an immutable commit and exact input hashes; it never treats Buzz's
 independent desktop, relay, chart, or rolling Sprig labels as interchangeable.
 Qualification evidence must be regenerated for the proposed bytes before merge.
 
-Revisit the patch when Buzz provides a stable structured dispatch sink, a
-secretless signer interface, local verification for every delivered event, and
-durable lossless delivery. Revisit the separately operated relay boundary only if
-users consistently need Steward to own the complete Buzz data plane.
+Revisit if Buzz provides a stable structured dispatch sink, composite cursors in
+its public message command, a secretless signer interface, local verification for
+every delivered event, and durable lossless delivery. Revisit the separately
+operated relay boundary only if users consistently need Steward to own the
+complete Buzz data plane.

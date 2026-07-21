@@ -59,7 +59,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor qualification evidence, signed workspace and connector skills, service API, and limits
 - [Web research agents](https://hardrails.github.io/steward/guides/research-agents/): Search and extract web sources through separately operated credential-isolating workers, treat retrieved content as untrusted, and publish bounded source-linked findings
 - [Codex and Claude Code workers](https://hardrails.github.io/steward/guides/coding-workers/): Delegate bounded repository work from Hermes to an isolated official CLI with its own clean worktree and authentication store
-- [Buzz integration](https://hardrails.github.io/steward/guides/buzz/): Turn an exact signed Buzz mention into one signed Hermes task and one correctly targeted reply without exposing Buzz or Steward signing keys to the agent
+- [Buzz integration](https://hardrails.github.io/steward/guides/buzz/): Durably queue exact signed Buzz mentions, run bounded isolated Hermes tasks, and verify correctly targeted replies without exposing Buzz or Steward signing keys to the agent
 - [Controller events](https://hardrails.github.io/steward/guides/controller-events/): Receive durable, identity-stamped, at-least-once status and findings from admitted instances without adding command authority
 - [OpenClaw support retirement](https://hardrails.github.io/steward/reference/openclaw-migration/): Understand why active support was removed and how to migrate by creating a fresh Hermes application
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
