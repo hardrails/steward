@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Credential-isolating adapter for SearXNG and Firecrawl-compatible services."""
+"""Credential-isolating search adapter and SSRF-safe public page extractor."""
 
 from __future__ import annotations
 
 import hmac
+import html.parser
 import http.client
 import http.server
 import ipaddress
@@ -11,6 +12,8 @@ import json
 import os
 import pathlib
 import re
+import socket
+import ssl
 import stat
 import sys
 import time
@@ -21,6 +24,7 @@ MAX_UPSTREAM = 4 << 20
 MAX_RESPONSE = 1 << 20
 MAX_SOURCE_TEXT = 256 << 10
 UPSTREAM_TIMEOUT = 45
+MAX_REDIRECTS = 5
 
 
 class WorkerError(Exception):
@@ -132,12 +136,22 @@ def clean_text(value: object, maximum: int) -> str:
     return encoded[:maximum].decode("utf-8", "ignore")
 
 
-def public_url(value: object) -> str:
+def public_destination(value: object) -> tuple[str, urllib.parse.SplitResult, list[str]]:
     if not isinstance(value, str) or len(value.encode()) > 2048:
         raise WorkerError(400, "invalid_source_url", "source URL is invalid")
     parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+    ):
         raise WorkerError(400, "invalid_source_url", "source URL must be absolute HTTP(S) without user information")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as error:
+        raise WorkerError(400, "invalid_source_url", "source URL contains an invalid port") from error
     host = parsed.hostname.rstrip(".").lower()
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
         raise WorkerError(400, "private_source_denied", "private and local source names are not allowed")
@@ -147,7 +161,153 @@ def public_url(value: object) -> str:
         address = None
     if address is not None and not address.is_global:
         raise WorkerError(400, "private_source_denied", "non-public source addresses are not allowed")
-    return value
+    addresses = resolve_public_addresses(host, port)
+    return value, parsed, addresses
+
+
+def resolve_public_addresses(host: str, port: int) -> list[str]:
+    try:
+        records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as error:
+        raise WorkerError(400, "source_unresolvable", "source hostname could not be resolved") from error
+    addresses = []
+    for record in records:
+        candidate = record[4][0]
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError as error:
+            raise WorkerError(400, "source_unresolvable", "source resolver returned an invalid address") from error
+        if not address.is_global:
+            raise WorkerError(400, "private_source_denied", "source hostname resolved to a non-public address")
+        canonical = address.compressed
+        if canonical not in addresses:
+            addresses.append(canonical)
+    if not addresses:
+        raise WorkerError(400, "source_unresolvable", "source hostname returned no usable address")
+    return addresses
+
+
+def public_url(value: object) -> str:
+    return public_destination(value)[0]
+
+
+class PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, address: str, port: int) -> None:
+        super().__init__(host, port=port, timeout=UPSTREAM_TIMEOUT)
+        self.address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self.address, self.port), self.timeout, self.source_address)
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, address: str, port: int) -> None:
+        super().__init__(host, port=port, timeout=UPSTREAM_TIMEOUT, context=ssl.create_default_context())
+        self.address = address
+
+    def connect(self) -> None:
+        raw = socket.create_connection((self.address, self.port), self.timeout, self.source_address)
+        try:
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        except Exception:
+            raw.close()
+            raise
+
+
+class PageTextParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.title_parts: list[str] = []
+        self.hidden = 0
+        self.in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "template", "noscript"}:
+            self.hidden += 1
+        if tag == "title" and self.hidden == 0:
+            self.in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self.in_title = False
+        if tag in {"script", "style", "template", "noscript"} and self.hidden > 0:
+            self.hidden -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.hidden > 0:
+            return
+        clean = " ".join(data.split())
+        if not clean:
+            return
+        self.parts.append(clean)
+        if self.in_title:
+            self.title_parts.append(clean)
+
+
+def request_public_page(
+    parsed: urllib.parse.SplitResult,
+    addresses: list[str],
+) -> tuple[http.client.HTTPResponse, http.client.HTTPConnection]:
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    last_error: Exception | None = None
+    for address in addresses:
+        connection_type = PinnedHTTPSConnection if parsed.scheme == "https" else PinnedHTTPConnection
+        connection = connection_type(parsed.hostname, address, port)
+        try:
+            connection.request("GET", path, headers={
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
+                "Accept-Encoding": "identity",
+                "User-Agent": "steward-research-worker/1",
+            })
+            return connection.getresponse(), connection
+        except (OSError, TimeoutError, http.client.HTTPException, ssl.SSLError) as error:
+            last_error = error
+            connection.close()
+    raise WorkerError(502, "source_unavailable", "public source is unavailable") from last_error
+
+
+def fetch_public_page(value: object) -> tuple[str, str, str]:
+    current = value
+    visited: set[str] = set()
+    for redirect in range(MAX_REDIRECTS + 1):
+        url, parsed, addresses = public_destination(current)
+        if url in visited:
+            raise WorkerError(502, "invalid_source_redirect", "public source redirect loop was rejected")
+        visited.add(url)
+        response, connection = request_public_page(parsed, addresses)
+        try:
+            if response.status in {301, 302, 303, 307, 308}:
+                locations = response.headers.get_all("Location", [])
+                if redirect == MAX_REDIRECTS or len(locations) != 1 or len(locations[0].encode()) > 2048:
+                    raise WorkerError(502, "invalid_source_redirect", "public source redirect was rejected")
+                current = urllib.parse.urljoin(url, locations[0])
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise WorkerError(502, "source_rejected", f"public source returned HTTP {response.status}")
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise WorkerError(502, "unsupported_source", "compressed public source is not accepted")
+            content_type = response.headers.get_content_type().lower()
+            if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
+                raise WorkerError(502, "unsupported_source", "public source content type is not supported")
+            raw = response.read(MAX_UPSTREAM + 1)
+            if len(raw) > MAX_UPSTREAM:
+                raise WorkerError(502, "source_too_large", "public source exceeded 4 MiB")
+            charset = response.headers.get_content_charset() or "utf-8"
+            try:
+                decoded = raw.decode(charset, "replace")
+            except LookupError as error:
+                raise WorkerError(502, "unsupported_source", "public source character set is not supported") from error
+            if content_type == "text/plain":
+                return url, "", clean_text(decoded, MAX_SOURCE_TEXT)
+            parser = PageTextParser()
+            parser.feed(decoded)
+            parser.close()
+            return url, clean_text(" ".join(parser.title_parts), 2048), clean_text("\n".join(parser.parts), MAX_SOURCE_TEXT)
+        finally:
+            connection.close()
+    raise WorkerError(502, "invalid_source_redirect", "public source redirect was rejected")
 
 
 def search(payload: dict[str, object], upstream: urllib.parse.SplitResult | None) -> dict[str, object]:
@@ -182,24 +342,17 @@ def search(payload: dict[str, object], upstream: urllib.parse.SplitResult | None
     return {"schema_version": "steward.research-search-result.v1", "results": results}
 
 
-def extract(payload: dict[str, object], upstream: urllib.parse.SplitResult | None, token: bytes | None) -> dict[str, object]:
-    if upstream is None:
-        raise WorkerError(503, "extract_not_configured", "extraction upstream is not configured")
+def extract(payload: dict[str, object]) -> dict[str, object]:
     if set(payload) != {"urls"} or not isinstance(payload.get("urls"), list) or not 1 <= len(payload["urls"]) <= 10:
         raise WorkerError(400, "invalid_request", "extract requires one to ten URLs")
     sources = []
     for raw_url in payload["urls"]:
-        url = public_url(raw_url)
-        value = upstream_json(upstream, "POST", request_path(upstream, "/v1/scrape"), {"url": url, "formats": ["markdown"]}, token)
-        data = value.get("data") if isinstance(value, dict) else None
-        if not isinstance(data, dict):
-            raise WorkerError(502, "invalid_upstream_response", "Firecrawl response has no data object")
-        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        url, title, content = fetch_public_page(raw_url)
         sources.append({
             "url": url,
-            "title": clean_text(metadata.get("title"), 2048),
-            "content": clean_text(data.get("markdown"), MAX_SOURCE_TEXT),
-            "content_type": "text/markdown",
+            "title": title,
+            "content": content,
+            "content_type": "text/plain",
         })
     return {"schema_version": "steward.research-extract-result.v1", "sources": sources}
 
@@ -214,7 +367,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.path == "/v1/search":
                 result = search(payload, self.server.search_upstream)
             elif self.path == "/v1/extract":
-                result = extract(payload, self.server.extract_upstream, self.server.extract_token)
+                result = extract(payload)
             else:
                 raise WorkerError(404, "route_not_found", "route is not available")
             self.write_json(200, result)
@@ -274,11 +427,7 @@ class Server(http.server.HTTPServer):
     def __init__(self, address: tuple[str, int]) -> None:
         super().__init__(address, Handler)
         self.worker_token = read_secret(os.environ.get("STEWARD_WORKER_TOKEN_FILE", ""), "worker token")
-        self.extract_token = read_secret(os.environ.get("STEWARD_EXTRACT_TOKEN_FILE", ""), "extract token", required=False)
         self.search_upstream = parse_upstream(os.environ.get("STEWARD_SEARCH_URL", ""), "search upstream")
-        self.extract_upstream = parse_upstream(os.environ.get("STEWARD_EXTRACT_URL", ""), "extract upstream")
-        if self.search_upstream is None and self.extract_upstream is None:
-            raise RuntimeError("at least one research upstream is required")
 
 
 def main() -> int:

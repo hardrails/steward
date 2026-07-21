@@ -26,15 +26,18 @@ official user-operated CLI and must never become a Steward authentication broker
 ## Decision
 
 Use replaceable external engines behind two small, versioned HTTP worker
-contracts. The reference research worker normalizes SearXNG search and a
-Firecrawl-compatible extraction service. The reference coding worker invokes the
+contracts. The reference research worker normalizes SearXNG search and performs
+small, SSRF-safe public-page extraction itself because delegating a URL to a
+generic extraction service would move DNS and redirect enforcement outside
+Steward's reference boundary. The reference coding worker invokes the
 official, pinned Codex or Claude Code CLI in a separate hardened container with a
 dedicated workspace and credential volume. Gateway remains the only interface
 visible to Hermes and injects the worker credential.
 
 Steward owns the request validation, byte and time limits, fixed operation paths,
-safe process invocation, and normalized result envelopes. It does not own search
-ranking, crawling, page rendering, coding-agent logic, or subscription login.
+safe process invocation, public-destination resolution and redirect checks, and
+normalized result envelopes. It does not own search ranking, crawling,
+JavaScript rendering, coding-agent logic, or subscription login.
 
 **Tradeoff:** Operators deploy additional services, but each can be replaced
 without changing the Hermes skill or giving provider authority to the agent.

@@ -8,7 +8,7 @@ section: How-to guide
 
 The research profile lets Hermes search the web, extract selected pages, and send
 findings to Steward Control. Hermes does not receive a browser, public network
-route, search key, or extraction-service key.
+route, or search key.
 
 This separation matters because web content is untrusted. A page can contain text
 that tells an agent to ignore its task, reveal a secret, or call another service.
@@ -20,9 +20,9 @@ credentials available after the model reads it.
 1. Hermes calls the fixed search or extraction path on its local Steward Relay.
 2. Gateway verifies the admitted connector grant, call budget, request size, and
    exact operation.
-3. The optional research worker adds its own credential and calls SearXNG or a
-   Firecrawl-compatible extraction service.
-4. The worker returns normalized JSON. Its upstream credentials never enter the
+3. The optional research worker adds its own search credential for SearXNG, or
+   fetches an explicitly selected public page through its pinned-address extractor.
+4. The worker returns normalized JSON. Its search credential never enters the
    Hermes container.
 5. Hermes can publish a bounded finding to Steward Control. The event contains a
    code, severity, summary, source URL, and idempotency key—not the agent's full
@@ -54,10 +54,13 @@ sudo install -o steward-gateway -g steward-gateway -m 0600 \
   /etc/steward/credentials/research-worker
 ```
 
-Run the worker with gVisor. Replace the two example upstreams with services you
-operate or trust. The extraction service must reject private, loopback,
-link-local, and cloud-metadata destinations after DNS resolution; this is the
-final server-side-request-forgery (SSRF) boundary.
+Run the worker with gVisor. Replace the search example with a SearXNG service you
+operate or trust. Page extraction needs no provider service or credential. The
+worker resolves every requested hostname and redirect, rejects the request when
+any address is private, loopback, link-local, reserved, or otherwise non-public,
+and connects to the chosen address without resolving the name again. This closes
+DNS-rebinding and redirect forms of server-side request forgery (SSRF) at the
+worker boundary.
 
 ```console
 sudo docker run -d --name steward-research-worker --restart unless-stopped \
@@ -67,13 +70,13 @@ sudo docker run -d --name steward-research-worker --restart unless-stopped \
   -p 127.0.0.1:9080:8080 \
   -e STEWARD_WORKER_TOKEN_FILE=/run/secrets/worker-token \
   -e STEWARD_SEARCH_URL=https://search.example \
-  -e STEWARD_EXTRACT_URL=https://extract.example \
   --mount type=bind,src=/etc/steward/research-worker/token,dst=/run/secrets/worker-token,readonly \
   steward-research-worker
 ```
 
-The reference worker adapts APIs; it is not a crawler or search engine. Either
-upstream may be omitted when the corresponding operation is not needed. See the
+The reference worker is not a crawler, browser, or search engine. It extracts
+bounded text from HTML, XHTML, and plain-text responses; it does not execute
+JavaScript. The SearXNG upstream may be omitted when only extraction is needed. See the
 [worker reference](https://github.com/hardrails/steward/tree/main/workers/research)
 for its complete environment contract.
 
@@ -155,8 +158,8 @@ relative_url }}) for retention and failure behavior.
 
 ## Air-gapped research
 
-An air-gapped site cannot search the public web. You can point the same normalized
-worker contract at a locally mirrored corpus, internal SearXNG deployment, and
-local extraction service. Import source data through your site's reviewed media
+An air-gapped site cannot search or extract from the public web. Point search at
+an internal SearXNG deployment and expose approved corpus services through
+separate connector operations. The public-page extractor intentionally rejects
+private destinations. Import source data through your site's reviewed media
 process; do not give Hermes a temporary unrestricted route for convenience.
-

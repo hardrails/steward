@@ -250,11 +250,12 @@ separate.
 
 ## Research and coding workers add trust boundaries
 
-The optional research worker normalizes SearXNG and Firecrawl-compatible APIs. It
-blocks obvious private URLs, but the service that resolves and fetches a hostname
-must enforce the final SSRF policy. Retrieved text remains untrusted and can contain
-prompt injection. Source URLs and multiple documents improve review; they do not
-prove an agent's conclusion.
+The optional research worker normalizes SearXNG results and extracts bounded text
+from public HTML, XHTML, and plain-text pages. It rejects non-public DNS answers,
+pins the selected address for each connection, and rechecks every redirect. It
+does not execute JavaScript or provide browser-grade rendering. Retrieved text
+remains untrusted and can contain prompt injection. Source URLs and multiple
+documents improve review; they do not prove an agent's conclusion.
 
 The optional coding worker runs the official Codex or Claude Code CLI in a
 separate container and reports changed paths. It does not prove a patch is correct,

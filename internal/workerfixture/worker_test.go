@@ -141,14 +141,16 @@ func TestResearchWorkerNormalizesAndRejectsPrivateSources(t *testing.T) {
 	harness := `import importlib.util,json,sys,urllib.parse
 spec=importlib.util.spec_from_file_location("worker",sys.argv[1])
 worker=importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+worker.resolve_public_addresses=lambda host,port: ["93.184.216.34"] if host != "rebind.example" else (_ for _ in ()).throw(worker.WorkerError(400,"private_source_denied","blocked"))
 def fake(base,method,path,payload,token=None):
   if method=="GET": return {"results":[{"title":"Primary","url":"https://example.com/source","content":"Evidence","engine":"fixture"}]}
   return {"data":{"markdown":"# Source","metadata":{"title":"Document"}}}
 worker.upstream_json=fake
+worker.fetch_public_page=lambda url: (url,"Document","Source")
 base=urllib.parse.urlsplit("https://service.example/prefix")
-result={"search":worker.search({"query":"bounded query","limit":1},base),"extract":worker.extract({"urls":["https://example.com/source"]},base,None)}
+result={"search":worker.search({"query":"bounded query","limit":1},base),"extract":worker.extract({"urls":["https://example.com/source"]})}
 blocked=[]
-for value in ("http://127.0.0.1/x","http://169.254.169.254/latest","http://service.local/x"):
+for value in ("http://127.0.0.1/x","http://169.254.169.254/latest","http://service.local/x","https://rebind.example/x"):
   try: worker.public_url(value)
   except worker.WorkerError as error: blocked.append(error.code)
 result["blocked"]=blocked
@@ -169,13 +171,67 @@ print(json.dumps(result,sort_keys=True))
 	}
 	if value.Search["schema_version"] != "steward.research-search-result.v1" ||
 		value.Extract["schema_version"] != "steward.research-extract-result.v1" ||
-		!bytes.Equal([]byte(strings.Join(value.Blocked, ",")), []byte("private_source_denied,private_source_denied,private_source_denied")) {
+		!bytes.Equal([]byte(strings.Join(value.Blocked, ",")), []byte("private_source_denied,private_source_denied,private_source_denied,private_source_denied")) {
 		t.Fatalf("normalized result=%s", raw)
 	}
 	source := string(readFile(t, path, 1<<20))
-	for _, required := range []string{"MAX_REQUEST = 64 << 10", "MAX_UPSTREAM = 4 << 20", "MAX_RESPONSE = 1 << 20", "hmac.compare_digest"} {
+	for _, required := range []string{"MAX_REQUEST = 64 << 10", "MAX_UPSTREAM = 4 << 20", "MAX_RESPONSE = 1 << 20", "hmac.compare_digest", "MAX_REDIRECTS = 5", "socket.create_connection"} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("research worker is missing contract %q", required)
 		}
+	}
+}
+
+func TestResearchWorkerPinsPublicDNSAndRevalidatesRedirects(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	path := filepath.Join(repositoryRoot(t), "workers", "research", "research_worker.py")
+	harness := `import importlib.util,json,socket,sys,types
+spec=importlib.util.spec_from_file_location("worker",sys.argv[1])
+worker=importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+worker.socket.getaddrinfo=lambda host,port,type,proto:[
+  (socket.AF_INET,socket.SOCK_STREAM,socket.IPPROTO_TCP,"",("93.184.216.34",port)),
+  (socket.AF_INET,socket.SOCK_STREAM,socket.IPPROTO_TCP,"",("127.0.0.1",port)),
+]
+dns="accepted"
+try: worker.resolve_public_addresses("rebind.example",443)
+except worker.WorkerError as error: dns=error.code
+seen=[]
+def destination(value):
+  seen.append(value)
+  if value=="https://private.example/secret": raise worker.WorkerError(400,"private_source_denied","blocked")
+  return value,worker.urllib.parse.urlsplit(value),["93.184.216.34"]
+class Headers:
+  def get_all(self,name,default): return ["https://private.example/secret"] if name=="Location" else default
+class Response:
+  status=302
+  headers=Headers()
+class Connection:
+  def close(self): pass
+worker.public_destination=destination
+worker.request_public_page=lambda parsed,addresses:(Response(),Connection())
+redirect="accepted"
+try: worker.fetch_public_page("https://public.example/start")
+except worker.WorkerError as error: redirect=error.code
+print(json.dumps({"dns":dns,"redirect":redirect,"seen":seen},sort_keys=True))
+`
+	command := exec.Command(python, "-I", "-B", "-c", harness, path)
+	raw, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		DNS      string   `json:"dns"`
+		Redirect string   `json:"redirect"`
+		Seen     []string `json:"seen"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.DNS != "private_source_denied" || result.Redirect != "private_source_denied" ||
+		strings.Join(result.Seen, ",") != "https://public.example/start,https://private.example/secret" {
+		t.Fatalf("research destination enforcement=%s", raw)
 	}
 }
