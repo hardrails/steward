@@ -164,8 +164,10 @@ and purge wait for a complete reconciliation.
 
 ## Network capability limits
 
-Inference is restricted to fixed OpenAI-compatible endpoints. Every model-bearing
-POST must contain exactly one top-level string `model` equal to the grant's alias.
+Inference is restricted to fixed OpenAI-compatible or Anthropic Messages endpoints.
+Each route pins its protocol, base-path prefix, authentication mode, and API version
+where applicable. Every model-bearing POST must contain exactly one top-level string
+`model` equal to the grant's alias.
 A missing, duplicate, malformed, or different value is rejected before any
 upstream request. Request bodies are limited to 4 MiB and responses to 32 MiB.
 Known-length oversized responses fail before body forwarding. Unknown-length

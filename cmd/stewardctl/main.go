@@ -67,7 +67,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	case "key":
 		return keyCommand(arguments[1:], stdout)
 	case "capsule":
-		return artifact(arguments[1:], stdout, admission.CapsulePayloadType)
+		return capsuleCommand(arguments[1:], stdout)
 	case "policy":
 		return artifact(arguments[1:], stdout, admission.PolicyPayloadType)
 	case "permit":
@@ -152,9 +152,9 @@ var commandHelp = map[string]string{
 	"task":             "Run, issue, submit, observe, and audit an authorized service task through Gateway. The run command persists the exact signed bundle before dispatch so an interrupted task can be resumed without minting new authority.\n\nUsage: stewardctl task run|issue|verify|audit|submit|status|observe|wait ...\n\nWith task defaults in a context: stewardctl task run DEPLOYMENT \"your request\"\n",
 	"evidence":         "Verify or export a signed Executor or Gateway receipt chain without contacting a hosted service.\n\nUsage: stewardctl evidence verify|export ...\n",
 	"image":            "Inspect or import one bounded offline OCI/Docker archive and bind it to the signed workload identity.\n\nUsage: stewardctl image inspect|import ...\n",
-	"gateway":          "Validate the Gateway configuration, bind its enrolled node identity, and inspect routes, connectors, services, and effect policy.\n\nUsage: stewardctl gateway validate|identity|route|connector|service|effects ...\n",
+	"gateway":          "Validate the Gateway configuration, configure mediated inference providers, bind its enrolled node identity, and inspect routes, connectors, services, and effect policy.\n\nUsage: stewardctl gateway validate|identity|inference|route|connector|service|effects ...\n",
 	"secret":           "Validate or prepare owner-only files rendered by an external secret materializer. Steward does not store secrets.\n\nUsage: stewardctl secret materialization check|prepare ...\n",
-	"capsule":          "Sign or verify a publisher workload profile.\n\nUsage: stewardctl capsule sign|verify ...\n",
+	"capsule":          "Check, sign, or verify a publisher workload profile against Steward's built-in runtime contract.\n\nUsage: stewardctl capsule check-profile|sign|verify ...\n",
 	"policy":           "Sign or verify the site policy that bounds admitted workload authority.\n\nUsage: stewardctl policy sign|verify ...\n",
 	"keygen":           "Create an Ed25519 signing key pair in owner-only files.\n\nUsage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]\n",
 	"key":              "Check that one private key matches one public key.\n\nUsage: stewardctl key match -private-key FILE -public-key FILE\n",
@@ -640,6 +640,40 @@ func artifact(arguments []string, stdout io.Writer, payloadType string) error {
 	}
 }
 
+func capsuleCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) > 0 && arguments[0] == "check-profile" {
+		flags := flag.NewFlagSet("capsule check-profile", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		input := flags.String("in", "", "strict capsule JSON payload")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if *input == "" || flags.NArg() != 0 {
+			return errors.New("capsule check-profile requires -in")
+		}
+		raw, err := readBounded(*input)
+		if err != nil {
+			return err
+		}
+		var capsule admission.ProfileCapsule
+		if err := dsse.DecodeStrictInto(raw, maxArtifactBytes, &capsule); err != nil {
+			return err
+		}
+		if err := capsule.Validate(timeNow()); err != nil {
+			return err
+		}
+		profile, err := admission.ValidateProfileContract(capsule, admission.DefaultProfiles())
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(map[string]any{
+			"valid": true, "profile": profile.Ref, "uid": profile.UID, "gid": profile.GID,
+			"state_path": profile.StatePath, "command": capsule.Command, "service": capsule.Service,
+		})
+	}
+	return artifact(arguments, stdout, admission.CapsulePayloadType)
+}
+
 func signArtifact(arguments []string, stdout io.Writer, payloadType string) error {
 	flags := flag.NewFlagSet("sign", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -717,7 +751,11 @@ func validatePayload(payload []byte, payloadType string) error {
 		if err := dsse.DecodeStrictInto(payload, maxArtifactBytes, &capsule); err != nil {
 			return err
 		}
-		return capsule.Validate(timeNow())
+		if err := capsule.Validate(timeNow()); err != nil {
+			return err
+		}
+		_, err := admission.ValidateProfileContract(capsule, admission.DefaultProfiles())
+		return err
 	case admission.PolicyPayloadType:
 		var policy admission.SitePolicy
 		if err := dsse.DecodeStrictInto(payload, maxArtifactBytes, &policy); err != nil {

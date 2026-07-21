@@ -16,6 +16,8 @@
     {
       "id": "local-openai",
       "base_url": "http://127.0.0.1:11434/v1",
+      "protocol": "openai",
+      "credential_mode": "bearer",
       "max_concurrent": 8
     }
   ],

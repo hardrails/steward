@@ -408,6 +408,8 @@ func (s *Server) stopRelayAndConfirm(ctx context.Context, relayName string, want
 	return fmt.Errorf("trusted relay did not reach an exact stopped state; Docker status is %q", observed.Status)
 }
 
+var errGatewayRoutePolicyInvalid = errors.New("gateway returned an invalid route policy digest")
+
 func (s *Server) gatewayRoutePolicyDigest(ctx context.Context, workload Workload) (string, error) {
 	if !runtimeNeedsGatewayPolicy(workload.Runtime) {
 		return "", nil
@@ -417,7 +419,7 @@ func (s *Server) gatewayRoutePolicyDigest(ctx context.Context, workload Workload
 		return "", err
 	}
 	if !imageConfigDigest.MatchString(inspection.RoutePolicyDigest) {
-		return "", errors.New("gateway returned an invalid route policy digest")
+		return "", errGatewayRoutePolicyInvalid
 	}
 	return inspection.RoutePolicyDigest, nil
 }

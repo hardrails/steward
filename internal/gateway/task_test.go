@@ -569,8 +569,13 @@ func TestSignedServiceTaskRecordsUntrustedResponsesWithoutRelayingThem(t *testin
 		firstError  string
 		replayError string
 	}{
-		{name: "redirect", status: http.StatusFound, contentType: "application/json", body: `{"run_id":"run_redirect"}`, firstError: "redirect_denied", replayError: "task_already_spent"},
-		{name: "partial success", status: http.StatusPartialContent, contentType: "application/json", body: `{"run_id":"run_partial"}`, firstError: "service_task_rejected", replayError: "task_already_spent"},
+		{name: "redirect", status: http.StatusFound, contentType: "application/json", body: `{"run_id":"run_redirect"}`, firstError: "redirect_denied", replayError: "redirect_denied"},
+		{name: "partial success", status: http.StatusPartialContent, contentType: "application/json", body: `{"run_id":"run_partial"}`, firstError: "service_task_unexpected_status", replayError: "service_task_unexpected_status"},
+		{name: "auth failure", status: http.StatusUnauthorized, contentType: "application/json", body: `{"error":"bad key"}`, firstError: "service_task_upstream_unauthorized", replayError: "service_task_upstream_unauthorized"},
+		{name: "forbidden", status: http.StatusForbidden, contentType: "application/json", body: `{"error":"denied"}`, firstError: "service_task_upstream_forbidden", replayError: "service_task_upstream_forbidden"},
+		{name: "missing route", status: http.StatusNotFound, contentType: "application/json", body: `{"error":"missing"}`, firstError: "service_task_upstream_not_found", replayError: "service_task_upstream_not_found"},
+		{name: "gateway timeout", status: http.StatusGatewayTimeout, contentType: "application/json", body: `{"error":"timeout"}`, firstError: "service_task_upstream_timeout", replayError: "service_task_upstream_timeout"},
+		{name: "server error", status: http.StatusBadGateway, contentType: "application/json", body: `{"error":"down"}`, firstError: "service_task_upstream_server_error", replayError: "service_task_upstream_server_error"},
 		{name: "missing run id", status: http.StatusAccepted, contentType: "application/json", body: `{"status":"queued"}`, firstError: "outcome_unknown", replayError: "outcome_unknown"},
 		{name: "duplicate run id", status: http.StatusAccepted, contentType: "application/json", body: `{"run_id":"run_one","run_id":"run_two"}`, firstError: "outcome_unknown", replayError: "outcome_unknown"},
 		{name: "wrong media type", status: http.StatusAccepted, contentType: "text/plain", body: `{"run_id":"run_plain"}`, firstError: "outcome_unknown", replayError: "outcome_unknown"},
@@ -595,12 +600,16 @@ func TestSignedServiceTaskRecordsUntrustedResponsesWithoutRelayingThem(t *testin
 			permit := taskPermitFor(t, rig, "task-response-"+strings.ReplaceAll(test.name, " ", "-"), body, nil)
 
 			first := invokeServiceTask(rig, body, permit)
+			statusText := fmt.Sprintf("HTTP %d", test.status)
+			expectStatus := test.firstError != "outcome_unknown"
 			if first.Code != http.StatusBadGateway || first.Header().Get(taskReceiptHeader) != "recorded" ||
-				first.Header().Get("X-Steward-Forged") != "" || !strings.Contains(first.Body.String(), `"error":"`+test.firstError+`"`) || calls.Load() != 1 {
+				first.Header().Get("X-Steward-Forged") != "" || !strings.Contains(first.Body.String(), `"error":"`+test.firstError+`"`) ||
+				expectStatus && !strings.Contains(first.Body.String(), statusText) || calls.Load() != 1 {
 				t.Fatalf("first status=%d headers=%v body=%s calls=%d", first.Code, first.Header(), first.Body.String(), calls.Load())
 			}
 			replay := invokeServiceTask(rig, body, permit)
-			if replay.Code != http.StatusConflict || !strings.Contains(replay.Body.String(), `"error":"`+test.replayError+`"`) || calls.Load() != 1 {
+			if replay.Code != http.StatusConflict || !strings.Contains(replay.Body.String(), `"error":"`+test.replayError+`"`) ||
+				expectStatus && !strings.Contains(replay.Body.String(), statusText) || calls.Load() != 1 {
 				t.Fatalf("replay status=%d body=%s calls=%d", replay.Code, replay.Body.String(), calls.Load())
 			}
 		})

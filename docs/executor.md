@@ -405,6 +405,7 @@ used by the fleet rollout coordinator. A rollout node must advertise
 plan-authorization envelope digest for batch zero or the applicable signed
 batch-promotion envelope digest for a later batch. Generic signed commands may omit
 the field. Executor validates the digest as part of the signed command but does not
+<!-- cli-contract-ignore: this names a deliberately separate or removed CLI surface. -->
 fetch or verify the referenced rollout envelope; `stewardctl rollout` performs that
 correlation before submission and during offline verification.
 

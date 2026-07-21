@@ -54,7 +54,10 @@ type inferenceRoutePolicy struct {
 	ID                   string `json:"id"`
 	ModelAlias           string `json:"model_alias"`
 	BaseURL              string `json:"base_url"`
+	Protocol             string `json:"protocol,omitempty"`
 	CredentialFile       string `json:"credential_file,omitempty"`
+	CredentialMode       string `json:"credential_mode,omitempty"`
+	AnthropicVersion     string `json:"anthropic_version,omitempty"`
 	CredentialConfigured bool   `json:"credential_configured"`
 	MaxConcurrent        int    `json:"max_concurrent"`
 }
@@ -233,6 +236,16 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		document.Inference = &inferenceRoutePolicy{
 			ID: route.ID, ModelAlias: grant.ModelAlias, BaseURL: routeBaseURL(route.base), CredentialFile: route.CredentialFile,
 			CredentialConfigured: route.credential != "", MaxConcurrent: route.MaxConcurrent,
+		}
+		if route.Protocol != "" || route.CredentialMode != "" || route.AnthropicVersion != "" {
+			if document.Version < 10 {
+				document.Version = 10
+			}
+			document.Inference.Protocol = string(effectiveInferenceProtocol(route.Route))
+			document.Inference.CredentialMode = string(effectiveInferenceCredentialMode(route.Route))
+			if effectiveInferenceProtocol(route.Route) == InferenceProtocolAnthropic {
+				document.Inference.AnthropicVersion = effectiveAnthropicVersion(route.Route)
+			}
 		}
 	}
 	for _, id := range grant.EgressRouteIDs {

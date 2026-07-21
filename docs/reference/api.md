@@ -553,6 +553,7 @@ existing signed-runtime destroy endpoint; no separate node-local drain engine
 exists. This is distinct from Control's desired-deployment drain state machine.
 
 `stewardctl image`, `stewardctl evidence`, `stewardctl permit`, `stewardctl task`,
+<!-- cli-contract-ignore: the first two names below are intentionally documented as removed. -->
 `stewardctl activation`, `stewardctl rollout`, and `stewardctl upgrade` are CLIs,
 not HTTP endpoints. They provide bounded,
 policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
@@ -611,6 +612,12 @@ instance, runtime, generations, sequence, validity window, kind, and payload to
 Executor's durable admission record. The bearer cannot select a tenant; legacy
 credentials remain single-tenant.
 
+The complete signed-operation sets are release contracts:
+
+- Tenant operations: `activation-canary`, `admit`, `clone-state`, `delete-snapshot`,
+  `destroy`, `purge`, `read`, `renew`, `snapshot-state`, `start`, `stop`.
+- Site cleanup operations: `delete-snapshot`, `destroy`, `purge`, `stop`.
+
 `admit` carries exact `capsule_dsse_base64` and OpenAPI `intent`; identity and
 generation must match the command. `snapshot-state` carries `lineage_id` and
 `snapshot_id` and requires the exact destroyed lifecycle generation. `clone-state`
@@ -636,8 +643,8 @@ explicitly select the mode, and generic egress is unavailable. Executor projects
 those narrowed public authorities into immutable Gateway state; private action keys
 are never node inputs.
 
-Inference grants expose only the fixed OpenAI-compatible paths listed in the
-[positive-capability guide]({{ '/guides/positive-capabilities/' | relative_url }}).
+Inference grants expose only the fixed OpenAI-compatible or Anthropic Messages
+paths listed in the [inference-provider guide]({{ '/guides/inference/' | relative_url }}).
 Each model-bearing request needs exactly one top-level `model` matching the grant
 alias. Gateway generates `GET /v1/models` from it. Authenticated service paths apply
 bounds to HTTP and RFC 6455 WebSockets and close active streams on revocation.

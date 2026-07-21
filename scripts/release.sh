@@ -37,6 +37,8 @@ cd "$(dirname "$0")/.."
 # inventories. Refuse the release before building anything if those inventories
 # drift, because such an artifact would reject its own integrity manifest.
 /bin/bash -p scripts/check-release-inventory.sh
+/bin/bash -p scripts/check-docs-consistency.sh
+/bin/bash -p scripts/check-cli-docs-contract.sh
 
 # The published target matrix: pure-stdlib Go with CGO off, so every target is a
 # trivial cross-compile from any host.

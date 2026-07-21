@@ -36,10 +36,13 @@ Signed admission (all trust inputs are optional as one group):
   --executor-evidence-public-key FILE
                                 Matching receipt public key
   --allow-host-admin-intent     Let the host-admin token select signed tenant intent
+  --disallow-host-admin-intent  Explicitly disable host-admin intent selection
   --allow-unquotaed-state-on-dedicated-host
                                 Allow persistent Docker volumes only when the
                                 signed policy contains exactly one tenant; no
                                 hard byte or inode quota is enforced
+  --disallow-unquotaed-state-on-dedicated-host
+                                Explicitly disable unquotaed persistent state
 
 Optional:
   --local-only                 Configure loopback HTTP, CLI, and MCP without an uplink
@@ -76,8 +79,8 @@ node_id=
 executor_evidence_config=
 receipt_private=
 receipt_public=
-allow_host_admin=false
-allow_unquotaed_state=false
+allow_host_admin=preserve
+allow_unquotaed_state=preserve
 start_services=true
 local_only=false
 while [[ $# -gt 0 ]]; do
@@ -103,7 +106,9 @@ while [[ $# -gt 0 ]]; do
 		--executor-evidence-private-key) receipt_private=${2:-}; shift 2 ;;
 		--executor-evidence-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
+		--disallow-host-admin-intent) allow_host_admin=false; shift ;;
 		--allow-unquotaed-state-on-dedicated-host) allow_unquotaed_state=true; shift ;;
+		--disallow-unquotaed-state-on-dedicated-host) allow_unquotaed_state=false; shift ;;
 		--local-only) local_only=true; shift ;;
 		--no-start) start_services=false; shift ;;
 		-h | --help) usage; exit 0 ;;
@@ -887,9 +892,14 @@ if (( admission_required == 3 )); then
 			--receipt-public-key "$receipt_public"
 		)
 	fi
-	[[ $allow_host_admin == false ]] || admission_args+=(--allow-host-admin-intent)
-	[[ $allow_unquotaed_state == false ]] ||
-		admission_args+=(--allow-unquotaed-state-on-dedicated-host)
+	case "$allow_host_admin" in
+		true) admission_args+=(--allow-host-admin-intent) ;;
+		false) admission_args+=(--disallow-host-admin-intent) ;;
+	esac
+	case "$allow_unquotaed_state" in
+		true) admission_args+=(--allow-unquotaed-state-on-dedicated-host) ;;
+		false) admission_args+=(--disallow-unquotaed-state-on-dedicated-host) ;;
+	esac
 	/usr/local/libexec/steward/configure-admission "${admission_args[@]}"
 fi
 

@@ -120,6 +120,11 @@ Gateway configuration refers to the materialized secret identity through its
 bounded credential configuration. Keep configuration and secret files separate:
 configuration may be copied to an auditor; secret material must not.
 
+Use `stewardctl gateway inference set -credential-file …` to bind an inference
+route to the materialized file. The
+[inference-provider guide]({{ '/guides/inference/' | relative_url }}) lists provider
+presets and authentication modes.
+
 Restart or reload Gateway according to the deployment guide after a rotation if the
 configured credential is loaded at process start. Verify the new epoch before
 draining the old provider version.

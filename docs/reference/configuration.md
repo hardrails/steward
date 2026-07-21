@@ -479,6 +479,15 @@ host and each tenant, including fixed relay overhead. The OpenZFS worker caps st
 bytes and objects per lineage; Control does not yet schedule those storage
 reservations across a fleet, and Steward does not cap I/O bandwidth.
 
+Re-running `configure-node` or `configure-admission` patches signed-admission
+trust and preserves both installed compatibility choices when their flags are
+omitted. Use `--disallow-host-admin-intent` or
+`--disallow-unquotaed-state-on-dedicated-host` to turn a previously enabled
+choice off. The helper prints each explicit true-to-false or false-to-true
+change before committing it and refuses a missing, duplicate, or unrecognized
+installed value. This prevents a policy refresh from silently changing host
+authority or persistent-state behavior.
+
 ## OpenZFS storage worker configuration
 
 `steward-storage-zfs` reads strict JSON from
@@ -516,10 +525,17 @@ and cannot rewrite the live Executor environment.
 
 `steward-gateway` reads strict `/etc/steward/gateway.json`: clean absolute socket,
 state, token, and audit paths; numeric Executor and relay GIDs; an explicit loopback
-service address with a port from 1 through 65535; and at most 128 OpenAI-compatible
-routes. Each inference route defines an ID, HTTP(S) origin, optional owner-only
-credential file, and concurrency limit. Gateway and relay HTTP listeners cap request
-headers at 64 KiB, and their outbound transports cap response headers at 64 KiB.
+service address with a port from 1 through 65535; and at most 128 inference routes.
+Each inference route defines an ID, exact HTTP(S) base URL with an optional canonical
+path prefix, `openai` or `anthropic` protocol, optional owner-only credential file,
+`bearer`, `x-api-key`, or `api-key` credential mode, and concurrency limit.
+`anthropic_version` is allowed only for Anthropic routes and defaults to
+`2023-06-01`. Existing routes that omit `protocol` and `credential_mode` retain
+OpenAI and bearer behavior. Use `stewardctl gateway inference set -provider …` for
+the built-in OpenAI, OpenRouter, Anthropic, Mistral, vLLM, Ollama, llama.cpp,
+LocalAI, LiteLLM, LM Studio, SGLang, and TGI presets. Gateway and relay HTTP
+listeners cap request headers at 64 KiB, and their outbound transports cap response
+headers at 64 KiB.
 
 `egress_routes` contains at most 128 HTTP(S) proxy policies. Each has 1–128
 destinations (`host`, `ports`, optional canonical `allowed_cidrs`) and four limits:

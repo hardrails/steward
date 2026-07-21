@@ -25,7 +25,7 @@ var completionTree = map[string][]string{
 	"context":                     {"set", "use", "show", "list", "delete"},
 	"completion":                  {"install", "bash", "zsh", "fish"},
 	"key":                         {"match"},
-	"capsule":                     {"sign", "verify"},
+	"capsule":                     {"check-profile", "sign", "verify"},
 	"policy":                      {"sign", "verify"},
 	"permit":                      {"context", "issue", "approve", "verify", "audit", "bundle"},
 	"permit bundle":               {"issue", "approve", "verify", "audit"},
@@ -56,9 +56,10 @@ var completionTree = map[string][]string{
 	"evidence":                 {"verify", "export"},
 	"node":                     {"whoami", "admit", "status", "logs", "egress", "start", "stop", "destroy", "snapshot-state", "clone-state", "delete-snapshot", "purge-state", "maintenance"},
 	"node maintenance":         {"status", "enter", "drain", "exit"},
-	"gateway":                  {"validate", "identity", "route", "connector", "service", "effects"},
+	"gateway":                  {"validate", "identity", "inference", "route", "connector", "service", "effects"},
 	"gateway identity":         {"set"},
-	"gateway route":            {"add", "remove", "list"},
+	"gateway inference":        {"set", "list"},
+	"gateway route":            {"set", "list"},
 	"gateway connector":        {"set", "list", "trust"},
 	"gateway service":          {"set", "list", "trust"},
 	"gateway effects":          {"check"},
@@ -128,6 +129,8 @@ var completionFlags = map[string][]string{
 	"node":                              {"-node-url", "-token-file", "-no-context", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation", "-reason", "-apply"},
 	"gateway":                           {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
 	"gateway identity set":              {"-config", "-node-id"},
+	"gateway inference set":             {"-config", "-provider", "-id", "-base-url", "-protocol", "-credential-file", "-credential-mode", "-anthropic-version", "-max-concurrent"},
+	"capsule check-profile":             {"-in"},
 	"gateway connector set":             {"-preset", "-repository", "-id", "-base-url", "-credential-file", "-credential-mode", "-credential-epoch", "-allow-cidr", "-operation", "-tenant-budget", "-action-authority", "-action-authority-tenant", "-action-node-id", "-max-action-permit-seconds", "-max-concurrent", "-max-request-bytes", "-max-response-bytes", "-max-seconds", "-max-calls-per-grant"},
 }
 
@@ -352,6 +355,15 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 		}
 		if previous == "-preset" && leaf == "gateway connector set" {
 			return matchingCandidates([]string{"github-issues"}, current)
+		}
+		if previous == "-provider" && leaf == "gateway inference set" {
+			return matchingCandidates([]string{"anthropic", "compatible", "litellm", "llamacpp", "lmstudio", "localai", "mistral", "ollama", "openai", "openrouter", "sglang", "tgi", "vllm"}, current)
+		}
+		if previous == "-protocol" && leaf == "gateway inference set" {
+			return matchingCandidates([]string{"anthropic", "openai"}, current)
+		}
+		if previous == "-credential-mode" && leaf == "gateway inference set" {
+			return matchingCandidates([]string{"api-key", "bearer", "x-api-key"}, current)
 		}
 		if previous == "-authorized-effects" && (leaf == "site init" || strings.HasPrefix(leaf, "site init ")) {
 			return matchingCandidates([]string{"optional", "required"}, current)

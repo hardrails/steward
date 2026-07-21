@@ -167,10 +167,7 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 		return
 	}
 
-	code, message := "service_task_rejected", "service rejected the task; the signed task is spent"
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		code, message = "redirect_denied", "service task redirects are not returned across the trust boundary"
-	}
+	code, message := serviceTaskRejection(response.StatusCode)
 	terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), code)
 	if err := s.finishServiceTask(taskDigest, terminal); err != nil {
 		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
@@ -377,11 +374,15 @@ func (s *Server) writeExistingServiceTask(w http.ResponseWriter, state serviceTa
 		writeGatewayError(w, http.StatusConflict, "task_in_progress", "task authorization is already in progress")
 		return
 	}
-	code := "task_already_spent"
-	if state.Terminal.ErrorCode == "outcome_unknown" {
-		code = "outcome_unknown"
+	code := state.Terminal.ErrorCode
+	if code == "" {
+		code = "task_already_spent"
 	}
-	writeGatewayError(w, http.StatusConflict, code, "task was already dispatched and cannot be retried safely")
+	message := "task was already dispatched and cannot be retried safely"
+	if state.Terminal.HTTPStatus != 0 {
+		message = fmt.Sprintf("task was already dispatched; upstream returned HTTP %d; the signed task cannot be retried safely", state.Terminal.HTTPStatus)
+	}
+	writeGatewayError(w, http.StatusConflict, code, message)
 }
 
 func (s *Server) finishServiceTaskKnownFailure(w http.ResponseWriter, taskDigest string, event connectorledger.Event, code string, status int, message string) {
@@ -497,6 +498,32 @@ func serviceRunID(raw []byte) (string, bool) {
 
 func successfulServiceTaskStatus(status int) bool {
 	return status == http.StatusOK || status == http.StatusCreated || status == http.StatusAccepted
+}
+
+func serviceTaskRejection(status int) (string, string) {
+	code := "service_task_unexpected_status"
+	switch status {
+	case http.StatusUnauthorized:
+		code = "service_task_upstream_unauthorized"
+	case http.StatusForbidden:
+		code = "service_task_upstream_forbidden"
+	case http.StatusNotFound:
+		code = "service_task_upstream_not_found"
+	case http.StatusTooManyRequests:
+		code = "service_task_upstream_rate_limited"
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		code = "service_task_upstream_timeout"
+	default:
+		switch {
+		case status >= 300 && status < 400:
+			return "redirect_denied", fmt.Sprintf("upstream service returned HTTP %d; redirects are denied; the signed task is spent", status)
+		case status >= 400 && status < 500:
+			code = "service_task_upstream_client_error"
+		case status >= 500 && status < 600:
+			code = "service_task_upstream_server_error"
+		}
+	}
+	return code, fmt.Sprintf("upstream service returned HTTP %d; the signed task is spent; inspect task status or signed audit evidence before issuing new authority", status)
 }
 
 func serviceTaskJSONResponse(header http.Header) bool {

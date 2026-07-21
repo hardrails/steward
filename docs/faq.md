@@ -166,9 +166,12 @@ state. Steward will not expose its loopback host token for this purpose. See
 
 ## Where do models run?
 
-Outside Steward. An operator provides local models through a separately managed,
-OpenAI-compatible service. Steward brokers site-configured routes and credentials;
-it does not schedule or serve models.
+Outside Steward. An operator provides a separately managed local or hosted model
+service. Gateway has presets for OpenAI, OpenRouter, Anthropic, Mistral, vLLM,
+Ollama, llama.cpp, LocalAI, LiteLLM, LM Studio, SGLang, and TGI, plus a bounded
+compatible-route form. Steward brokers site-configured routes and credentials; it
+does not schedule or serve models. See
+[inference providers]({{ '/guides/inference/' | relative_url }}).
 
 ## Does Steward store inference keys and connector tokens?
 
@@ -257,6 +260,36 @@ endpoint also requires an existing repository digest. See
 No. It launches a trusted, operator-authored operating-system process with
 Steward's Unix identity and no container isolation. Keep it disabled for tenant
 workloads; use Executor.
+
+## How do I diagnose a failed service task?
+
+Read the structured error code before issuing another permit. Gateway keeps
+upstream failures distinct: authentication (`service_task_upstream_unauthorized`),
+authorization (`service_task_upstream_forbidden`), missing routes
+(`service_task_upstream_not_found`), rate limits, other client errors, and server
+errors have separate codes. The message includes the upstream HTTP status but
+never copies its untrusted response body. A non-success response still spends the
+one-use permit because the upstream may have performed work before responding.
+`stewardctl task status` shows the durable terminal code, and
+`stewardctl task audit` verifies it against the signed receipt chain.
+
+Executor likewise distinguishes an unreachable Gateway from an invalid committed
+route-policy binding and from a policy digest mismatch. A mismatch is durable
+state drift, not a transient network failure. Inspect `/v1/readiness` and let
+the periodic reconciler repair or contain it instead of repeatedly submitting
+admission.
+
+## What if Docker removed an admitted container outside Steward?
+
+Executor reconciliation reports `workload_missing` and blocks ordinary mutation.
+Run the same authorized `stewardctl node destroy RUNTIME_REF` operation after the
+failure appears in readiness. Destroy has a narrow recovery path when there is
+exactly one matching failure and no pending journal operation. It proves the
+container remains absent, validates the deterministic Gateway, relay, and network
+identities, removes that residual authority, writes a signed destroy receipt, and
+commits a fence tombstone. Persistent state is retained for a later signed purge.
+Any foreign identity or uncertain result remains fail closed. Do not purge and
+reinstall the node to clear this condition.
 
 ## How are upgrades rolled back?
 

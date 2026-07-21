@@ -47,6 +47,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, service, connector, and HTTP(S) egress grants
+- [Inference providers](https://hardrails.github.io/steward/guides/inference/): Connect OpenAI, OpenRouter, Anthropic, Mistral, vLLM, Ollama, llama.cpp, LocalAI, LiteLLM, LM Studio, SGLang, TGI, or another compatible endpoint while keeping its credential outside the agent
 - [Authorized Effects](https://hardrails.github.io/steward/guides/authorized-effects/): Assume the agent is compromised and require signed authority for one exact connector request or an unordered set of up to eight exact, independently one-use requests
 - [Context-locked effects](https://hardrails.github.io/steward/guides/context-locked-effects/): Bind each exact permit to the signed history of completed Gateway-mediated connector responses so later responses invalidate older approvals
 - [Gateway credentials](https://hardrails.github.io/steward/guides/secrets/): Compile exact OpenBao KV v2 policy, fail-closed Agent templates, expected-version readiness, and a systemd sandbox while keeping rendered inference keys and connector tokens in owner-only Gateway files and outside agents and the React console
@@ -70,6 +71,7 @@ Documentation: https://hardrails.github.io/steward/
 
 - [Platform support](https://hardrails.github.io/steward/reference/platform-support/): Supported hosts and artifacts
 - [Configuration](https://hardrails.github.io/steward/reference/configuration/): Flags, defaults, paths, and validation
+- [Runtime profiles](https://hardrails.github.io/steward/reference/runtime-profiles/): Exact command, Linux identity, writable state, and service contracts checked before capsule signing and admission
 - [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts
 - [Catalog, agent release, image, permit, task, and evidence tools](https://hardrails.github.io/steward/reference/offline-tools/): Issue and verify curator catalogs and signed outcome releases; search and compare exact capsule metadata; verify and import Open Container Initiative (OCI) archives; issue and audit exact connector and service-task permits; dispatch a qualified Hermes run; verify receipt chains
 - [Release artifacts](https://hardrails.github.io/steward/reference/release-artifacts/): Filenames and checksum verification
@@ -80,8 +82,9 @@ On a shared Linux host with OpenZFS, Steward can grant persistent state across
 approved workload replacements with a hard byte and object quota per tenant
 lineage. A separate root worker owns the ZFS and exact Docker-volume operations;
 Executor reaches it through an authenticated Unix socket. The unquotaed portable
-Docker-volume mode is dedicated-host only. Steward can also grant OpenAI-compatible
-inference without directly configuring or injecting the upstream credential into
+Docker-volume mode is dedicated-host only. Steward can also grant bounded
+OpenAI-compatible or Anthropic Messages inference without directly configuring or
+injecting the upstream credential into
 the workload, one private service, and named credential-brokered API operations with
 spend-before-effect call budgets. A connector can additionally require a short-lived
 permit signed by a tenant-scoped off-node key for the exact admitted operation,

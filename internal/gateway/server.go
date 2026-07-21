@@ -1308,7 +1308,7 @@ func (s *Server) inferenceHandler(id string) http.Handler {
 	})
 }
 
-var inferencePaths = map[string]string{
+var openAIInferencePaths = map[string]string{
 	"/v1/chat/completions": http.MethodPost,
 	"/v1/completions":      http.MethodPost,
 	"/v1/embeddings":       http.MethodPost,
@@ -1316,16 +1316,24 @@ var inferencePaths = map[string]string{
 	"/v1/models":           http.MethodGet,
 }
 
+var anthropicInferencePaths = map[string]string{
+	"/v1/messages":              http.MethodPost,
+	"/v1/messages/count_tokens": http.MethodPost,
+	"/v1/models":                http.MethodGet,
+}
+
 func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, grant Grant, route loadedRoute) {
-	if inferencePaths[incoming.URL.Path] != incoming.Method || incoming.URL.RawQuery != "" {
+	protocol := effectiveInferenceProtocol(route.Route)
+	paths := openAIInferencePaths
+	if protocol == InferenceProtocolAnthropic {
+		paths = anthropicInferencePaths
+	}
+	if paths[incoming.URL.Path] != incoming.Method || incoming.URL.RawQuery != "" {
 		writeGatewayError(w, http.StatusForbidden, "route_denied", "inference method or path is not allowed")
 		return
 	}
 	if incoming.URL.Path == "/v1/models" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"object": "list",
-			"data":   []map[string]any{{"id": grant.ModelAlias, "object": "model", "created": 0, "owned_by": "steward"}},
-		})
+		writeInferenceModels(w, protocol, grant.ModelAlias)
 		return
 	}
 	raw, model, err := inspectInferenceModel(w, incoming)
@@ -1339,7 +1347,36 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 	}
 	incoming.Body = io.NopCloser(bytes.NewReader(raw))
 	incoming.ContentLength = int64(len(raw))
-	s.proxy(w, incoming, route.base, incoming.URL.Path, route.credential, false, s.client)
+	fixedHeaders := make(http.Header)
+	if protocol == InferenceProtocolAnthropic {
+		fixedHeaders.Set("Anthropic-Version", effectiveAnthropicVersion(route.Route))
+	}
+	credentialMode := effectiveInferenceCredentialMode(route.Route)
+	s.proxy(w, incoming, route.base, inferenceUpstreamPath(route.base, incoming.URL.Path), route.credential, credentialMode, fixedHeaders, false, s.client)
+}
+
+func writeInferenceModels(w http.ResponseWriter, protocol InferenceProtocol, modelAlias string) {
+	if protocol == InferenceProtocolAnthropic {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"data": []map[string]any{{
+				"id": modelAlias, "type": "model", "display_name": modelAlias, "created_at": "1970-01-01T00:00:00Z",
+			}},
+			"has_more": false, "first_id": modelAlias, "last_id": modelAlias,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   []map[string]any{{"id": modelAlias, "object": "model", "created": 0, "owned_by": "steward"}},
+	})
+}
+
+func inferenceUpstreamPath(base *url.URL, incomingPath string) string {
+	if base == nil || base.Path == "" || base.Path == "/" {
+		return incomingPath
+	}
+	suffix := strings.TrimPrefix(incomingPath, "/v1")
+	return strings.TrimSuffix(base.Path, "/") + suffix
 }
 
 func (s *Server) proxyService(w http.ResponseWriter, incoming *http.Request, grant Grant, path string) {
@@ -1373,7 +1410,7 @@ func (s *Server) proxyService(w http.ResponseWriter, incoming *http.Request, gra
 		s.proxyWebSocket(w, incoming, base, path, client.Transport)
 		return
 	}
-	s.proxy(w, incoming, base, path, "", true, client)
+	s.proxy(w, incoming, base, path, "", "", nil, true, client)
 }
 
 func (s *Server) serviceUpstream(value string) (*url.URL, *http.Client, *http.Transport, error) {
@@ -1415,7 +1452,7 @@ func safeServicePath(path string) bool {
 	return true
 }
 
-func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.URL, path, credential string, service bool, client *http.Client) {
+func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.URL, path, credential string, credentialMode CredentialMode, fixedHeaders http.Header, service bool, client *http.Client) {
 	incoming.Body = http.MaxBytesReader(w, incoming.Body, maxProxyBody)
 	target := *base
 	if base.Path == "/v1" || base.Path == "/v1/" {
@@ -1436,8 +1473,32 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 	request.Header.Del("Authorization")
 	request.Header.Del("Proxy-Authorization")
 	request.Header.Del("Cookie")
+	if !service {
+		request.Header.Del("X-Api-Key")
+		request.Header.Del("Api-Key")
+		request.Header.Del("OpenAI-Organization")
+		request.Header.Del("OpenAI-Project")
+		for key := range request.Header {
+			if strings.HasPrefix(http.CanonicalHeaderKey(key), "Anthropic-") {
+				request.Header.Del(key)
+			}
+		}
+	}
+	for key, values := range fixedHeaders {
+		request.Header.Del(key)
+		for _, value := range values {
+			request.Header.Add(key, value)
+		}
+	}
 	if credential != "" {
-		request.Header.Set("Authorization", "Bearer "+credential)
+		switch credentialMode {
+		case CredentialModeXAPIKey:
+			request.Header.Set("X-Api-Key", credential)
+		case CredentialModeAPIKey:
+			request.Header.Set("Api-Key", credential)
+		default:
+			request.Header.Set("Authorization", "Bearer "+credential)
+		}
 	}
 	response, err := client.Do(request)
 	if err != nil {

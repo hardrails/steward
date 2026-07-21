@@ -150,20 +150,23 @@ func agentPublish(arguments []string, stdout io.Writer) error {
 }
 
 func agentPublicationContractFor(runtime string) (agentPublicationContract, bool) {
+	var ref admission.ProfileRef
 	switch runtime {
 	case "hermes":
-		return agentPublicationContract{
-			profile: admission.ProfileRef{ID: "hermes-v1", Version: "v1"}, command: []string{"serve"},
-			statePath: "/opt/data", serviceID: "hermes-api", servicePort: 8766,
-		}, true
+		ref = admission.ProfileRef{ID: "hermes-v1", Version: "v1"}
 	case "openclaw":
-		return agentPublicationContract{
-			profile: admission.ProfileRef{ID: "openclaw-v1", Version: "v1"}, command: []string{"serve"},
-			statePath: "/home/node/.openclaw", serviceID: "openclaw-api", servicePort: 18789,
-		}, true
+		ref = admission.ProfileRef{ID: "openclaw-v1", Version: "v1"}
 	default:
 		return agentPublicationContract{}, false
 	}
+	profile, ok := admission.DefaultProfiles().Lookup(ref)
+	if !ok || len(profile.Command) == 0 || profile.ServiceID == "" || profile.ServicePort == 0 {
+		return agentPublicationContract{}, false
+	}
+	return agentPublicationContract{
+		profile: profile.Ref, command: append([]string(nil), profile.Command...), statePath: profile.StatePath,
+		serviceID: profile.ServiceID, servicePort: profile.ServicePort,
+	}, true
 }
 
 func validateSitePublisherKey(policy admission.SitePolicy, privateKey ed25519.PrivateKey) error {

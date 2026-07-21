@@ -86,7 +86,8 @@ and rotation epoch. It does not build another vault, store provider credentials,
 return secret values through its control plane, console, MCP adapter, or receipts.
 
 [Manage Gateway credentials]({{ '/guides/secrets/' | relative_url }}) ·
-[Configure inference and services]({{ '/guides/positive-capabilities/' | relative_url }}) ·
+[Connect an inference provider]({{ '/guides/inference/' | relative_url }}) ·
+[Configure state and services]({{ '/guides/positive-capabilities/' | relative_url }}) ·
 [Configure egress]({{ '/guides/egress/' | relative_url }})
 
 ## Read before production

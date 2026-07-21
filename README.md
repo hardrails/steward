@@ -156,9 +156,11 @@ security boundary.
 - [Understand workload admission](https://hardrails.github.io/steward/guides/signed-admission/)
 - [Configure inference, services, connectors, and egress](https://hardrails.github.io/steward/guides/positive-capabilities/)
 
-Inference remains a separate operator responsibility. Steward expects an
-OpenAI-compatible endpoint or another explicitly configured service and mediates
-the route and credential.
+Inference remains a separate operator responsibility. Steward mediates OpenAI,
+OpenRouter, Anthropic, Mistral, vLLM, Ollama, llama.cpp, LocalAI, LiteLLM, LM Studio,
+SGLang, TGI, and other compatible endpoints without placing the upstream credential
+in the agent.
+See [inference providers](https://hardrails.github.io/steward/guides/inference/).
 
 Start a portable agent project with:
 

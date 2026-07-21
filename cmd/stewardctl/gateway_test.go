@@ -118,6 +118,81 @@ func TestGatewayRouteSetIsValidatedAndAtomic(t *testing.T) {
 	}
 }
 
+func TestGatewayInferencePresetsAreValidatedAndAtomic(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "sgi-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	token := filepath.Join(directory, "token")
+	credential := filepath.Join(directory, "provider-key")
+	if err := os.WriteFile(token, []byte("service-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credential, []byte("provider-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := gateway.Config{Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8091",
+		ServiceTokenFile: token, StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
+		ExecutorGID: os.Getgid(), RelayGID: os.Getgid()}
+	if config.ExecutorGID == 0 {
+		config.ExecutorGID, config.RelayGID = 1, 1
+	}
+	raw, _ := json.Marshal(config)
+	path := filepath.Join(directory, "gateway.json")
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, _, err := gateway.LoadConfig(path)
+	if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].ID != "vllm" ||
+		loaded.Routes[0].BaseURL != "http://127.0.0.1:8000/v1" || loaded.Routes[0].Protocol != gateway.InferenceProtocolOpenAI {
+		t.Fatalf("routes=%#v output=%q err=%v", loaded.Routes, output.String(), err)
+	}
+
+	output.Reset()
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "openrouter", "-credential-file", credential}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "anthropic", "-credential-file", credential}, &output, &output); err == nil ||
+		!strings.Contains(err.Error(), "must not be shared") {
+		t.Fatalf("shared provider credential error=%v", err)
+	}
+	anthropicCredential := filepath.Join(directory, "anthropic-key")
+	if err := os.WriteFile(anthropicCredential, []byte("anthropic-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "anthropic", "-credential-file", anthropicCredential}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.Routes) != 3 || loaded.Routes[1].BaseURL != "https://openrouter.ai/api/v1" ||
+		loaded.Routes[2].Protocol != gateway.InferenceProtocolAnthropic || loaded.Routes[2].CredentialMode != gateway.CredentialModeXAPIKey {
+		t.Fatalf("routes=%#v err=%v", loaded.Routes, err)
+	}
+	output.Reset()
+	if err := run([]string{"gateway", "inference", "list", "-config", path}, &output, &output); err != nil ||
+		!strings.Contains(output.String(), "openrouter.ai/api/v1") || !strings.Contains(output.String(), "anthropic") {
+		t.Fatalf("list output=%q err=%v", output.String(), err)
+	}
+
+	before, _ := os.ReadFile(path)
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "unknown"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "compatible", "-id", "custom", "-base-url", "https://models.example.test/bad//path"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("unsafe compatible provider URL accepted")
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected inference update changed gateway config")
+	}
+}
+
 func TestGatewayIdentitySetAtomicallyBindsEnrolledNode(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "sgi-")
 	if err != nil {
@@ -169,12 +244,15 @@ func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 	for _, arguments := range [][]string{
 		{"gateway"}, {"gateway", "unknown"}, {"gateway", "route"}, {"gateway", "route", "remove"},
 		{"gateway", "identity"}, {"gateway", "identity", "remove"},
+		{"gateway", "inference"}, {"gateway", "inference", "remove"},
 		{"gateway", "connector"}, {"gateway", "connector", "remove"},
 		{"gateway", "service"}, {"gateway", "service", "remove"},
 		{"gateway", "route", "set", "-id", "web"}, {"gateway", "route", "set", "-id", "web", "-destination", "missing-port"},
+		{"gateway", "inference", "set", "-provider", "compatible"},
 		{"gateway", "connector", "set", "-id", "issues"},
 		{"gateway", "validate", "extra"}, {"gateway", "route", "list", "-id", "unexpected"},
 		{"gateway", "route", "list", "-max-concurrent", "7"},
+		{"gateway", "inference", "list", "-provider", "openai"},
 	} {
 		if err := run(arguments, &output, &output); err == nil {
 			t.Fatalf("ambiguous command accepted: %v", arguments)
