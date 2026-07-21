@@ -212,6 +212,27 @@ changes placement constraints or resource requirements can become blocked after
 the source is removed; inspect the target constraints and node capacity before
 applying it.
 
+Pause a rollout before investigating a bad generation:
+
+```console
+stewardctl agent deployment pause auditor -tenant acme
+stewardctl agent deployment status auditor -tenant acme
+```
+
+The pause is durable. It prevents Steward from starting another replica
+replacement, while a replacement already in progress continues until the target
+is running or reports a failure. This avoids leaving an instance after source
+destruction but before target admission. Resume only after checking the current
+instance phases and `last_error` values:
+
+```console
+stewardctl agent deployment resume auditor -tenant acme
+```
+
+Pause is not rollback. Returning to an older bundle requires a new, higher
+generation and a fresh tenant-signed delegation; Steward never moves generation
+fences backward. Automatic mixed-generation rollback is not implemented.
+
 ```console
 stewardctl agent deployment remove auditor
 ```
@@ -262,8 +283,9 @@ deployment instances that have an eligible destination and budget room. A
 replacement is admitted only after the old runtime reports successful destroy,
 and its instance generation advances so delayed commands cannot affect it.
 
-Set the budget when applying a deployment. `1` is the default; `0` pauses
-voluntary movement without changing desired state:
+Set the budget when applying a deployment. `1` is the default; `0` prevents both
+rollout and node-drain movement from starting. To pause only an active rollout,
+use `agent deployment pause` instead:
 
 ```console
 stewardctl agent deployment apply auditor -tenant acme -max-unavailable 1

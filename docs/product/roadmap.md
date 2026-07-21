@@ -436,8 +436,9 @@ supportable through one coherent operational surface.
 - Make placement an actual controller decision with stale-plan detection and
   Executor revalidation.
 - Extend implemented lease-fenced replacement, rescheduling, topology placement,
-  cordon, quarantine, budgeted stateless drain, and fleet-wide tenant quotas with
-  canary rollout, pause, and rollback.
+  cordon, quarantine, budgeted stateless drain, fleet-wide tenant quotas, and
+  durable rollout pause/resume with health-gated canaries and mixed-generation
+  rollback.
 - Add the storage backend contract and one quota-capable local backend.
 - Add quiesce, snapshot, clone, archive, restore, TTL, idle expiry, and garbage
   collection state machines.

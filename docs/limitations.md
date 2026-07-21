@@ -289,8 +289,11 @@ source authority. Rollout is restart-safe, limited by `max_unavailable`, and
 switches each instance to target authority only after Executor proves the source
 runtime was destroyed. It is an in-place replacement: there are no surge replicas,
 automatic rollback, or rollout health probes beyond the authenticated lifecycle
-result. Rollback requires a new higher generation and fresh signed delegation;
-Steward never moves generation fences backward.
+result. An operator can durably pause new replacements while an in-flight
+replacement reaches a safe boundary, then resume with a revision-guarded command.
+Rollback requires a new higher generation and fresh signed delegation; Steward
+never moves generation fences backward. Steward cannot yet safely reverse a
+partially updated, mixed-generation rollout in place.
 
 A ready deployment retains the exact verified instance intent and authenticated
 Executor admission projection needed for task issuance. `agent deployment wait`

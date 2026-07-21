@@ -55,6 +55,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
 | `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments, including retained task-ready intent and admission projections when present |
 | `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
+| `PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout` | Pause or resume new replacements in an active rollout; in-flight work reaches a safe boundary |
 | `DELETE /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Mark one deployment absent; reconciliation performs bounded cleanup asynchronously |
 | `GET /v1/nodes/{node_id}/evidence` | Read the site-admin-only last-good Executor receipt checkpoint and any sticky divergence finding |
 | `GET /v1/nodes/{node_id}/evidence/export` | Sign a portable evidence checkpoint with the controller's dedicated witness key |
@@ -148,7 +149,10 @@ remains in the target delegation. The response's top-level digests describe the
 target. Its `rollout` object identifies the retained source authority, and each
 instance's `rollout.stage` shows whether that instance is still draining under the
 source or deploying under the target. `max_unavailable` is shared with node drains
-and enforced atomically.
+and enforced atomically. `PUT
+/v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout` durably pauses or
+resumes new replacements with an expected revision. Pausing does not cancel an
+already-started replacement; that transition continues to a safe boundary.
 Executor verifies that signature against its authenticated site policy, then
 verifies the purpose-separated controller signature and exact delegated scope.
 The response exposes public digests and scope, never either private key. Changed
