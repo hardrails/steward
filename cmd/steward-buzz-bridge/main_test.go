@@ -30,6 +30,8 @@ func TestConfigRejectsBroadOrUnsafeAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]func(*config){
+		"identity is invalid":      func(value *config) { value.SchemaVersion = "wrong" },
+		"authors are missing":      func(value *config) { value.AllowedAuthors = nil },
 		"author is not canonical":  func(value *config) { value.AllowedAuthors = []string{strings.ToUpper(testAuthor)} },
 		"agent author is allowed":  func(value *config) { value.AllowedAuthors = []string{testAgent} },
 		"relay has userinfo":       func(value *config) { value.RelayURL = "https://user@buzz.example" },
@@ -38,6 +40,10 @@ func TestConfigRejectsBroadOrUnsafeAuthority(t *testing.T) {
 		"gateway port is invalid":  func(value *config) { value.GatewayURL = "http://127.0.0.1:99999" },
 		"listener port is invalid": func(value *config) { value.HTTPListen = "127.0.0.1:nope" },
 		"relative secret":          func(value *config) { value.TaskKeyFile = "task.pem" },
+		"relative optional secret": func(value *config) { value.BuzzAPITokenFile = "buzz.token" },
+		"relative Control CA":      func(value *config) { value.ControlCAFile = "control-ca.pem" },
+		"poll interval is invalid": func(value *config) { value.PollIntervalSeconds = 301 },
+		"record cap is invalid":    func(value *config) { value.MaxRecords = 10001 },
 		"duplicate channel":        func(value *config) { value.Channels = []string{testChannel, testChannel} },
 	}
 	for name, mutate := range cases {
@@ -58,13 +64,13 @@ func TestMalformedVerifiedEventsAreIgnoredWithoutPoisoningTheChannel(t *testing.
 	b := &bridge{cfg: validTestConfig(t.TempDir()), now: func() time.Time { return now }}
 	malformed := validEvent(now)
 	malformed.Tags = [][]string{{"h"}}
-	if eligible, err := b.eligible(testChannel, malformed); err != nil || eligible {
-		t.Fatalf("malformed event eligible=%v error=%v", eligible, err)
+	if b.eligible(testChannel, malformed) {
+		t.Fatal("malformed event was eligible")
 	}
 	oversized := validEvent(now)
 	oversized.Content = strings.Repeat("x", maxMessageBytes+1)
-	if eligible, err := b.eligible(testChannel, oversized); err != nil || eligible {
-		t.Fatalf("oversized event eligible=%v error=%v", eligible, err)
+	if b.eligible(testChannel, oversized) {
+		t.Fatal("oversized event was eligible")
 	}
 }
 
@@ -94,6 +100,60 @@ func TestNewBridgeValidatesEveryProtectedInput(t *testing.T) {
 	}
 	if _, err := newBridge(configPath, slog.Default()); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := newBridge(filepath.Join(directory, "missing-config.json"), slog.Default()); err == nil ||
+		!strings.Contains(err.Error(), "read configuration") {
+		t.Fatalf("missing configuration error=%v", err)
+	}
+	malformedPath := filepath.Join(directory, "malformed.json")
+	if err := os.WriteFile(malformedPath, []byte("{} {}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(malformedPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "strict JSON") {
+		t.Fatalf("malformed configuration error=%v", err)
+	}
+	invalid := cfg
+	invalid.SchemaVersion = "wrong"
+	invalidRaw, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidPath := filepath.Join(directory, "invalid.json")
+	if err := os.WriteFile(invalidPath, invalidRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(invalidPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("invalid configuration error=%v", err)
+	}
+	stateFile := filepath.Join(directory, "state-file")
+	if err := os.WriteFile(stateFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalid = cfg
+	invalid.StateDirectory = stateFile
+	invalidRaw, err = json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateConfigPath := filepath.Join(directory, "state-invalid.json")
+	if err := os.WriteFile(stateConfigPath, invalidRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(stateConfigPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "state directory") {
+		t.Fatalf("invalid state directory error=%v", err)
+	}
+	invalid = cfg
+	invalid.BuzzPrivateKeyFile = filepath.Join(directory, "missing-private-key")
+	invalidRaw, err = json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyConfigPath := filepath.Join(directory, "key-invalid.json")
+	if err := os.WriteFile(keyConfigPath, invalidRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newBridge(keyConfigPath, slog.Default()); err == nil || !strings.Contains(err.Error(), "private key") {
+		t.Fatalf("missing private key error=%v", err)
 	}
 	var stdout, stderr bytes.Buffer
 	if code := runMain([]string{"-version"}, &stdout, &stderr); code != 0 || !strings.HasPrefix(stdout.String(), "steward-buzz-bridge ") {
@@ -426,12 +486,62 @@ func TestEventLockExcludesOverlappingProcessorsAndRecovers(t *testing.T) {
 	}
 }
 
+func TestAdditionalFilesystemAndStateFailureBoundaries(t *testing.T) {
+	if identifier("") || identifier(strings.Repeat("a", 129)) || identifier("Uppercase") || !identifier("valid-id_1.2") {
+		t.Fatal("identifier boundary is incorrect")
+	}
+	directory := t.TempDir()
+	if err := prepareStateDirectory(filepath.Join(directory, "missing-parent", "state")); err == nil ||
+		!strings.Contains(err.Error(), "create state directory") {
+		t.Fatalf("missing parent error=%v", err)
+	}
+	badChildren := filepath.Join(directory, "bad-children")
+	if err := os.Mkdir(badChildren, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badChildren, "records"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareStateDirectory(badChildren); err == nil || !strings.Contains(err.Error(), "child directories") {
+		t.Fatalf("invalid child error=%v", err)
+	}
+
+	cfg := validTestConfig(directory)
+	now := time.Now().UTC()
+	b := &bridge{cfg: cfg, logger: slog.Default(), now: func() time.Time { return now }}
+	if err := b.process(context.Background(), testChannel, validEvent(now)); err == nil ||
+		!strings.Contains(err.Error(), "acquire event lock") {
+		t.Fatalf("missing lock directory error=%v", err)
+	}
+	if _, _, err := b.loadOrCreateRecord(filepath.Join(directory, "missing-record-parent", testEvent+".json"),
+		testChannel, validEvent(now)); err == nil {
+		t.Fatal("record creation with a missing parent succeeded")
+	}
+	result := filepath.Join(directory, "empty-result.json")
+	if err := os.WriteFile(result, []byte(`{"status":"completed","output":"  "}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTaskReply(result); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty reply error=%v", err)
+	}
+	lock, acquired, err := acquireEventLock(filepath.Join(directory, "closed.lock"))
+	if err != nil || !acquired {
+		t.Fatalf("closed lock acquired=%v error=%v", acquired, err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseEventLock(lock); err == nil {
+		t.Fatal("releasing a closed lock succeeded")
+	}
+}
+
 func TestEligibilityRequiresExactCryptographicMentionShape(t *testing.T) {
 	now := time.Unix(1_900_000_000, 0)
 	b := &bridge{cfg: validTestConfig(t.TempDir()), now: func() time.Time { return now }}
 	event := validEvent(now)
-	if eligible, err := b.eligible(testChannel, event); err != nil || !eligible {
-		t.Fatalf("valid event eligible=%v error=%v", eligible, err)
+	if !b.eligible(testChannel, event) {
+		t.Fatal("valid event was not eligible")
 	}
 	cases := map[string]func(*buzzEvent){
 		"text only mention":  func(value *buzzEvent) { value.Tags = [][]string{{"h", testChannel}} },
@@ -446,7 +556,7 @@ func TestEligibilityRequiresExactCryptographicMentionShape(t *testing.T) {
 			candidate := event
 			candidate.Tags = cloneTags(event.Tags)
 			mutate(&candidate)
-			if eligible, _ := b.eligible(testChannel, candidate); eligible {
+			if b.eligible(testChannel, candidate) {
 				t.Fatal("ineligible event was accepted")
 			}
 		})

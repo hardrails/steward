@@ -483,11 +483,7 @@ func (b *bridge) fetchEvents(ctx context.Context, channel string) ([]buzzEvent, 
 }
 
 func (b *bridge) process(ctx context.Context, channel string, event buzzEvent) error {
-	eligible, err := b.eligible(channel, event)
-	if err != nil {
-		return err
-	}
-	if !eligible {
+	if !b.eligible(channel, event) {
 		return nil
 	}
 	lock, acquired, err := acquireEventLock(filepath.Join(b.cfg.StateDirectory, "records", event.ID+".lock"))
@@ -593,12 +589,12 @@ func releaseEventLock(file *os.File) error {
 	return closeErr
 }
 
-func (b *bridge) eligible(channel string, event buzzEvent) (bool, error) {
+func (b *bridge) eligible(channel string, event buzzEvent) bool {
 	if !hex64RE.MatchString(event.ID) || !hex64RE.MatchString(event.PublicKey) || event.Kind != 9 || len([]byte(event.Content)) > maxMessageBytes {
-		return false, nil
+		return false
 	}
 	if event.PublicKey == b.cfg.AgentPublicKey || !slices.Contains(b.cfg.AllowedAuthors, event.PublicKey) {
-		return false, nil
+		return false
 	}
 	now := b.now().Unix()
 	maximumAge := int64(defaultEventAge.Seconds())
@@ -606,18 +602,18 @@ func (b *bridge) eligible(channel string, event buzzEvent) (bool, error) {
 		maximumAge = int64(b.cfg.MaxEventAgeSeconds)
 	}
 	if event.CreatedAt < now-maximumAge || event.CreatedAt > now+300 {
-		return false, nil
+		return false
 	}
 	hCount, mentionCount := 0, 0
 	for _, tag := range event.Tags {
 		if len(tag) < 2 || len(tag) > 8 {
-			return false, nil
+			return false
 		}
 		switch tag[0] {
 		case "h":
 			hCount++
 			if tag[1] != channel {
-				return false, nil
+				return false
 			}
 		case "p":
 			if tag[1] == b.cfg.AgentPublicKey {
@@ -626,9 +622,9 @@ func (b *bridge) eligible(channel string, event buzzEvent) (bool, error) {
 		}
 	}
 	if hCount != 1 || mentionCount != 1 {
-		return false, nil
+		return false
 	}
-	return true, nil
+	return true
 }
 
 func (b *bridge) loadOrCreateRecord(path, channel string, event buzzEvent) (record, bool, error) {

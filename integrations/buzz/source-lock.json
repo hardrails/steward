@@ -42,11 +42,11 @@
     },
     {
       "path": "cmd/steward-buzz-bridge/main.go",
-      "sha256": "d0d0259569f5d04b12211deeb907c5fb7563b1bf46a7bade50a0e4172fa445c7"
+      "sha256": "6c5869ff350882249e00f775f13561ede8540df7215d8167fbf40cb79db3a4b2"
     },
     {
       "path": "cmd/steward-buzz-bridge/main_test.go",
-      "sha256": "d0b9ad933025f267cf42a6ef3b845ad615f235b134c38ee62aa344b93012095a"
+      "sha256": "714ec15adf9440dd500ca4f4539c26eef4ca2282c6002c4562451ca7806d1e7a"
     },
     {
       "path": "scripts/build-buzz-bridge.sh",
