@@ -275,6 +275,24 @@ For a control-plane-enrolled node, also pass `--receipt-private-key` and
 `--receipt-public-key` using the pair created before enrollment exchange. The
 helper validates the pair and refuses to replace an installed evidence identity.
 
+An omitted compatibility flag preserves its current installed value during
+reconfiguration. Disabling an existing exception is explicit:
+
+```console
+sudo /usr/local/libexec/steward/configure-admission \
+  --policy /root/steward-admission/site-policy.dsse.json \
+  --site-root-public-key /root/steward-admission/site-root.public \
+  --site-root-key-id site-root-1 \
+  --disallow-host-admin-intent \
+  --disallow-unquotaed-state-on-dedicated-host
+```
+
+Before signing a hand-authored capsule, run
+`stewardctl capsule check-profile -in capsule.json`. Signing and verification
+repeat the same check. See the [runtime profile contracts]({{
+'/reference/runtime-profiles/' | relative_url }}) for the exact command, state,
+and service values.
+
 Rollback here covers handled process errors only. After `SIGKILL` or power loss,
 keep the node services stopped and follow an approved whole-configuration recovery;
 rerunning does not automatically restore the pre-change files. Preserve every

@@ -86,6 +86,23 @@ These exist because a reviewer already found and fixed the failure mode once
   shape on every operation. If server behavior and the spec ever disagree,
   that is a defect in one of them — fix the mismatch, don't let a new
   endpoint skip documenting its real error responses.
+- **Operator errors identify the failed boundary.** Do not reuse an
+  availability code for a durable digest mismatch, or collapse an observed
+  upstream HTTP rejection into permit reuse. Keep response bodies secret and
+  bounded, but preserve safe evidence such as the boundary, HTTP status, and
+  recovery action. Tests must cover both the first failure and replay.
+- **Admission reconfiguration is patch-like.** Omitted compatibility choices
+  preserve their installed values. Disabling one requires its explicit
+  `--disallow-*` option, and a malformed prior value is an error. Any new
+  security-sensitive configurator option needs a rerun regression test.
+- **Built-in runtime profiles have one source of truth.** Executor admission,
+  `agent publish`, capsule preflight, and the runtime-profile reference must
+  agree. `TestRuntimeProfileReferenceMatchesBuiltInRegistry` is the change gate.
+- **A reconciliation escape hatch may only narrow authority.** Missing-workload
+  destroy recovery requires one exact `workload_missing` failure, no pending
+  journal, an authorized signed fence, repeated proof of absence, and exact
+  identity checks before removing deterministic residual topology. Never turn
+  `--force` into adoption, recreation, or unverified deletion.
 
 ## The public contract is load-bearing
 
@@ -95,6 +112,12 @@ change request/response shapes, status codes, or add an endpoint, update the
 spec in the same change — CI lints it, but lint only catches malformed YAML,
 not spec/behavior drift. Read the response your handler actually sends before
 declaring the spec update done.
+
+`scripts/check-cli-docs-contract.sh` also builds `stewardctl` and rejects any
+documented command/subcommand pair absent from that exact source tree. CI and the
+release builder both run it. GitHub Pages follows current source and must retain
+its visible version-matching warning; tagged docs and tagged binaries are the
+authoritative matched pair for an installed release.
 
 ## Computer-use stays out of this process
 
