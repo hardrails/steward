@@ -133,6 +133,10 @@ func TestDeploymentHTTPContractFailsClosedAtRoutingAndEncodingBoundaries(t *test
 	} {
 		requireError(t, fixture.request(t, test.method, test.path, fixture.adminToken, test.body), test.status, test.code)
 	}
+	requireError(t, fixture.request(
+		t, http.MethodPut, "/v1/tenants/tenant-a/deployments/x/rollout", "",
+		`{"expected_revision":1,"paused":true}`,
+	), http.StatusUnauthorized, "unauthorized")
 	oversized := `{"generation":1,"agent_name":"a","bundle_digest":"x","capsule_dsse_base64":"` +
 		strings.Repeat("a", maxRequestBytes) + `","delegation_dsse_base64":"a"}`
 	requireError(

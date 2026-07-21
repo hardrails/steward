@@ -172,6 +172,29 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 	if err != nil || !changed || paused.Rollout == nil || paused.Rollout.PausedAt == "" {
 		t.Fatalf("pause rollout = (%+v, %v, %v)", paused, changed, err)
 	}
+	fixture.store.mu.Lock()
+	pausedState := fixture.store.current
+	fixture.store.mu.Unlock()
+	stateRaw, err := encodeState(pausedState, fixture.store.limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacySnapshot snapshotState
+	if err := json.Unmarshal(stateRaw, &legacySnapshot); err != nil {
+		t.Fatal(err)
+	}
+	legacySnapshot.Version = stateFormatRolloutControlVersion - 1
+	stateRaw, _ = json.Marshal(legacySnapshot)
+	if _, err := decodeState(stateRaw, fixture.store.limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot smuggled rollout pause state")
+	}
+	legacyTransaction := transaction{
+		Version:   transactionRolloutControlVersion - 1,
+		Mutations: []mutation{deploymentMutation(paused)},
+	}
+	if _, err := applyTransaction(pausedState, legacyTransaction); err == nil {
+		t.Fatal("legacy transaction smuggled rollout pause state")
+	}
 	if same, changed, err := fixture.store.SetDeploymentRolloutPaused(
 		fixture.admin, "tenant-a", "deployment-a", paused.Revision, true, fixture.now.Add(100*time.Second),
 	); err != nil || changed || same.Revision != paused.Revision {
@@ -422,6 +445,24 @@ func TestDeploymentRolloutControlRejectsUnavailableUnauthorizedAndInactiveState(
 		fixture.admin, "tenant-a", "deployment-a", 1, true, now,
 	); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing rollout control error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	fixture.store.closed = true
+	fixture.store.mu.Unlock()
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", 1, true, now,
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed store rollout control error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	fixture.store.closed = false
+	fixture.store.mu.Unlock()
+	staleActor := fixture.admin
+	staleActor.CredentialID = "missing-credential"
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		staleActor, "tenant-a", "deployment-a", 1, true, now,
+	); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("revoked rollout operator error = %v", err)
 	}
 }
 

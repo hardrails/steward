@@ -245,6 +245,7 @@ func TestAgentDeploymentRolloutControlRejectsInvalidInputAndLookupFailure(t *tes
 		{"auditor", "-no-context"},
 		{"auditor", "extra", "-tenant", "tenant-a", "-no-context"},
 		{"auditor", "-tenant", "tenant-a", "-control-url", "://bad", "-token-file", "missing", "-no-context"},
+		{"-definitely-not-a-flag", "-no-context"},
 	} {
 		if err := agentDeploymentRolloutControl(arguments, &bytes.Buffer{}, true); err == nil {
 			t.Fatalf("invalid rollout control arguments were accepted: %v", arguments)
@@ -266,6 +267,12 @@ func TestAgentDeploymentRolloutControlRejectsInvalidInputAndLookupFailure(t *tes
 		"-token-file", tokenPath, "-no-context",
 	}, &bytes.Buffer{}, false); err == nil {
 		t.Fatal("rollout control accepted a failed revision lookup")
+	}
+	if err := agentDeploymentRolloutControl([]string{
+		"-tenant", "tenant-a", "-control-url", server.URL,
+		"-token-file", tokenPath, "-no-context", "auditor",
+	}, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("rollout control accepted a failed positional revision lookup")
 	}
 }
 
