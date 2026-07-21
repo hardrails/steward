@@ -150,6 +150,10 @@ func TestDeploymentClientRejectsInvalidLocalInputAndUntrustedProjection(t *testi
 	for _, call := range []func() error{
 		func() error { _, err := client.GetDeployment(ctx, "bad tenant", "research"); return err },
 		func() error {
+			_, err := client.SetDeploymentRolloutPaused(ctx, "bad tenant", "research", 1, true)
+			return err
+		},
+		func() error {
 			_, err := client.ListDeployments(ctx, "tenant-a", strings.Repeat("x", 129), 1)
 			return err
 		},
@@ -159,8 +163,11 @@ func TestDeploymentClientRejectsInvalidLocalInputAndUntrustedProjection(t *testi
 			t.Fatal("invalid local deployment input reached transport")
 		}
 	}
-	if requests != 1 {
-		t.Fatalf("invalid local input made %d requests", requests-1)
+	if _, err := client.SetDeploymentRolloutPaused(ctx, "tenant-a", "research", 1, true); err == nil {
+		t.Fatal("rollout control accepted an invalid deployment projection")
+	}
+	if requests != 2 {
+		t.Fatalf("invalid local input made %d requests", requests-2)
 	}
 }
 
@@ -182,6 +189,19 @@ func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
 	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err != nil {
 		t.Fatalf("valid rollout projection was rejected: %v", err)
 	}
+	deployment.Rollout.PausedAt = deployment.UpdatedAt
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err != nil {
+		t.Fatalf("valid rollout pause was rejected: %v", err)
+	}
+	deployment.Rollout.PausedAt = "not-a-time"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("malformed rollout pause was accepted")
+	}
+	deployment.Rollout.PausedAt = "2026-07-13T19:59:59Z"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("rollout pause before rollout start was accepted")
+	}
+	deployment.Rollout.PausedAt = ""
 	deployment.Instances[0].Rollout.Stage = "unknown"
 	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
 		t.Fatal("unknown rollout stage was accepted")

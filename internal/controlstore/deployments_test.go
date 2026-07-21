@@ -187,6 +187,20 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("paused rollout began a new disruption: %v", err)
 	}
+	fixture.store.mu.Lock()
+	overflow := fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")]
+	overflow.Revision = ^uint64(0)
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = overflow
+	fixture.store.mu.Unlock()
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", ^uint64(0), false, fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("rollout control revision overflow error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	overflow.Revision = paused.Revision
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = overflow
+	fixture.store.mu.Unlock()
 	resumed, changed, err := fixture.store.SetDeploymentRolloutPaused(
 		fixture.admin, "tenant-a", "deployment-a", paused.Revision, false, fixture.now.Add(2*time.Minute),
 	)
