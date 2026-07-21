@@ -274,6 +274,12 @@ func TestAgentDeploymentRolloutControlRejectsInvalidInputAndLookupFailure(t *tes
 	}, &bytes.Buffer{}, false); err == nil {
 		t.Fatal("rollout control accepted a failed positional revision lookup")
 	}
+	if err := agentDeploymentRolloutControl([]string{
+		"auditor", "-tenant", "tenant-a", "-revision", "1", "-control-url", server.URL,
+		"-token-file", tokenPath, "-no-context",
+	}, &bytes.Buffer{}, true); err == nil {
+		t.Fatal("rollout control accepted a failed mutation")
+	}
 }
 
 func TestAgentDeploymentWaitExportsOneTaskReadyInstance(t *testing.T) {
