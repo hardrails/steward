@@ -85,6 +85,10 @@ type Config struct {
 	// published independently so a telemetry failure cannot block command
 	// polling, reporting, or workload-lease renewal.
 	Scheduling *controlprotocol.ExecutorSchedulingObservationV1
+	// SchedulingProvider refreshes soft, dynamic scheduling facts such as image
+	// locality immediately before publication. Static identity, limits, labels,
+	// and taints remain validated on every returned observation.
+	SchedulingProvider func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error)
 }
 
 type Poller struct {
@@ -102,6 +106,7 @@ type Poller struct {
 	deliveryState                     *DeliveryStore
 	canaryRunner                      *activationCanaryRunner
 	scheduling                        *controlprotocol.ExecutorSchedulingObservationV1
+	schedulingProvider                func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error)
 	stateSnapshots                    bool
 }
 
@@ -205,6 +210,9 @@ func NewPoller(cfg Config) (*Poller, error) {
 			return nil, errors.New("executor scheduling observation requires its matching node-scoped credential")
 		}
 	}
+	if cfg.SchedulingProvider != nil && !credential.NodeScoped() {
+		return nil, errors.New("executor scheduling provider requires a node-scoped credential")
+	}
 	pollURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "poll")
 	reportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "report")
 	schedulingURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "scheduling")
@@ -233,8 +241,9 @@ func NewPoller(cfg Config) (*Poller, error) {
 		canaryRunner: newActivationCanaryRunner(
 			activationGateway != nil,
 		),
-		scheduling:     cloneSchedulingObservation(cfg.Scheduling),
-		stateSnapshots: cfg.StateSnapshots,
+		scheduling:         cloneSchedulingObservation(cfg.Scheduling),
+		schedulingProvider: cfg.SchedulingProvider,
+		stateSnapshots:     cfg.StateSnapshots,
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
 			nodeID: credential.NodeID, nodeScoped: credential.NodeScoped(), state: cfg.State,
@@ -264,7 +273,7 @@ func isLoopbackHost(host string) bool {
 }
 
 func (p *Poller) Run(ctx context.Context) {
-	if p.scheduling != nil {
+	if p.scheduling != nil || p.schedulingProvider != nil {
 		go p.runScheduling(ctx)
 	}
 	failures := 0
@@ -319,7 +328,21 @@ func (p *Poller) publishScheduling(ctx context.Context) error {
 		credential.TenantID != p.expected.TenantID || credential.NodeID != p.expected.NodeID {
 		return errors.New("rotated uplink credential changed version, scope, tenant_id, or node_id; refusing it")
 	}
-	raw, err := json.Marshal(p.scheduling)
+	observation := cloneSchedulingObservation(p.scheduling)
+	if p.schedulingProvider != nil {
+		observation, err = p.schedulingProvider(ctx)
+		if err != nil {
+			observation = cloneSchedulingObservation(p.scheduling)
+			if observation != nil {
+				observation.CachedImageConfigDigests = nil
+			}
+		}
+	}
+	if observation == nil || observation.Validate() != nil || observation.NodeID != credential.NodeID ||
+		observation.CredentialScope != "node" {
+		return errors.New("refreshed executor scheduling observation is invalid")
+	}
+	raw, err := json.Marshal(observation)
 	if err != nil {
 		return err
 	}
@@ -355,6 +378,9 @@ func cloneSchedulingObservation(
 	}
 	if value.Taints != nil {
 		cloned.Taints = append([]string{}, value.Taints...)
+	}
+	if value.CachedImageConfigDigests != nil {
+		cloned.CachedImageConfigDigests = append([]string{}, value.CachedImageConfigDigests...)
 	}
 	return &cloned
 }

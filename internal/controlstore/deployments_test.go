@@ -166,6 +166,71 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 		target.Generation != 2 || target.Phase != DeploymentReconciling {
 		t.Fatalf("apply rollout = (%+v, %v, %v)", target, changed, err)
 	}
+	paused, changed, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", target.Revision, true, fixture.now.Add(90*time.Second),
+	)
+	if err != nil || !changed || paused.Rollout == nil || paused.Rollout.PausedAt == "" {
+		t.Fatalf("pause rollout = (%+v, %v, %v)", paused, changed, err)
+	}
+	fixture.store.mu.Lock()
+	pausedState := fixture.store.current
+	fixture.store.mu.Unlock()
+	stateRaw, err := encodeState(pausedState, fixture.store.limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacySnapshot snapshotState
+	if err := json.Unmarshal(stateRaw, &legacySnapshot); err != nil {
+		t.Fatal(err)
+	}
+	legacySnapshot.Version = stateFormatRolloutControlVersion - 1
+	stateRaw, _ = json.Marshal(legacySnapshot)
+	if _, err := decodeState(stateRaw, fixture.store.limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot smuggled rollout pause state")
+	}
+	legacyTransaction := transaction{
+		Version:   transactionRolloutControlVersion - 1,
+		Mutations: []mutation{deploymentMutation(paused)},
+	}
+	if _, err := applyTransaction(pausedState, legacyTransaction); err == nil {
+		t.Fatal("legacy transaction smuggled rollout pause state")
+	}
+	if same, changed, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", paused.Revision, true, fixture.now.Add(100*time.Second),
+	); err != nil || changed || same.Revision != paused.Revision {
+		t.Fatalf("repeat pause rollout = (%+v, %v, %v)", same, changed, err)
+	}
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", paused.Revision+1, false, fixture.now.Add(100*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale resume rollout error = %v", err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceRollout(
+		"tenant-a", "deployment-a", paused.Instances[0].InstanceID, paused.Revision, fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("paused rollout began a new disruption: %v", err)
+	}
+	fixture.store.mu.Lock()
+	overflow := fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")]
+	overflow.Revision = ^uint64(0)
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = overflow
+	fixture.store.mu.Unlock()
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", ^uint64(0), false, fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("rollout control revision overflow error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	overflow.Revision = paused.Revision
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = overflow
+	fixture.store.mu.Unlock()
+	resumed, changed, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", paused.Revision, false, fixture.now.Add(2*time.Minute),
+	)
+	if err != nil || !changed || resumed.Rollout == nil || resumed.Rollout.PausedAt != "" {
+		t.Fatalf("resume rollout = (%+v, %v, %v)", resumed, changed, err)
+	}
+	target = resumed
 	for _, instance := range target.Instances {
 		_, selected, selectErr := DeploymentAuthorityForInstance(target, instance)
 		if selectErr != nil || bytes.Equal(selected, target.DelegationDSSE) {
@@ -354,6 +419,50 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 		Mutations: []mutation{deploymentMutation(recovered)},
 	}); err == nil {
 		t.Fatal("legacy transaction smuggled rollout state")
+	}
+}
+
+func TestDeploymentRolloutControlRejectsUnavailableUnauthorizedAndInactiveState(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	if _, _, err := (*Store)(nil).SetDeploymentRolloutPaused(
+		controlauth.Identity{}, "tenant-a", "deployment-a", 1, true, now,
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil store rollout control error = %v", err)
+	}
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", 0, true, now,
+	); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid rollout control error = %v", err)
+	}
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		controlauth.Identity{}, "tenant-a", "deployment-a", 1, true, now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized rollout control error = %v", err)
+	}
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", 1, true, now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing rollout control error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	fixture.store.closed = true
+	fixture.store.mu.Unlock()
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		fixture.admin, "tenant-a", "deployment-a", 1, true, now,
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed store rollout control error = %v", err)
+	}
+	fixture.store.mu.Lock()
+	fixture.store.closed = false
+	fixture.store.mu.Unlock()
+	staleActor := fixture.admin
+	staleActor.CredentialID = "missing-credential"
+	if _, _, err := fixture.store.SetDeploymentRolloutPaused(
+		staleActor, "tenant-a", "deployment-a", 1, true, now,
+	); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("revoked rollout operator error = %v", err)
 	}
 }
 

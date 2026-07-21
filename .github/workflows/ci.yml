@@ -189,6 +189,8 @@ jobs:
           grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_STATE_BACKEND_SOCKET=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_STATE_VOLUME_BYTE_LIMIT=10737418240' "$stage/deploy/config/executor.env"
+          grep -Fxq 'EXECUTOR_IMAGE_PULL_REGISTRY=' "$stage/deploy/config/executor.env"
+          grep -Fxq 'EXECUTOR_IMAGE_PULL_TIMEOUT=5m' "$stage/deploy/config/executor.env"
           grep -Fq -- '-uplink-delivery-state-file=${EXECUTOR_UPLINK_DELIVERY_STATE_FILE}' \
             "$stage/deploy/systemd/steward-executor.service"
           grep -Fq -- '-uplink-protocol-version=${EXECUTOR_UPLINK_PROTOCOL_VERSION}' \
@@ -196,6 +198,8 @@ jobs:
           grep -Fq -- '-evidence-uplink=${EXECUTOR_EVIDENCE_UPLINK_ENABLED}' \
             "$stage/deploy/systemd/steward-executor.service"
           grep -Fq -- '-state-backend-socket=${EXECUTOR_STATE_BACKEND_SOCKET}' \
+            "$stage/deploy/systemd/steward-executor.service"
+          grep -Fq -- '-image-pull-registry=${EXECUTOR_IMAGE_PULL_REGISTRY}' \
             "$stage/deploy/systemd/steward-executor.service"
           grep -Fq -- '-uplink-delivery-state-file "${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}"' \
             "$stage/scripts/node-preflight.sh"

@@ -1,6 +1,7 @@
 package controlprotocol
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,22 @@ func TestExecutorSchedulingObservationV1ValidatesCanonicalBoundedProfile(t *test
 		}},
 		{"nil taints", func(value *ExecutorSchedulingObservationV1) { value.Taints = nil }},
 		{"unsorted taints", func(value *ExecutorSchedulingObservationV1) { value.Taints = []string{"z", "a"} }},
+		{"unsorted images", func(value *ExecutorSchedulingObservationV1) {
+			value.CachedImageConfigDigests = []string{
+				"sha256:" + strings.Repeat("b", 64),
+				"sha256:" + strings.Repeat("a", 64),
+			}
+		}},
+		{"duplicate images", func(value *ExecutorSchedulingObservationV1) {
+			digest := "sha256:" + strings.Repeat("a", 64)
+			value.CachedImageConfigDigests = []string{digest, digest}
+		}},
+		{"invalid image", func(value *ExecutorSchedulingObservationV1) {
+			value.CachedImageConfigDigests = []string{"sha256:not-a-digest"}
+		}},
+		{"too many images", func(value *ExecutorSchedulingObservationV1) {
+			value.CachedImageConfigDigests = make([]string, MaxExecutorSchedulingImages+1)
+		}},
 		{"oversized attribute", func(value *ExecutorSchedulingObservationV1) {
 			value.Architecture = strings.Repeat("a", MaxExecutorSchedulingAttribute+1)
 		}},
@@ -43,6 +60,22 @@ func TestExecutorSchedulingObservationV1ValidatesCanonicalBoundedProfile(t *test
 				t.Fatal("invalid scheduling observation was accepted")
 			}
 		})
+	}
+}
+
+func TestExecutorSchedulingObservationPreservesReportedEmptyImageInventory(t *testing.T) {
+	observation := schedulingObservationFixture()
+	observation.CachedImageConfigDigests = []string{}
+	raw, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded ExecutorSchedulingObservationV1
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.CachedImageConfigDigests == nil {
+		t.Fatalf("reported empty image inventory was lost: %s", raw)
 	}
 }
 

@@ -13,6 +13,7 @@ const (
 	MaxExecutorSchedulingBytes        = 16 << 10
 	MaxExecutorSchedulingLabels       = 32
 	MaxExecutorSchedulingTaints       = 32
+	MaxExecutorSchedulingImages       = 128
 	MaxExecutorSchedulingAttribute    = 128
 	ExecutorSchedulingIsolationGVisor = "gvisor"
 )
@@ -52,7 +53,11 @@ type ExecutorSchedulingObservationV1 struct {
 	Isolation       string                      `json:"isolation"`
 	Labels          []ExecutorSchedulingLabelV1 `json:"labels"`
 	Taints          []string                    `json:"taints"`
-	Policy          ExecutorSchedulingPolicyV1  `json:"policy"`
+	// CachedImageConfigDigests is a soft placement observation. Executor still
+	// inspects the exact signed image during admission; Control may use this
+	// canonical inventory only to avoid an unnecessary image transfer.
+	CachedImageConfigDigests []string                   `json:"cached_image_config_digests"`
+	Policy                   ExecutorSchedulingPolicyV1 `json:"policy"`
 }
 
 func (observation ExecutorSchedulingObservationV1) Validate() error {
@@ -63,7 +68,8 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 		return errors.New("executor scheduling observation identity is invalid")
 	}
 	if observation.Labels == nil || len(observation.Labels) > MaxExecutorSchedulingLabels ||
-		observation.Taints == nil || len(observation.Taints) > MaxExecutorSchedulingTaints {
+		observation.Taints == nil || len(observation.Taints) > MaxExecutorSchedulingTaints ||
+		len(observation.CachedImageConfigDigests) > MaxExecutorSchedulingImages {
 		return errors.New("executor scheduling attributes exceed their limits")
 	}
 	for index, label := range observation.Labels {
@@ -78,6 +84,12 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 	for index, taint := range observation.Taints {
 		if !ValidSchedulingAttribute(taint) || index > 0 && observation.Taints[index-1] == taint {
 			return errors.New("executor scheduling taint is invalid")
+		}
+	}
+	for index, digest := range observation.CachedImageConfigDigests {
+		if !ValidSHA256Digest(digest) ||
+			index > 0 && observation.CachedImageConfigDigests[index-1] >= digest {
+			return errors.New("executor scheduling image inventory is not canonical")
 		}
 	}
 	if err := observation.Policy.Validate(); err != nil {

@@ -33,7 +33,7 @@ func (store *Store) BeginDeploymentInstanceRollout(
 		return Deployment{}, false, ErrNotFound
 	}
 	if deployment.Revision != expectedRevision || deployment.DesiredState != DeploymentRunning ||
-		deployment.Rollout == nil {
+		deployment.Rollout == nil || deployment.Rollout.PausedAt != "" {
 		return Deployment{}, false, ErrConflict
 	}
 	index := deploymentInstanceIndex(deployment.Instances, instanceID)

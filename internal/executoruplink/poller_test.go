@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -152,7 +154,7 @@ func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) 
 	if err := os.WriteFile(credentialPath, []byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"bearer"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	received := make(chan controlprotocol.ExecutorSchedulingObservationV1, 1)
+	received := make(chan controlprotocol.ExecutorSchedulingObservationV1, 2)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/executor-uplink/scheduling" || request.Header.Get("Authorization") != "Bearer bearer" {
 			writer.WriteHeader(http.StatusNotFound)
@@ -184,12 +186,24 @@ func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) 
 			RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32},
 		},
 	}
+	providerObservation := observation
+	var providerCalls atomic.Int32
+	var providerFails atomic.Bool
+	provider := func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error) {
+		if providerFails.Load() {
+			return nil, errors.New("Docker inventory unavailable")
+		}
+		refreshed := providerObservation
+		refreshed.CachedImageConfigDigests = []string{fmt.Sprintf("sha256:%064x", providerCalls.Add(1))}
+		return &refreshed, nil
+	}
 	cfg := Config{
 		BaseURL: server.URL, CredentialPath: credentialPath, PollInterval: time.Second,
 		HTTPClient: server.Client(), Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		LocalToken: "local", State: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
 		SecureExecutor: true, SecureNodeID: "node-1", ProtectedTransport: true,
 		CommandPolicy: &policy, ProtocolVersion: 2, Scheduling: &observation,
+		SchedulingProvider: provider,
 	}
 	invalid := observation
 	invalid.Architecture = "invalid architecture"
@@ -209,11 +223,27 @@ func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) 
 	}
 	select {
 	case published := <-received:
-		if published.NodeID != "node-1" || published.Architecture != "amd64" {
+		if published.NodeID != "node-1" || published.Architecture != "amd64" ||
+			len(published.CachedImageConfigDigests) != 1 ||
+			published.CachedImageConfigDigests[0] != fmt.Sprintf("sha256:%064x", 1) {
 			t.Fatalf("published scheduling observation = %+v", published)
 		}
 	default:
 		t.Fatal("scheduling observation was not published")
+	}
+	if err := poller.publishScheduling(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if published := <-received; published.CachedImageConfigDigests[0] != fmt.Sprintf("sha256:%064x", 2) {
+		t.Fatalf("refreshed scheduling observation = %+v", published)
+	}
+	providerFails.Store(true)
+	if err := poller.publishScheduling(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if published := <-received; published.CachedImageConfigDigests != nil ||
+		published.NodeID != "node-1" || published.Architecture != "amd64" {
+		t.Fatalf("failed refresh did not clear stale image locality = %+v", published)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -34,6 +34,26 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch {
+		case request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/rollout"):
+			var body struct {
+				ExpectedRevision uint64 `json:"expected_revision"`
+				Paused           bool   `json:"paused"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body.ExpectedRevision != 1 || !body.Paused {
+				t.Fatalf("deployment rollout body = (%+v, %v)", body, err)
+			}
+			controlled := want
+			controlled.Rollout = &DeploymentRollout{
+				SourceGeneration: 1, SourceAgentName: want.AgentName,
+				SourceBundleDigest: want.BundleDigest, SourceCapsuleDigest: want.CapsuleDigest,
+				SourceDelegationDigest: want.DelegationDigest,
+				StartedAt:              "2026-07-13T20:00:00Z",
+				PausedAt:               "2026-07-13T20:01:00Z",
+			}
+			controlled.Generation = 2
+			controlled.Revision = 2
+			controlled.Fork = nil
+			_ = json.NewEncoder(writer).Encode(controlled)
 		case request.Method == http.MethodPut:
 			var body struct {
 				Generation           uint64                                   `json:"generation"`
@@ -100,7 +120,11 @@ func TestDeploymentClientPreservesSignedBindingsAndRevisionIntent(t *testing.T) 
 		removed.DesiredState != controlstore.DeploymentAbsent {
 		t.Fatalf("remove deployment = (%+v, %v)", removed, err)
 	}
-	if requests != 4 {
+	if paused, err := client.SetDeploymentRolloutPaused(ctx, "tenant-a", "research", 1, true); err != nil ||
+		paused.Rollout == nil || paused.Rollout.PausedAt == "" {
+		t.Fatalf("pause deployment rollout = (%+v, %v)", paused, err)
+	}
+	if requests != 5 {
 		t.Fatalf("deployment request count = %d", requests)
 	}
 }
@@ -126,6 +150,10 @@ func TestDeploymentClientRejectsInvalidLocalInputAndUntrustedProjection(t *testi
 	for _, call := range []func() error{
 		func() error { _, err := client.GetDeployment(ctx, "bad tenant", "research"); return err },
 		func() error {
+			_, err := client.SetDeploymentRolloutPaused(ctx, "bad tenant", "research", 1, true)
+			return err
+		},
+		func() error {
 			_, err := client.ListDeployments(ctx, "tenant-a", strings.Repeat("x", 129), 1)
 			return err
 		},
@@ -135,8 +163,11 @@ func TestDeploymentClientRejectsInvalidLocalInputAndUntrustedProjection(t *testi
 			t.Fatal("invalid local deployment input reached transport")
 		}
 	}
-	if requests != 1 {
-		t.Fatalf("invalid local input made %d requests", requests-1)
+	if _, err := client.SetDeploymentRolloutPaused(ctx, "tenant-a", "research", 1, true); err == nil {
+		t.Fatal("rollout control accepted an invalid deployment projection")
+	}
+	if requests != 2 {
+		t.Fatalf("invalid local input made %d requests", requests-2)
 	}
 }
 
@@ -158,6 +189,19 @@ func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
 	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err != nil {
 		t.Fatalf("valid rollout projection was rejected: %v", err)
 	}
+	deployment.Rollout.PausedAt = deployment.UpdatedAt
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err != nil {
+		t.Fatalf("valid rollout pause was rejected: %v", err)
+	}
+	deployment.Rollout.PausedAt = "not-a-time"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("malformed rollout pause was accepted")
+	}
+	deployment.Rollout.PausedAt = "2026-07-13T19:59:59Z"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("rollout pause before rollout start was accepted")
+	}
+	deployment.Rollout.PausedAt = ""
 	deployment.Instances[0].Rollout.Stage = "unknown"
 	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
 		t.Fatal("unknown rollout stage was accepted")
@@ -184,7 +228,53 @@ func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
 	}
 }
 
+func TestDeploymentRolloutControlRejectsTransportAndStateContradictions(t *testing.T) {
+	response := validClientDeployment()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte(`{"error":"unavailable","message":"try later"}`))
+			return
+		}
+		if requests == 3 {
+			response.Generation = 2
+			response.Rollout = &DeploymentRollout{
+				SourceGeneration: 1, SourceAgentName: response.AgentName,
+				SourceBundleDigest: response.BundleDigest, SourceCapsuleDigest: response.CapsuleDigest,
+				SourceDelegationDigest: response.DelegationDigest,
+				StartedAt:              response.UpdatedAt,
+			}
+		}
+		_ = json.NewEncoder(writer).Encode(response)
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "operator", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		if _, err := client.SetDeploymentRolloutPaused(
+			context.Background(), "tenant-a", "research", 1, true,
+		); err == nil {
+			t.Fatalf("rollout control contradiction %d was accepted", index)
+		}
+	}
+}
+
 func TestDeploymentClientRejectsMalformedProjectionFields(t *testing.T) {
+	validPlacement := validClientDeployment()
+	validPlacement.Instances[0].NodeID = "node-1"
+	validPlacement.Instances[0].Placement = &controlstore.DeploymentPlacementDecision{
+		NodeID: "node-1", ImageConfigDigest: "sha256:" + strings.Repeat("d", 64),
+		ImageLocal: true, ImageLocalityReported: true,
+		PreferredLabelMatches: []string{}, DecidedAt: validPlacement.UpdatedAt,
+	}
+	if err := validateDeploymentResponse(validPlacement, "tenant-a", "research"); err != nil {
+		t.Fatalf("valid placement projection was rejected: %v", err)
+	}
 	tests := []struct {
 		name   string
 		mutate func(*Deployment)
@@ -194,6 +284,13 @@ func TestDeploymentClientRejectsMalformedProjectionFields(t *testing.T) {
 		}},
 		{"node scope", func(value *Deployment) { value.AllowedNodeIDs = []string{"bad node"} }},
 		{"instance identity", func(value *Deployment) { value.Instances[0].InstanceID = "bad instance" }},
+		{"placement image locality", func(value *Deployment) {
+			value.Instances[0].NodeID = "node-1"
+			value.Instances[0].Placement = &controlstore.DeploymentPlacementDecision{
+				NodeID: "node-1", ImageConfigDigest: "sha256:" + strings.Repeat("d", 64), ImageLocal: true,
+				PreferredLabelMatches: []string{}, DecidedAt: value.UpdatedAt,
+			}
+		}},
 		{"intent", func(value *Deployment) { value.Instances[0].Intent = &admission.InstanceIntent{} }},
 		{"admission", func(value *Deployment) {
 			value.Instances[0].Admission = &controlprotocol.ExecutorAdmissionProjectionV1{}

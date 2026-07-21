@@ -3,10 +3,13 @@ package controlstore
 import (
 	"encoding/json"
 	"errors"
+	"math"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
@@ -20,6 +23,10 @@ func TestObserveNodeSchedulingIsAuthenticatedBoundedAndDurable(t *testing.T) {
 		t.Fatalf("first observation = (%+v, %v, %v)", node, applied, err)
 	}
 	originalObservedAt := node.Scheduling.ObservedAt
+	observation.CachedImageConfigDigests[0] = "sha256:" + strings.Repeat("b", 64)
+	if node.Scheduling.Observation.CachedImageConfigDigests[0] != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatal("retained scheduling image inventory aliases caller memory")
+	}
 	observation.Labels[0].Value = "mutated"
 	nodes, err := fixture.store.ListNodes(fixture.admin, "tenant-a")
 	if err != nil || len(nodes) != 1 || nodes[0].Scheduling.Observation.Labels[0].Value != "west" {
@@ -50,7 +57,9 @@ func TestObserveNodeSchedulingIsAuthenticatedBoundedAndDurable(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	nodes, err = reopened.ListNodes(fixture.admin, "tenant-a")
 	if err != nil || len(nodes) != 1 || nodes[0].Scheduling == nil ||
-		nodes[0].Scheduling.Observation.Policy.Host.Workloads != 4 {
+		nodes[0].Scheduling.Observation.Policy.Host.Workloads != 4 ||
+		len(nodes[0].Scheduling.Observation.CachedImageConfigDigests) != 1 ||
+		nodes[0].Scheduling.Observation.CachedImageConfigDigests[0] != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("reopened scheduling observation = (%+v, %v)", nodes, err)
 	}
 }
@@ -87,6 +96,9 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	if err := CheckNodeScheduling(cordoned, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrNodePlacementUnavailable) {
 		t.Fatalf("cordoned placement error = %v", err)
 	}
+	if err := CheckNodeScheduling(Node{ID: "node-1"}, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrNodeSchedulingUnavailable) {
+		t.Fatalf("missing observation error = %v", err)
+	}
 
 	stale := node
 	stale.Scheduling = cloneNodeScheduling(node.Scheduling)
@@ -114,6 +126,21 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	if err := CheckNodeScheduling(tainted, nil, "tenant-a", intent, capsule, placement, now, time.Minute); err != nil {
 		t.Fatalf("signed placement fit: %v", err)
 	}
+	wrongIsolation := *placement
+	wrongIsolation.RequiredIsolation = "native"
+	if schedulingPlacementMatches(tainted.Scheduling.Observation, &wrongIsolation) {
+		t.Fatal("wrong required isolation matched")
+	}
+	missingLabel := *placement
+	missingLabel.RequiredLabels = []admission.CommandDelegationLabel{{Key: "zone", Value: "one"}}
+	if schedulingPlacementMatches(tainted.Scheduling.Observation, &missingLabel) {
+		t.Fatal("missing required label matched")
+	}
+	untolerated := *placement
+	untolerated.Tolerations = []string{}
+	if schedulingPlacementMatches(tainted.Scheduling.Observation, &untolerated) {
+		t.Fatal("untolerated taint matched")
+	}
 
 	tenantFull := cloneNode(node)
 	tenantFull.Scheduling.Observation.Policy.Tenant.Workloads = 1
@@ -140,6 +167,20 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	perWorkloadLimited.Scheduling.Observation.Policy.PerWorkload.MemoryBytes = intent.Resources.MemoryBytes - 1
 	if err := CheckNodeScheduling(perWorkloadLimited, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrWorkloadLimitExceeded) {
 		t.Fatalf("per-workload limit error = %v", err)
+	}
+	overflowIntent := intent
+	overflowIntent.Resources.MemoryBytes = math.MaxInt64
+	overflowIntent.Capabilities.Service = true
+	if _, err := schedulingReservation(overflowIntent, observation.Policy); err == nil {
+		t.Fatal("runtime overhead overflow was accepted")
+	}
+	if err := addSchedulingResources(nil, controlprotocol.ExecutorSchedulingResourcesV1{}); err == nil {
+		t.Fatal("nil scheduling accumulator was accepted")
+	}
+	if _, _, err := (*Store)(nil).ObserveNodeScheduling(
+		controlauth.NodeIdentity{}, observation, now,
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil scheduling store error = %v", err)
 	}
 }
 
@@ -182,9 +223,10 @@ func storeSchedulingObservation(nodeID string) controlprotocol.ExecutorSchedulin
 	return controlprotocol.ExecutorSchedulingObservationV1{
 		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
 		NodeID:        nodeID, CredentialScope: "node", OS: "linux", Architecture: "amd64",
-		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
-		Labels:    []controlprotocol.ExecutorSchedulingLabelV1{{Key: "region", Value: "west"}},
-		Taints:    []string{},
+		Isolation:                controlprotocol.ExecutorSchedulingIsolationGVisor,
+		Labels:                   []controlprotocol.ExecutorSchedulingLabelV1{{Key: "region", Value: "west"}},
+		Taints:                   []string{},
+		CachedImageConfigDigests: []string{"sha256:" + strings.Repeat("a", 64)},
 		Policy: controlprotocol.ExecutorSchedulingPolicyV1{
 			PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 512 << 20, CPUMillis: 1000, PIDs: 128, Workloads: 1},
 			Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2 << 30, CPUMillis: 4000, PIDs: 1024, Workloads: 4},

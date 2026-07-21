@@ -278,6 +278,9 @@ outbound-only deployment.
 | `-max-tenant-pids` | `512` | Aggregate process reservation for one tenant |
 | `-node-labels` | empty | Comma-separated scheduling labels such as `region=west,accelerator=gpu` |
 | `-node-taints` | empty | Comma-separated scheduling taints; a delegated workload must tolerate every taint |
+| `-image-pull-registry` | empty | Opt-in OCI registry host and optional port used only to fetch a missing exact signed image digest |
+| `-image-pull-auth-file` | empty | Owner-only `steward.registry-auth.v1` secret for that registry; empty permits anonymous access |
+| `-image-pull-timeout` | `5m` | Per-admission image-pull timeout; accepted range is 1 second to 30 minutes |
 | `-state-backend-socket` | empty | Unix socket for a quota-enforced storage worker; requires the token file and complete signed admission |
 | `-state-backend-token-file` | empty | Owner-only bearer token shared by Executor and the storage worker |
 | `-state-volume-byte-limit` | `10737418240` | Hard byte limit for each qualified state lineage |
@@ -310,6 +313,39 @@ not block lease renewal, stop, or destroy operations for assigned workloads.
 Labels and taints use letters, digits, `.`, `_`, `:`, `/`, and `-`, with a
 maximum of 128 bytes per key or value. Do not put secrets in them. They are
 returned by the node status API and console.
+
+### Optional site registry
+
+An Executor can fetch a missing agent image from one operator-approved OCI
+registry. This is disabled by default. Set `EXECUTOR_IMAGE_PULL_REGISTRY` in
+`/etc/steward/executor.env` to a canonical `host[:port]` with no scheme or path.
+Docker must already trust the registry's TLS certificate; Steward does not weaken
+Docker transport security or edit daemon configuration.
+
+For authenticated access, have the site's secret materializer write an owner-only
+file readable by `steward-executor`:
+
+```json
+{
+  "schema_version": "steward.registry-auth.v1",
+  "registry": "registry.site.example:5443",
+  "username": "steward-node",
+  "password": "REDACTED"
+}
+```
+
+Set `EXECUTOR_IMAGE_PULL_AUTH_FILE` to that absolute path. Instead of username and
+password, the file may contain exactly one `identity_token` or `registry_token`.
+Unknown fields, mixed credential modes, a registry mismatch, an unsafe file, or
+an oversized secret stops Executor startup. The encoded credential exists only in
+Executor memory and Docker's pull request; it is not sent to the agent, Control,
+the console, scheduling observations, or receipts.
+
+When signed admission references `registry.site.example:5443/team/agent@sha256:…`
+and the exact image is absent, Executor asks Docker to pull that immutable
+reference. It then inspects the manifest and config digests, platform, and declared
+volumes exactly as it does for an offline import. A tag, a different registry, or
+a substituted config remains unavailable. Pulling content never grants admission.
 
 ### Executor local roles
 

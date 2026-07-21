@@ -170,11 +170,15 @@ cordon and quarantine now provide durable placement and command-delivery gates
 without replacing Executor's node-local maintenance fence. Signed soft label
 preferences, one-key topology spreading, retained placement explanations, and
 restart-safe stateless node drains with maximum-unavailable budgets are also
-implemented. The next scheduling layer should add image and state locality,
-rollback, quota-capable portable state, and backend conformance. Instance counts, singleton identity, restart
-recovery, lease-fenced stateless replacement, bounded renewal retention, and an
-explanation for placement and replacement blockers are already part of the
-narrow scheduler.
+implemented. Executor also publishes a bounded set of exact local image config
+digests. Control uses that observation only as a soft scheduling preference and
+retains it in the placement explanation; Executor still inspects the exact signed
+image before changing runtime state. Forks remain pinned to the node that owns
+their snapshot. The next scheduling layer should add portable state locality,
+rollback, quota-capable portable state, and backend conformance. Instance counts,
+singleton identity, restart recovery, lease-fenced stateless replacement, bounded
+renewal retention, and an explanation for placement and replacement blockers are
+already part of the narrow scheduler.
 
 The controller may request authority but may not invent it. Automated operation
 uses a tenant-signed, time-bounded delegation that limits application, version,
@@ -356,9 +360,14 @@ The roadmap starts from working primitives rather than a blank design:
   bindings, and record only credential paths in the operator context;
 - authority-preserving in-place rollouts that retain source and target signed
   delegations, spend disruption budget atomically, and switch each instance only
-  after a proven destroy; and
+  after a proven destroy;
 - durable fleet-wide tenant CPU, memory, process, and workload quotas reserved
-  atomically with admission, with CLI, API, attention, and console visibility.
+  atomically with admission, with CLI, API, attention, and console visibility;
+- bounded exact-image locality reporting and deterministic cache-aware placement,
+  with the optimization kept separate from signed admission authority;
+- opt-in image retrieval from one operator-approved OCI registry, with protected
+  registry authentication, exact signed-digest pulls, and mandatory post-pull
+  image inspection; and
 - a strict, owner-only incident support bundle that joins non-secret controller
   inventory and node evidence checkpoints for offline inspection without exporting
   prompts, bodies, command envelopes, credentials, private keys, result text, or
@@ -367,9 +376,10 @@ The roadmap starts from working primitives rather than a blank design:
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and
 prompt path now has composed commands. Explicit human or automation steps still
-cross the boundaries where a privileged installer runs, an image is transferred
-and imported, Control's public controller key is authenticated, Gateway is
-restarted, or non-secret service trust moves between machines. The controller also
+cross the boundaries where a privileged installer runs, an approved registry is
+populated or an offline image is imported, Control's public controller key is
+authenticated, Gateway is restarted, or non-secret service trust moves between
+machines. The controller also
 does not yet join continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 
@@ -420,13 +430,15 @@ Outcome: the same application can run across nodes, recover from failure, create
 safe temporary or durable forks, use governed tool ecosystems, and remain
 supportable through one coherent operational surface.
 
-- Add node leases, resources, reservations, labels, taints and tolerations,
-  isolation classes, topology, image locality, and state locality.
+- Extend the implemented node leases, resources, reservations, labels, taints and
+  tolerations, isolation classes, topology, and image locality with portable state
+  locality.
 - Make placement an actual controller decision with stale-plan detection and
   Executor revalidation.
 - Extend implemented lease-fenced replacement, rescheduling, topology placement,
-  cordon, quarantine, budgeted stateless drain, and fleet-wide tenant quotas with
-  canary rollout, pause, and rollback.
+  cordon, quarantine, budgeted stateless drain, fleet-wide tenant quotas, and
+  durable rollout pause/resume with health-gated canaries and mixed-generation
+  rollback.
 - Add the storage backend contract and one quota-capable local backend.
 - Add quiesce, snapshot, clone, archive, restore, TTL, idle expiry, and garbage
   collection state machines.

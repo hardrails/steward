@@ -136,6 +136,30 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			}
 			_ = json.NewEncoder(writer).Encode(view)
 		case http.MethodPut:
+			if strings.HasSuffix(request.URL.Path, "/rollout") {
+				var input struct {
+					ExpectedRevision uint64 `json:"expected_revision"`
+					Paused           bool   `json:"paused"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.ExpectedRevision != 1 {
+					t.Errorf("rollout control input=%+v err=%v", input, err)
+				}
+				controlled := view
+				controlled.Generation = 2
+				controlled.Revision = 2
+				controlled.Phase = controlstore.DeploymentReconciling
+				controlled.Rollout = &controlclient.DeploymentRollout{
+					SourceGeneration: 1, SourceAgentName: view.AgentName,
+					SourceBundleDigest: view.BundleDigest, SourceCapsuleDigest: view.CapsuleDigest,
+					SourceDelegationDigest: view.DelegationDigest,
+					StartedAt:              now.Format(time.RFC3339Nano),
+				}
+				if input.Paused {
+					controlled.Rollout.PausedAt = now.Add(time.Minute).Format(time.RFC3339Nano)
+				}
+				_ = json.NewEncoder(writer).Encode(controlled)
+				return
+			}
 			putCount++
 			var input struct {
 				Generation       uint64                       `json:"generation"`
@@ -186,6 +210,8 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		}, common...),
 		append([]string{"agent", "deployment", "status", "auditor"}, common...),
 		append([]string{"agent", "deployment", "list"}, common...),
+		append([]string{"agent", "deployment", "pause", "auditor"}, common...),
+		append([]string{"agent", "deployment", "resume", "auditor"}, common...),
 		append([]string{"agent", "deployment", "remove", "auditor"}, common...),
 	} {
 		output.Reset()
@@ -204,9 +230,55 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		"GET /v1/tenants/tenant-a/deployments/auditor," +
 		"GET /v1/tenants/tenant-a/deployments?limit=100," +
 		"GET /v1/tenants/tenant-a/deployments/auditor," +
+		"PUT /v1/tenants/tenant-a/deployments/auditor/rollout," +
+		"GET /v1/tenants/tenant-a/deployments/auditor," +
+		"PUT /v1/tenants/tenant-a/deployments/auditor/rollout," +
+		"GET /v1/tenants/tenant-a/deployments/auditor," +
 		"DELETE /v1/tenants/tenant-a/deployments/auditor"
 	if strings.Join(requests, ",") != wantRequests {
 		t.Fatalf("requests=%v", requests)
+	}
+}
+
+func TestAgentDeploymentRolloutControlRejectsInvalidInputAndLookupFailure(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"auditor", "-no-context"},
+		{"auditor", "extra", "-tenant", "tenant-a", "-no-context"},
+		{"auditor", "-tenant", "tenant-a", "-control-url", "://bad", "-token-file", "missing", "-no-context"},
+		{"-definitely-not-a-flag", "-no-context"},
+	} {
+		if err := agentDeploymentRolloutControl(arguments, &bytes.Buffer{}, true); err == nil {
+			t.Fatalf("invalid rollout control arguments were accepted: %v", arguments)
+		}
+	}
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"error":"unavailable","message":"try later"}`))
+	}))
+	defer server.Close()
+	if err := agentDeploymentRolloutControl([]string{
+		"auditor", "-tenant", "tenant-a", "-control-url", server.URL,
+		"-token-file", tokenPath, "-no-context",
+	}, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("rollout control accepted a failed revision lookup")
+	}
+	if err := agentDeploymentRolloutControl([]string{
+		"-tenant", "tenant-a", "-control-url", server.URL,
+		"-token-file", tokenPath, "-no-context", "auditor",
+	}, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("rollout control accepted a failed positional revision lookup")
+	}
+	if err := agentDeploymentRolloutControl([]string{
+		"auditor", "-tenant", "tenant-a", "-revision", "1", "-control-url", server.URL,
+		"-token-file", tokenPath, "-no-context",
+	}, &bytes.Buffer{}, true); err == nil {
+		t.Fatal("rollout control accepted a failed mutation")
 	}
 }
 

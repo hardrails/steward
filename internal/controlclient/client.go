@@ -226,6 +226,7 @@ type DeploymentRollout struct {
 	SourceCapsuleDigest    string `json:"source_capsule_digest"`
 	SourceDelegationDigest string `json:"source_delegation_digest"`
 	StartedAt              string `json:"started_at"`
+	PausedAt               string `json:"paused_at,omitempty"`
 }
 
 type DeploymentList struct {
@@ -437,6 +438,33 @@ func (c *Client) ApplyDeployment(
 	}
 	if !deploymentForkResponseEqual(deployment.Fork, input.Fork) {
 		return Deployment{}, errors.New("control deployment response changed the requested fork")
+	}
+	return deployment, nil
+}
+
+func (c *Client) SetDeploymentRolloutPaused(
+	ctx context.Context,
+	tenantID, deploymentID string,
+	expectedRevision uint64,
+	paused bool,
+) (Deployment, error) {
+	path, err := deploymentPath(tenantID, deploymentID)
+	if err != nil {
+		return Deployment{}, err
+	}
+	var deployment Deployment
+	err = c.do(ctx, http.MethodPut, path+"/rollout", struct {
+		ExpectedRevision uint64 `json:"expected_revision"`
+		Paused           bool   `json:"paused"`
+	}{ExpectedRevision: expectedRevision, Paused: paused}, &deployment, true)
+	if err != nil {
+		return Deployment{}, err
+	}
+	if err := validateDeploymentResponse(deployment, tenantID, deploymentID); err != nil {
+		return Deployment{}, err
+	}
+	if deployment.Rollout == nil || (deployment.Rollout.PausedAt != "") != paused {
+		return Deployment{}, errors.New("control deployment response changed the requested rollout state")
 	}
 	return deployment, nil
 }
@@ -1593,6 +1621,12 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 		if err != nil {
 			return errors.New("control deployment response rollout timestamp is invalid")
 		}
+		if rollout.PausedAt != "" {
+			paused, err := time.Parse(time.RFC3339Nano, rollout.PausedAt)
+			if err != nil || paused.Before(rolloutStarted) {
+				return errors.New("control deployment response rollout pause is invalid")
+			}
+		}
 		sourceCapsuleDigest = rollout.SourceCapsuleDigest
 	}
 	for index, nodeID := range deployment.AllowedNodeIDs {
@@ -1605,6 +1639,9 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 			!validEvidenceRouteIdentity(instance.LineageID, 256) || instance.Generation == 0 ||
 			index > 0 && deployment.Instances[index-1].InstanceID >= instance.InstanceID {
 			return errors.New("control deployment response instance set is not canonical")
+		}
+		if instance.Placement != nil && !validDeploymentPlacement(*instance.Placement, instance.NodeID) {
+			return errors.New("control deployment response placement decision is invalid")
 		}
 		if instance.Rollout != nil {
 			if deployment.Rollout == nil ||
@@ -1685,6 +1722,39 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 	default:
 		return errors.New("control deployment response phase is invalid")
 	}
+}
+
+func validDeploymentPlacement(placement controlstore.DeploymentPlacementDecision, nodeID string) bool {
+	if placement.NodeID != nodeID || !validEvidenceRouteIdentity(placement.NodeID, 128) ||
+		placement.PreferredLabelMatches == nil || len(placement.PreferredLabelMatches) > 32 ||
+		placement.PreferredLabelCount < len(placement.PreferredLabelMatches) || placement.PreferredLabelCount > 32 ||
+		placement.SameDeploymentInSpreadDomain < 0 || placement.AssignedWorkloads < 0 {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, placement.DecidedAt); err != nil {
+		return false
+	}
+	if placement.ImageConfigDigest == "" {
+		if placement.ImageLocal || placement.ImageLocalityReported {
+			return false
+		}
+	} else if !controlprotocol.ValidSHA256Digest(placement.ImageConfigDigest) ||
+		placement.ImageLocal && !placement.ImageLocalityReported {
+		return false
+	}
+	for index, key := range placement.PreferredLabelMatches {
+		if !controlprotocol.ValidSchedulingAttribute(key) ||
+			index > 0 && placement.PreferredLabelMatches[index-1] >= key {
+			return false
+		}
+	}
+	if placement.SpreadBy == "" {
+		return placement.SpreadValue == "" && !placement.SpreadLabelPresent &&
+			placement.SameDeploymentInSpreadDomain == 0
+	}
+	return controlprotocol.ValidSchedulingAttribute(placement.SpreadBy) &&
+		(placement.SpreadLabelPresent && controlprotocol.ValidSchedulingAttribute(placement.SpreadValue) ||
+			!placement.SpreadLabelPresent && placement.SpreadValue == "")
 }
 
 func paginatedPath(path, after string, limit int) (string, error) {

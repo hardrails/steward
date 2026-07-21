@@ -77,6 +77,9 @@ func main() {
 	maxTenantPIDs := flag.Int64("max-tenant-pids", defaults.MaxTenantPIDs, "maximum processes reserved for one tenant's workloads and relays")
 	nodeLabels := flag.String("node-labels", "", "comma-separated scheduling labels as key=value")
 	nodeTaints := flag.String("node-taints", "", "comma-separated scheduling taints; workloads require matching tolerations")
+	imagePullRegistry := flag.String("image-pull-registry", "", "optional approved OCI registry host[:port] for missing signed images")
+	imagePullAuthFile := flag.String("image-pull-auth-file", "", "optional owner-only steward.registry-auth.v1 secret for the approved registry")
+	imagePullTimeout := flag.Duration("image-pull-timeout", 5*time.Minute, "bounded timeout for an opt-in exact image pull")
 	allowUnquotaedState := flag.Bool("allow-unquotaed-state-on-dedicated-host", false, "INSECURE on shared hosts: allow persistent Docker volumes without hard byte or inode quotas")
 	stateBackendSocket := flag.String("state-backend-socket", "", "quota-enforced storage worker Unix socket")
 	stateBackendTokenFile := flag.String("state-backend-token-file", "", "owner-only storage worker bearer token")
@@ -245,7 +248,8 @@ func main() {
 	admissionRequested := *admissionPolicyFile != "" || *admissionSiteRootFile != "" ||
 		*admissionSiteRootKeyID != "" || *admissionNodeID != "" || *admissionEvidenceKeyFile != "" ||
 		*admissionAllowHostAdmin || *allowUnquotaedState || *stateBackendSocket != "" || *stateBackendTokenFile != "" ||
-		*gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0
+		*gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0 ||
+		*imagePullRegistry != "" || *imagePullAuthFile != ""
 	if admissionRequested {
 		if *admissionPolicyFile == "" || *admissionSiteRootFile == "" || *admissionSiteRootKeyID == "" ||
 			*admissionNodeID == "" || *admissionEvidenceKeyFile == "" {
@@ -276,6 +280,27 @@ func main() {
 		if *allowUnquotaedState && (*stateBackendSocket != "" || *stateBackendTokenFile != "") {
 			slog.Error("quota-enforced and unquotaed persistent state modes are mutually exclusive")
 			os.Exit(2)
+		}
+		registryAuth := ""
+		configuredImagePullTimeout := time.Duration(0)
+		if *imagePullRegistry != "" || *imagePullAuthFile != "" {
+			if *imagePullRegistry == "" {
+				slog.Error("image pull authentication requires an approved registry")
+				os.Exit(2)
+			}
+			configuredImagePullTimeout = *imagePullTimeout
+			if *imagePullAuthFile != "" {
+				raw, err := readSecureArtifact(*imagePullAuthFile, true, 64<<10)
+				if err != nil {
+					slog.Error("read image pull authentication", "err", err)
+					os.Exit(2)
+				}
+				registryAuth, err = executor.EncodeRegistryAuth(raw, *imagePullRegistry)
+				if err != nil {
+					slog.Error("validate image pull authentication", "err", err)
+					os.Exit(2)
+				}
+			}
 		}
 		var stateBackend storagebackend.Backend
 		if *stateBackendSocket != "" || *stateBackendTokenFile != "" {
@@ -357,6 +382,8 @@ func main() {
 			StateVolumeObjectLimit:             selectedStateLimit(stateBackend, *stateVolumeObjectLimit),
 			Topology:                           topology, Gateway: gatewayControl, RelayImage: *relayImage,
 			GrantRoot: configuredGrantRoot, RelayGID: *relayGID,
+			ImagePullRegistry: *imagePullRegistry, RegistryAuth: registryAuth,
+			ImagePullTimeout: configuredImagePullTimeout,
 		}); err != nil {
 			slog.Error("configure signed admission", "err", err)
 			os.Exit(2)
@@ -418,8 +445,22 @@ func main() {
 			os.Exit(2)
 		}
 		var publishedScheduling *controlprotocol.ExecutorSchedulingObservationV1
+		var schedulingProvider func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error)
 		if uplinkMetadata.NodeScoped() {
 			publishedScheduling = schedulingObservation
+			if schedulingObservation != nil {
+				schedulingProvider = func(ctx context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error) {
+					images, err := docker.CachedImageConfigDigests(ctx)
+					if err != nil {
+						return nil, err
+					}
+					observation := *schedulingObservation
+					observation.Labels = append([]controlprotocol.ExecutorSchedulingLabelV1{}, schedulingObservation.Labels...)
+					observation.Taints = append([]string{}, schedulingObservation.Taints...)
+					observation.CachedImageConfigDigests = images
+					return &observation, nil
+				}
+			}
 		}
 		state, err := executoruplink.LoadStateStore(*uplinkStateFile)
 		if err != nil {
@@ -464,6 +505,7 @@ func main() {
 			DeliveryState: deliveryState, GatewayControl: gatewayControlClient,
 			StateSnapshots: stateSnapshots,
 			ValidateOnly:   *checkConfig, Scheduling: publishedScheduling,
+			SchedulingProvider: schedulingProvider,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)

@@ -922,7 +922,7 @@ stewardctl agent build -file my-agent/Stewardfile.cue`}</code></pre>
         </article>
         <article className="panel">
           <PanelHeading index="02 / PLACE" title="Explain placement" />
-          <p>The scheduler rejects ineligible nodes first, then scores image and snapshot locality, preferred labels, and current load. The selected tenant projection is <strong>{tenant}</strong>.</p>
+          <p>The scheduler rejects ineligible nodes first, then considers topology spread, tenant-signed label preferences, exact image locality, and current load. A fork stays on the node that owns its snapshot. The selected tenant projection is <strong>{tenant}</strong>.</p>
           <pre><code>{`stewardctl agent plan -bundle agent.bundle.json \\
   -nodes nodes.json -tenant ${tenant}`}</code></pre>
         </article>
@@ -1079,11 +1079,13 @@ function NodeScheduling({scheduling}) {
   const observation = scheduling.observation;
   const host = observation.policy.host;
   const tenant = observation.policy.tenant;
+  const cachedImages = observation.cached_image_config_digests;
   return (
     <div>
       <Badge kind="is-ok">reported</Badge>
       <small>{observation.isolation} · {observation.architecture}</small>
       <small>{host.workloads} host slots · {tenant.workloads}/tenant</small>
+      <small>{Array.isArray(cachedImages) ? `${cachedImages.length} cached image${cachedImages.length === 1 ? "" : "s"} reported` : "Image locality not reported"}</small>
       <small>Observed {formatTime(scheduling.observed_at)}</small>
     </div>
   );

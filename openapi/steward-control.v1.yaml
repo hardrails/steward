@@ -1341,6 +1341,51 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/DeploymentID"
+    put:
+      tags: [deployments]
+      operationId: controlDeploymentRollout
+      summary: Pause or resume an active deployment rollout
+      description: |
+        A pause prevents reconciliation from starting another instance
+        replacement. Work already in flight continues to a safe boundary, so
+        the operation cannot strand an instance after its source runtime has
+        been destroyed. The current revision prevents a stale operator from
+        changing a newer rollout.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeploymentRolloutControlRequest"
+      responses:
+        "200":
+          description: Durable rollout control state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/tenants/{tenant_id}/nodes:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -3886,6 +3931,17 @@ components:
             minLength: 1
             maxLength: 128
             pattern: '^[A-Za-z0-9._:/-]+$'
+        cached_image_config_digests:
+          type: array
+          nullable: true
+          maxItems: 128
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/SHA256Digest"
+          description: >-
+            Canonical, bounded local Docker image config identities used only
+            as a soft placement hint. Null means this Executor did not report
+            image locality; an empty array means it reported an empty cache.
         policy:
           $ref: "#/components/schemas/ExecutorSchedulingPolicy"
     ExecutorSchedulingLabel:
@@ -4018,6 +4074,17 @@ components:
           type: integer
           format: int64
           minimum: 1
+    DeploymentRolloutControlRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, paused]
+      properties:
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 1
+        paused:
+          type: boolean
     DeploymentInstanceIntent:
       type: object
       additionalProperties: false
@@ -4211,6 +4278,9 @@ components:
         started_at:
           type: string
           format: date-time
+        paused_at:
+          type: string
+          format: date-time
     DeploymentInstanceRollout:
       type: object
       additionalProperties: false
@@ -4231,6 +4301,8 @@ components:
       additionalProperties: false
       required:
         - node_id
+        - image_local
+        - image_locality_reported
         - preferred_label_matches
         - preferred_label_count
         - same_deployment_in_spread_domain
@@ -4239,6 +4311,14 @@ components:
       properties:
         node_id:
           $ref: "#/components/schemas/Identifier128"
+        image_config_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        image_local:
+          type: boolean
+          description: True when the selected node reported the exact image config digest locally.
+        image_locality_reported:
+          type: boolean
+          description: False when the selected Executor did not support image-locality reporting.
         preferred_label_matches:
           type: array
           maxItems: 32

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -17,7 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/gateway"
 )
 
@@ -53,6 +56,151 @@ func TestLoadImageUsesNativeDockerImportAndRejectsDaemonErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCachedImageConfigDigestsReturnsCanonicalBoundedInventory(t *testing.T) {
+	images := make([]map[string]string, 0, controlprotocol.MaxExecutorSchedulingImages+2)
+	for index := controlprotocol.MaxExecutorSchedulingImages + 1; index >= 0; index-- {
+		images = append(images, map[string]string{"Id": fmt.Sprintf("sha256:%064x", index)})
+	}
+	images = append(images, images[0])
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1.41/images/json" || r.URL.Query().Get("all") != "1" {
+			t.Fatalf("unexpected image inventory target %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(images)
+	})
+	digests, err := docker.CachedImageConfigDigests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digests) != controlprotocol.MaxExecutorSchedulingImages ||
+		digests[0] != "sha256:"+strings.Repeat("0", 64) ||
+		digests[len(digests)-1] != fmt.Sprintf("sha256:%064x", controlprotocol.MaxExecutorSchedulingImages-1) {
+		t.Fatalf("canonical bounded inventory = %#v", digests)
+	}
+}
+
+func TestCachedImageConfigDigestsRejectsUntrustedDockerResponses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "daemon status", status: http.StatusServiceUnavailable, body: `{"message":"unavailable"}`},
+		{name: "invalid digest", status: http.StatusOK, body: `[{"Id":"latest"}]`},
+		{name: "invalid json", status: http.StatusOK, body: `[`},
+		{name: "oversized", status: http.StatusOK, body: `"` + strings.Repeat("x", (1<<20)+1) + `"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			})
+			if _, err := docker.CachedImageConfigDigests(context.Background()); err == nil {
+				t.Fatal("untrusted Docker image inventory was accepted")
+			}
+		})
+	}
+}
+
+func TestPullSignedImageUsesExactDockerReferenceAndBoundedAuth(t *testing.T) {
+	reference := "registry.site.test/agents/hermes@sha256:" + strings.Repeat("a", 64)
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1.41/images/create" ||
+			r.URL.Query().Get("fromImage") != reference || r.Header.Get("X-Registry-Auth") != "encoded-auth" {
+			t.Fatalf("image pull request = %s %s auth=%q", r.Method, r.URL.String(), r.Header.Get("X-Registry-Auth"))
+		}
+		_, _ = w.Write([]byte("{\"status\":\"pulling\"}\n{\"status\":\"complete\"}\n"))
+	})
+	if err := docker.PullSignedImage(context.Background(), reference, "encoded-auth"); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.PullSignedImage(context.Background(), "registry.site.test/agents/hermes:latest", ""); err == nil {
+		t.Fatal("mutable image pull was accepted")
+	}
+}
+
+func TestPullSignedImageRejectsDaemonAndUnboundedProgress(t *testing.T) {
+	reference := "registry.site.test/agents/hermes@sha256:" + strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "daemon status", status: http.StatusBadGateway, body: `{"message":"registry unavailable"}`},
+		{name: "daemon stream error", status: http.StatusOK, body: `{"errorDetail":{"message":"digest rejected"}}`},
+		{name: "oversized progress", status: http.StatusOK, body: strings.Repeat("x", (1<<20)+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			})
+			if err := docker.PullSignedImage(context.Background(), reference, ""); err == nil {
+				t.Fatal("untrusted Docker pull response was accepted")
+			}
+		})
+	}
+}
+
+func TestDockerImageAdministrativeFailuresStayBoundedAndVisible(t *testing.T) {
+	if docker := NewDockerHTTPWithTimeout("/tmp/missing-docker.sock", 0); docker.client.Timeout != 10*time.Second ||
+		docker.administrative.Timeout != 10*time.Second {
+		t.Fatalf("default administrative timeouts = (%v, %v)", docker.client.Timeout, docker.administrative.Timeout)
+	}
+	broken := &DockerHTTP{
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("transport failed")
+		})},
+		administrative: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("transport failed")
+		})},
+	}
+	reference := "registry.site.test/agents/hermes@sha256:" + strings.Repeat("a", 64)
+	for name, call := range map[string]func() error{
+		"nil archive": func() error { return broken.LoadImage(context.Background(), nil) },
+		"load transport": func() error {
+			return broken.LoadImage(context.Background(), strings.NewReader("archive"))
+		},
+		"pull transport": func() error { return broken.PullSignedImage(context.Background(), reference, "") },
+		"inventory transport": func() error {
+			_, err := broken.CachedImageConfigDigests(context.Background())
+			return err
+		},
+	} {
+		if err := call(); err == nil {
+			t.Fatalf("%s failure was accepted", name)
+		}
+	}
+	statusDocker := dockerTestClient(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"message":"bad archive"}`))
+	})
+	if err := statusDocker.LoadImage(context.Background(), strings.NewReader("archive")); err == nil {
+		t.Fatal("non-successful Docker import was accepted")
+	}
+	for name, input := range map[string]io.Reader{
+		"read":   &failingReader{},
+		"decode": strings.NewReader("{"),
+		"error":  strings.NewReader(`{"error":"registry denied"}`),
+	} {
+		if err := decodeDockerProgress(input, name); err == nil {
+			t.Fatalf("%s progress failure was accepted", name)
+		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+type failingReader struct{}
+
+func (*failingReader) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
 }
 
 func dockerTestClient(t *testing.T, handler http.HandlerFunc) *DockerHTTP {
