@@ -103,7 +103,7 @@ func (values *repeatedFlag) Set(value string) error {
 
 func gatewayCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("gateway command requires validate, identity, route, connector, service, or effects")
+		return errors.New("gateway command requires validate, identity, inference, route, connector, service, or effects")
 	}
 	switch arguments[0] {
 	case "validate":
@@ -127,6 +127,8 @@ func gatewayCommand(arguments []string, stdout io.Writer) error {
 		return err
 	case "identity":
 		return gatewayIdentityCommand(arguments[1:], stdout)
+	case "inference":
+		return gatewayInferenceCommand(arguments[1:], stdout)
 	case "route":
 		return gatewayRouteCommand(arguments[1:], stdout)
 	case "connector":
@@ -138,6 +140,119 @@ func gatewayCommand(arguments []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unsupported gateway command %q", arguments[0])
 	}
+}
+
+type inferenceProviderPreset struct {
+	id             string
+	baseURL        string
+	protocol       gateway.InferenceProtocol
+	credentialMode gateway.CredentialMode
+}
+
+var inferenceProviderPresets = map[string]inferenceProviderPreset{
+	"openai":     {id: "openai", baseURL: "https://api.openai.com/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"openrouter": {id: "openrouter", baseURL: "https://openrouter.ai/api/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"anthropic":  {id: "anthropic", baseURL: "https://api.anthropic.com/v1", protocol: gateway.InferenceProtocolAnthropic, credentialMode: gateway.CredentialModeXAPIKey},
+	"mistral":    {id: "mistral", baseURL: "https://api.mistral.ai/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"vllm":       {id: "vllm", baseURL: "http://127.0.0.1:8000/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"ollama":     {id: "ollama", baseURL: "http://127.0.0.1:11434/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"llamacpp":   {id: "llamacpp", baseURL: "http://127.0.0.1:8080/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"localai":    {id: "localai", baseURL: "http://127.0.0.1:8080/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"litellm":    {id: "litellm", baseURL: "http://127.0.0.1:4000/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"lmstudio":   {id: "lmstudio", baseURL: "http://127.0.0.1:1234/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"sglang":     {id: "sglang", baseURL: "http://127.0.0.1:30000/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+	"tgi":        {id: "tgi", baseURL: "http://127.0.0.1:3000/v1", protocol: gateway.InferenceProtocolOpenAI, credentialMode: gateway.CredentialModeBearer},
+}
+
+func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 {
+		return errors.New("gateway inference requires list or set")
+	}
+	action := arguments[0]
+	flags := flag.NewFlagSet("gateway inference "+action, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
+	provider := flags.String("provider", "", "provider preset or compatible")
+	id := flags.String("id", "", "stable inference route ID")
+	baseURL := flags.String("base-url", "", "exact provider API base URL")
+	protocol := flags.String("protocol", "", "openai or anthropic request protocol")
+	credentialFile := flags.String("credential-file", "", "owner-only provider credential file")
+	credentialMode := flags.String("credential-mode", "", "bearer, x-api-key, or api-key")
+	anthropicVersion := flags.String("anthropic-version", "", "fixed Anthropic API version")
+	maxConcurrent := flags.Int("max-concurrent", 8, "maximum concurrent requests")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("gateway inference accepts no positional arguments")
+	}
+	config, _, _, _, err := gateway.LoadConfig(*path)
+	if err != nil {
+		return err
+	}
+	if action == "list" {
+		if !onlyConfigFlagVisited(flags) {
+			return errors.New("gateway inference list accepts only -config")
+		}
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(config.Routes)
+	}
+	if action != "set" {
+		return fmt.Errorf("unsupported gateway inference action %q", action)
+	}
+	if *provider != "" && *provider != "compatible" {
+		preset, ok := inferenceProviderPresets[*provider]
+		if !ok {
+			return errors.New("-provider must be openai, openrouter, anthropic, mistral, vllm, ollama, llamacpp, localai, litellm, lmstudio, sglang, tgi, or compatible")
+		}
+		if !flagWasVisited(flags, "id") {
+			*id = preset.id
+		}
+		if !flagWasVisited(flags, "base-url") {
+			*baseURL = preset.baseURL
+		}
+		if !flagWasVisited(flags, "protocol") {
+			*protocol = string(preset.protocol)
+		}
+		if !flagWasVisited(flags, "credential-mode") {
+			*credentialMode = string(preset.credentialMode)
+		}
+	}
+	if *id == "" || *baseURL == "" {
+		return errors.New("gateway inference set requires -provider, or -id and -base-url")
+	}
+	if *protocol == "" {
+		*protocol = string(gateway.InferenceProtocolOpenAI)
+	}
+	if *credentialMode == "" {
+		if gateway.InferenceProtocol(*protocol) == gateway.InferenceProtocolAnthropic {
+			*credentialMode = string(gateway.CredentialModeXAPIKey)
+		} else {
+			*credentialMode = string(gateway.CredentialModeBearer)
+		}
+	}
+	route := gateway.Route{
+		ID: *id, BaseURL: *baseURL, Protocol: gateway.InferenceProtocol(*protocol), CredentialFile: *credentialFile,
+		CredentialMode: gateway.CredentialMode(*credentialMode), AnthropicVersion: *anthropicVersion, MaxConcurrent: *maxConcurrent,
+	}
+	replaced := false
+	for index := range config.Routes {
+		if config.Routes[index].ID == route.ID {
+			config.Routes[index], replaced = route, true
+			break
+		}
+	}
+	if !replaced {
+		config.Routes = append(config.Routes, route)
+	}
+	if err := writeGatewayConfig(*path, config); err != nil {
+		return err
+	}
+	result := map[string]any{"inference_route": route, "replaced": replaced, "activation": "systemctl reload steward-gateway.service"}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(result)
 }
 
 func gatewayIdentityCommand(arguments []string, stdout io.Writer) error {
