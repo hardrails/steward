@@ -127,6 +127,7 @@ type Limits struct {
 	MaxCommandsPerNode      int
 	MaxDeployments          int
 	MaxDeploymentsPerTenant int
+	MaxForksPerSnapshot     int
 	MaxNodePools            int
 	MaxCommandBytes         int
 	MaxReportBytes          int
@@ -142,7 +143,7 @@ func DefaultLimits() Limits {
 		MaxCredentials: 16384, MaxCredentialsPerTenant: 2048,
 		MaxEnrollments: 4096, MaxEnrollmentsPerTenant: 512,
 		MaxCommands: 16384, MaxCommandsPerTenant: 1024, MaxCommandsPerNode: 256,
-		MaxDeployments: 1024, MaxDeploymentsPerTenant: 128, MaxNodePools: 256,
+		MaxDeployments: 1024, MaxDeploymentsPerTenant: 128, MaxForksPerSnapshot: 32, MaxNodePools: 256,
 		MaxCommandBytes: 1 << 20, MaxReportBytes: 64 << 10,
 		MaxStateBytes: 64 << 20, MaxRecordBytes: 2 << 20, MaxWALBytes: 64 << 20,
 		TerminalRetention: 24 * time.Hour,
@@ -154,7 +155,7 @@ func (limits Limits) Validate() error {
 		limits.MaxCredentials <= 0 || limits.MaxCredentialsPerTenant <= 0 ||
 		limits.MaxEnrollments <= 0 || limits.MaxEnrollmentsPerTenant <= 0 ||
 		limits.MaxCommands <= 0 || limits.MaxCommandsPerTenant <= 0 || limits.MaxCommandsPerNode <= 0 ||
-		limits.MaxDeployments <= 0 || limits.MaxDeploymentsPerTenant <= 0 || limits.MaxNodePools <= 0 ||
+		limits.MaxDeployments <= 0 || limits.MaxDeploymentsPerTenant <= 0 || limits.MaxForksPerSnapshot <= 0 || limits.MaxNodePools <= 0 ||
 		limits.MaxCommandBytes <= 0 || limits.MaxReportBytes <= 0 || limits.MaxStateBytes <= 0 ||
 		limits.MaxRecordBytes <= 0 || limits.MaxWALBytes <= 0 || limits.TerminalRetention <= 0 {
 		return errors.New("every control store limit must be positive")

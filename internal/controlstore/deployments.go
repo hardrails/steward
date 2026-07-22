@@ -133,6 +133,22 @@ func (store *Store) ApplyDeployment(
 			return Deployment{}, false, invalid("new deployment fork expiry must be within 30 days")
 		}
 	}
+	if input.Fork != nil {
+		descendants := 0
+		for otherKey, other := range store.current.deployments {
+			if otherKey == key || other.Fork == nil || deploymentFullyRemoved(other) {
+				continue
+			}
+			if other.TenantID == input.TenantID &&
+				other.Fork.SourceNodeID == input.Fork.SourceNodeID &&
+				other.Fork.SnapshotID == input.Fork.SnapshotID {
+				descendants++
+			}
+		}
+		if descendants >= store.limits.MaxForksPerSnapshot {
+			return Deployment{}, false, ErrCapacityExceeded
+		}
+	}
 	for otherKey, other := range store.current.deployments {
 		if otherKey != key && deploymentIdentitiesOverlap(other.Instances, instances) {
 			return Deployment{}, false, ErrConflict
