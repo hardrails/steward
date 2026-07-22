@@ -190,7 +190,7 @@ lineage is one workload's persistent state history.
 | `steward_control_attention_list` | Page through deterministic findings for node contact, evidence, command outcome, and capacity pressure. Findings cannot be acknowledged or cleared through MCP. |
 | `steward_control_incident_timeline` | Page current metadata-only containment, evidence, access, and failed-workload facts. This is a retained view, not a complete audit log, and it cannot acknowledge or remediate anything. |
 | `steward_control_event_list` | Page recent untrusted agent status and finding events with Gateway-derived workload identity. |
-| `steward_control_task_list` | Page bounded task progress projected from retained events. Conflicting terminal, run, or workload identities remain visible as conditions. |
+| `steward_control_task_list` | Page bounded, durable task progress projected from accepted events. Raw-event eviction cannot regress terminal state; conflicting terminal, run, or workload identities remain visible as conditions. |
 | `steward_control_agent_list` | Page through non-secret agent runtime observations. It reports the last successful workload status separately from the latest signed operation and never schedules, retries, or mutates a workload. |
 | `steward_control_command_list` | Page and filter secret-free command metadata without returning the signed command body, terminal result body, reported status text, or error codes. |
 | `steward_control_credential_list` | Page and filter non-secret operator and node credential metadata without returning bearer material or token verifiers. |

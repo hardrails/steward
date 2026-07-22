@@ -26,12 +26,13 @@ surface without solving Steward's distinctive authorization-to-outcome binding.
 
 ## Decision
 
-Build a bounded, read-only task projection inside Control from already-retained
-instance events. A projection is scoped by tenant, task ID, instance ID, and
-generation. It reports agent-authored progress and findings as untrusted
-observations, detects conflicting run identities, and never becomes command or
-result authority. Pagination and response-size limits reuse Control's existing
-HTTP and store boundaries.
+Build a bounded, read-only task projection inside Control from accepted instance
+events. Update it durably in the same WAL transaction that accepts each source
+event, but retain it independently from the raw event window. A projection is
+scoped by tenant, task ID, instance ID, and generation. It reports agent-authored
+progress and findings as untrusted observations, detects conflicting run
+identities, and never becomes command or result authority. Pagination and
+response-size limits reuse Control's existing HTTP and store boundaries.
 
 **Tradeoff:** This creates useful fleet task visibility without retaining prompts,
 result bodies, credentials, or a second event stream. It does not make Control a
@@ -46,10 +47,12 @@ conflict, and retention semantics.
 
 ## Consequences
 
-Task projections disappear when all contributing events age out under the existing
-tenant and site retention limits. A malicious agent can report false progress or
-reuse a task ID; Steward preserves the workload identity and exposes conflicts
-instead of treating the report as verified task state.
+Task projections have their own oldest-first retention limits: 1,024 per tenant
+and 4,096 across the site. Raw-event eviction therefore cannot erase a terminal
+task observation, although an old projection eventually leaves this separate
+bounded window. A malicious agent can report false progress or reuse a task ID;
+Steward preserves the workload identity and exposes conflicts instead of treating
+the report as verified task state.
 
 Revisit the external-service decision when asynchronous fleet submission requires
 multi-writer high availability, when task payloads must survive without an owner

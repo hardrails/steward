@@ -76,9 +76,9 @@ Use these stable event codes when they match the actual lifecycle:
 The first reported terminal state remains sticky. If later events claim a
 different terminal state, run ID, node, or runtime, Steward adds a conflict
 condition instead of silently replacing history. The projection retains only
-bounded metadata and disappears when all of its contributing events age out.
-It is not a task queue, cancellation API, artifact store, or proof that the
-agent performed the reported work correctly.
+bounded metadata. It survives eviction of its source events, then ages out under
+its own oldest-first limits. It is not a task queue, cancellation API, artifact
+store, or proof that the agent performed the reported work correctly.
 
 ## Trust and retention
 
@@ -88,7 +88,9 @@ rendered content and never turns an event into a mutation.
 
 Control retains the newest 1,024 events per tenant and 4,096 across the site,
 evicting the oldest records in the same durable transaction that accepts newer
-ones. Gateway's undelivered outbox is separately capped at 16 events per grant,
+ones. Task projections use separate limits of 1,024 per tenant and 4,096 across
+the site, so raw-event eviction does not roll completed work back to an earlier
+state. Gateway's undelivered outbox is separately capped at 16 events per grant,
 32 per tenant, and 64 per node. If Control is unavailable, the node retries
 without discarding an acknowledged event; when the outbox is full, new events fail
 visibly until delivery frees capacity. Include enough source or task context in
