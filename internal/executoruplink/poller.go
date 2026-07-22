@@ -93,6 +93,7 @@ type Config struct {
 
 type Poller struct {
 	pollURL, reportURL, schedulingURL, eventsURL string
+	taskPollURL, taskReportURL                   string
 	credentialPath                               string
 	expected                                     *stewarduplink.Credential
 	interval                                     time.Duration
@@ -108,6 +109,7 @@ type Poller struct {
 	scheduling                                   *controlprotocol.ExecutorSchedulingObservationV1
 	schedulingProvider                           func(context.Context) (*controlprotocol.ExecutorSchedulingObservationV1, error)
 	eventGateway                                 *gateway.ControlClient
+	taskGateway                                  taskGateway
 	stateSnapshots                               bool
 }
 
@@ -218,6 +220,8 @@ func NewPoller(cfg Config) (*Poller, error) {
 	reportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "report")
 	schedulingURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "scheduling")
 	eventsURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "events")
+	taskPollURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "tasks", "poll")
+	taskReportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "tasks", "report")
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
@@ -236,6 +240,7 @@ func NewPoller(cfg Config) (*Poller, error) {
 	)
 	return &Poller{
 		pollURL: pollURL, reportURL: reportURL, schedulingURL: schedulingURL, eventsURL: eventsURL,
+		taskPollURL: taskPollURL, taskReportURL: taskReportURL,
 		credentialPath: cfg.CredentialPath,
 		expected:       credential, interval: cfg.PollInterval, client: client, logger: logger,
 		security: security, commandPolicy: cfg.CommandPolicy, now: now,
@@ -246,7 +251,13 @@ func NewPoller(cfg Config) (*Poller, error) {
 		scheduling:         cloneSchedulingObservation(cfg.Scheduling),
 		schedulingProvider: cfg.SchedulingProvider,
 		eventGateway:       cfg.GatewayControl,
-		stateSnapshots:     cfg.StateSnapshots,
+		taskGateway: func() *gateway.ControlClient {
+			if protocolVersion == controlprotocol.ExecutorProtocolV4 {
+				return cfg.GatewayControl
+			}
+			return nil
+		}(),
+		stateSnapshots: cfg.StateSnapshots,
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
 			nodeID: credential.NodeID, nodeScoped: credential.NodeScoped(), state: cfg.State,
@@ -281,6 +292,9 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 	if p.eventGateway != nil && p.expected.NodeScoped() {
 		go p.runEvents(ctx)
+	}
+	if p.taskGateway != nil && p.expected.NodeScoped() {
+		go p.runTasks(ctx)
 	}
 	failures := 0
 	for {

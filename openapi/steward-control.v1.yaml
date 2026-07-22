@@ -6,7 +6,7 @@ info:
     Public contract for Steward's optional, self-hosted fleet controller. The
     controller manages tenant scopes, operator credentials, one-time node
     enrollment, node inventory, provider-neutral node-pool capacity, bounded desired deployments, reclaimable
-    delivery of signed Executor commands, independently witnessed Executor evidence heads, and
+    delivery of signed Executor commands and exact tenant-signed asynchronous tasks, independently witnessed Executor evidence heads, and
     authenticated fleet operations views and emergency command-delivery freezes. The embedded React console
     can also courier one exact offline-signed command through the existing command
     endpoint; it does not create, edit, approve, or sign command authority. An
@@ -58,7 +58,7 @@ tags:
   - name: deployments
     description: Bounded desired agent state reconciled under tenant-signed controller delegation.
   - name: tasks
-    description: Bounded, read-only task projections derived from untrusted agent events.
+    description: Durable exact-task submission metadata plus bounded read-only projections derived from untrusted agent events.
   - name: evidence
     description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
@@ -1854,6 +1854,211 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/task-requests:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tasks]
+      operationId: listTaskRequests
+      summary: List durable asynchronous tasks
+      description: |
+        Returns newest-first lifecycle metadata for exact signed tasks submitted
+        through Control. The response never includes the request body or the
+        replayable task permit. Result digests and byte counts describe what
+        Gateway observed; they do not make agent-authored result content trusted.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: A bounded page of durable task metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRequestPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      tags: [tasks]
+      operationId: submitTaskRequest
+      summary: Queue one exact, already-signed task
+      description: |
+        Durably retains and asynchronously couriers one canonical task permit
+        plus the exact request bytes it binds. Control structurally inspects the
+        envelope for routing and tenant isolation but does not authenticate it;
+        Gateway verifies the signature and every admitted workload binding
+        before dispatch. An exact retry is idempotent. Reusing the same tenant
+        task ID with different bytes returns a conflict.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskRequestSubmit"
+      responses:
+        "200":
+          description: An exact previously retained task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRequest"
+        "201":
+          description: A newly retained task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/task-requests/{task_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Identifier128"
+    get:
+      tags: [tasks]
+      operationId: getTaskRequest
+      summary: Inspect one durable asynchronous task
+      description: Returns bounded lifecycle and content-addressed result metadata without the request, permit, or result body.
+      responses:
+        "200":
+          description: Current bounded task lifecycle metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [tasks]
+      operationId: cancelTaskRequest
+      summary: Request cancellation of one asynchronous task
+      description: |
+        Cancels queued work before dispatch. Once Gateway has accepted a task,
+        the current lifecycle protocol has no generic remote-cancel operation;
+        Control therefore records `cancel_requested` and
+        `outcome_may_continue=true` until the agent reports a terminal state.
+        This endpoint never claims that already-dispatched work stopped.
+      responses:
+        "200":
+          description: Current task metadata including the cancellation decision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/task-requests/{task_id}/result:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Identifier128"
+    get:
+      tags: [tasks]
+      operationId: getTaskRequestResult
+      summary: Retrieve one retained terminal task result
+      description: |
+        Returns the exact bounded terminal observation that Gateway verified
+        against its durable result digest and byte count. This explicit endpoint
+        can contain agent-authored sensitive content and sets `Cache-Control:
+        no-store`; ordinary task list and get responses remain metadata-only.
+        A task whose result is pending, missing, or larger than 512 KiB returns
+        `task_result_unavailable` rather than pretending that metadata is the
+        result.
+      responses:
+        "200":
+          description: Exact retained terminal task result and its content identity.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/operations/freeze:
     get:
       tags: [operations]
@@ -2451,6 +2656,89 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/tasks/poll:
+    post:
+      tags: [executor-uplink]
+      operationId: pollExecutorTasks
+      summary: Lease asynchronous task courier work for one node
+      description: |
+        Returns only tasks whose unverified routing fields name the authenticated
+        node and one of its tenants. A submit delivery contains the exact signed
+        permit and request. An observe delivery contains only the Gateway task
+        and permit digests. Redelivery is safe because Gateway spends and replays
+        the same exact permit identity instead of creating another external
+        effect.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutorTaskPollRequest"
+      responses:
+        "200":
+          description: Zero or more bounded task courier deliveries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorTaskPollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/tasks/report:
+    post:
+      tags: [executor-uplink]
+      operationId: reportExecutorTask
+      summary: Record Gateway-backed task lifecycle metadata
+      description: |
+        Fences the report by delivery identity and generation. Reports carry
+        Gateway task, permit, run, status, digest, and byte-count metadata. A
+        terminal observation of at most 512 KiB may also carry its canonical
+        base64 bytes so Control can serve it through the explicit owner-scoped
+        result endpoint. Larger results remain metadata-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutorTaskReport"
+      responses:
+        "200":
+          description: The report was applied or recognized as stale.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppliedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "405":
@@ -4600,6 +4888,164 @@ components:
         next_after:
           type: string
           pattern: '^task-[0-9a-f]{64}$'
+    TaskRequestSubmit:
+      type: object
+      additionalProperties: false
+      required: [task_permit, request_base64]
+      properties:
+        task_permit:
+          type: string
+          minLength: 1
+          maxLength: 21846
+          description: Canonical unpadded base64url encoding of one DSSE task permit.
+        request_base64:
+          type: string
+          minLength: 4
+          maxLength: 87384
+          description: Canonical base64 encoding of the exact JSON request bytes bound by the permit.
+    TaskRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - task_id
+        - node_id
+        - instance_id
+        - instance_generation
+        - runtime_ref
+        - service_id
+        - operation_id
+        - request_digest
+        - request_bytes
+        - permit_digest
+        - permit_key_id
+        - deadline
+        - state
+        - delivery_generation
+        - dispatch_attempts
+        - observation_attempts
+        - created_at
+        - updated_at
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        instance_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        service_id:
+          $ref: "#/components/schemas/Identifier128"
+        operation_id:
+          $ref: "#/components/schemas/Identifier128"
+        request_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        request_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 65536
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        permit_key_id:
+          $ref: "#/components/schemas/Identifier128"
+        deadline:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum: [queued, leased, dispatched, running, cancel_requested, completed, failed, cancelled, deadline_exceeded, outcome_unknown]
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 0
+        dispatch_attempts:
+          type: integer
+          format: int64
+          minimum: 0
+        observation_attempts:
+          type: integer
+          format: int64
+          minimum: 0
+        task_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        run_id:
+          $ref: "#/components/schemas/Identifier128"
+        result_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        response_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        result_available:
+          type: boolean
+        task_status:
+          type: string
+          maxLength: 128
+        last_error_code:
+          $ref: "#/components/schemas/Identifier128"
+        cancel_requested_at:
+          type: string
+          format: date-time
+        outcome_may_continue:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        terminal_at:
+          type: string
+          format: date-time
+      description: >-
+        Durable task lifecycle and content-addressed result metadata. Request
+        bytes, result bodies, credentials, and the replayable task permit are
+        deliberately excluded from this public projection. `result_available`
+        indicates that the explicit result endpoint can return retained bytes.
+    TaskResult:
+      type: object
+      additionalProperties: false
+      required: [task_id, result_digest, response_bytes, result_base64]
+      properties:
+        task_id:
+          $ref: "#/components/schemas/Identifier128"
+        result_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        response_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 524288
+        result_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 699052
+      description: >-
+        Explicit secret-bearing response containing the exact terminal agent
+        observation whose byte count and SHA-256 digest are retained in task
+        metadata.
+    TaskRequestPage:
+      type: object
+      additionalProperties: false
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/TaskRequest"
+        next_after:
+          $ref: "#/components/schemas/Identifier128"
     NodeList:
       type: object
       additionalProperties: false
@@ -5363,6 +5809,134 @@ components:
           allOf:
             - $ref: "#/components/schemas/ControlCommandResult"
           description: Bounded node result details. Present only after the command becomes terminal.
+    ExecutorTaskPollRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, node_id, limit]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-task-poll.v1]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 32
+    ExecutorTaskDelivery:
+      type: object
+      additionalProperties: false
+      required: [schema_version, delivery_id, delivery_generation, action, tenant_id, node_id, task_id, permit_digest]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-task-delivery.v1]
+        delivery_id:
+          type: string
+          pattern: '^task-delivery-[0-9a-f]{64}$'
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        action:
+          type: string
+          enum: [submit, observe]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_id:
+          $ref: "#/components/schemas/Identifier128"
+        grant_id:
+          type: string
+          pattern: '^grant-[0-9a-f]{64}$'
+        operation_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_permit:
+          type: string
+          minLength: 1
+          maxLength: 21846
+        request_base64:
+          type: string
+          minLength: 4
+          maxLength: 87384
+        task_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+      description: >-
+        A submit action uses grant_id, operation_id, task_permit, and
+        request_base64. An observe action uses task_digest. Executor validates
+        the closed action-specific shape before calling Gateway.
+    ExecutorTaskPollResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, deliveries]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-task-poll.v1]
+        deliveries:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/ExecutorTaskDelivery"
+    ExecutorTaskReport:
+      type: object
+      additionalProperties: false
+      required: [schema_version, delivery_id, delivery_generation, tenant_id, node_id, task_id, status, permit_digest]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-task-report.v1]
+        delivery_id:
+          type: string
+          pattern: '^task-delivery-[0-9a-f]{64}$'
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_id:
+          $ref: "#/components/schemas/Identifier128"
+        status:
+          type: string
+          enum: [accepted, observed, retryable_error, rejected, outcome_unknown]
+        task_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        run_id:
+          $ref: "#/components/schemas/Identifier128"
+        lifecycle_state:
+          $ref: "#/components/schemas/Identifier128"
+        task_status:
+          type: string
+          maxLength: 128
+        result_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        response_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        result_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 699052
+          description: Optional exact terminal observation, limited to 512 KiB before base64 encoding.
+        error_code:
+          $ref: "#/components/schemas/Identifier128"
+    AppliedResponse:
+      type: object
+      additionalProperties: false
+      required: [applied]
+      properties:
+        applied:
+          type: boolean
     ExecutorPollRequest:
       oneOf:
         - $ref: "#/components/schemas/ExecutorPollRequestV3"

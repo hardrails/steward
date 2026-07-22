@@ -99,6 +99,65 @@ type Verified struct {
 	EnvelopeDigest string
 }
 
+// Inspected is a structurally valid, canonical task permit whose signature has
+// not been authenticated. It exists for untrusted couriers such as Control,
+// which must route an exact envelope without possessing tenant verification
+// keys. Only Gateway may turn this inspection into authority by calling Verify
+// against the admitted task-authority key.
+type Inspected struct {
+	Statement      Statement
+	KeyID          string
+	EnvelopeDigest string
+}
+
+// InspectUnverified parses one canonical permit without authenticating its
+// signature. Callers must treat every returned field as attacker-controlled and
+// must never authorize an effect from this result. The statement is still
+// checked for schema, identifier, digest, size, and bounded validity syntax so
+// a durable courier can reject malformed work before retaining it.
+func InspectUnverified(rawEnvelope []byte) (Inspected, error) {
+	if len(rawEnvelope) == 0 || len(rawEnvelope) > MaxEnvelopeBytes {
+		return Inspected{}, invalid("envelope is empty or exceeds %d bytes", MaxEnvelopeBytes)
+	}
+	envelope, err := dsse.Parse(rawEnvelope)
+	if err != nil || envelope.PayloadType != PayloadType || len(envelope.Signatures) != 1 {
+		return Inspected{}, invalid("parse canonical single-signature envelope")
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload || !utf8.Valid(payload) {
+		return Inspected{}, invalid("permit payload is not canonical UTF-8")
+	}
+	signature, err := base64.StdEncoding.DecodeString(envelope.Signatures[0].Sig)
+	if err != nil || len(signature) != ed25519.SignatureSize ||
+		base64.StdEncoding.EncodeToString(signature) != envelope.Signatures[0].Sig ||
+		!identifier(envelope.Signatures[0].KeyID) {
+		return Inspected{}, invalid("permit signature encoding is invalid")
+	}
+	canonical, err := dsse.Marshal(envelope)
+	if err != nil || !bytes.Equal(canonical, rawEnvelope) {
+		return Inspected{}, invalid("permit envelope is not canonical")
+	}
+	var wire wireStatement
+	if err := dsse.DecodeStrictInto(payload, MaxEnvelopeBytes, &wire); err != nil {
+		return Inspected{}, invalid("decode signed statement: %v", err)
+	}
+	statement, ok := wire.statement()
+	if !ok {
+		return Inspected{}, invalid("signed statement omits a required field")
+	}
+	notBefore, err := canonicalTime(statement.NotBefore)
+	if err != nil {
+		return Inspected{}, invalid("not_before: %v", err)
+	}
+	if err := validateStatement(statement, notBefore, MaxValidity); err != nil {
+		return Inspected{}, err
+	}
+	return Inspected{
+		Statement: statement, KeyID: envelope.Signatures[0].KeyID,
+		EnvelopeDigest: dsse.Digest(rawEnvelope),
+	}, nil
+}
+
 // RequestDigest binds a permit to the exact request-body bytes. Callers must
 // compute it without parsing or reserializing the request.
 func RequestDigest(raw []byte) string {

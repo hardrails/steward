@@ -38,6 +38,44 @@ func TestVerifyReturnsEveryAuthenticatedBinding(t *testing.T) {
 	}
 }
 
+func TestInspectUnverifiedReturnsBindingsWithoutGrantingAuthority(t *testing.T) {
+	_, private := testKey(t)
+	statement := validStatement()
+	raw := signStatement(t, statement, "authority-a", private)
+
+	inspected, err := InspectUnverified(raw)
+	if err != nil {
+		t.Fatalf("InspectUnverified: %v", err)
+	}
+	if inspected.Statement != statement || inspected.KeyID != "authority-a" ||
+		inspected.EnvelopeDigest != dsse.Digest(raw) {
+		t.Fatalf("inspection = %#v", inspected)
+	}
+
+	// A different signing key remains structurally inspectable. Gateway, which
+	// owns the admitted public keys, is still required to reject it.
+	_, attacker := testKey(t)
+	forged := signStatement(t, statement, "authority-a", attacker)
+	if _, err := InspectUnverified(forged); err != nil {
+		t.Fatalf("structural inspection authenticated a signature: %v", err)
+	}
+}
+
+func TestInspectUnverifiedRejectsMalformedEnvelopeAndStatement(t *testing.T) {
+	_, private := testKey(t)
+	invalid := validStatement()
+	invalid.ExpiresAt = "2026-07-13T12:30:00Z"
+	for _, raw := range [][]byte{
+		nil,
+		[]byte(`{"payloadType":"broken"}`),
+		signStatement(t, invalid, "authority-a", private),
+	} {
+		if _, err := InspectUnverified(raw); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("InspectUnverified error = %v, want ErrInvalid", err)
+		}
+	}
+}
+
 func TestVerifyRejectsInvalidSignedStatements(t *testing.T) {
 	public, private := testKey(t)
 	trusted := map[string]ed25519.PublicKey{"authority-a": public}
