@@ -265,6 +265,7 @@ func agentPlan(arguments []string, stdout io.Writer) error {
 }
 
 func agentFork(arguments []string, stdout io.Writer) error {
+	leadingDeployment, arguments := deploymentLeadingName(arguments)
 	flags := flag.NewFlagSet("agent fork", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	bundlePath := flags.String("bundle", "agent.bundle.json", "agent bundle")
@@ -278,7 +279,7 @@ func agentFork(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	if *snapshotPath == "" || flags.NArg() != 0 {
-		return errors.New("agent fork requires -snapshot and accepts only named flags")
+		return errors.New("agent fork requires -snapshot and accepts one optional leading deployment name")
 	}
 	if *ttl != 0 && *onExpiry == "" {
 		*onExpiry = "destroy"
@@ -313,7 +314,11 @@ func agentFork(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	plan, err := agentapp.Fork(bundle, snapshot, *instanceID, *lineageID, *ttl, *onExpiry, time.Now().UTC())
+	deploymentID := bundle.Definition.Name + "-fork"
+	if leadingDeployment != "" {
+		deploymentID = leadingDeployment
+	}
+	plan, err := agentapp.Fork(bundle, snapshot, deploymentID, *instanceID, *lineageID, *ttl, *onExpiry, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -324,7 +329,12 @@ func agentFork(arguments []string, stdout io.Writer) error {
 	if err := writeNewFile(*output, raw, 0o644); err != nil {
 		return err
 	}
-	return writeAgentJSON(stdout, map[string]any{"fork": *output, "instance_id": plan.InstanceID, "lineage_id": plan.LineageID, "expires_at": plan.ExpiresAt})
+	return writeAgentJSON(stdout, map[string]any{
+		"fork": *output, "deployment": plan.DeploymentID, "instance_id": plan.InstanceID,
+		"lineage_id": plan.LineageID, "source_node_id": plan.SourceNodeID,
+		"expires_at": plan.ExpiresAt,
+		"next":       "stewardctl agent authorize SITE_DIRECTORY -fork-plan " + *output,
+	})
 }
 
 func agentDoctor(arguments []string, stdout io.Writer) error {

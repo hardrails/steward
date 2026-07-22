@@ -80,9 +80,9 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 	}
 	delegationRaw, _ := json.Marshal(delegationEnvelope)
 	forkRaw, _ := json.Marshal(agentapp.ForkPlan{
-		Schema: agentapp.ForkSchema, SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
+		Schema: agentapp.ForkSchema, DeploymentID: "forked-auditor", SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
 		InstanceID: "auditor-0", LineageID: "auditor-lineage", Generation: 1,
-		SourceLineageID: "source-lineage", ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
+		SourceNodeID: "node-a", SourceLineageID: "source-lineage", ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
 	})
 	for name, raw := range map[string][]byte{
 		"auditor.bundle.json":     bundleRaw,

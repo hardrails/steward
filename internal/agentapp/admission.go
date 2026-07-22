@@ -17,6 +17,29 @@ func BuildIntent(
 	tenantID, nodeID, instanceID, lineageID string,
 	generation uint64,
 ) (admission.InstanceIntent, error) {
+	return buildIntent(bundle, verified, tenantID, nodeID, instanceID, lineageID, generation, "")
+}
+
+// BuildResumeIntent performs the same complete policy intersection as
+// BuildIntent while requiring a fresh lineage to resume from an independently
+// bound immutable snapshot. The snapshot identity remains in the signed clone
+// command and must not be smuggled into the portable bundle digest.
+func BuildResumeIntent(
+	bundle Bundle,
+	verified admission.VerifiedCapsuleImport,
+	tenantID, nodeID, instanceID, lineageID string,
+	generation uint64,
+) (admission.InstanceIntent, error) {
+	return buildIntent(bundle, verified, tenantID, nodeID, instanceID, lineageID, generation, "resume")
+}
+
+func buildIntent(
+	bundle Bundle,
+	verified admission.VerifiedCapsuleImport,
+	tenantID, nodeID, instanceID, lineageID string,
+	generation uint64,
+	stateDispositionOverride string,
+) (admission.InstanceIntent, error) {
 	if err := bundle.Validate(); err != nil {
 		return admission.InstanceIntent{}, err
 	}
@@ -64,6 +87,12 @@ func BuildIntent(
 		if bundle.Definition.State.SnapshotID != "" {
 			stateDisposition = "resume"
 		}
+	}
+	if stateDispositionOverride != "" {
+		if stateDispositionOverride != "resume" || !capabilities.State {
+			return admission.InstanceIntent{}, errors.New("resume admission requires a stateful agent bundle")
+		}
+		stateDisposition = stateDispositionOverride
 	}
 	effectMode, err := defaultEffectMode(verified.SitePolicy, tenantID)
 	if err != nil {

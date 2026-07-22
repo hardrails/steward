@@ -116,7 +116,7 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	snapshot := agentapp.Snapshot{
 		Schema: agentapp.SnapshotSchema, ID: "snapshot-a", BundleDigest: bundleDigest,
 		RuntimeEngine: "hermes", StateDigest: "sha256:" + strings.Repeat("b", 64),
-		SourceLineage: "lineage-parent", CreatedAt: "2026-07-19T12:00:00Z",
+		SourceNodeID: "node-a", SourceLineage: "lineage-parent", CreatedAt: "2026-07-19T12:00:00Z",
 	}
 	snapshotRaw, _ := json.Marshal(snapshot)
 	snapshotPath := filepath.Join(directory, "snapshot.json")
@@ -126,7 +126,7 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	}
 	output.Reset()
 	if err := run([]string{
-		"agent", "fork", "-bundle", bundlePath, "-snapshot", snapshotPath,
+		"agent", "fork", "forked-auditor", "-bundle", bundlePath, "-snapshot", snapshotPath,
 		"-instance-id", "auditor-fork", "-lineage-id", "lineage-fork",
 		"-ttl", "1h", "-out", forkPath,
 	}, &output, &bytes.Buffer{}); err != nil {
@@ -141,7 +141,7 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	}
 	var fork agentapp.ForkPlan
 	if err := json.Unmarshal(forkRaw, &fork); err != nil || fork.OnExpiry != "destroy" || fork.ExpiresAt == "" ||
-		fork.SourceLineageID != "lineage-parent" {
+		fork.DeploymentID != "forked-auditor" || fork.SourceNodeID != "node-a" || fork.SourceLineageID != "lineage-parent" {
 		t.Fatalf("fork plan=%s err=%v", forkRaw, err)
 	}
 	generatedForkPath := filepath.Join(directory, "generated-fork.json")

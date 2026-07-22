@@ -178,6 +178,16 @@ func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	if _, err := BuildIntent(bundle, denied, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil {
 		t.Fatal("site policy inference denial accepted")
 	}
+	forkIntent, err := BuildResumeIntent(bundle, verified, "tenant-a", "node-a", "agent-fork", "lineage-fork", 1)
+	if err != nil || forkIntent.StateDisposition != "resume" {
+		t.Fatalf("fork resume intent=(%+v, %v)", forkIntent, err)
+	}
+	stateless := bundle
+	stateless.Definition.State.Persistent = false
+	stateless.SourceDigest, _ = DigestJSON(stateless.Definition)
+	if _, err := BuildResumeIntent(stateless, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil {
+		t.Fatal("stateless resume accepted")
+	}
 	resumed := bundle
 	resumed.Definition.State.SnapshotID = "snapshot-a"
 	resumed.SourceDigest, _ = DigestJSON(resumed.Definition)
@@ -260,15 +270,15 @@ func TestScheduleFiltersAndScoresDeterministically(t *testing.T) {
 func TestForkCreatesFreshBoundedLineage(t *testing.T) {
 	bundle, _ := Build(validDefinition(), nil)
 	digest, _ := DigestJSON(bundle)
-	snapshot := Snapshot{Schema: SnapshotSchema, ID: "snap-1", BundleDigest: digest, RuntimeEngine: "hermes", StateDigest: "sha256:" + strings.Repeat("b", 64), SourceLineage: "lineage-old", CreatedAt: "2026-07-18T00:00:00Z"}
-	plan, err := Fork(bundle, snapshot, "agent-fork-1", "lineage-new", time.Hour, "destroy", time.Date(2026, 7, 18, 1, 0, 0, 0, time.UTC))
+	snapshot := Snapshot{Schema: SnapshotSchema, ID: "snap-1", BundleDigest: digest, RuntimeEngine: "hermes", StateDigest: "sha256:" + strings.Repeat("b", 64), SourceNodeID: "node-a", SourceLineage: "lineage-old", CreatedAt: "2026-07-18T00:00:00Z"}
+	plan, err := Fork(bundle, snapshot, "agent-fork", "agent-fork-1", "lineage-new", time.Hour, "destroy", time.Date(2026, 7, 18, 1, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.Generation != 1 || plan.ExpiresAt != "2026-07-18T02:00:00Z" || plan.LineageID == snapshot.SourceLineage {
 		t.Fatalf("plan=%#v", plan)
 	}
-	if _, err := Fork(bundle, snapshot, "agent-fork-1", snapshot.SourceLineage, time.Hour, "destroy", time.Now()); err == nil {
+	if _, err := Fork(bundle, snapshot, "agent-fork", "agent-fork-1", snapshot.SourceLineage, time.Hour, "destroy", time.Now()); err == nil {
 		t.Fatal("source lineage reused")
 	}
 }
@@ -409,7 +419,7 @@ func TestInventoryAndScheduleRejectMalformedOrIneligibleNodes(t *testing.T) {
 func TestDecodeSnapshotAndForkFailures(t *testing.T) {
 	bundle, _ := Build(validDefinition(), nil)
 	digest, _ := DigestJSON(bundle)
-	snapshot := Snapshot{Schema: SnapshotSchema, ID: "snap-1", BundleDigest: digest, RuntimeEngine: "hermes", StateDigest: "sha256:" + strings.Repeat("b", 64), SourceLineage: "old", CreatedAt: "2026-07-18T00:00:00Z"}
+	snapshot := Snapshot{Schema: SnapshotSchema, ID: "snap-1", BundleDigest: digest, RuntimeEngine: "hermes", StateDigest: "sha256:" + strings.Repeat("b", 64), SourceNodeID: "node-a", SourceLineage: "old", CreatedAt: "2026-07-18T00:00:00Z"}
 	raw, _ := json.Marshal(snapshot)
 	decoded, err := DecodeSnapshot(raw)
 	if err != nil || decoded.ID != "snap-1" {
@@ -422,30 +432,30 @@ func TestDecodeSnapshotAndForkFailures(t *testing.T) {
 	}
 	snapshot.CreatedAt = "2026-07-18T00:00:00Z"
 	snapshot.BundleDigest = "sha256:" + strings.Repeat("c", 64)
-	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", 0, "", time.Now()); err == nil {
+	if _, err := Fork(bundle, snapshot, "new-deployment", "new-agent", "new-lineage", 0, "", time.Now()); err == nil {
 		t.Fatal("incompatible snapshot accepted")
 	}
 	snapshot.BundleDigest = digest
 	invalid := snapshot
 	invalid.Schema = "other"
-	if _, err := Fork(bundle, invalid, "new-agent", "new-lineage", 0, "", time.Now()); err == nil {
+	if _, err := Fork(bundle, invalid, "new-deployment", "new-agent", "new-lineage", 0, "", time.Now()); err == nil {
 		t.Fatal("direct invalid snapshot accepted")
 	}
-	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", 0, "destroy", time.Now()); err == nil {
+	if _, err := Fork(bundle, snapshot, "new-deployment", "new-agent", "new-lineage", 0, "destroy", time.Now()); err == nil {
 		t.Fatal("expiry without TTL accepted")
 	}
-	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", time.Second, "destroy", time.Now()); err == nil {
+	if _, err := Fork(bundle, snapshot, "new-deployment", "new-agent", "new-lineage", time.Second, "destroy", time.Now()); err == nil {
 		t.Fatal("short TTL accepted")
 	}
-	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", time.Hour, "hibernate", time.Now()); err == nil {
+	if _, err := Fork(bundle, snapshot, "new-deployment", "new-agent", "new-lineage", time.Hour, "hibernate", time.Now()); err == nil {
 		t.Fatal("unsupported fork hibernation accepted")
 	}
 }
 
 func TestForkPlanStrictDecodingAndValidation(t *testing.T) {
 	valid := ForkPlan{
-		Schema: ForkSchema, SnapshotID: "snapshot-a", BundleDigest: "sha256:" + strings.Repeat("a", 64),
-		InstanceID: "fork-a", LineageID: "lineage-fork", SourceLineageID: "lineage-source", Generation: 1,
+		Schema: ForkSchema, DeploymentID: "fork-deployment", SnapshotID: "snapshot-a", BundleDigest: "sha256:" + strings.Repeat("a", 64),
+		InstanceID: "fork-a", LineageID: "lineage-fork", SourceNodeID: "node-a", SourceLineageID: "lineage-source", Generation: 1,
 		ExpiresAt: "2026-07-21T12:00:00Z", OnExpiry: "destroy",
 	}
 	raw, err := json.Marshal(valid)
