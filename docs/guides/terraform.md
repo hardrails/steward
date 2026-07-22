@@ -6,6 +6,12 @@ section: How-to
 
 # Bootstrap Steward with Terraform
 
+For a private multi-node deployment, start with
+[Deploy Steward node pools in the cloud]({{ '/guides/cloud-fleets/' | relative_url }}).
+It provides supported AWS Auto Scaling Group, Google Cloud regional Managed
+Instance Group, and Azure Virtual Machine Scale Set modules. This page explains
+the lower-level provider-neutral bootstrap and its authority boundaries.
+
 The provider-neutral module at `integrations/terraform/modules/steward-node`
 generates cloud-init that pins the installer by SHA-256 and Steward by exact release
 tag.

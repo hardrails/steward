@@ -56,7 +56,8 @@ Documentation: https://hardrails.github.io/steward/
 - [Tenant-signed service tasks](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task): Scope a tenant key to Hermes, issue one exact task bundle, dispatch it through loopback Gateway, and audit its receipts
 - [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; use the protected GitHub issue preset or a generic exact operation; verify permit-to-receipt linkage offline
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
-- [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
+- [Cloud node pools](https://hardrails.github.io/steward/guides/cloud-fleets/): Private multi-zone AWS Auto Scaling Group, Google Cloud Managed Instance Group, and Azure VM Scale Set modules with exact non-secret bootstrap and explicit enrollment and drain boundaries
+- [Terraform](https://hardrails.github.io/steward/guides/terraform/): Lower-level provider-neutral, non-secret cloud bootstrap and controller handoff
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate the fleet controller, a local node, or both with Model Context Protocol 2025-11-25 stdio tools
 - [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor qualification evidence, signed workspace and connector skills, service API, and limits
 - [Web research agents](https://hardrails.github.io/steward/guides/research-agents/): Search and extract web sources through separately operated credential-isolating workers, treat retrieved content as untrusted, and publish bounded source-linked findings

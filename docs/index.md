@@ -115,6 +115,7 @@ volumes remain a dedicated-host-only compatibility mode.
 [Known limitations]({{ '/limitations/' | relative_url }}) ·
 [Persistent state]({{ '/guides/persistent-state/' | relative_url }}) ·
 [Air-gapped deployment]({{ '/guides/air-gapped/' | relative_url }}) ·
+[Cloud node pools]({{ '/guides/cloud-fleets/' | relative_url }}) ·
 [Terraform bootstrap]({{ '/guides/terraform/' | relative_url }}) ·
 [MCP setup]({{ '/guides/mcp/' | relative_url }})
 

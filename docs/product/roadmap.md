@@ -370,7 +370,11 @@ The roadmap starts from working primitives rather than a blank design:
 - a strict, owner-only incident support bundle that joins non-secret controller
   inventory and node evidence checkpoints for offline inspection without exporting
   prompts, bodies, command envelopes, credentials, private keys, result text, or
-  logs.
+  logs; and
+- supported private AWS Auto Scaling Group, Google Cloud regional Managed Instance
+  Group, and Azure Virtual Machine Scale Set modules that reuse native fleet
+  lifecycle, pin non-secret first boot, and keep node enrollment out of Terraform
+  state.
 
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and
@@ -452,6 +456,8 @@ supportable through one coherent operational surface.
   multi-party thresholds; expiry; revocation; and explicit uncertain outcomes.
 - Add OpenBao and SPIFFE/SPIRE reference integrations with rotation and freshness
   policy while retaining protected-file materialization.
+- Bind SPIFFE/SPIRE-attested cloud instance identity to short-lived, node-specific
+  enrollment so elastic pools can add capacity without shared bootstrap tokens.
 - Add a connector conformance kit and two or three anchor connectors.
 - Extend the implemented site and tenant freeze, node quarantine, snapshot
   quarantine, retained Control incident timeline, and metadata-only support
