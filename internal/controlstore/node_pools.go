@@ -1,6 +1,8 @@
 package controlstore
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"math"
 	"sort"
@@ -8,6 +10,8 @@ import (
 
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/poolmembership"
 )
 
 const (
@@ -15,16 +19,20 @@ const (
 	MaxNodePoolTenantScopes    = 64
 	MaxNodePoolDesiredCapacity = 4096
 
-	NodePoolConditionCapacityShortfall = "capacity_shortfall"
-	NodePoolConditionNodesNotReady     = "nodes_not_ready"
-	NodePoolConditionScaleInAvailable  = "scale_in_available"
+	NodePoolConditionCapacityShortfall    = "capacity_shortfall"
+	NodePoolConditionNodesNotReady        = "nodes_not_ready"
+	NodePoolConditionScaleInAvailable     = "scale_in_available"
+	NodePoolConditionMembershipUnverified = "membership_unverified"
 )
 
 type NodePoolNode struct {
-	NodeID     string         `json:"node_id"`
-	Ready      bool           `json:"ready"`
-	Reason     string         `json:"reason,omitempty"`
-	DrainState NodeDrainState `json:"drain_state,omitempty"`
+	NodeID             string         `json:"node_id"`
+	Ready              bool           `json:"ready"`
+	Reason             string         `json:"reason,omitempty"`
+	DrainState         NodeDrainState `json:"drain_state,omitempty"`
+	Eligible           bool           `json:"eligible"`
+	MembershipDigest   string         `json:"membership_digest,omitempty"`
+	MembershipNotAfter string         `json:"membership_not_after,omitempty"`
 }
 
 // NodePoolStatus is a provider-neutral capacity observation. ScaleOutNeeded is
@@ -35,6 +43,7 @@ type NodePoolStatus struct {
 	Nodes             []NodePoolNode `json:"nodes"`
 	RegisteredNodes   int            `json:"registered_nodes"`
 	ReadyNodes        int            `json:"ready_nodes"`
+	EligibleNodes     int            `json:"eligible_nodes"`
 	ScaleOutNeeded    int            `json:"scale_out_needed"`
 	ScaleInCandidates []string       `json:"scale_in_candidates"`
 	Conditions        []string       `json:"conditions"`
@@ -51,12 +60,14 @@ func (pool NodePool) Validate() error {
 func (status NodePoolStatus) Validate() error {
 	if status.Pool.Validate() != nil || status.Nodes == nil || status.ScaleInCandidates == nil ||
 		status.Conditions == nil || status.RegisteredNodes != len(status.Nodes) || status.ReadyNodes < 0 ||
-		status.ReadyNodes > status.RegisteredNodes || status.ScaleOutNeeded != max(0, status.Pool.DesiredNodes-status.RegisteredNodes) ||
-		len(status.ScaleInCandidates) > max(0, status.RegisteredNodes-status.Pool.DesiredNodes) ||
+		status.ReadyNodes > status.EligibleNodes || status.EligibleNodes > status.RegisteredNodes ||
+		status.ScaleOutNeeded != max(0, status.Pool.DesiredNodes-status.EligibleNodes) ||
+		len(status.ScaleInCandidates) > max(0, status.EligibleNodes-status.Pool.DesiredNodes) ||
 		!validTimestamp(status.ObservedAt) {
 		return errors.New("node pool status is invalid")
 	}
 	ready := 0
+	eligible := 0
 	byID := make(map[string]NodePoolNode, len(status.Nodes))
 	for index, node := range status.Nodes {
 		if !validRecordID(node.NodeID, 128) || index > 0 && status.Nodes[index-1].NodeID >= node.NodeID ||
@@ -66,9 +77,12 @@ func (status NodePoolStatus) Validate() error {
 		if node.Ready {
 			ready++
 		}
+		if node.Eligible {
+			eligible++
+		}
 		byID[node.NodeID] = node
 	}
-	if ready != status.ReadyNodes {
+	if ready != status.ReadyNodes || eligible != status.EligibleNodes {
 		return errors.New("node pool ready count is inconsistent")
 	}
 	for index, nodeID := range status.ScaleInCandidates {
@@ -82,10 +96,13 @@ func (status NodePoolStatus) Validate() error {
 	if status.ScaleOutNeeded > 0 {
 		wantConditions = append(wantConditions, NodePoolConditionCapacityShortfall)
 	}
-	if status.ReadyNodes < status.RegisteredNodes {
+	if status.ReadyNodes < status.EligibleNodes {
 		wantConditions = append(wantConditions, NodePoolConditionNodesNotReady)
 	}
-	if len(status.ScaleInCandidates) > 0 && status.RegisteredNodes > status.Pool.DesiredNodes {
+	if status.EligibleNodes < status.RegisteredNodes {
+		wantConditions = append(wantConditions, NodePoolConditionMembershipUnverified)
+	}
+	if len(status.ScaleInCandidates) > 0 && status.EligibleNodes > status.Pool.DesiredNodes {
 		wantConditions = append(wantConditions, NodePoolConditionScaleInAvailable)
 	}
 	if len(wantConditions) != len(status.Conditions) {
@@ -103,18 +120,36 @@ func validNodePoolNodeState(node NodePoolNode) bool {
 	if node.Ready != (node.Reason == "") {
 		return false
 	}
+	if node.Ready && !node.Eligible {
+		return false
+	}
+	if (node.MembershipDigest == "") != (node.MembershipNotAfter == "") ||
+		node.MembershipDigest != "" && (!validSHA256Digest(node.MembershipDigest) || !validTimestamp(node.MembershipNotAfter)) {
+		return false
+	}
 	switch node.Reason {
 	case "", "scheduling_unavailable", "scheduling_stale", "placement_blocked":
+		if !node.Eligible {
+			return false
+		}
+	case "membership_missing":
+		if node.Eligible || node.MembershipDigest != "" {
+			return false
+		}
+	case "membership_expired", "membership_mismatch":
+		if node.Eligible || node.MembershipDigest == "" {
+			return false
+		}
 	case "draining":
-		if node.DrainState != NodeDrainActive {
+		if !node.Eligible || node.DrainState != NodeDrainActive {
 			return false
 		}
 	case "drained":
-		if node.DrainState != NodeDrainCompleted {
+		if !node.Eligible || node.DrainState != NodeDrainCompleted {
 			return false
 		}
 	case "drain_failed":
-		if node.DrainState != NodeDrainFailed {
+		if !node.Eligible || node.DrainState != NodeDrainFailed {
 			return false
 		}
 	default:
@@ -233,6 +268,7 @@ func (store *Store) ApplyNodePool(
 		return NodePool{}, false, ErrForbidden
 	}
 	pool.Revision = 1
+	pool.MembershipGeneration = 1
 	pool.CreatedAt = canonicalTimestamp(now)
 	pool.UpdatedAt = pool.CreatedAt
 	if now.IsZero() || !validNodePool(pool) {
@@ -272,6 +308,13 @@ func (store *Store) ApplyNodePool(
 		}
 		if current.Revision == math.MaxUint64 {
 			return NodePool{}, false, ErrCapacityExceeded
+		}
+		pool.MembershipGeneration = current.MembershipGeneration
+		if !sameNodePoolMembershipSpec(current, pool) {
+			if current.MembershipGeneration == math.MaxUint64 {
+				return NodePool{}, false, ErrCapacityExceeded
+			}
+			pool.MembershipGeneration++
 		}
 		pool.Revision = current.Revision + 1
 		pool.CreatedAt = current.CreatedAt
@@ -321,43 +364,54 @@ func nodePoolStatusLocked(current state, pool NodePool, now time.Time, staleAfte
 		Conditions: []string{}, ObservedAt: canonicalTimestamp(now),
 	}
 	for _, node := range current.nodes {
-		if !nodeMatchesPool(node, pool) {
+		if !nodeAdvertisesPool(node, pool) {
 			continue
 		}
 		projection := NodePoolNode{NodeID: node.ID}
 		if node.Drain != nil {
 			projection.DrainState = node.Drain.State
 		}
-		projection.Ready, projection.Reason = nodePoolNodeReady(node, now, staleAfter)
+		projection.Eligible, projection.Reason = nodePoolMembershipEligible(node, pool, now)
+		if node.PoolMembership != nil {
+			projection.MembershipDigest = node.PoolMembership.Digest
+			projection.MembershipNotAfter = node.PoolMembership.NotAfter
+		}
+		if projection.Eligible {
+			status.EligibleNodes++
+			projection.Ready, projection.Reason = nodePoolNodeReady(node, now, staleAfter)
+		}
 		if projection.Ready {
 			status.ReadyNodes++
 		}
 		status.Nodes = append(status.Nodes, projection)
-		if node.Drain != nil && node.Drain.State == NodeDrainCompleted && !nodeHasAssignedWorkload(current.deployments, node.ID) {
+		if projection.Eligible && node.Drain != nil && node.Drain.State == NodeDrainCompleted && !nodeHasAssignedWorkload(current.deployments, node.ID) {
 			status.ScaleInCandidates = append(status.ScaleInCandidates, node.ID)
 		}
 	}
 	sort.Slice(status.Nodes, func(i, j int) bool { return status.Nodes[i].NodeID < status.Nodes[j].NodeID })
 	sort.Strings(status.ScaleInCandidates)
 	status.RegisteredNodes = len(status.Nodes)
-	surplus := max(0, status.RegisteredNodes-pool.DesiredNodes)
+	surplus := max(0, status.EligibleNodes-pool.DesiredNodes)
 	if len(status.ScaleInCandidates) > surplus {
 		status.ScaleInCandidates = status.ScaleInCandidates[:surplus]
 	}
-	if status.RegisteredNodes < pool.DesiredNodes {
-		status.ScaleOutNeeded = pool.DesiredNodes - status.RegisteredNodes
+	if status.EligibleNodes < pool.DesiredNodes {
+		status.ScaleOutNeeded = pool.DesiredNodes - status.EligibleNodes
 		status.Conditions = append(status.Conditions, NodePoolConditionCapacityShortfall)
 	}
-	if status.ReadyNodes < status.RegisteredNodes {
+	if status.ReadyNodes < status.EligibleNodes {
 		status.Conditions = append(status.Conditions, NodePoolConditionNodesNotReady)
 	}
-	if len(status.ScaleInCandidates) > 0 && status.RegisteredNodes > pool.DesiredNodes {
+	if status.EligibleNodes < status.RegisteredNodes {
+		status.Conditions = append(status.Conditions, NodePoolConditionMembershipUnverified)
+	}
+	if len(status.ScaleInCandidates) > 0 && status.EligibleNodes > pool.DesiredNodes {
 		status.Conditions = append(status.Conditions, NodePoolConditionScaleInAvailable)
 	}
 	return status
 }
 
-func nodeMatchesPool(node Node, pool NodePool) bool {
+func nodeAdvertisesPool(node Node, pool NodePool) bool {
 	if !node.Active || node.Scheduling == nil || pool.Architecture != "" && node.Scheduling.Observation.Architecture != pool.Architecture {
 		return false
 	}
@@ -369,6 +423,38 @@ func nodeMatchesPool(node Node, pool NodePool) bool {
 	labels := node.Scheduling.Observation.Labels
 	index := sort.Search(len(labels), func(index int) bool { return labels[index].Key >= NodePoolLabelKey })
 	return index < len(labels) && labels[index].Key == NodePoolLabelKey && labels[index].Value == pool.ID
+}
+
+func nodePoolMembershipEligible(node Node, pool NodePool, now time.Time) (bool, string) {
+	if pool.MembershipKeyID == "" {
+		return true, ""
+	}
+	membership := node.PoolMembership
+	if membership == nil {
+		return false, "membership_missing"
+	}
+	if membership.PoolID != pool.ID || membership.PoolMembershipGeneration != pool.MembershipGeneration || membership.KeyID != pool.MembershipKeyID ||
+		pool.Architecture != "" && membership.Architecture != pool.Architecture {
+		return false, "membership_mismatch"
+	}
+	notAfter, err := time.Parse(time.RFC3339Nano, membership.NotAfter)
+	if err != nil || !now.Before(notAfter) {
+		return false, "membership_expired"
+	}
+	if !nodeMeasurementsMatchMembership(node, membership) {
+		return false, "membership_mismatch"
+	}
+	return true, ""
+}
+
+func nodeMeasurementsMatchMembership(node Node, membership *NodePoolMembership) bool {
+	if node.Scheduling == nil || membership == nil {
+		return false
+	}
+	observation := node.Scheduling.Observation
+	return observation.BootIdentitySHA256 != "" && observation.SchedulingPolicySHA256 != "" &&
+		observation.BootIdentitySHA256 == membership.BootIdentitySHA256 &&
+		observation.SchedulingPolicySHA256 == membership.SchedulingPolicySHA256
 }
 
 func nodePoolNodeReady(node Node, now time.Time, staleAfter time.Duration) (bool, string) {
@@ -407,11 +493,12 @@ func nodeHasAssignedWorkload(deployments map[string]Deployment, nodeID string) b
 }
 
 func validNodePool(pool NodePool) bool {
-	if !validRecordID(pool.ID, 128) || pool.Revision == 0 || !validTenantSet(pool.TenantIDs) ||
+	if !validRecordID(pool.ID, 128) || pool.Revision == 0 || pool.MembershipGeneration == 0 || !validTenantSet(pool.TenantIDs) ||
 		len(pool.TenantIDs) > MaxNodePoolTenantScopes ||
 		pool.Architecture != "" && !controlprotocol.ValidSchedulingAttribute(pool.Architecture) ||
 		pool.MinNodes < 0 || pool.DesiredNodes < pool.MinNodes || pool.MaxNodes < pool.DesiredNodes ||
 		pool.MaxNodes <= 0 || pool.MaxNodes > MaxNodePoolDesiredCapacity ||
+		!validNodePoolMembershipAuthority(pool) ||
 		!validTimestamp(pool.CreatedAt) || !validTimestamp(pool.UpdatedAt) {
 		return false
 	}
@@ -425,12 +512,141 @@ func sameNodePoolSpec(left, right NodePool) bool {
 		left.DesiredNodes != right.DesiredNodes || left.MaxNodes != right.MaxNodes || len(left.TenantIDs) != len(right.TenantIDs) {
 		return false
 	}
+	if left.MembershipKeyID != right.MembershipKeyID || left.MembershipPublicKeyBase64 != right.MembershipPublicKeyBase64 {
+		return false
+	}
 	for index := range left.TenantIDs {
 		if left.TenantIDs[index] != right.TenantIDs[index] {
 			return false
 		}
 	}
 	return true
+}
+
+func sameNodePoolMembershipSpec(left, right NodePool) bool {
+	if left.Architecture != right.Architecture || left.MembershipKeyID != right.MembershipKeyID ||
+		left.MembershipPublicKeyBase64 != right.MembershipPublicKeyBase64 || len(left.TenantIDs) != len(right.TenantIDs) {
+		return false
+	}
+	for index := range left.TenantIDs {
+		if left.TenantIDs[index] != right.TenantIDs[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validNodePoolMembershipAuthority(pool NodePool) bool {
+	if pool.MembershipKeyID == "" || pool.MembershipPublicKeyBase64 == "" {
+		return pool.MembershipKeyID == "" && pool.MembershipPublicKeyBase64 == ""
+	}
+	if !validRecordID(pool.MembershipKeyID, 128) {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(pool.MembershipPublicKeyBase64)
+	return err == nil && len(decoded) == ed25519.PublicKeySize && base64.StdEncoding.EncodeToString(decoded) == pool.MembershipPublicKeyBase64
+}
+
+func validStoredNodePoolMembership(value *NodePoolMembership, nodeID string, tenantIDs []string) bool {
+	if value == nil || !validRecordID(value.PoolID, 128) || value.PoolMembershipGeneration == 0 ||
+		!validTimestamp(value.PoolCreatedAt) || !validSHA256Digest(value.Digest) || !validRecordID(value.KeyID, 128) ||
+		!validSHA256Digest(value.BootIdentitySHA256) || !validSHA256Digest(value.SchedulingPolicySHA256) ||
+		!validTimestamp(value.IssuedAt) || !validTimestamp(value.NotAfter) {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(value.EnvelopeBase64)
+	if err != nil || base64.StdEncoding.EncodeToString(raw) != value.EnvelopeBase64 || dsse.Digest(raw) != value.Digest {
+		return false
+	}
+	claim, err := poolmembership.Inspect(raw)
+	if err != nil || claim.NodeID != nodeID || !tenantSubset(claim.TenantIDs, tenantIDs) ||
+		claim.PoolID != value.PoolID || claim.PoolMembershipGeneration != value.PoolMembershipGeneration ||
+		claim.PoolCreatedAt != value.PoolCreatedAt || claim.Architecture != value.Architecture ||
+		claim.BootIdentitySHA256 != value.BootIdentitySHA256 || claim.SchedulingPolicySHA256 != value.SchedulingPolicySHA256 ||
+		claim.IssuedAt != value.IssuedAt || claim.NotAfter != value.NotAfter {
+		return false
+	}
+	envelope, err := dsse.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for _, signature := range envelope.Signatures {
+		if signature.KeyID == value.KeyID {
+			return true
+		}
+	}
+	return false
+}
+
+func (store *Store) BindNodePoolMembership(identity controlauth.NodeIdentity, auth *controlauth.Manager, raw []byte, now time.Time) (Node, error) {
+	if store == nil || auth == nil {
+		return Node{}, ErrUnavailable
+	}
+	statement, err := poolmembership.Inspect(raw)
+	if err != nil || statement.NodeID != identity.NodeID || statement.ControllerInstanceID != auth.InstanceID() || now.IsZero() {
+		return Node{}, invalid("node-pool membership identity is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return Node{}, err
+	}
+	if err := store.revalidateNodeLocked(identity); err != nil {
+		return Node{}, err
+	}
+	pool, ok := store.current.nodePools[statement.PoolID]
+	if !ok || pool.MembershipKeyID == "" {
+		return Node{}, ErrNotFound
+	}
+	public, err := base64.StdEncoding.DecodeString(pool.MembershipPublicKeyBase64)
+	if err != nil {
+		return Node{}, ErrConflict
+	}
+	verified, err := poolmembership.Verify(raw, pool.MembershipKeyID, ed25519.PublicKey(public), now)
+	if err != nil {
+		return Node{}, invalid("node-pool membership signature or validity is invalid")
+	}
+	claim := verified.Statement
+	if claim.PoolMembershipGeneration != pool.MembershipGeneration || claim.PoolCreatedAt != pool.CreatedAt || claim.Architecture != pool.Architecture ||
+		!equalStrings(claim.TenantIDs, pool.TenantIDs) || !tenantSubset(claim.TenantIDs, identity.TenantIDs) {
+		return Node{}, ErrConflict
+	}
+	node, ok := store.current.nodes[identity.NodeID]
+	if !ok || !node.Active {
+		return Node{}, ErrNotFound
+	}
+	membership := &NodePoolMembership{
+		PoolID: claim.PoolID, PoolMembershipGeneration: claim.PoolMembershipGeneration, PoolCreatedAt: claim.PoolCreatedAt, Digest: verified.Digest, KeyID: verified.KeyID,
+		EnvelopeBase64: base64.StdEncoding.EncodeToString(raw), Architecture: claim.Architecture,
+		BootIdentitySHA256: claim.BootIdentitySHA256, SchedulingPolicySHA256: claim.SchedulingPolicySHA256,
+		IssuedAt: claim.IssuedAt, NotAfter: claim.NotAfter,
+	}
+	if !nodeMeasurementsMatchMembership(node, membership) {
+		return Node{}, ErrConflict
+	}
+	if node.PoolMembership != nil {
+		if node.PoolMembership.Digest == membership.Digest {
+			return cloneNode(node), nil
+		}
+		if sameNodePoolMembershipLineage(node.PoolMembership, membership) {
+			previous, _ := time.Parse(time.RFC3339Nano, node.PoolMembership.IssuedAt)
+			issued, _ := time.Parse(time.RFC3339Nano, membership.IssuedAt)
+			if !issued.After(previous) {
+				return Node{}, ErrConflict
+			}
+		}
+	}
+	node.PoolMembership = membership
+	if err := store.applyMutationsLocked(mutation{Kind: mutationNode, Node: &node}); err != nil {
+		return Node{}, err
+	}
+	return cloneNode(node), nil
+}
+
+func sameNodePoolMembershipLineage(left, right *NodePoolMembership) bool {
+	return left != nil && right != nil && left.PoolID == right.PoolID &&
+		left.PoolMembershipGeneration == right.PoolMembershipGeneration &&
+		left.PoolCreatedAt == right.PoolCreatedAt && left.KeyID == right.KeyID
 }
 
 func cloneNodePool(pool NodePool) NodePool {

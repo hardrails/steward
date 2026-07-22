@@ -60,10 +60,10 @@ safe scale-in coordination but deliberately does not make elastic workload
 placement automatic. Documentation and API descriptions must keep that boundary
 explicit.
 
-Before enabling pool-scoped delegation, add a short-lived node membership
-statement signed by an offline or independently protected site authority. Bind
-it to the node ID, pool ID, tenant scopes, immutable boot identity, validity
-window, and local scheduling policy digest. Executor must verify its own
-membership and the tenant's pool-scoped delegation without trusting Control's
-interpretation. A cloud workload identity may supply attestation evidence, but
-must sit behind this vendor-neutral statement rather than becoming the protocol.
+The short-lived node membership statement is now implemented as described in
+[ADR 0059]({{ '/decisions/0059-independent-elastic-pool-membership/' | relative_url }}).
+It makes provider capacity accounting independently verifiable. Before enabling
+pool-scoped delegation, Executor must also verify its own membership and the
+tenant's pool-scoped delegation without trusting Control's interpretation. A
+cloud workload identity may supply attestation evidence, but must sit behind the
+vendor-neutral statement rather than becoming the protocol.

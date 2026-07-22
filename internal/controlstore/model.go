@@ -28,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion            = 1
-	stateFormatWriteVersion              = 19
+	stateFormatWriteVersion              = 20
 	stateFormatMaxReadVersion            = stateFormatWriteVersion
 	stateFormatEvidenceVersion           = 2
 	stateFormatExecutorV4Version         = 3
@@ -48,8 +48,9 @@ const (
 	stateFormatNodePoolVersion           = 17
 	stateFormatTaskProjectionVersion     = 18
 	stateFormatTaskRequestVersion        = 19
+	stateFormatPoolMembershipVersion     = 20
 	transactionFormatMinReadVersion      = 1
-	transactionFormatWriteVersion        = 19
+	transactionFormatWriteVersion        = 20
 	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
 	transactionEvidenceVersion           = 2
 	transactionExecutorV4Version         = 3
@@ -69,6 +70,7 @@ const (
 	transactionNodePoolVersion           = 17
 	transactionTaskProjectionVersion     = 18
 	transactionTaskRequestVersion        = 19
+	transactionPoolMembershipVersion     = 20
 	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -177,17 +179,38 @@ type Tenant struct {
 
 // NodePool is provider-neutral desired infrastructure capacity. Matching a
 // pool never grants workload authority; tenant delegations continue to name
-// exact nodes until independently verifiable pool membership is implemented.
+// exact nodes. Independently signed membership affects only capacity
+// eligibility.
 type NodePool struct {
-	ID           string   `json:"id"`
-	Revision     uint64   `json:"revision"`
-	TenantIDs    []string `json:"tenant_ids"`
-	Architecture string   `json:"architecture,omitempty"`
-	MinNodes     int      `json:"min_nodes"`
-	DesiredNodes int      `json:"desired_nodes"`
-	MaxNodes     int      `json:"max_nodes"`
-	CreatedAt    string   `json:"created_at"`
-	UpdatedAt    string   `json:"updated_at"`
+	ID                        string   `json:"id"`
+	Revision                  uint64   `json:"revision"`
+	MembershipGeneration      uint64   `json:"membership_generation"`
+	TenantIDs                 []string `json:"tenant_ids"`
+	Architecture              string   `json:"architecture,omitempty"`
+	MinNodes                  int      `json:"min_nodes"`
+	DesiredNodes              int      `json:"desired_nodes"`
+	MaxNodes                  int      `json:"max_nodes"`
+	MembershipKeyID           string   `json:"membership_key_id,omitempty"`
+	MembershipPublicKeyBase64 string   `json:"membership_public_key_base64,omitempty"`
+	CreatedAt                 string   `json:"created_at"`
+	UpdatedAt                 string   `json:"updated_at"`
+}
+
+// NodePoolMembership is the exact, independently signed statement last
+// presented by a node. Control retains the envelope so an operator can verify
+// membership without trusting Control's projection.
+type NodePoolMembership struct {
+	PoolID                   string `json:"pool_id"`
+	PoolMembershipGeneration uint64 `json:"pool_membership_generation"`
+	PoolCreatedAt            string `json:"pool_created_at"`
+	Digest                   string `json:"digest"`
+	KeyID                    string `json:"key_id"`
+	EnvelopeBase64           string `json:"envelope_base64"`
+	Architecture             string `json:"architecture,omitempty"`
+	BootIdentitySHA256       string `json:"boot_identity_sha256"`
+	SchedulingPolicySHA256   string `json:"scheduling_policy_sha256"`
+	IssuedAt                 string `json:"issued_at"`
+	NotAfter                 string `json:"not_after"`
 }
 
 type TenantQuotaAction string
@@ -243,17 +266,18 @@ type SnapshotQuarantine struct {
 }
 
 type Node struct {
-	ID           string           `json:"id"`
-	TenantIDs    []string         `json:"tenant_ids"`
-	Capabilities []string         `json:"capabilities"`
-	Evidence     *EvidenceWitness `json:"evidence,omitempty"`
-	Scheduling   *NodeScheduling  `json:"scheduling,omitempty"`
-	Placement    *NodePlacement   `json:"placement,omitempty"`
-	Drain        *NodeDrain       `json:"drain,omitempty"`
-	CreatedAt    string           `json:"created_at"`
-	LastSeenAt   string           `json:"last_seen_at,omitempty"`
-	RevokedAt    string           `json:"revoked_at,omitempty"`
-	Active       bool             `json:"active"`
+	ID             string              `json:"id"`
+	TenantIDs      []string            `json:"tenant_ids"`
+	Capabilities   []string            `json:"capabilities"`
+	Evidence       *EvidenceWitness    `json:"evidence,omitempty"`
+	Scheduling     *NodeScheduling     `json:"scheduling,omitempty"`
+	Placement      *NodePlacement      `json:"placement,omitempty"`
+	Drain          *NodeDrain          `json:"drain,omitempty"`
+	PoolMembership *NodePoolMembership `json:"pool_membership,omitempty"`
+	CreatedAt      string              `json:"created_at"`
+	LastSeenAt     string              `json:"last_seen_at,omitempty"`
+	RevokedAt      string              `json:"revoked_at,omitempty"`
+	Active         bool                `json:"active"`
 }
 
 type NodeDrainState string
@@ -815,6 +839,7 @@ func (current state) clone() state {
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		node.Placement = cloneNodePlacement(node.Placement)
 		node.Drain = cloneNodeDrain(node.Drain)
+		node.PoolMembership = cloneNodePoolMembership(node.PoolMembership)
 		next.nodes[key] = node
 	}
 	for key, credential := range current.credentials {
@@ -1198,6 +1223,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		node.Placement = cloneNodePlacement(node.Placement)
+		node.PoolMembership = cloneNodePoolMembership(node.PoolMembership)
 		snapshot.Nodes = append(snapshot.Nodes, node)
 	}
 	for _, credential := range current.credentials {
@@ -1350,6 +1376,12 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if snapshot.Version < stateFormatFleetOperationsVersion && node.Drain != nil {
 			return state{}, errors.New("legacy control snapshot contains node drain state")
 		}
+		if snapshot.Version < stateFormatPoolMembershipVersion && node.PoolMembership != nil {
+			return state{}, errors.New("legacy control snapshot contains node-pool membership state")
+		}
+		if node.PoolMembership != nil && !validStoredNodePoolMembership(node.PoolMembership, node.ID, node.TenantIDs) {
+			return state{}, errors.New("control snapshot contains invalid node-pool membership state")
+		}
 		if node.Placement != nil && !validNodePlacement(*node.Placement) {
 			return state{}, errors.New("control snapshot contains invalid node placement state")
 		}
@@ -1360,6 +1392,7 @@ func decodeState(raw []byte, limit int) (state, error) {
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		node.Placement = cloneNodePlacement(node.Placement)
 		node.Drain = cloneNodeDrain(node.Drain)
+		node.PoolMembership = cloneNodePoolMembership(node.PoolMembership)
 		current.nodes[node.ID] = node
 	}
 	for _, stored := range snapshot.Credentials {
@@ -1441,6 +1474,12 @@ func decodeState(raw []byte, limit int) (state, error) {
 		current.events[event.Event.EventID] = cloneInstanceEvent(event)
 	}
 	for _, pool := range snapshot.NodePools {
+		if snapshot.Version < stateFormatPoolMembershipVersion {
+			if pool.MembershipGeneration != 0 || pool.MembershipKeyID != "" || pool.MembershipPublicKeyBase64 != "" {
+				return state{}, errors.New("legacy control snapshot contains node-pool membership authority")
+			}
+			pool.MembershipGeneration = 1
+		}
 		if !validNodePool(pool) {
 			return state{}, errors.New("control snapshot contains an invalid node pool")
 		}
@@ -1604,6 +1643,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionFleetOperationsVersion && node.Drain != nil {
 				return state{}, errors.New("legacy control transaction contains node drain state")
 			}
+			if value.Version < transactionPoolMembershipVersion && node.PoolMembership != nil {
+				return state{}, errors.New("legacy control transaction contains node-pool membership state")
+			}
+			if node.PoolMembership != nil && !validStoredNodePoolMembership(node.PoolMembership, node.ID, node.TenantIDs) {
+				return state{}, errors.New("control transaction contains invalid node-pool membership state")
+			}
 			if node.Placement != nil && !validNodePlacement(*node.Placement) {
 				return state{}, errors.New("control transaction contains invalid node placement state")
 			}
@@ -1616,6 +1661,7 @@ func applyTransaction(current state, value transaction) (state, error) {
 			node.Scheduling = cloneNodeScheduling(change.Node.Scheduling)
 			node.Placement = cloneNodePlacement(change.Node.Placement)
 			node.Drain = cloneNodeDrain(change.Node.Drain)
+			node.PoolMembership = cloneNodePoolMembership(change.Node.PoolMembership)
 			next.nodes[node.ID] = node
 		case mutationCredential:
 			if change.Credential == nil {
@@ -1755,7 +1801,16 @@ func applyTransaction(current state, value transaction) (state, error) {
 			}
 			delete(next.events, change.EventID)
 		case mutationNodePool:
-			if value.Version < transactionNodePoolVersion || change.NodePool == nil || !validNodePool(*change.NodePool) {
+			if value.Version < transactionNodePoolVersion || change.NodePool == nil {
+				return state{}, errors.New("node pool mutation is invalid for this transaction version")
+			}
+			if value.Version < transactionPoolMembershipVersion {
+				if change.NodePool.MembershipGeneration != 0 || change.NodePool.MembershipKeyID != "" || change.NodePool.MembershipPublicKeyBase64 != "" {
+					return state{}, errors.New("legacy node pool mutation contains membership authority")
+				}
+				change.NodePool.MembershipGeneration = 1
+			}
+			if !validNodePool(*change.NodePool) {
 				return state{}, errors.New("node pool mutation is invalid for this transaction version")
 			}
 			next.nodePools[change.NodePool.ID] = cloneNodePool(*change.NodePool)

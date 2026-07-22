@@ -1,15 +1,21 @@
 package controlstore
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/poolmembership"
 )
 
 func TestNodePoolCapacityIntentIsOptimisticBoundedAndDurable(t *testing.T) {
@@ -20,7 +26,7 @@ func TestNodePoolCapacityIntentIsOptimisticBoundedAndDurable(t *testing.T) {
 		MinNodes: 1, DesiredNodes: 2, MaxNodes: 4,
 	}
 	pool, changed, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 0, fixture.now.Add(time.Minute))
-	if err != nil || !changed || pool.Revision != 1 || pool.CreatedAt != pool.UpdatedAt {
+	if err != nil || !changed || pool.Revision != 1 || pool.MembershipGeneration != 1 || pool.CreatedAt != pool.UpdatedAt {
 		t.Fatalf("create pool=(%+v, %v, %v)", pool, changed, err)
 	}
 	poolInput.TenantIDs[0] = "mutated"
@@ -38,7 +44,7 @@ func TestNodePoolCapacityIntentIsOptimisticBoundedAndDurable(t *testing.T) {
 	}
 	retry.DesiredNodes = 3
 	pool, changed, err = fixture.store.ApplyNodePool(fixture.admin, retry, 1, fixture.now.Add(3*time.Minute))
-	if err != nil || !changed || pool.Revision != 2 || pool.DesiredNodes != 3 || pool.CreatedAt == pool.UpdatedAt {
+	if err != nil || !changed || pool.Revision != 2 || pool.MembershipGeneration != 1 || pool.DesiredNodes != 3 || pool.CreatedAt == pool.UpdatedAt {
 		t.Fatalf("update pool=(%+v, %v, %v)", pool, changed, err)
 	}
 	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, retry, 1, fixture.now.Add(4*time.Minute)); !errors.Is(err, ErrConflict) {
@@ -67,6 +73,259 @@ func TestNodePoolCapacityIntentIsOptimisticBoundedAndDurable(t *testing.T) {
 	if err != nil || len(listed) != 0 {
 		t.Fatalf("deleted pools=(%+v, %v)", listed, err)
 	}
+}
+
+func TestNodePoolMembershipGenerationChangesOnlyWithSecurityScope(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	publicA, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := NodePool{
+		ID: "pool-a", TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		MinNodes: 0, DesiredNodes: 1, MaxNodes: 3, MembershipKeyID: "authority-a",
+		MembershipPublicKeyBase64: base64.StdEncoding.EncodeToString(publicA),
+	}
+	pool, _, err := fixture.store.ApplyNodePool(fixture.admin, input, 0, fixture.now.Add(time.Minute))
+	if err != nil || pool.Revision != 1 || pool.MembershipGeneration != 1 {
+		t.Fatalf("create pool=%+v err=%v", pool, err)
+	}
+	input.DesiredNodes = 2
+	pool, _, err = fixture.store.ApplyNodePool(fixture.admin, input, 1, fixture.now.Add(2*time.Minute))
+	if err != nil || pool.Revision != 2 || pool.MembershipGeneration != 1 {
+		t.Fatalf("capacity update pool=%+v err=%v", pool, err)
+	}
+	input.MembershipKeyID = "authority-b"
+	input.MembershipPublicKeyBase64 = base64.StdEncoding.EncodeToString(publicB)
+	pool, _, err = fixture.store.ApplyNodePool(fixture.admin, input, 2, fixture.now.Add(3*time.Minute))
+	if err != nil || pool.Revision != 3 || pool.MembershipGeneration != 2 {
+		t.Fatalf("authority rotation pool=%+v err=%v", pool, err)
+	}
+}
+
+func TestSignedPoolMembershipControlsElasticEligibilityAndSurvivesRestart(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, identity := fixture.createNode(t, "tenant-a")
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, _, err := fixture.store.ApplyNodePool(fixture.admin, NodePool{
+		ID: "verified-pool", TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		MinNodes: 0, DesiredNodes: 1, MaxNodes: 2, MembershipKeyID: "pool-authority-1",
+		MembershipPublicKeyBase64: base64.StdEncoding.EncodeToString(public),
+	}, 0, fixture.now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := withMembershipMeasurements(t, storeSchedulingObservation(identity.NodeID))
+	observation.Labels = append(observation.Labels, controlprotocol.ExecutorSchedulingLabelV1{Key: NodePoolLabelKey, Value: pool.ID})
+	sort.Slice(observation.Labels, func(i, j int) bool { return observation.Labels[i].Key < observation.Labels[j].Key })
+	observedAt := fixture.now.Add(2 * time.Minute)
+	if _, applied, err := fixture.store.ObserveNodeScheduling(identity, observation, observedAt); err != nil || !applied {
+		t.Fatalf("observe=(%v,%v)", applied, err)
+	}
+	status, err := fixture.store.GetNodePoolStatus(fixture.admin, pool.ID, observedAt, time.Minute)
+	if err != nil || status.RegisteredNodes != 1 || status.EligibleNodes != 0 || status.ScaleOutNeeded != 1 ||
+		status.Nodes[0].Reason != "membership_missing" || !slices.Contains(status.Conditions, NodePoolConditionMembershipUnverified) ||
+		slices.Contains(status.Conditions, NodePoolConditionNodesNotReady) {
+		t.Fatalf("unverified status=%+v err=%v", status, err)
+	}
+	statement := poolmembership.Statement{
+		SchemaVersion: 1, ControllerInstanceID: fixture.auth.InstanceID(), PoolID: pool.ID, PoolMembershipGeneration: pool.MembershipGeneration,
+		PoolCreatedAt: pool.CreatedAt,
+		NodeID:        identity.NodeID, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		BootIdentitySHA256:     observation.BootIdentitySHA256,
+		SchedulingPolicySHA256: observation.SchedulingPolicySHA256,
+		IssuedAt:               observedAt.Format(time.RFC3339Nano), NotAfter: observedAt.Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	raw, err := poolmembership.Sign(statement, pool.MembershipKeyID, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, raw, observedAt.Add(10*time.Second))
+	if err != nil || node.PoolMembership == nil || node.PoolMembership.Digest == "" {
+		t.Fatalf("bind node=%+v err=%v", node, err)
+	}
+	if _, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, raw, observedAt.Add(20*time.Second)); err != nil {
+		t.Fatalf("idempotent bind: %v", err)
+	}
+	encoded, err := encodeState(fixture.store.current, fixture.limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tampered snapshotState
+	if err := json.Unmarshal(encoded, &tampered); err != nil {
+		t.Fatal(err)
+	}
+	tampered.Nodes[0].PoolMembership.Digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	tamperedRaw, err := json.Marshal(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(tamperedRaw, fixture.limits.MaxStateBytes); err == nil {
+		t.Fatal("snapshot accepted membership metadata that disagrees with its retained envelope")
+	}
+	status, err = fixture.store.GetNodePoolStatus(fixture.admin, pool.ID, observedAt.Add(30*time.Second), time.Minute)
+	if err != nil || status.EligibleNodes != 1 || status.ReadyNodes != 1 || status.ScaleOutNeeded != 0 || !status.Nodes[0].Eligible {
+		t.Fatalf("eligible status=%+v err=%v", status, err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	status, err = reopened.GetNodePoolStatus(fixture.admin, pool.ID, observedAt.Add(30*time.Second), time.Minute)
+	if err != nil || status.EligibleNodes != 1 || status.Nodes[0].MembershipDigest == "" {
+		t.Fatalf("reopened status=%+v err=%v", status, err)
+	}
+	status, err = reopened.GetNodePoolStatus(fixture.admin, pool.ID, statementNotAfter(t, statement), time.Minute)
+	if err != nil || status.EligibleNodes != 0 || status.Nodes[0].Reason != "membership_expired" {
+		t.Fatalf("expired status=%+v err=%v", status, err)
+	}
+	capacityInput := NodePool{
+		ID: pool.ID, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		MinNodes: 0, DesiredNodes: 2, MaxNodes: 2, MembershipKeyID: pool.MembershipKeyID,
+		MembershipPublicKeyBase64: pool.MembershipPublicKeyBase64,
+	}
+	updated, _, err := reopened.ApplyNodePool(fixture.admin, capacityInput, 1, observedAt.Add(31*time.Second))
+	if err != nil || updated.Revision != 2 || updated.MembershipGeneration != 1 {
+		t.Fatalf("capacity update=%+v err=%v", updated, err)
+	}
+	status, err = reopened.GetNodePoolStatus(fixture.admin, pool.ID, observedAt.Add(32*time.Second), time.Minute)
+	if err != nil || status.EligibleNodes != 1 {
+		t.Fatalf("capacity update invalidated membership: status=%+v err=%v", status, err)
+	}
+	capacityInput.Architecture = ""
+	updated, _, err = reopened.ApplyNodePool(fixture.admin, capacityInput, 2, observedAt.Add(33*time.Second))
+	if err != nil || updated.Revision != 3 || updated.MembershipGeneration != 2 {
+		t.Fatalf("security-scope update=%+v err=%v", updated, err)
+	}
+	if _, err := reopened.BindNodePoolMembership(identity, fixture.auth, raw, observedAt.Add(34*time.Second)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale membership generation bind error=%v", err)
+	}
+	status, err = reopened.GetNodePoolStatus(fixture.admin, pool.ID, observedAt.Add(35*time.Second), time.Minute)
+	if err != nil || status.EligibleNodes != 0 || status.Nodes[0].Reason != "membership_mismatch" {
+		t.Fatalf("security-scope status=%+v err=%v", status, err)
+	}
+	if err := reopened.DeleteNodePool(fixture.admin, pool.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	capacityInput.Architecture = "amd64"
+	recreated, _, err := reopened.ApplyNodePool(fixture.admin, capacityInput, 0, observedAt.Add(36*time.Second))
+	if err != nil || recreated.Revision != 1 || recreated.MembershipGeneration != 1 || recreated.CreatedAt == pool.CreatedAt {
+		t.Fatalf("recreated pool=%+v err=%v", recreated, err)
+	}
+	if _, err := reopened.BindNodePoolMembership(identity, fixture.auth, raw, observedAt.Add(37*time.Second)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("deleted-pool membership replay error=%v", err)
+	}
+}
+
+func TestPoolMembershipFollowsCurrentMeasurementsAcrossPoolTransitions(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, identity := fixture.createNode(t, "tenant-a")
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createPool := func(id string, at time.Time) NodePool {
+		t.Helper()
+		pool, _, err := fixture.store.ApplyNodePool(fixture.admin, NodePool{
+			ID: id, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+			MinNodes: 0, DesiredNodes: 1, MaxNodes: 2, MembershipKeyID: "authority-a",
+			MembershipPublicKeyBase64: base64.StdEncoding.EncodeToString(public),
+		}, 0, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pool
+	}
+	poolA := createPool("pool-a", fixture.now.Add(time.Minute))
+	poolB := createPool("pool-b", fixture.now.Add(2*time.Minute))
+	observation := withMembershipMeasurements(t, storeSchedulingObservation(identity.NodeID))
+	observation.Labels = append(observation.Labels, controlprotocol.ExecutorSchedulingLabelV1{Key: NodePoolLabelKey, Value: poolA.ID})
+	sort.Slice(observation.Labels, func(i, j int) bool { return observation.Labels[i].Key < observation.Labels[j].Key })
+	observedAt := fixture.now.Add(3 * time.Minute)
+	if _, applied, err := fixture.store.ObserveNodeScheduling(identity, observation, observedAt); err != nil || !applied {
+		t.Fatalf("observe pool A=(%v,%v)", applied, err)
+	}
+	sign := func(pool NodePool, issued time.Time) []byte {
+		t.Helper()
+		raw, err := poolmembership.Sign(poolmembership.Statement{
+			SchemaVersion: 1, ControllerInstanceID: fixture.auth.InstanceID(), PoolID: pool.ID,
+			PoolMembershipGeneration: pool.MembershipGeneration, PoolCreatedAt: pool.CreatedAt,
+			NodeID: identity.NodeID, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+			BootIdentitySHA256: observation.BootIdentitySHA256, SchedulingPolicySHA256: observation.SchedulingPolicySHA256,
+			IssuedAt: issued.Format(time.RFC3339Nano), NotAfter: issued.Add(2 * time.Hour).Format(time.RFC3339Nano),
+		}, pool.MembershipKeyID, private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	first := sign(poolA, observedAt)
+	if _, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, first, observedAt.Add(time.Minute)); err != nil {
+		t.Fatalf("bind pool A: %v", err)
+	}
+	// Pool B's independently valid statement deliberately predates pool A's
+	// retained membership. Timestamps fence renewal rollback within one pool,
+	// not transitions between unrelated pool lineages.
+	second := sign(poolB, observedAt.Add(-time.Minute))
+	if node, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, second, observedAt.Add(time.Minute)); err != nil ||
+		node.PoolMembership == nil || node.PoolMembership.PoolID != poolB.ID {
+		t.Fatalf("cross-pool bind node=%+v err=%v", node, err)
+	}
+
+	observation.Labels = []controlprotocol.ExecutorSchedulingLabelV1{
+		{Key: "region", Value: "west"},
+		{Key: NodePoolLabelKey, Value: poolB.ID},
+	}
+	observation.BootIdentitySHA256 = "sha256:" + strings.Repeat("c", 64)
+	changedAt := observedAt.Add(2 * time.Minute)
+	if _, applied, err := fixture.store.ObserveNodeScheduling(identity, observation, changedAt); err != nil || !applied {
+		t.Fatalf("changed measurement observation=(%v,%v)", applied, err)
+	}
+	status, err := fixture.store.GetNodePoolStatus(fixture.admin, poolB.ID, changedAt.Add(time.Second), time.Minute)
+	if err != nil || status.EligibleNodes != 0 || status.ReadyNodes != 0 || status.Nodes[0].Reason != "membership_mismatch" ||
+		!slices.Equal(status.Conditions, []string{NodePoolConditionCapacityShortfall, NodePoolConditionMembershipUnverified}) {
+		t.Fatalf("changed measurement status=%+v err=%v", status, err)
+	}
+	if _, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, second, changedAt.Add(time.Second)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale measured membership bind error=%v", err)
+	}
+}
+
+func statementNotAfter(t *testing.T, statement poolmembership.Statement) time.Time {
+	t.Helper()
+	value, err := time.Parse(time.RFC3339Nano, statement.NotAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func withMembershipMeasurements(
+	t *testing.T,
+	observation controlprotocol.ExecutorSchedulingObservationV1,
+) controlprotocol.ExecutorSchedulingObservationV1 {
+	t.Helper()
+	digest, err := controlprotocol.SchedulingPolicyDigest(observation.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.BootIdentitySHA256 = "sha256:" + strings.Repeat("a", 64)
+	observation.SchedulingPolicySHA256 = digest
+	return observation
 }
 
 func TestNodePoolStatusReportsCapacityWithoutGrantingPlacementAuthority(t *testing.T) {
@@ -110,7 +369,7 @@ func TestNodePoolStatusReportsCapacityWithoutGrantingPlacementAuthority(t *testi
 func TestNodePoolScaleInCandidatesRequireCompletedDrainAndEmptyNode(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	pool := NodePool{
-		ID: "pool-a", Revision: 1, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		ID: "pool-a", Revision: 1, MembershipGeneration: 1, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
 		MinNodes: 0, DesiredNodes: 0, MaxNodes: 2,
 		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
 	}
@@ -142,7 +401,7 @@ func TestNodePoolScaleInCandidatesRequireCompletedDrainAndEmptyNode(t *testing.T
 func TestNodePoolScaleInCandidatesNeverExceedSurplus(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	pool := NodePool{
-		ID: "pool-a", Revision: 1, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		ID: "pool-a", Revision: 1, MembershipGeneration: 1, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
 		MinNodes: 1, DesiredNodes: 4, MaxNodes: 6,
 		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
 	}
@@ -182,14 +441,15 @@ func TestNodePoolScaleInCandidatesNeverExceedSurplus(t *testing.T) {
 
 func TestNodePoolNodeStateValidationRejectsContradictoryDrainFacts(t *testing.T) {
 	valid := []NodePoolNode{
-		{NodeID: "ready", Ready: true},
-		{NodeID: "cancelled", Ready: true, DrainState: NodeDrainCancelled},
-		{NodeID: "unavailable", Reason: "scheduling_unavailable"},
-		{NodeID: "stale-active", Reason: "scheduling_stale", DrainState: NodeDrainActive},
-		{NodeID: "blocked", Reason: "placement_blocked"},
-		{NodeID: "draining", Reason: "draining", DrainState: NodeDrainActive},
-		{NodeID: "drained", Reason: "drained", DrainState: NodeDrainCompleted},
-		{NodeID: "failed", Reason: "drain_failed", DrainState: NodeDrainFailed},
+		{NodeID: "ready", Ready: true, Eligible: true},
+		{NodeID: "cancelled", Ready: true, Eligible: true, DrainState: NodeDrainCancelled},
+		{NodeID: "unavailable", Eligible: true, Reason: "scheduling_unavailable"},
+		{NodeID: "stale-active", Eligible: true, Reason: "scheduling_stale", DrainState: NodeDrainActive},
+		{NodeID: "blocked", Eligible: true, Reason: "placement_blocked"},
+		{NodeID: "missing", Reason: "membership_missing"},
+		{NodeID: "draining", Eligible: true, Reason: "draining", DrainState: NodeDrainActive},
+		{NodeID: "drained", Eligible: true, Reason: "drained", DrainState: NodeDrainCompleted},
+		{NodeID: "failed", Eligible: true, Reason: "drain_failed", DrainState: NodeDrainFailed},
 	}
 	for _, node := range valid {
 		if !validNodePoolNodeState(node) {
@@ -238,11 +498,133 @@ func TestNodePoolRejectsInvalidCapacityAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestNodePoolOperationsFailClosedAcrossAuthorizationAndRevisionBoundaries(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxNodePools = 1
+	fixture := newRecordsFixture(t, limits)
+	fixture.createTenant(t, "tenant-a")
+	poolInput := NodePool{ID: "pool-a", TenantIDs: []string{"tenant-a"}, MinNodes: 0, DesiredNodes: 1, MaxNodes: 2}
+	notAdmin := controlauth.Identity{Role: controlauth.RoleTenantOperator, TenantID: "tenant-a", CredentialID: "tenant-operator"}
+	staleAdmin := fixture.admin
+	staleAdmin.CredentialID = "missing-credential"
+
+	if _, err := fixture.store.ListNodePools(notAdmin); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant list error=%v", err)
+	}
+	if _, err := fixture.store.GetNodePoolStatus(notAdmin, poolInput.ID, fixture.now, time.Minute); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant status error=%v", err)
+	}
+	if _, err := fixture.store.ListNodePoolStatuses(notAdmin, fixture.now, time.Minute); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant status list error=%v", err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(notAdmin, poolInput, 0, fixture.now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant apply error=%v", err)
+	}
+	if err := fixture.store.DeleteNodePool(notAdmin, poolInput.ID, 1); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant delete error=%v", err)
+	}
+	if _, err := fixture.store.GetNodePoolStatus(fixture.admin, "bad pool", fixture.now, time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid status error=%v", err)
+	}
+	if _, err := fixture.store.ListNodePoolStatuses(fixture.admin, time.Time{}, time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid status list error=%v", err)
+	}
+	if err := fixture.store.DeleteNodePool(fixture.admin, poolInput.ID, 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid delete error=%v", err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 1, fixture.now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("create with revision error=%v", err)
+	}
+	created, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 0, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, NodePool{
+		ID: "pool-b", TenantIDs: []string{"tenant-a"}, MinNodes: 0, DesiredNodes: 1, MaxNodes: 2,
+	}, 0, fixture.now); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("pool capacity error=%v", err)
+	}
+	if _, err := fixture.store.GetNodePoolStatus(fixture.admin, "missing", fixture.now, time.Minute); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing status error=%v", err)
+	}
+	if err := fixture.store.DeleteNodePool(fixture.admin, "missing", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing delete error=%v", err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, created.Revision, fixture.now.Add(-time.Second)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("retrograde update error=%v", err)
+	}
+
+	fixture.store.mu.Lock()
+	retained := fixture.store.current.nodePools[poolInput.ID]
+	retained.Revision = math.MaxUint64
+	fixture.store.current.nodePools[poolInput.ID] = retained
+	fixture.store.mu.Unlock()
+	poolInput.DesiredNodes = 2
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, math.MaxUint64, fixture.now.Add(time.Minute)); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("revision exhaustion error=%v", err)
+	}
+
+	fixture.store.mu.Lock()
+	retained.Revision = 1
+	retained.MembershipGeneration = math.MaxUint64
+	fixture.store.current.nodePools[poolInput.ID] = retained
+	fixture.store.mu.Unlock()
+	poolInput.Architecture = "amd64"
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 1, fixture.now.Add(time.Minute)); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("membership generation exhaustion error=%v", err)
+	}
+
+	for name, check := range map[string]func() error{
+		"list": func() error { _, err := fixture.store.ListNodePools(staleAdmin); return err },
+		"get": func() error {
+			_, err := fixture.store.GetNodePoolStatus(staleAdmin, poolInput.ID, fixture.now, time.Minute)
+			return err
+		},
+		"list status": func() error {
+			_, err := fixture.store.ListNodePoolStatuses(staleAdmin, fixture.now, time.Minute)
+			return err
+		},
+		"apply": func() error {
+			_, _, err := fixture.store.ApplyNodePool(staleAdmin, poolInput, 1, fixture.now)
+			return err
+		},
+		"delete": func() error { return fixture.store.DeleteNodePool(staleAdmin, poolInput.ID, 1) },
+	} {
+		if err := check(); !errors.Is(err, controlauth.ErrUnauthorized) {
+			t.Fatalf("stale administrator %s error=%v", name, err)
+		}
+	}
+
+	fixture.store.mu.Lock()
+	fixture.store.closed = true
+	fixture.store.mu.Unlock()
+	for name, check := range map[string]func() error{
+		"list": func() error { _, err := fixture.store.ListNodePools(fixture.admin); return err },
+		"get": func() error {
+			_, err := fixture.store.GetNodePoolStatus(fixture.admin, poolInput.ID, fixture.now, time.Minute)
+			return err
+		},
+		"list status": func() error {
+			_, err := fixture.store.ListNodePoolStatuses(fixture.admin, fixture.now, time.Minute)
+			return err
+		},
+		"apply": func() error {
+			_, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 1, fixture.now)
+			return err
+		},
+		"delete": func() error { return fixture.store.DeleteNodePool(fixture.admin, poolInput.ID, 1) },
+	} {
+		if err := check(); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("closed store %s error=%v", name, err)
+		}
+	}
+}
+
 func TestNodePoolStateFormatRejectsLegacySmugglingAndDuplicateIdentity(t *testing.T) {
 	current, limits := populatedControlState(t)
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
 	pool := NodePool{
-		ID: "pool-a", Revision: 1, TenantIDs: []string{"tenant-a"},
+		ID: "pool-a", Revision: 1, MembershipGeneration: 1, TenantIDs: []string{"tenant-a"},
 		MinNodes: 0, DesiredNodes: 1, MaxNodes: 2, CreatedAt: now, UpdatedAt: now,
 	}
 	current.nodePools[pool.ID] = pool
@@ -289,5 +671,38 @@ func TestNodePoolStateFormatRejectsLegacySmugglingAndDuplicateIdentity(t *testin
 	}
 	if _, err := decodeState(duplicate, limits.MaxStateBytes); err == nil {
 		t.Fatal("snapshot accepted duplicate node pool identity")
+	}
+
+	versionNineteen := snapshot
+	versionNineteen.Version = stateFormatPoolMembershipVersion - 1
+	versionNineteen.NodePools = []NodePool{pool}
+	versionNineteen.NodePools[0].MembershipGeneration = 0
+	versionNineteenRaw, err := json.Marshal(versionNineteen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err = decodeState(versionNineteenRaw, limits.MaxStateBytes)
+	if err != nil || migrated.nodePools[pool.ID].MembershipGeneration != 1 {
+		t.Fatalf("membership generation migration=(%+v, %v)", migrated.nodePools, err)
+	}
+
+	smuggledMembership := versionNineteen
+	smuggledMembership.NodePools[0].MembershipKeyID = "authority-a"
+	smuggledMembership.NodePools[0].MembershipPublicKeyBase64 = base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))
+	smuggledMembershipRaw, err := json.Marshal(smuggledMembership)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(smuggledMembershipRaw, limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot smuggled node-pool membership authority")
+	}
+
+	legacyPool := pool
+	legacyPool.MembershipGeneration = 0
+	migratedTransaction, err := applyTransaction(emptyState(), transaction{
+		Version: transactionPoolMembershipVersion - 1, Mutations: []mutation{{Kind: mutationNodePool, NodePool: &legacyPool}},
+	})
+	if err != nil || migratedTransaction.nodePools[pool.ID].MembershipGeneration != 1 {
+		t.Fatalf("membership transaction migration=(%+v, %v)", migratedTransaction.nodePools, err)
 	}
 }

@@ -19,6 +19,10 @@ func TestExecutorSchedulingObservationV1ValidatesCanonicalBoundedProfile(t *test
 		{"scope", func(value *ExecutorSchedulingObservationV1) { value.CredentialScope = "tenant" }},
 		{"os", func(value *ExecutorSchedulingObservationV1) { value.OS = "darwin" }},
 		{"isolation", func(value *ExecutorSchedulingObservationV1) { value.Isolation = "runc" }},
+		{"boot identity", func(value *ExecutorSchedulingObservationV1) { value.BootIdentitySHA256 = "sha256:invalid" }},
+		{"policy digest", func(value *ExecutorSchedulingObservationV1) {
+			value.SchedulingPolicySHA256 = "sha256:" + strings.Repeat("a", 64)
+		}},
 		{"nil labels", func(value *ExecutorSchedulingObservationV1) { value.Labels = nil }},
 		{"unsorted labels", func(value *ExecutorSchedulingObservationV1) {
 			value.Labels = []ExecutorSchedulingLabelV1{{Key: "zone", Value: "b"}, {Key: "region", Value: "a"}}
@@ -80,7 +84,7 @@ func TestExecutorSchedulingObservationPreservesReportedEmptyImageInventory(t *te
 }
 
 func schedulingObservationFixture() ExecutorSchedulingObservationV1 {
-	return ExecutorSchedulingObservationV1{
+	observation := ExecutorSchedulingObservationV1{
 		SchemaVersion: ExecutorSchedulingSchemaV1,
 		NodeID:        "node-1", CredentialScope: "node", OS: "linux", Architecture: "amd64",
 		Isolation: ExecutorSchedulingIsolationGVisor,
@@ -93,4 +97,11 @@ func schedulingObservationFixture() ExecutorSchedulingObservationV1 {
 			RuntimeOverhead: ExecutorSchedulingResourcesV1{MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32},
 		},
 	}
+	digest, err := SchedulingPolicyDigest(observation.Policy)
+	if err != nil {
+		panic(err)
+	}
+	observation.BootIdentitySHA256 = "sha256:" + strings.Repeat("b", 64)
+	observation.SchedulingPolicySHA256 = digest
+	return observation
 }

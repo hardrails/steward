@@ -27,6 +27,7 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/poolmembership"
 	"github.com/hardrails/steward/internal/securefile"
 )
 
@@ -142,16 +143,17 @@ type CommandResult struct {
 }
 
 type Node struct {
-	NodeID       string                       `json:"node_id"`
-	TenantIDs    []string                     `json:"tenant_ids"`
-	Capabilities []string                     `json:"capabilities"`
-	State        string                       `json:"state"`
-	CreatedAt    string                       `json:"created_at"`
-	LastSeenAt   string                       `json:"last_seen_at,omitempty"`
-	RevokedAt    string                       `json:"revoked_at,omitempty"`
-	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
-	Placement    controlstore.NodePlacement   `json:"placement"`
-	Drain        *controlstore.NodeDrain      `json:"drain,omitempty"`
+	NodeID         string                           `json:"node_id"`
+	TenantIDs      []string                         `json:"tenant_ids"`
+	Capabilities   []string                         `json:"capabilities"`
+	State          string                           `json:"state"`
+	CreatedAt      string                           `json:"created_at"`
+	LastSeenAt     string                           `json:"last_seen_at,omitempty"`
+	RevokedAt      string                           `json:"revoked_at,omitempty"`
+	Scheduling     *controlstore.NodeScheduling     `json:"scheduling,omitempty"`
+	Placement      controlstore.NodePlacement       `json:"placement"`
+	Drain          *controlstore.NodeDrain          `json:"drain,omitempty"`
+	PoolMembership *controlstore.NodePoolMembership `json:"pool_membership,omitempty"`
 }
 
 type NodePlacementChange struct {
@@ -255,12 +257,19 @@ type NodePoolList struct {
 }
 
 type NodePoolApply struct {
-	ExpectedRevision uint64
-	TenantIDs        []string
-	Architecture     string
-	MinNodes         int
-	DesiredNodes     int
-	MaxNodes         int
+	ExpectedRevision          uint64
+	TenantIDs                 []string
+	Architecture              string
+	MinNodes                  int
+	DesiredNodes              int
+	MaxNodes                  int
+	MembershipKeyID           string
+	MembershipPublicKeyBase64 string
+}
+
+type NodePoolMembershipBinding struct {
+	NodeID     string                           `json:"node_id"`
+	Membership *controlstore.NodePoolMembership `json:"membership"`
 }
 
 type NodeRevocation struct {
@@ -799,16 +808,19 @@ func (c *Client) ApplyNodePool(
 	}
 	var status controlstore.NodePoolStatus
 	err := c.do(ctx, http.MethodPut, "/v1/node-pools/"+url.PathEscape(poolID), struct {
-		ExpectedRevision uint64   `json:"expected_revision"`
-		TenantIDs        []string `json:"tenant_ids"`
-		Architecture     string   `json:"architecture,omitempty"`
-		MinNodes         int      `json:"min_nodes"`
-		DesiredNodes     int      `json:"desired_nodes"`
-		MaxNodes         int      `json:"max_nodes"`
+		ExpectedRevision          uint64   `json:"expected_revision"`
+		TenantIDs                 []string `json:"tenant_ids"`
+		Architecture              string   `json:"architecture,omitempty"`
+		MinNodes                  int      `json:"min_nodes"`
+		DesiredNodes              int      `json:"desired_nodes"`
+		MaxNodes                  int      `json:"max_nodes"`
+		MembershipKeyID           string   `json:"membership_key_id,omitempty"`
+		MembershipPublicKeyBase64 string   `json:"membership_public_key_base64,omitempty"`
 	}{
 		ExpectedRevision: input.ExpectedRevision, TenantIDs: input.TenantIDs,
 		Architecture: input.Architecture, MinNodes: input.MinNodes,
 		DesiredNodes: input.DesiredNodes, MaxNodes: input.MaxNodes,
+		MembershipKeyID: input.MembershipKeyID, MembershipPublicKeyBase64: input.MembershipPublicKeyBase64,
 	}, &status, true)
 	if err != nil {
 		return controlstore.NodePoolStatus{}, err
@@ -817,6 +829,52 @@ func (c *Client) ApplyNodePool(
 		return controlstore.NodePoolStatus{}, errors.New("control node pool response is invalid")
 	}
 	return status, nil
+}
+
+func (c *Client) BindNodePoolMembership(ctx context.Context, envelope json.RawMessage) (NodePoolMembershipBinding, error) {
+	if len(envelope) == 0 || len(envelope) > 64<<10 {
+		return NodePoolMembershipBinding{}, errors.New("node-pool membership envelope is invalid")
+	}
+	statement, err := poolmembership.Inspect(envelope)
+	if err != nil {
+		return NodePoolMembershipBinding{}, errors.New("node-pool membership envelope is invalid")
+	}
+	var binding NodePoolMembershipBinding
+	if err := c.do(ctx, http.MethodPut, "/executor-uplink/pool-membership", struct {
+		Membership json.RawMessage `json:"membership"`
+	}{Membership: envelope}, &binding, true); err != nil {
+		return NodePoolMembershipBinding{}, err
+	}
+	if binding.NodeID != statement.NodeID || binding.Membership == nil ||
+		binding.Membership.PoolID != statement.PoolID ||
+		binding.Membership.PoolMembershipGeneration != statement.PoolMembershipGeneration ||
+		binding.Membership.PoolCreatedAt != statement.PoolCreatedAt ||
+		binding.Membership.Architecture != statement.Architecture ||
+		binding.Membership.BootIdentitySHA256 != statement.BootIdentitySHA256 ||
+		binding.Membership.SchedulingPolicySHA256 != statement.SchedulingPolicySHA256 ||
+		binding.Membership.IssuedAt != statement.IssuedAt || binding.Membership.NotAfter != statement.NotAfter ||
+		binding.Membership.Digest != dsse.Digest(envelope) ||
+		binding.Membership.EnvelopeBase64 != base64.StdEncoding.EncodeToString(envelope) ||
+		!envelopeHasKeyID(envelope, binding.Membership.KeyID) {
+		return NodePoolMembershipBinding{}, errors.New("control node-pool membership response is invalid")
+	}
+	return binding, nil
+}
+
+func envelopeHasKeyID(raw []byte, keyID string) bool {
+	if keyID == "" {
+		return false
+	}
+	envelope, err := dsse.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for _, signature := range envelope.Signatures {
+		if signature.KeyID == keyID {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) DeleteNodePool(ctx context.Context, poolID string, expectedRevision uint64) error {
@@ -1617,11 +1675,12 @@ func validateEvidenceCaptureResponse(
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, output any, authenticated bool) error {
-	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.ContainsAny(path, "\r\n\x00") {
+	if (!strings.HasPrefix(path, "/v1/") && path != "/executor-uplink/pool-membership") ||
+		strings.Contains(path, "//") || strings.ContainsAny(path, "\r\n\x00") {
 		return errors.New("invalid control API path")
 	}
 	if authenticated && c.token == "" {
-		return errors.New("control operator token is required")
+		return errors.New("control bearer token is required")
 	}
 	var reader io.Reader
 	if body != nil {

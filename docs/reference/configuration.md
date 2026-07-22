@@ -289,6 +289,7 @@ outbound-only deployment.
 | `-max-tenant-pids` | `512` | Aggregate process reservation for one tenant |
 | `-node-labels` | empty | Comma-separated scheduling labels such as `region=west,accelerator=gpu` |
 | `-node-taints` | empty | Comma-separated scheduling taints; a delegated workload must tolerate every taint |
+| `-node-boot-identity-sha256` | empty | Measured or immutable boot identity digest reported with authenticated scheduling state; required when binding verified pool membership |
 | `-image-pull-registry` | empty | Opt-in OCI registry host and optional port used only to fetch a missing exact signed image digest |
 | `-image-pull-auth-file` | empty | Owner-only `steward.registry-auth.v1` secret for that registry; empty permits anonymous access |
 | `-image-pull-timeout` | `5m` | Per-admission image-pull timeout; accepted range is 1 second to 30 minutes |

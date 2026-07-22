@@ -77,6 +77,7 @@ func main() {
 	maxTenantPIDs := flag.Int64("max-tenant-pids", defaults.MaxTenantPIDs, "maximum processes reserved for one tenant's workloads and relays")
 	nodeLabels := flag.String("node-labels", "", "comma-separated scheduling labels as key=value")
 	nodeTaints := flag.String("node-taints", "", "comma-separated scheduling taints; workloads require matching tolerations")
+	nodeBootIdentitySHA256 := flag.String("node-boot-identity-sha256", "", "optional measured or immutable boot identity digest required by verified pool membership")
 	imagePullRegistry := flag.String("image-pull-registry", "", "optional approved OCI registry host[:port] for missing signed images")
 	imagePullAuthFile := flag.String("image-pull-auth-file", "", "optional owner-only steward.registry-auth.v1 secret for the approved registry")
 	imagePullTimeout := flag.Duration("image-pull-timeout", 5*time.Minute, "bounded timeout for an opt-in exact image pull")
@@ -407,7 +408,8 @@ func main() {
 			SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
 			NodeID:        secureNodeID, CredentialScope: "node", OS: "linux",
 			Architecture: runtime.GOARCH, Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
-			Labels: schedulingLabels, Taints: schedulingTaints,
+			BootIdentitySHA256: *nodeBootIdentitySHA256,
+			Labels:             schedulingLabels, Taints: schedulingTaints,
 			Policy: controlprotocol.ExecutorSchedulingPolicyV1{
 				PerWorkload: controlprotocol.ExecutorSchedulingResourcesV1{
 					MemoryBytes: policy.MaxMemoryBytes, CPUMillis: policy.MaxCPUMillis,
@@ -427,6 +429,12 @@ func main() {
 				},
 			},
 		}
+		policyDigest, err := controlprotocol.SchedulingPolicyDigest(schedulingObservation.Policy)
+		if err != nil {
+			slog.Error("derive node scheduling policy digest", "err", err)
+			os.Exit(2)
+		}
+		schedulingObservation.SchedulingPolicySHA256 = policyDigest
 		if err := schedulingObservation.Validate(); err != nil {
 			slog.Error("validate node scheduling observation", "err", err)
 			os.Exit(2)

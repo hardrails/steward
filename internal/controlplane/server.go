@@ -145,6 +145,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/nodes/{node_id}/drain", server.nodeDrain)
 	server.mux.HandleFunc("/v1/node-pools", server.nodePools)
 	server.mux.HandleFunc("/v1/node-pools/{pool_id}", server.nodePool)
+	server.mux.HandleFunc("/executor-uplink/pool-membership", server.executorPoolMembership)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures", server.evidenceCaptures)
@@ -1389,16 +1390,17 @@ func tenantView(tenant controlstore.Tenant) tenantResponse {
 }
 
 type nodeResponse struct {
-	NodeID       string                       `json:"node_id"`
-	TenantIDs    []string                     `json:"tenant_ids"`
-	Capabilities []string                     `json:"capabilities"`
-	State        string                       `json:"state"`
-	CreatedAt    string                       `json:"created_at"`
-	LastSeenAt   string                       `json:"last_seen_at,omitempty"`
-	RevokedAt    string                       `json:"revoked_at,omitempty"`
-	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
-	Placement    controlstore.NodePlacement   `json:"placement"`
-	Drain        *controlstore.NodeDrain      `json:"drain,omitempty"`
+	NodeID         string                           `json:"node_id"`
+	TenantIDs      []string                         `json:"tenant_ids"`
+	Capabilities   []string                         `json:"capabilities"`
+	State          string                           `json:"state"`
+	CreatedAt      string                           `json:"created_at"`
+	LastSeenAt     string                           `json:"last_seen_at,omitempty"`
+	RevokedAt      string                           `json:"revoked_at,omitempty"`
+	Scheduling     *controlstore.NodeScheduling     `json:"scheduling,omitempty"`
+	Placement      controlstore.NodePlacement       `json:"placement"`
+	Drain          *controlstore.NodeDrain          `json:"drain,omitempty"`
+	PoolMembership *controlstore.NodePoolMembership `json:"pool_membership,omitempty"`
 }
 
 type nodeListResponse struct {
@@ -1415,9 +1417,10 @@ func nodeView(node controlstore.Node) nodeResponse {
 		NodeID: node.ID, TenantIDs: append([]string(nil), node.TenantIDs...),
 		Capabilities: append([]string{}, node.Capabilities...), State: state,
 		CreatedAt: node.CreatedAt, LastSeenAt: node.LastSeenAt, RevokedAt: node.RevokedAt,
-		Scheduling: node.Scheduling,
-		Placement:  controlstore.EffectiveNodePlacement(node),
-		Drain:      node.Drain,
+		Scheduling:     node.Scheduling,
+		Placement:      controlstore.EffectiveNodePlacement(node),
+		Drain:          node.Drain,
+		PoolMembership: node.PoolMembership,
 	}
 }
 

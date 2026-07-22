@@ -1285,7 +1285,7 @@ function nodePoolConditionKind(condition) {
   if (condition === "capacity_shortfall") {
     return "is-danger";
   }
-  if (condition === "nodes_not_ready" || condition === "scale_in_available") {
+  if (condition === "nodes_not_ready" || condition === "membership_unverified" || condition === "scale_in_available") {
     return "is-warning";
   }
   return "";
@@ -1294,6 +1294,7 @@ function nodePoolConditionKind(condition) {
 function NodePoolsView({page}) {
   const pools = Array.isArray(page?.node_pools) ? page.node_pools : [];
   const registered = pools.reduce((total, status) => total + status.registered_nodes, 0);
+  const eligible = pools.reduce((total, status) => total + status.eligible_nodes, 0);
   const ready = pools.reduce((total, status) => total + status.ready_nodes, 0);
   const scaleOut = pools.reduce((total, status) => total + status.scale_out_needed, 0);
   const scaleIn = pools.reduce((total, status) => total + (status.scale_in_candidates?.length || 0), 0);
@@ -1304,12 +1305,12 @@ function NodePoolsView({page}) {
       </ViewHeading>
       <aside className="signal-boundary">
         <strong>CAPACITY IS NOT PERMISSION.</strong>
-        <span>A matching pool label cannot enroll a node, expand a tenant delegation, place a workload, or call a cloud API.</span>
+        <span>A pool label is only discovery metadata. A configured pool counts a node only after it binds a short-lived statement from the independent membership authority.</span>
       </aside>
       <dl className="task-totals" aria-label="Node pool capacity totals">
         <div><dt>Pools</dt><dd>{pools.length}</dd></div>
         <div><dt>Registered nodes</dt><dd>{registered}</dd></div>
-        <div><dt>Ready nodes</dt><dd>{ready}</dd></div>
+        <div><dt>Eligible / ready</dt><dd>{eligible} / {ready}</dd></div>
         <div className={scaleOut ? "has-conflict" : ""}><dt>Scale out needed</dt><dd>{scaleOut}</dd></div>
       </dl>
       {pools.length ? (
@@ -1322,7 +1323,7 @@ function NodePoolsView({page}) {
               <article className="pool-card" key={pool.id}>
                 <header>
                   <div>
-                    <span className="panel-index">NODE POOL / REV {pool.revision}</span>
+                    <span className="panel-index">NODE POOL / REV {pool.revision} · MEMBERSHIP GEN {pool.membership_generation}</span>
                     <h3>{pool.id}</h3>
                   </div>
                   <Badge kind={conditions.length ? "is-warning" : "is-ok"}>
@@ -1330,19 +1331,20 @@ function NodePoolsView({page}) {
                   </Badge>
                 </header>
                 <div className="pool-capacity">
-                  <div><span>Ready</span><strong>{status.ready_nodes}</strong></div>
+                  <div><span>Eligible</span><strong>{status.eligible_nodes}</strong></div>
                   <div><span>Registered</span><strong>{status.registered_nodes}</strong></div>
                   <div><span>Desired</span><strong>{pool.desired_nodes}</strong></div>
                   <div><span>Maximum</span><strong>{pool.max_nodes}</strong></div>
                 </div>
                 <progress
                   max={pool.max_nodes}
-                  value={Math.min(status.registered_nodes, pool.max_nodes)}
-                  aria-label={`${pool.id}: ${status.registered_nodes} registered of ${pool.max_nodes} maximum nodes`}
+                  value={Math.min(status.eligible_nodes, pool.max_nodes)}
+                  aria-label={`${pool.id}: ${status.eligible_nodes} eligible of ${pool.max_nodes} maximum nodes`}
                 />
                 <dl className="pool-facts">
                   <div><dt>Tenant scopes</dt><dd>{displayStringList(pool.tenant_ids).join(", ")}</dd></div>
                   <div><dt>Architecture</dt><dd>{pool.architecture || "any reported architecture"}</dd></div>
+                  <div><dt>Membership</dt><dd>{pool.membership_key_id || "not required (label accounting)"}</dd></div>
                   <div><dt>Capacity range</dt><dd>{pool.min_nodes} minimum · {pool.desired_nodes} desired · {pool.max_nodes} maximum</dd></div>
                   <div><dt>Observed</dt><dd>{formatTime(status.observed_at)}</dd></div>
                 </dl>
@@ -1351,7 +1353,7 @@ function NodePoolsView({page}) {
                   {!conditions.length ? <Badge kind="is-ok">capacity healthy</Badge> : null}
                 </div>
                 {status.scale_out_needed ? (
-                  <p className="pool-action"><strong>CREATE {status.scale_out_needed}</strong> The provider driver may create exactly this many machines, then complete node-specific enrollment.</p>
+                  <p className="pool-action"><strong>CREATE {status.scale_out_needed}</strong> The provider driver may create exactly this many machines, then complete finite enrollment and bind independent membership.</p>
                 ) : null}
                 {candidates.length ? (
                   <div className="pool-candidates">

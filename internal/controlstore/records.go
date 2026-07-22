@@ -1687,7 +1687,16 @@ func cloneNode(node Node) Node {
 	node.Scheduling = cloneNodeScheduling(node.Scheduling)
 	node.Placement = cloneNodePlacement(node.Placement)
 	node.Drain = cloneNodeDrain(node.Drain)
+	node.PoolMembership = cloneNodePoolMembership(node.PoolMembership)
 	return node
+}
+
+func cloneNodePoolMembership(value *NodePoolMembership) *NodePoolMembership {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func cloneNodeDrain(value *NodeDrain) *NodeDrain {

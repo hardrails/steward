@@ -1,6 +1,6 @@
 ---
 title: Reconcile elastic node-pool capacity
-description: Use Steward's provider-neutral NodePool API to add capacity and remove only drained, empty nodes without turning cloud metadata into workload authority.
+description: Add and remove fleet capacity using short-lived independently signed membership, exact deficits, and drained-node removal.
 section: How-to
 ---
 
@@ -8,45 +8,49 @@ section: How-to
 
 A Steward `NodePool` is the handoff between fleet operations and an external
 infrastructure provider. You declare how many nodes you want. Steward reports the
-exact creation deficit and, after a safe drain, the exact nodes an external driver
+exact creation deficit and, after a safe drain, the exact nodes a provider driver
 may remove.
 
-This resource does **not** create machines or authorize workloads. A cloud label,
-Terraform record, or compromised controller must not be able to expand a tenant's
-execution authority.
+The pool does not create machines or authorize workloads. A cloud label,
+Terraform record, provider identity, or compromised Control process must not be
+able to expand a tenant's execution authority.
 
 ## What a node pool controls
 
 | Field or result | Meaning | Authority it does not grant |
 | --- | --- | --- |
 | `min_nodes`, `desired_nodes`, `max_nodes` | Bounded infrastructure capacity intent | Permission to call a cloud API |
-| `tenant_ids` | Tenant scopes a registered node must already carry to count in the pool | Permission to add those scopes to a node |
+| `tenant_ids` | Tenant scopes a member must already carry | Permission to add those scopes |
 | `architecture` | Optional exact scheduling architecture | Permission to change or trust a host |
-| `scale_out_needed` | `desired_nodes - registered_nodes`, never less than zero | Enrollment or placement authority |
-| `scale_in_candidates` | At most the current surplus of exact nodes that completed a Steward drain and have no assigned deployment instance | Permission to choose or delete another node |
+| `membership_key_id`, `membership_public_key_base64` | Optional independent Ed25519 authority for short-lived membership | The private key or permission to mint a node credential |
+| `scale_out_needed` | `desired_nodes - eligible_nodes`, never less than zero | Enrollment or placement authority |
+| `scale_in_candidates` | At most the eligible surplus of exact nodes that completed a Steward drain and have no assigned deployment | Permission to choose or delete another node |
 
-Deleting a pool removes only this intent record. It does not drain, revoke, or
-destroy a node.
+`registered_nodes` counts enrolled nodes that advertise the pool label.
+`eligible_nodes` counts those with a current verified membership when the pool
+requires one. Deleting a pool removes only its capacity record.
 
 ## Label enrolled nodes
 
-Configure each Executor in the pool with the reserved label. Keep any additional
-placement labels separate:
+Configure each Executor in the pool with the reserved label. Keep other placement
+labels separate:
 
 ```console
 steward-executor \
   -node-labels steward.io/node-pool=research-amd64,region=us-west \
+  -node-boot-identity-sha256 sha256:BOOT_IDENTITY_HEX \
   ...
 ```
 
-The node must also be active, have every tenant scope declared by the pool, report
-a matching architecture when one is required, and publish a fresh scheduling
-observation. This self-reported label is useful for accounting. It is deliberately
-not accepted as signed tenant authority.
+The node must be active, carry every declared tenant scope, report a matching
+architecture, and publish fresh scheduling data. The label is useful for
+discovery. When a pool has a membership authority, the label alone does not make
+the node eligible.
 
 ## Create capacity intent
 
-Use a site-administrator context:
+Use a site-administrator context. Keep the membership private key outside
+Control and every fleet node:
 
 ```console
 stewardctl control node-pool apply \
@@ -55,7 +59,9 @@ stewardctl control node-pool apply \
   -architecture amd64 \
   -min-nodes 2 \
   -desired-nodes 4 \
-  -max-nodes 20
+  -max-nodes 20 \
+  -membership-key-id pool-authority-1 \
+  -membership-public-key /secure/pool-authority.public
 ```
 
 Inspect all pools or one exact pool:
@@ -65,8 +71,8 @@ stewardctl control node-pool list
 stewardctl control node-pool status -pool-id research-amd64
 ```
 
-Updates use optimistic concurrency. Pass the current retained revision so two
-operators cannot silently overwrite each other:
+Updates use optimistic concurrency. Pass the current revision so two operators
+cannot silently overwrite each other:
 
 ```console
 stewardctl control node-pool apply \
@@ -76,49 +82,115 @@ stewardctl control node-pool apply \
   -min-nodes 2 \
   -desired-nodes 8 \
   -max-nodes 20 \
+  -membership-key-id pool-authority-1 \
+  -membership-public-key /secure/pool-authority.public \
   -revision 1
 ```
 
-The CLI prints JSON so an infrastructure driver can consume the same stable
-contract. The HTTP resources are `GET /v1/node-pools`, and `GET`, `PUT`, or
-`DELETE /v1/node-pools/{pool_id}`.
+The CLI prints JSON for provider automation. The HTTP resources are
+`GET /v1/node-pools`, and `GET`, `PUT`, or `DELETE
+/v1/node-pools/{pool_id}`.
+
+## Make a node eligible
+
+A membership statement is a short-lived DSSE-signed file. DSSE (Dead Simple
+Signing Envelope) keeps the exact statement bytes and signature together. It
+binds the exact Control instance, pool membership generation, node, tenant set,
+architecture, boot identity, scheduling policy, and a validity window of no more
+than 24 hours.
+
+An offline signer or separately protected identity adapter should issue the
+statement only after it verifies the machine:
+
+```console
+stewardctl control node-pool membership-issue \
+  -private-key /secure/pool-authority.private.pem \
+  -key-id pool-authority-1 \
+  -controller-id CONTROL_INSTANCE_ID \
+  -pool-id research-amd64 \
+  -pool-membership-generation 1 \
+  -pool-created-at 2026-07-22T09:00:00Z \
+  -node-id research-0042 \
+  -tenant-ids research \
+  -architecture amd64 \
+  -boot-identity-sha256 sha256:BOOT_IDENTITY_HEX \
+  -scheduling-policy-sha256 sha256:POLICY_HEX \
+  -valid-for 1h \
+  -out research-0042.membership.dsse.json
+```
+
+The pool status supplies `pool.created_at`; binding it prevents an old statement
+from being replayed after a pool is deleted and recreated. `CONTROL_INSTANCE_ID`
+appears in every finite enrollment package and response.
+Configure Executor with `-node-boot-identity-sha256` using a digest from your
+image pipeline, measured-boot verifier, or another trusted provisioning process.
+Executor derives `scheduling_policy_sha256` from its effective scheduling limits;
+Control recomputes that digest before retaining the authenticated observation.
+Read both current values from the node's `scheduling.observation` projection and
+give those exact values to the protected membership signer. Steward checks them
+again when the statement is bound and whenever it calculates pool eligibility.
+It does not independently measure the host, so the strength of the boot claim
+still depends on the process that supplies the boot identity to Executor.
+
+Verify the file before transfer:
+
+```console
+stewardctl control node-pool membership-verify \
+  -in research-0042.membership.dsse.json \
+  -public-key /secure/pool-authority.public \
+  -key-id pool-authority-1
+```
+
+After finite enrollment, bind it with the node's own Control credential:
+
+```console
+stewardctl control node-pool membership-bind \
+  -in research-0042.membership.dsse.json \
+  -control-url https://control.example.com:8443 \
+  -credential /secure/enrollment/executor-node.json \
+  -ca-file /etc/steward-control/ca.pem
+```
+
+Control accepts an exact retry. A renewal must have a later `issued_at` and
+match the current pool membership generation. Renewal ordering is scoped to one
+pool lineage, so a valid statement for a different pool can move the node even
+when the two validity windows overlap. Capacity-only changes preserve
+that generation. Changing tenant scope, architecture, or the membership key
+increments it and invalidates prior statements. Expired, wrong-controller,
+wrong-node, wrong-tenant, wrong-architecture, stale-generation, rollback, and
+untrusted statements fail closed. Status retains the exact envelope and digest
+for independent audit.
 
 ## Build a safe provider loop
 
-Keep cloud, hypervisor, or bare-metal credentials in a separate provider driver.
-Do not place them in Steward Control.
-
-The driver loop is intentionally small:
+Keep cloud, hypervisor, or bare-metal credentials in a separate provider driver:
 
 1. Read the exact pool status.
-2. If `scale_out_needed` is positive, ask the provider to create no more than that
-   many nodes and never exceed `max_nodes`.
-3. Give each new machine a unique node identity and complete Steward enrollment.
-4. Wait for the node doctor and a fresh scheduling observation.
-5. For scale-in, request a Steward drain for a chosen node first.
-6. Delete only an exact ID returned in `scale_in_candidates`.
-7. Re-read status after every provider operation. Treat ambiguous provider results
-   as uncertain; do not repeat a deletion against a different node.
+2. Create no more than `scale_out_needed` machines and never exceed `max_nodes`.
+3. Give each machine a unique node identity and complete finite enrollment.
+4. Obtain and bind a node-specific membership from the protected authority.
+5. Wait for the node doctor, verified eligibility, and fresh scheduling data.
+6. For scale-in, request a Steward drain first.
+7. Delete only an exact ID returned in `scale_in_candidates`.
+8. Re-read status after every provider operation. Do not repeat an uncertain
+   deletion against a different node.
 
-The driver must never infer a scale-in victim from `registered_nodes`, CPU use, or
-cloud group order. Steward returns no more candidates than
-`registered_nodes - desired_nodes`, and names them only after the drain is durable
-and the node has no assigned deployment instance.
+Never infer a victim from CPU use or provider group order. Steward returns no
+more candidates than `eligible_nodes - desired_nodes` and names them only after
+the drain is durable and the node is empty.
 
 ## Current automation boundary
 
-Capacity reconciliation is available now. Zero-touch authority expansion is not.
-Tenant-signed controller delegations still contain a finite set of exact node IDs.
-A newly created and enrolled node therefore needs a fresh finite delegation before
-Control can place that tenant's workload on it.
+Capacity reconciliation and verified membership are available. Steward does not
+ship a cloud-specific workload-identity adapter yet. A provider driver must
+obtain each node-specific statement from a protected signer and complete finite
+enrollment. Never put a reusable pool join token in metadata, Terraform state,
+or an image.
 
-This is a deliberate fail-closed boundary. If Steward treated a pool label as
-authority, a compromised controller could enroll and label its own node, then run
-a tenant workload there. The planned pool-membership credential will bind one node
-ID and immutable boot identity to one pool, tenant scope, policy digest, and short
-validity window. Both Control and Executor must verify it before pool-scoped
-placement can be enabled.
+Membership is eligibility, not workload authority. Tenant delegations still
+name exact node IDs. Pool-scoped placement remains disabled until Executor can
+verify the same independent statement within a finite tenant delegation.
 
-For ready-to-use AWS, Google Cloud, and Azure infrastructure modules, continue with
-[cloud node pools]({{ '/guides/cloud-fleets/' | relative_url }}). For the lower-level
-bootstrap boundary, see [Terraform and cloud]({{ '/guides/terraform/' | relative_url }}).
+Continue with [cloud node pools]({{ '/guides/cloud-fleets/' | relative_url }})
+for AWS, Google Cloud, and Azure modules, or [Terraform and cloud]({{
+'/guides/terraform/' | relative_url }}) for the lower-level bootstrap boundary.

@@ -43,7 +43,7 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     'api("/v1/tenants/" + encodeURIComponent(tenantID) + "/tasks?limit=100"',
     'api("/v1/node-pools?limit=500"',
     "CAPACITY IS NOT PERMISSION.",
-    "A matching pool label cannot enroll a node",
+    "A pool label is only discovery metadata.",
     "READ AS A CLAIM, NOT AS PROOF.",
     "REPORTED STATE · NOT VERIFIED OUTCOME",
     'encodeURIComponent(tenantID) + "/quota"',

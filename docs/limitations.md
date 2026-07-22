@@ -305,14 +305,22 @@ suspected node, revoke compromised credentials or delegations, and preserve
 evidence as the incident requires. Heartbeats, reports, and evidence remain open
 during a freeze so containment does not erase visibility.
 
-## Cloud node pools do not provide zero-touch enrollment or controller HA
+## Cloud node pools do not provide unattended attestation or controller HA
 
 The AWS, Google Cloud, and Azure Terraform modules create private VM pools and
 stage an exact Steward release. A new VM remains ineligible for Steward placement
 until a node-specific enrollment is delivered and the complete node doctor passes.
 The modules do not put a reusable join token in Terraform state or instance
-metadata. Secure zero-touch scale-out needs the planned SPIFFE/SPIRE attestation
-profile; it is not available today.
+metadata. A separately protected signer can now issue a short-lived statement
+that binds one enrolled node, exact pool membership generation, tenant set, boot
+identity, and scheduling policy. Steward verifies and retains that statement
+before counting the node as eligible. The bundled modules do not yet obtain
+cloud workload identity, verify measured boot, or request that statement
+automatically. Executor can report a provisioning-supplied boot identity and
+Control rejects membership when that current authenticated report or the
+recomputed scheduling-policy digest changes. A SPIFFE/SPIRE or
+platform-attestation adapter is still needed to make the boot claim stronger
+than the process that configures Executor.
 
 Cloud VM health does not cover Steward policy continuity, authenticated Executor
 readiness, or Gateway state. The modules therefore do not claim application-aware

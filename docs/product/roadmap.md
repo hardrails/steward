@@ -582,12 +582,12 @@ supportable through one coherent operational surface.
 - Extend the implemented node leases, resources, reservations, labels, taints and
   tolerations, isolation classes, topology, and image locality with portable state
   locality.
-- Extend the shipped provider-neutral `NodePool` capacity signal with short-lived,
-  independently verifiable pool membership, node-specific zero-touch enrollment,
-  cloud workload identity adapters, exact-node lifecycle notices, and provider
-  driver conformance. Keep infrastructure reconciliation outside Control and do
-  not enable pool-scoped placement until both Control and Executor verify the same
-  finite membership statement.
+- Extend the shipped provider-neutral `NodePool` capacity signal and its
+  short-lived, independently verifiable membership with node-specific unattended
+  enrollment, cloud workload identity adapters, exact-node lifecycle notices,
+  and provider-driver conformance. Keep infrastructure reconciliation outside
+  Control and do not enable pool-scoped placement until both Control and Executor
+  verify the same finite membership statement.
 - Make placement an actual controller decision with stale-plan detection and
   Executor revalidation.
 - Extend implemented lease-fenced replacement, rescheduling, topology placement,
