@@ -40,7 +40,7 @@ an optional valid prerelease suffix and rejects malformed tags, leading zeros,
 and build-metadata suffixes. This fail-fast check prevents tags such as `vnext` or
 `v2` from reaching publication.
 
-The workflow uses six job executions across five job definitions:
+The workflow uses seven job executions across six job definitions:
 
 1. **`validate release source`:** checks out the selected commit without running
    repository scripts. For a tag build, it proves that the tag commit is reachable
@@ -65,15 +65,21 @@ The workflow uses six job executions across five job definitions:
    produce an `aarch64` package on `x86_64`.
 4. **`combine`:** with a read-only token and no source checkout, downloads both
    architecture sets, requires the complete matrix, and writes one SHA-256
-   manifest over exactly those files.
-5. **`publish`:** only on a tag push, with the workflow's only `contents: write`
+   manifest over exactly those files, including the support contract emitted by
+   the stamped CLI.
+5. **`qualify shipped release`:** with a read-only token, verifies every combined
+   checksum, extracts the Linux AMD64 archive, checks every binary's stamped
+   version, requires its JSON support contract to match the release asset byte for
+   byte, and runs the Control acceptance workflow with the extracted binaries.
+6. **`publish`:** only on a tag push, with the workflow's only `contents: write`
    token and no source checkout, runs `gh release create` against the combined
    artifacts. It adds generated notes, node and controller archives, packages,
-   both installers, and
+   all installers, the machine-readable support contract, and
    `checksums.txt`.
 
 Code from the tagged commit runs only in read-only jobs. The job allowed to
-publish executes no repository code. A bad tagged commit can therefore fail or
+publish executes no repository code and receives only artifacts that passed the
+shipped-binary qualification job. A bad tagged commit can therefore fail or
 produce bad artifacts, but it cannot run its own code with release-write
 authority.
 
@@ -96,6 +102,9 @@ Each Linux target also produces `steward-node_vX.Y.Z_<arch>.deb` and
 `steward-control_vX.Y.Z_linux_<arch>.tar.gz`. The architecture-independent
 `install-steward.sh` selects a native node package or archive at install time;
 `install-control.sh` selects only the dedicated controller archive.
+`steward-support_<version>.json` is architecture-independent and records the
+supported roles, runtime, production isolation prerequisites, compatibility
+boundary, and known limits emitted by the stamped `stewardctl` binary.
 
 Steward's Go module uses only the Go standard library. The source tree separately
 pins React and Vite for frontend maintenance; releases embed the committed console
@@ -139,7 +148,9 @@ go build -trimpath \
 The script also builds host-native copies through this path, runs each with
 `-version`, and fails unless each result equals the `VERSION` stamped into the
 artifacts. On a tag build, that value is `GITHUB_REF_NAME`. This checks the linker
-symbol, import path, and every entry point.
+symbol, import path, and every entry point. It then emits the support contract
+through the same stamped `stewardctl`; the hosted qualification job compares that
+asset with the copy emitted by the extracted release binary.
 
 `go install "github.com/hardrails/steward/cmd/steward@$RELEASE_TAG"` still reports
 the selected tag through `Main.Version` without linker flags. Keep the shared

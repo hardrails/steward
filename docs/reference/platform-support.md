@@ -6,6 +6,17 @@ section: Reference
 
 # Platform support matrix
 
+For the contract embedded in the installed binary, including known limits, run:
+
+<!-- cli-flags: support matrix | -output -->
+```console
+stewardctl support matrix
+stewardctl support matrix -output json
+```
+
+See the [installed support contract]({{ '/reference/support-contract/' | relative_url }})
+for the schema, release asset, and upgrade use.
+
 ## Production controller hosts
 
 The dedicated `steward-control_<version>_linux_<arch>.tar.gz` and

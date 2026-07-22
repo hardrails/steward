@@ -507,7 +507,16 @@ The roadmap starts from working primitives rather than a blank design:
 - a bounded provider-neutral `NodePool` resource with optimistic revisions,
   desired/minimum/maximum capacity, exact scale-out deficits, post-drain empty-node
   scale-in candidates, public API/client/CLI contracts, and an explicit rule that
-  self-reported pool membership never grants workload authority; and
+  self-reported pool membership never grants workload authority;
+- report-backed runtime assurance that binds placement to fresh node observations,
+  rechecks the selected isolation and resource facts before Executor mutations,
+  and requires independently verified pool membership for elastic capacity;
+- a bounded stopped-Control backup, verification, and restore workflow that keeps
+  controller state and identity in one canonical owner-only checkpoint without
+  trying to replace encryption, replication, or high-availability systems;
+- an installed, machine-readable support contract derived from the stamped binary,
+  published inside the checksum set, and compared byte for byte with the extracted
+  release before a code-free publication job receives write authority; and
 - explicit `strict-sovereign` and `bounded-autonomous` Control authority modes;
   strict mode refuses accessible controller signing-key files, never starts the
   reconciler, and rejects desired-state mutations, while bounded mode preserves
@@ -681,8 +690,9 @@ contracts are reproducible and independently verifiable as one supported system.
 - Freeze the application, backend, capability, storage, receipt, and control
   contracts with a compatibility policy and migration tools.
 - Remove the legacy compatibility supervisor and transitional command surfaces.
-- Publish runtime, backend, connector, and storage conformance suites and a
-  machine-readable support matrix.
+- Publish runtime, backend, connector, and storage conformance suites, then extend
+  the shipped support matrix with the exact conformance profile and evidence
+  identifiers that each supported combination passed.
 - Complete an external security assessment focused on tenant escape, Docker
   authority, egress bypass, secret disclosure, permit replay, controller
   compromise, snapshot authority cloning, and evidence rollback.

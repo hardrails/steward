@@ -32,6 +32,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"co"}); !slices.Contains(candidates, "control") || !slices.Contains(candidates, "context") {
 		t.Fatalf("top-level candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"support", ""}); !slices.Equal(candidates, []string{"matrix"}) {
+		t.Fatalf("support candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"support", "matrix", "-o"}); !slices.Equal(candidates, []string{"-output"}) {
+		t.Fatalf("support flags=%v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"control", "command", ""}); !slices.Equal(candidates, []string{"list", "status", "submit"}) {
 		t.Fatalf("control command candidates=%v", candidates)
 	}

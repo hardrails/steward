@@ -260,24 +260,6 @@ install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 install -m 0755 scripts/install-control.sh "${dist}/install-control.sh"
 install -m 0755 scripts/install-macos.sh "${dist}/install-macos.sh"
 
-# SHA-256 over every archive, in one checksums.txt (the conventional shape a
-# consumer verifies with `sha256sum -c`). Prefer sha256sum (Linux/CI); fall back
-# to shasum -a 256 (macOS) so the script runs identically on a maintainer's Mac.
-(
-	cd "$dist"
-	shopt -s nullglob
-	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh ./install-macos.sh)
-	if (( ${#artifacts[@]} == 0 )); then
-		echo "release: no artifacts were built" >&2
-		exit 1
-	fi
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "${artifacts[@]}" >checksums.txt
-	else
-		shasum -a 256 "${artifacts[@]}" >checksums.txt
-	fi
-)
-
 # Version-assertion gate. Build every host-native binary and require each one to
 # report the exact VERSION stamped into the artifacts. This runs for tag builds,
 # manual workflow dispatches, and local dry runs.
@@ -317,7 +299,34 @@ if [ "${reported}" != "${VERSION}" ] || [ "${control_reported}" != "${VERSION}" 
 	exit 1
 fi
 echo "release: version assertion OK — every binary self-reports ${VERSION}"
+
+# Publish one deterministic, architecture-independent statement of what this
+# exact binary supports. The release workflow compares this file byte-for-byte
+# with the copy emitted by the extracted release binary before it may publish.
+support_tmp=$(mktemp "$dist/.steward-support.XXXXXX")
+"$native_dir/stewardctl" support matrix -output json >"$support_tmp"
+chmod 0644 "$support_tmp"
+mv "$support_tmp" "$dist/steward-support_${VERSION}.json"
+grep -Fq '"schema_version": "steward.support-matrix.v1"' "$dist/steward-support_${VERSION}.json"
+grep -Fq '"steward_version": "'"$VERSION"'"' "$dist/steward-support_${VERSION}.json"
 rm -rf "$native_dir"
+
+# SHA-256 over every public artifact, in one checksums.txt. Prefer sha256sum
+# (Linux/CI); fall back to shasum -a 256 (macOS).
+(
+	cd "$dist"
+	shopt -s nullglob
+	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh ./install-macos.sh ./steward-support_*.json)
+	if (( ${#artifacts[@]} == 0 )); then
+		echo "release: no artifacts were built" >&2
+		exit 1
+	fi
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "${artifacts[@]}" >checksums.txt
+	else
+		shasum -a 256 "${artifacts[@]}" >checksums.txt
+	fi
+)
 
 echo "release: artifacts in ${dist}/:"
 ls -1 "$dist"
