@@ -578,6 +578,7 @@ PY
 tenant_id=acceptance-tenant
 other_tenant_id=acceptance-other
 node_id=acceptance-node
+pool_id=acceptance-pool
 command_id=acceptance-command
 instance_id=acceptance-instance
 
@@ -725,6 +726,74 @@ import sys
 node = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if node.get("node_id") != sys.argv[2] or node.get("tenant_ids") != [sys.argv[3]] or node.get("state") != "active":
     raise SystemExit("control-acceptance: enrolled node inventory is invalid")
+PY
+
+# NodePool capacity is site authority, not tenant or workload authority. Create
+# a durable intent before the node advertises membership, prove idempotent and
+# optimistic revision handling, and leave the pool in revision 2 so restart
+# recovery can be verified against an exact retained value.
+run_bounded 30 "$work" "$work/node-pool-create.stdout" "$work/node-pool-create.stderr" \
+	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
+	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
+	-min-nodes 1 -desired-nodes 2 -max-nodes 3
+run_bounded 30 "$work" "$work/node-pool-retry.stdout" "$work/node-pool-retry.stderr" \
+	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
+	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
+	-min-nodes 1 -desired-nodes 2 -max-nodes 3 -revision 1
+python3 -I - "$work/node-pool-create.stdout" "$work/node-pool-retry.stdout" \
+	"$pool_id" "$tenant_id" <<'PY'
+import json
+import pathlib
+import sys
+
+for path in sys.argv[1:3]:
+    status = json.loads(pathlib.Path(path).read_text())
+    pool = status.get("pool", {})
+    if pool.get("id") != sys.argv[3] or pool.get("tenant_ids") != [sys.argv[4]] or \
+            pool.get("architecture") != "amd64" or pool.get("revision") != 1:
+        raise SystemExit("control-acceptance: node-pool creation or idempotent retry changed intent")
+    if status.get("registered_nodes") != 0 or status.get("ready_nodes") != 0 or \
+            status.get("scale_out_needed") != 2 or status.get("scale_in_candidates") != [] or \
+            status.get("conditions") != ["capacity_shortfall"]:
+        raise SystemExit("control-acceptance: empty node-pool capacity observation is invalid")
+PY
+
+set +e
+run_bounded 30 "$work" "$work/node-pool-tenant-denied.stdout" \
+	"$work/node-pool-tenant-denied.stderr" "$ctl_bin" control node-pool list \
+	-control-url "$control_url" -token-file "$operator_token"
+node_pool_tenant_status=$?
+set -e
+if (( node_pool_tenant_status == 0 )) || [[ -s $work/node-pool-tenant-denied.stdout ]]; then
+	echo "control-acceptance: tenant operator gained site node-pool visibility" >&2
+	exit 1
+fi
+
+run_bounded 30 "$work" "$work/node-pool-update.stdout" "$work/node-pool-update.stderr" \
+	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
+	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
+	-min-nodes 1 -desired-nodes 3 -max-nodes 3 -revision 1
+set +e
+run_bounded 30 "$work" "$work/node-pool-stale.stdout" "$work/node-pool-stale.stderr" \
+	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
+	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
+	-min-nodes 1 -desired-nodes 2 -max-nodes 3 -revision 1
+node_pool_stale_status=$?
+set -e
+if (( node_pool_stale_status == 0 )) || [[ -s $work/node-pool-stale.stdout ]]; then
+	echo "control-acceptance: stale node-pool writer changed retained capacity" >&2
+	exit 1
+fi
+python3 -I - "$work/node-pool-update.stdout" "$pool_id" <<'PY'
+import json
+import pathlib
+import sys
+
+status = json.loads(pathlib.Path(sys.argv[1]).read_text())
+pool = status.get("pool", {})
+if pool.get("id") != sys.argv[2] or pool.get("revision") != 2 or pool.get("desired_nodes") != 3 or \
+        status.get("registered_nodes") != 0 or status.get("scale_out_needed") != 3:
+    raise SystemExit("control-acceptance: revised node-pool capacity is invalid")
 PY
 
 # The operations surface is authenticated, tenant projected, query strict, and
@@ -1281,6 +1350,148 @@ for field in ("verified", "controller_instance_id", "control_node_id", "state", 
         raise SystemExit(f"control-acceptance: recovered verification changed {field}")
 PY
 
+# The controller restart must retain NodePool intent. Membership arrives only
+# through the authenticated node uplink and changes the exact external
+# reconciliation deficit without granting any new delivery authority.
+run_bounded 30 "$work" "$work/node-pool-recovered.stdout" "$work/node-pool-recovered.stderr" \
+	"$ctl_bin" control node-pool status -control-url "$control_url" -token-file "$admin_token" \
+	-pool-id "$pool_id"
+python3 -I - "$work/node-pool-recovered.stdout" "$pool_id" <<'PY'
+import json
+import pathlib
+import sys
+
+status = json.loads(pathlib.Path(sys.argv[1]).read_text())
+pool = status.get("pool", {})
+if pool.get("id") != sys.argv[2] or pool.get("revision") != 2 or pool.get("desired_nodes") != 3 or \
+        status.get("registered_nodes") != 0 or status.get("scale_out_needed") != 3:
+    raise SystemExit("control-acceptance: controller restart changed node-pool intent")
+PY
+
+python3 -I - "$work/scheduling-observation.json" "$node_id" "$pool_id" <<'PY'
+import json
+import pathlib
+import sys
+
+resources = lambda memory, cpu, pids, workloads: {
+    "memory_bytes": memory, "cpu_millis": cpu, "pids": pids, "workloads": workloads,
+}
+observation = {
+    "schema_version": "steward.executor-scheduling.v1",
+    "node_id": sys.argv[2],
+    "credential_scope": "node",
+    "os": "linux",
+    "architecture": "amd64",
+    "isolation": "gvisor",
+    "labels": [{"key": "steward.io/node-pool", "value": sys.argv[3]}],
+    "taints": [],
+    "cached_image_config_digests": [],
+    "policy": {
+        "per_workload": resources(268435456, 1000, 128, 1),
+        "host": resources(2147483648, 4000, 1024, 4),
+        "tenant": resources(2147483648, 4000, 1024, 4),
+        "runtime_overhead": resources(67108864, 100, 32, 0),
+    },
+}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(observation, separators=(",", ":")) + "\n")
+PY
+http_json POST /executor-uplink/scheduling "$work/scheduling-observation.json" json \
+	"$node_credential" 200 "$work/scheduling-observation-response.json"
+run_bounded 30 "$work" "$work/node-pool-member.stdout" "$work/node-pool-member.stderr" \
+	"$ctl_bin" control node-pool status -control-url "$control_url" -token-file "$admin_token" \
+	-pool-id "$pool_id"
+python3 -I - "$work/scheduling-observation-response.json" "$work/node-pool-member.stdout" \
+	"$pool_id" "$node_id" <<'PY'
+import json
+import pathlib
+import sys
+
+observed = json.loads(pathlib.Path(sys.argv[1]).read_text())
+status = json.loads(pathlib.Path(sys.argv[2]).read_text())
+nodes = status.get("nodes", [])
+if observed.get("applied") is not True or not observed.get("observed_at"):
+    raise SystemExit("control-acceptance: node scheduling observation was not durably applied")
+if status.get("pool", {}).get("id") != sys.argv[3] or status.get("registered_nodes") != 1 or \
+        status.get("ready_nodes") != 1 or status.get("scale_out_needed") != 2 or \
+        status.get("scale_in_candidates") != [] or status.get("conditions") != ["capacity_shortfall"]:
+    raise SystemExit("control-acceptance: authenticated node-pool membership changed capacity incorrectly")
+if len(nodes) != 1 or nodes[0].get("node_id") != sys.argv[4] or nodes[0].get("ready") is not True:
+    raise SystemExit("control-acceptance: node-pool membership projection is invalid")
+PY
+
+# MCP exposes the same provider-neutral observation to a site automation
+# process, but deliberately offers no pool mutation or provider action tool.
+python3 -I - "$work/mcp-node-pool.requests" "$pool_id" <<'PY'
+import json
+import pathlib
+import sys
+
+messages = [
+    {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "control-acceptance", "version": "1"},
+        },
+    },
+    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "steward_control_node_pool_list", "arguments": {"limit": 1}},
+    },
+    {
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {
+            "name": "steward_control_node_pool_status",
+            "arguments": {"pool_id": sys.argv[2]},
+        },
+    },
+]
+with pathlib.Path(sys.argv[1]).open("x", encoding="utf-8") as output:
+    for message in messages:
+        output.write(json.dumps(message, separators=(",", ":")) + "\n")
+PY
+run_mcp_session "$work/mcp-node-pool.requests" "$work/mcp-node-pool.stdout" \
+	"$work/mcp-node-pool.stderr" "$mcp_bin" -control-url "$control_url" \
+	-control-token-file "$admin_token"
+python3 -I - "$work/mcp-node-pool.stdout" "$work/mcp-node-pool.stderr" \
+	"$pool_id" "$node_id" <<'PY'
+import json
+import pathlib
+import sys
+
+if pathlib.Path(sys.argv[2]).read_bytes():
+    raise SystemExit("control-acceptance: node-pool MCP session wrote diagnostics")
+responses = {}
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    value = json.loads(line)
+    if value.get("jsonrpc") != "2.0" or value.get("id") in responses:
+        raise SystemExit("control-acceptance: node-pool MCP response identity is invalid")
+    responses[value.get("id")] = value
+if set(responses) != {1, 2, 3} or "error" in responses[1]:
+    raise SystemExit("control-acceptance: node-pool MCP lifecycle is incomplete")
+structured = {}
+for identifier in (2, 3):
+    result = responses[identifier].get("result", {})
+    content = result.get("content", [])
+    if result.get("isError") is not False or len(content) != 1 or content[0].get("type") != "text":
+        raise SystemExit("control-acceptance: node-pool MCP read failed")
+    structured[identifier] = result.get("structuredContent")
+    if json.loads(content[0].get("text", "")) != structured[identifier]:
+        raise SystemExit("control-acceptance: node-pool MCP projections disagree")
+listed = structured[2].get("node_pools", [])
+status = structured[3]
+if len(listed) != 1:
+    raise SystemExit("control-acceptance: node-pool MCP list is not exactly bounded")
+for observation in (listed[0], status):
+    if observation.get("pool", {}).get("id") != sys.argv[3] or \
+            observation.get("pool", {}).get("revision") != 2 or \
+            observation.get("registered_nodes") != 1 or observation.get("ready_nodes") != 1 or \
+            observation.get("nodes", [{}])[0].get("node_id") != sys.argv[4] or \
+            observation.get("scale_out_needed") != 2:
+        raise SystemExit("control-acceptance: node-pool MCP observation differs from the public API")
+PY
+
 run_bounded 30 "$work" "$work/leased-status.stdout" "$work/leased-status.stderr" \
 	"$ctl_bin" control command status -control-url "$control_url" -token-file "$operator_token" \
 	-tenant-id "$tenant_id" -node-id "$node_id" -command-id "$command_id"
@@ -1681,6 +1892,25 @@ for forbidden in (
     if forbidden in raw:
         raise SystemExit("control-acceptance: metrics exposed a high-cardinality label")
 PY
+
+run_bounded 30 "$work" "$work/node-pool-delete.stdout" "$work/node-pool-delete.stderr" \
+	"$ctl_bin" control node-pool delete -control-url "$control_url" -token-file "$admin_token" \
+	-pool-id "$pool_id" -revision 2
+if [[ $(tr -d '\n' <"$work/node-pool-delete.stdout") != "$pool_id" ]]; then
+	echo "control-acceptance: node-pool deletion returned the wrong identity" >&2
+	exit 1
+fi
+http_json GET "/v1/node-pools/$pool_id" "" raw "$admin_token" 404 \
+	"$work/node-pool-deleted.json"
+python3 -I - "$work/node-pool-deleted.json" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if value.get("error") != "not_found" or not value.get("message"):
+    raise SystemExit("control-acceptance: deleted node pool remained observable")
+PY
 stop_control
 for log in "$work/control-first.stdout" "$work/control-first.stderr" \
 	"$work/control-recovered.stdout" "$work/control-recovered.stderr" \
@@ -1701,4 +1931,4 @@ assert_secret_absent raw "$wrong_admin" "${process_outputs[@]}"
 assert_secret_absent raw "$wrong_witness_private" "${process_outputs[@]}"
 assert_secret_absent raw "$work/command.private" "${process_outputs[@]}"
 
-echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, retained incident chronology, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
+echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, provider-neutral NodePool capacity, retained incident chronology, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
