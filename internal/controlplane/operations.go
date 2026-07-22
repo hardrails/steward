@@ -55,7 +55,7 @@ func (server *Server) operationsAttention(writer http.ResponseWriter, request *h
 	if !ok {
 		return
 	}
-	query, ok := parseExactQuery(writer, request, "tenant_id", "reason", "cursor", "limit")
+	query, ok := parseExactQuery(writer, request, "tenant_id", "reason", "resource_id", "cursor", "limit")
 	if !ok {
 		return
 	}
@@ -65,7 +65,8 @@ func (server *Server) operationsAttention(writer http.ResponseWriter, request *h
 	}
 	input := controlstore.AttentionQuery{
 		TenantID: query.Get("tenant_id"), Reason: controlstore.AttentionReason(query.Get("reason")),
-		Now: server.now(), Thresholds: server.operationsThresholds, Limit: limit, Cursor: query.Get("cursor"),
+		ResourceID: query.Get("resource_id"),
+		Now:        server.now(), Thresholds: server.operationsThresholds, Limit: limit, Cursor: query.Get("cursor"),
 	}
 	page, err := boundedOperationsPage(limit, func(candidateLimit int) (controlstore.AttentionPage, error) {
 		input.Limit = candidateLimit

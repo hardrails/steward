@@ -70,6 +70,19 @@ sudo -H stewardctl context set local-node \
 sudo -H stewardctl node whoami
 ```
 
+Once a Control or node context is selected, one command summarizes the current
+operating state:
+
+<!-- cli-flags: status | -output -watch -->
+```console
+stewardctl status
+```
+
+If it reports a warning or critical condition, `stewardctl explain` separates the
+cause, impact, and safest next step. Start with the
+[first useful task](https://hardrails.github.io/steward/getting-started/first-task/)
+or [diagnose and recover](https://hardrails.github.io/steward/guides/troubleshooting/).
+
 Running `stewardctl` without arguments now shows the small set of common tasks.
 Use `stewardctl help <command>` for a focused explanation and install shell
 completion with:

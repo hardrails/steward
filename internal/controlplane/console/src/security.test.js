@@ -87,6 +87,7 @@ test("source assets do not depend on a network-served asset", async () => {
     readFile(new URL("./app.css", import.meta.url), "utf8"),
     readFile(new URL("./App.jsx", import.meta.url), "utf8"),
     readFile(new URL("./command-courier.js", import.meta.url), "utf8"),
+    readFile(new URL("./operator-guidance.js", import.meta.url), "utf8"),
   ]);
   const source = files.join("\n");
   assert.equal(/https?:\/\//u.test(source), false);

@@ -1772,8 +1772,10 @@ paths:
         tenant. Tenant operators can see only their own projection; another
         tenant is hidden as not found.
 
-        `cursor` is opaque and bound to this endpoint, the caller's effective
-        site-wide or tenant projection, and the `reason` filter. Reusing it
+        `resource_id` selects the exact identity represented by an item: its
+        node ID, command ID, capacity resource, or quota resource. `cursor` is
+        opaque and bound to this endpoint, the caller's effective site-wide or
+        tenant projection, and the `reason` and `resource_id` filters. Reusing it
         across projections or with a changed filter returns `400`. It contains
         no bearer credential, token MAC, command payload, or result text. A page
         can contain fewer items than `limit` to keep the encoded response within
@@ -1781,6 +1783,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/OperationsTenantID"
         - $ref: "#/components/parameters/AttentionReasonFilter"
+        - $ref: "#/components/parameters/AttentionResourceIDFilter"
         - $ref: "#/components/parameters/OperationsCursor"
         - $ref: "#/components/parameters/OperationsLimit"
       responses:
@@ -2468,6 +2471,18 @@ components:
       description: Return only attention items with this exact derived reason.
       schema:
         $ref: "#/components/schemas/AttentionReason"
+    AttentionResourceIDFilter:
+      name: resource_id
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Return only attention items for this exact derived resource identity.
+        The compared identity is the node ID for node and evidence findings,
+        command ID for command findings, capacity resource for capacity
+        findings, or quota resource for quota findings.
+      schema:
+        $ref: "#/components/schemas/Identifier128"
     IncidentKindFilter:
       name: kind
       in: query
@@ -2981,7 +2996,7 @@ components:
       description: |
         One derived action-required fact. This is not mutable workflow state.
         Resource-specific fields are present only when applicable.
-      required: [id, reason, severity, resource]
+      required: [id, reason, severity, resource, title, explanation, impact, next_step]
       properties:
         id:
           type: string
@@ -3027,6 +3042,26 @@ components:
           type: integer
           format: int64
           minimum: 1
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Concise operator-facing name for the stable reason code.
+        explanation:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Bounded cause derived from retained metadata, never raw backend error text.
+        impact:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: What remains unavailable or unsafe while the finding exists.
+        next_step:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The safest next operator action without granting new authority.
     IncidentTimelinePage:
       type: object
       additionalProperties: false

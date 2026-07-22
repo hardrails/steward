@@ -16,6 +16,30 @@ import (
 	"github.com/hardrails/steward/internal/executor"
 )
 
+func TestEveryAttentionReasonHasBoundedOperatorGuidance(t *testing.T) {
+	reasons := []AttentionReason{
+		AttentionNodeNeverSeen, AttentionNodeStale, AttentionEvidenceUnwitnessed,
+		AttentionEvidenceStale, AttentionRollbackDetected, AttentionEquivocationDetected,
+		AttentionCommandPendingOverdue, AttentionCommandLeaseExpired, AttentionCommandFailed,
+		AttentionCommandOutcomeUnknown, AttentionCapacityWarning, AttentionTenantQuotaWarning,
+		AttentionTenantQuotaExceeded,
+	}
+	for _, reason := range reasons {
+		title, explanation, impact, nextStep, ok := AttentionGuidance(reason)
+		if !ok || title == "" || explanation == "" || impact == "" || nextStep == "" {
+			t.Fatalf("attention reason %q has incomplete guidance", reason)
+		}
+		for _, value := range []string{title, explanation, impact, nextStep} {
+			if len(value) > 256 {
+				t.Fatalf("attention reason %q guidance exceeds 256 bytes", reason)
+			}
+		}
+	}
+	if _, _, _, _, ok := AttentionGuidance("unknown"); ok {
+		t.Fatal("unknown attention reason has guidance")
+	}
+}
+
 func TestOperationsThresholdsAndCapacityEqualityAreBounded(t *testing.T) {
 	defaults := DefaultOperationsThresholds()
 	if defaults.NodeStaleAfter != 2*time.Minute ||
@@ -608,6 +632,30 @@ func TestAttentionAndSummaryAreDeterministicProjectedStickyAndNonMutating(t *tes
 		Cursor: firstAttention.NextCursor,
 	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("changed-filter attention cursor error = %v", err)
+	}
+	commandResourceID := ""
+	for _, item := range items {
+		if item.CommandID != "" {
+			commandResourceID = item.CommandID
+			break
+		}
+	}
+	exactAttention, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		ResourceID: commandResourceID, Now: now, Thresholds: DefaultOperationsThresholds(),
+		Limit: MaxInventoryPageLimit,
+	})
+	if err != nil || commandResourceID == "" || len(exactAttention.Items) == 0 {
+		t.Fatalf("resource-filtered attention = (%+v, %q, %v)", exactAttention, commandResourceID, err)
+	}
+	for _, item := range exactAttention.Items {
+		if attentionResourceID(item) != commandResourceID {
+			t.Fatalf("resource filter returned %+v", item)
+		}
+	}
+	if _, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		ResourceID: "invalid/resource", Now: now, Thresholds: DefaultOperationsThresholds(),
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid resource attention filter error = %v", err)
 	}
 	tenantAttention, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
 		TenantID: "tenant-a", Now: now, Thresholds: DefaultOperationsThresholds(), Limit: 1,

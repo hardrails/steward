@@ -38,6 +38,14 @@ func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T
 			body: `{"items":[]}`,
 		},
 		{
+			path: "/v1/operations/attention",
+			query: url.Values{
+				"tenant_id": {"tenant-a"}, "resource_id": {"node-1"},
+				"cursor": {attentionCursor}, "limit": {"25"},
+			},
+			body: `{"items":[]}`,
+		},
+		{
 			path: "/v1/operations/timeline",
 			query: url.Values{
 				"tenant_id": {"tenant-a"}, "node_id": {"node-1"}, "kind": {"containment"},
@@ -99,6 +107,9 @@ func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T
 	if page, err := client.ListAttention(ctx, "tenant-a", "node_stale", attentionCursor, 25); err != nil || page.Items == nil {
 		t.Fatalf("attention page = (%+v, %v)", page, err)
 	}
+	if page, err := client.ListAttentionForResource(ctx, "tenant-a", "node-1", attentionCursor, 25); err != nil || page.Items == nil {
+		t.Fatalf("resource attention page = (%+v, %v)", page, err)
+	}
 	if page, err := client.ListIncidentTimeline(
 		ctx, "tenant-a", "node-1", "containment", "critical", timelineCursor, 20,
 	); err != nil || len(page.Events) != 1 || page.Events[0].Action != "node_quarantined" {
@@ -140,6 +151,9 @@ func TestOperationsClientRejectsUnboundedOrAmbiguousFilters(t *testing.T) {
 	}
 	if _, err := client.ListAttention(ctx, "", " node_stale", "", 1); err == nil {
 		t.Fatal("whitespace-bearing attention reason was accepted")
+	}
+	if _, err := client.ListAttentionForResource(ctx, "", strings.Repeat("r", 129), "", 1); err == nil {
+		t.Fatal("invalid attention resource identity was accepted")
 	}
 	if _, err := client.ListCommandInventory(ctx, "", "", "", "", strings.Repeat("x", 8193), 1); err == nil {
 		t.Fatal("oversized operations cursor was accepted")

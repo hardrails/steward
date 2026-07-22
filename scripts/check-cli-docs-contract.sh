@@ -20,6 +20,9 @@ while read -r command subcommand; do
 		continue
 	fi
 	[[ -n ${subcommand:-} ]] || continue
+	case "$command" in
+		status|explain|recover|version) continue ;;
+	esac
 	candidates=$("$work/stewardctl" __complete "$command" "")
 	if ! grep -Fxq -- "$subcommand" <<<"$candidates"; then
 		echo "CLI docs contract: documented subcommand does not exist: stewardctl $command $subcommand" >&2
@@ -45,6 +48,36 @@ done < <(
 	done < <(printf '%s\0%s\0' "$root/README.md" "$root/ARCHITECTURE.md"; \
 		find "$root/docs" -type f -name '*.md' -print0) |
 		awk '{ print $2, $3 }' | sort -u
+)
+
+if [[ $failed == true ]]; then
+	exit 1
+fi
+
+# High-value tutorials declare their complete command/flag contract inline as:
+# <!-- cli-flags: status | -output -watch -->
+# This keeps fake paths and values out of execution while still proving that the
+# tagged stewardctl binary exposes every documented option.
+while IFS='|' read -r command_path documented_flags; do
+	command_path=${command_path#*cli-flags:}
+	command_path=${command_path%%-->*}
+	documented_flags=${documented_flags%%-->*}
+	read -r -a command_words <<<"$command_path"
+	candidates=$("$work/stewardctl" __complete "${command_words[@]}" -)
+	for documented_flag in $documented_flags; do
+		[[ $documented_flag == -* ]] || {
+			echo "CLI docs contract: invalid declared flag $documented_flag for stewardctl $command_path" >&2
+			failed=true
+			continue
+		}
+		if ! grep -Fxq -- "$documented_flag" <<<"$candidates"; then
+			echo "CLI docs contract: documented flag does not exist: stewardctl $command_path $documented_flag" >&2
+			failed=true
+		fi
+	done
+done < <(
+	grep -Eh '^[[:space:]]*<!--[[:space:]]*cli-flags:' "$root/README.md" "$root/ARCHITECTURE.md" \
+		$(find "$root/docs" -type f -name '*.md' -print) || true
 )
 
 if [[ $failed == true ]]; then

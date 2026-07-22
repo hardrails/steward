@@ -198,6 +198,22 @@ func TestOperationsHTTPAuthenticatesProjectsFiltersAndExcludesSecrets(t *testing
 		attentionPage.NextCursor == "" {
 		t.Fatalf("filtered attention page = %+v", attentionPage)
 	}
+	exactAttention := fixture.request(
+		t, http.MethodGet,
+		"/v1/operations/attention?resource_id="+attentionPage.Items[0].CommandID,
+		operatorA, "",
+	)
+	requireStatus(t, exactAttention, http.StatusOK)
+	var exactAttentionPage controlstore.AttentionPage
+	decodeResponse(t, exactAttention, &exactAttentionPage)
+	if len(exactAttentionPage.Items) == 0 {
+		t.Fatal("exact attention filter returned no findings")
+	}
+	for _, item := range exactAttentionPage.Items {
+		if item.CommandID != attentionPage.Items[0].CommandID {
+			t.Fatalf("exact attention filter returned %+v", item)
+		}
+	}
 	requireError(t, fixture.request(
 		t, http.MethodGet,
 		"/v1/operations/attention?reason=node_stale&cursor="+attentionPage.NextCursor,

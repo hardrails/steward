@@ -143,6 +143,28 @@ type LocalPrincipal struct {
 	Role          string `json:"role"`
 }
 
+type ReconcileFailure struct {
+	RuntimeRef string `json:"runtime_ref,omitempty"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+}
+
+type ReconcileReport struct {
+	Ready           bool               `json:"ready"`
+	Checked         int                `json:"checked"`
+	Changed         int                `json:"changed"`
+	Revoked         int                `json:"revoked"`
+	Failures        []ReconcileFailure `json:"failures,omitempty"`
+	DroppedFailures int                `json:"dropped_failures,omitempty"`
+}
+
+type Readiness struct {
+	Status          string          `json:"status"`
+	SecureAdmission bool            `json:"secure_admission"`
+	LastAttempt     string          `json:"last_attempt,omitempty"`
+	Reconciliation  ReconcileReport `json:"reconciliation"`
+}
+
 type APIError struct {
 	Status  int
 	Code    string
@@ -392,6 +414,15 @@ func (c *Client) LocalPrincipal(ctx context.Context) (LocalPrincipal, error) {
 	return principal, nil
 }
 
+// Readiness returns the bounded reconciliation projection. A degraded node is
+// a successful diagnostic response even though Executor uses HTTP 503 to keep
+// load balancers from routing mutations to it.
+func (c *Client) Readiness(ctx context.Context) (Readiness, error) {
+	var readiness Readiness
+	err := c.doAllowStatus(ctx, http.MethodGet, "/v1/readiness", nil, &readiness, http.StatusServiceUnavailable)
+	return readiness, err
+}
+
 func (c *Client) EnterMaintenance(ctx context.Context, reason string) (MaintenanceStatus, error) {
 	var status MaintenanceStatus
 	body := struct {
@@ -412,6 +443,15 @@ func (c *Client) ExitMaintenance(ctx context.Context) (MaintenanceStatus, error)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, output any) error {
+	return c.doAllowStatus(ctx, method, path, body, output)
+}
+
+func (c *Client) doAllowStatus(
+	ctx context.Context,
+	method, path string,
+	body, output any,
+	allowedStatus ...int,
+) error {
 	if !validRuntimePath(path) {
 		return errors.New("invalid node API path")
 	}
@@ -446,7 +486,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any) 
 	if len(raw) > maxWireBytes {
 		return errors.New("node response exceeds 1 MiB")
 	}
-	if response.StatusCode >= 400 {
+	allowed := false
+	for _, status := range allowedStatus {
+		if response.StatusCode == status {
+			allowed = true
+			break
+		}
+	}
+	if response.StatusCode >= 400 && !allowed {
 		var payload struct {
 			Code    string `json:"error"`
 			Message string `json:"message"`
@@ -496,7 +543,7 @@ func ReadBounded(path string, limit int64) ([]byte, error) {
 }
 
 func validRuntimePath(path string) bool {
-	if path == "/v1/admissions" || path == "/v1/local-principal" || path == "/v1/state/purge" ||
+	if path == "/v1/admissions" || path == "/v1/local-principal" || path == "/v1/readiness" || path == "/v1/state/purge" ||
 		path == "/v1/state/snapshots" || path == "/v1/state/snapshots/delete" || path == "/v1/state/clones" ||
 		path == "/v1/maintenance" || path == "/v1/maintenance/enter" || path == "/v1/maintenance/exit" {
 		return true

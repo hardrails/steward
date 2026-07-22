@@ -268,11 +268,16 @@ type AttentionItem struct {
 	Limit            int               `json:"limit,omitempty"`
 	UsedValue        int64             `json:"used_value,omitempty"`
 	LimitValue       int64             `json:"limit_value,omitempty"`
+	Title            string            `json:"title"`
+	Explanation      string            `json:"explanation"`
+	Impact           string            `json:"impact"`
+	NextStep         string            `json:"next_step"`
 }
 
 type AttentionQuery struct {
 	TenantID   string
 	Reason     AttentionReason
+	ResourceID string
 	Now        time.Time
 	Thresholds OperationsThresholds
 	Limit      int
@@ -562,6 +567,9 @@ func (store *Store) ListAttention(actor controlauth.Identity, query AttentionQue
 	if query.Reason != "" && !validAttentionReason(query.Reason) {
 		return AttentionPage{}, invalid("attention reason filter is invalid")
 	}
+	if query.ResourceID != "" && !validRecordID(query.ResourceID, 128) {
+		return AttentionPage{}, invalid("attention resource identity filter is invalid")
+	}
 	limit, err := normalizeInventoryLimit(query.Limit)
 	if err != nil {
 		return AttentionPage{}, err
@@ -578,14 +586,18 @@ func (store *Store) ListAttention(actor controlauth.Identity, query AttentionQue
 	if err != nil {
 		return AttentionPage{}, err
 	}
-	cursorBinding := operationsCursorBinding("attention-v1", scope, string(query.Reason))
+	bindingFields := []string{string(query.Reason)}
+	if query.ResourceID != "" {
+		bindingFields = append(bindingFields, "resource:"+query.ResourceID)
+	}
+	cursorBinding := operationsCursorBinding("attention-v1", scope, bindingFields...)
 	after, err := decodeOperationsCursor(cursorBinding, query.Cursor)
 	if err != nil {
 		return AttentionPage{}, err
 	}
 
 	collector := &attentionCollector{
-		after: after, limit: limit, reason: query.Reason,
+		after: after, limit: limit, reason: query.Reason, resourceID: query.ResourceID,
 		items: make([]AttentionItem, 0, limit), cursorBinding: cursorBinding,
 	}
 	store.emitAttentionLocked(collector, scope, query.Now, query.Thresholds)
@@ -1063,6 +1075,7 @@ type attentionCollector struct {
 	after         string
 	limit         int
 	reason        AttentionReason
+	resourceID    string
 	items         []AttentionItem
 	lastKey       string
 	more          bool
@@ -1070,7 +1083,11 @@ type attentionCollector struct {
 }
 
 func (collector *attentionCollector) add(item AttentionItem) bool {
+	item = withAttentionGuidance(item)
 	if collector.reason != "" && item.Reason != collector.reason {
+		return true
+	}
+	if collector.resourceID != "" && attentionResourceID(item) != collector.resourceID {
 		return true
 	}
 	key := attentionSortKey(item)
@@ -1084,6 +1101,54 @@ func (collector *attentionCollector) add(item AttentionItem) bool {
 	collector.items = append(collector.items, item)
 	collector.lastKey = key
 	return true
+}
+
+// AttentionGuidance turns a stable machine reason into bounded operator-facing
+// language. It never includes controller error text, command payloads, result
+// bodies, or credentials, so the same projection is safe for the CLI, console,
+// and metadata-only support bundles.
+func AttentionGuidance(reason AttentionReason) (title, explanation, impact, nextStep string, ok bool) {
+	switch reason {
+	case AttentionNodeNeverSeen:
+		return "Node has not reported", "Control has no authenticated report from this enrolled node.", "Placement and command delivery cannot rely on the node.", "Check the node service and uplink, then run the node doctor on that host.", true
+	case AttentionNodeStale:
+		return "Node report is stale", "The last authenticated node report is older than the configured freshness window.", "New placement is blocked and existing workload state may be out of date.", "Check node connectivity and services before changing workload state.", true
+	case AttentionEvidenceUnwitnessed:
+		return "Evidence is not witnessed", "Control has not accepted an Executor evidence checkpoint for this node.", "Offline verification cannot anchor the node's current receipt chain.", "Check the evidence uplink and retain the node public key through a trusted channel.", true
+	case AttentionEvidenceStale:
+		return "Evidence checkpoint is stale", "The latest accepted evidence checkpoint is older than the configured freshness window.", "Recent node enforcement events are not yet anchored in Control.", "Restore the evidence uplink and verify the next checkpoint before relying on recent activity.", true
+	case AttentionRollbackDetected:
+		return "Evidence rollback detected", "A node presented an older receipt-chain position than Control previously witnessed.", "The node's evidence history may have been rolled back or restored incorrectly.", "Quarantine the node, preserve both checkpoints, and investigate before restoring authority.", true
+	case AttentionEquivocationDetected:
+		return "Evidence fork detected", "A node presented a conflicting receipt-chain value at a previously witnessed position.", "The node may be presenting inconsistent enforcement histories.", "Quarantine the node and preserve its evidence for offline comparison.", true
+	case AttentionCommandPendingOverdue:
+		return "Command is waiting too long", "A signed command has remained pending beyond the normal delivery window.", "The requested lifecycle change has not reached its node.", "Check node availability, freeze state, and command scope before deciding whether to cancel or replace it.", true
+	case AttentionCommandLeaseExpired:
+		return "Command lease expired", "A node leased this command but did not report a terminal result before the lease expired.", "The command outcome is not yet known to Control.", "Inspect the node and retained command state; do not issue replacement authority until the outcome is proven.", true
+	case AttentionCommandFailed:
+		return "Command failed", "Executor returned a verified terminal failure for this signed command.", "The requested lifecycle state was not reached.", "Inspect the command status and node readiness for the exact failure before retrying.", true
+	case AttentionCommandOutcomeUnknown:
+		return "Command outcome is unknown", "Executor could not prove whether the external mutation completed.", "Retrying with new authority could duplicate an effect or violate lifecycle fencing.", "Reconcile the node and retained evidence; do not mint replacement authority until the outcome is proven.", true
+	case AttentionCapacityWarning:
+		return "Control capacity is running low", "A bounded Control inventory is at or above its warning threshold.", "New records may soon fail closed when the configured limit is reached.", "Preserve required evidence, then archive or remove eligible retained records before the limit is reached.", true
+	case AttentionTenantQuotaWarning:
+		return "Tenant quota is running low", "Reserved tenant resources are at or above the configured warning threshold.", "New workloads may soon be blocked by the tenant quota.", "Review tenant reservations and remove unused deployments or deliberately raise the signed operating limit.", true
+	case AttentionTenantQuotaExceeded:
+		return "Tenant quota is exceeded", "Reserved tenant resources meet or exceed the configured tenant limit.", "New workload placement is blocked for this resource.", "Remove unused reservations or deliberately raise the tenant quota before applying more workloads.", true
+	default:
+		return "", "", "", "", false
+	}
+}
+
+func withAttentionGuidance(item AttentionItem) AttentionItem {
+	title, explanation, impact, nextStep, ok := AttentionGuidance(item.Reason)
+	if ok {
+		item.Title = title
+		item.Explanation = explanation
+		item.Impact = impact
+		item.NextStep = nextStep
+	}
+	return item
 }
 
 type attentionCounter struct {
@@ -1374,6 +1439,19 @@ func attentionSortKey(item AttentionItem) string {
 	}
 	return item.TenantID + "\x00" + resourceRank + "\x00" + resourceID + "\x00" +
 		string(item.Reason) + "\x00" + string(item.Resource)
+}
+
+func attentionResourceID(item AttentionItem) string {
+	switch item.Resource {
+	case AttentionResourceCapacity:
+		return string(item.CapacityResource)
+	case AttentionResourceQuota:
+		return item.QuotaResource
+	case AttentionResourceCommand:
+		return item.CommandID
+	default:
+		return item.NodeID
+	}
 }
 
 func validAttentionReason(reason AttentionReason) bool {

@@ -934,9 +934,17 @@ func (c *Client) GetOperationsSummary(ctx context.Context, tenantID string) (con
 }
 
 func (c *Client) ListAttention(ctx context.Context, tenantID, reason, cursor string, limit int) (controlstore.AttentionPage, error) {
+	return c.listAttention(ctx, tenantID, reason, "", cursor, limit)
+}
+
+func (c *Client) ListAttentionForResource(ctx context.Context, tenantID, resourceID, cursor string, limit int) (controlstore.AttentionPage, error) {
+	return c.listAttention(ctx, tenantID, "", resourceID, cursor, limit)
+}
+
+func (c *Client) listAttention(ctx context.Context, tenantID, reason, resourceID, cursor string, limit int) (controlstore.AttentionPage, error) {
 	path, err := operationsPath(
 		"/v1/operations/attention",
-		map[string]string{"tenant_id": tenantID, "reason": reason}, nil, cursor, limit,
+		map[string]string{"tenant_id": tenantID, "reason": reason, "resource_id": resourceID}, nil, cursor, limit,
 	)
 	if err != nil {
 		return controlstore.AttentionPage{}, err

@@ -84,7 +84,7 @@ Initial authentication has a two-minute hard deadline. Navigation or `pagehide`
 also clears the credential while those first reads are still in flight; a stalled
 response cannot retain pre-session authority indefinitely.
 
-## Read the six views
+## Read the eight views
 
 Every view starts with the effective command-delivery state for the selected
 scope. A green banner means Control may deliver new commands. A red striped banner
@@ -100,7 +100,7 @@ The console does not set or clear a freeze. Use the authenticated
 | View | What it shows | What it omits |
 | --- | --- | --- |
 | Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, retained-state capacity, and the selected tenant's fleet-wide resource quota and usage | Mutation controls and raw evidence frames |
-| Attention | Deterministic findings derived from retained facts and current process observations, including tenant quota pressure; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, remediation, or incident workflow |
+| Attention | Deterministic findings derived from retained facts and current process observations, including the bounded cause, impact, safest next step, and a copyable `stewardctl explain` command; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, direct remediation, or incident workflow |
 | Incident view | Current containment, evidence divergence, access revocation, and failed-workload facts in newest-first order, with site or tenant scope and bounded reasons | Complete history, overwritten transitions, command or result bodies, credentials, prompts, logs, acknowledgement, or remediation |
 | Nodes | Node state, placement mode, durable drain state and request ID, failed drain instance when applicable, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
 | Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
@@ -119,6 +119,12 @@ example, if a running agent receives a stop command that fails, the card shows
 latest operation. This avoids claiming the workload stopped or failed when
 Executor reported neither result. An `unknown` status means Control has signed
 runtime identity but no unambiguous successful workload observation.
+
+Attention guidance comes from Control's stable reason-code catalog, not from raw
+Docker or upstream error text. Copying a diagnostic command does not execute it or
+grant authority. Run the command in a trusted terminal, review its current output,
+and use the [diagnosis and recovery guide]({{ '/guides/troubleshooting/' |
+relative_url }}) before applying a change.
 
 The console refreshes a visible page every 30 seconds and also provides a manual
 refresh. Operations pages request at most 100 records and the selected tenant's
