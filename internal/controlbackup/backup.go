@@ -578,7 +578,8 @@ func closeOpened(files []openedFile) {
 }
 
 func sameFile(before, after os.FileInfo) bool {
-	if before == nil || after == nil || before.Size() != after.Size() || before.Mode() != after.Mode() || !os.SameFile(before, after) {
+	if before == nil || after == nil || before.Size() != after.Size() || before.Mode() != after.Mode() ||
+		!before.ModTime().Equal(after.ModTime()) || !os.SameFile(before, after) {
 		return false
 	}
 	return true
