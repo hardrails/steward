@@ -151,9 +151,18 @@ stewardctl control event list \
   -token-file /etc/steward/control-operator.token
 ```
 
+To see event-correlated progress as one bounded record per workload lineage:
+
+```console
+stewardctl control task list \
+  -tenant-id research \
+  -token-file /etc/steward/control-operator.token
+```
+
 Delivery is at least once. Consumers must use the event ID or idempotency key to
 deduplicate work. A reported finding is an agent assertion with source metadata,
-not a trusted security decision. See [Receive agent events]({{ '/guides/controller-events/' |
+not a trusted security decision. The task projection is also agent-reported
+metadata, not signed evidence or result storage. See [Receive agent events]({{ '/guides/controller-events/' |
 relative_url }}) for retention and failure behavior.
 
 ## Air-gapped research

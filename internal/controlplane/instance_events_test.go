@@ -29,6 +29,8 @@ func TestExecutorEventUplinkAndOperatorTimelineAreAuthenticatedAndPaginated(t *t
 	decodeResponse(t, response, &credential)
 
 	event := controlplaneEvent("tenant-a", "node-1", "finding-1", fixture.now)
+	event.TaskID = "research-task-a"
+	event.RunID = "research-run-a"
 	batch := controlprotocol.InstanceEventBatchRequestV1{
 		SchemaVersion: controlprotocol.InstanceEventBatchV1, NodeID: "node-1",
 		Events: []controlprotocol.InstanceEventV1{event},
@@ -53,6 +55,24 @@ func TestExecutorEventUplinkAndOperatorTimelineAreAuthenticatedAndPaginated(t *t
 	requireError(t, fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a/instance-events?limit=101", fixture.adminToken, ""),
 		http.StatusBadRequest, "invalid_request")
 	requireError(t, fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a/instance-events?after=event-missing", fixture.adminToken, ""),
+		http.StatusBadRequest, "invalid_request")
+
+	response = fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a/tasks?limit=1", fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var tasks struct {
+		Tasks     []controlstore.TaskProjection `json:"tasks"`
+		NextAfter string                        `json:"next_after"`
+	}
+	decodeResponse(t, response, &tasks)
+	if len(tasks.Tasks) != 1 || tasks.Tasks[0].TaskID != event.TaskID || tasks.Tasks[0].RunID != event.RunID ||
+		tasks.Tasks[0].State != controlstore.TaskStateActivity || tasks.NextAfter != "" {
+		t.Fatalf("tasks=%+v", tasks)
+	}
+	requireError(t, fixture.request(t, http.MethodPost, "/v1/tenants/tenant-a/tasks", fixture.adminToken, "{}"),
+		http.StatusMethodNotAllowed, "method_not_allowed")
+	requireError(t, fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a/tasks?limit=101", fixture.adminToken, ""),
+		http.StatusBadRequest, "invalid_request")
+	requireError(t, fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a/tasks?after=task-missing", fixture.adminToken, ""),
 		http.StatusBadRequest, "invalid_request")
 }
 

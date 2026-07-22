@@ -239,6 +239,11 @@ type InstanceEventList struct {
 	NextAfter string                       `json:"next_after,omitempty"`
 }
 
+type TaskProjectionList struct {
+	Tasks     []controlstore.TaskProjection `json:"tasks"`
+	NextAfter string                        `json:"next_after,omitempty"`
+}
+
 type NodeRevocation struct {
 	NodeID             string `json:"node_id"`
 	RevokedCredentials int    `json:"revoked_credentials"`
@@ -560,6 +565,43 @@ func (c *Client) ListInstanceEvents(
 	}
 	if page.NextAfter != "" && (len(page.Events) == 0 || page.NextAfter != page.Events[len(page.Events)-1].Event.EventID) {
 		return InstanceEventList{}, errors.New("control instance event page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) ListTaskProjections(
+	ctx context.Context,
+	tenantID, after string,
+	limit int,
+) (TaskProjectionList, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || limit <= 0 || limit > 100 {
+		return TaskProjectionList{}, errors.New("task list requires a tenant and limit from 1 to 100")
+	}
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/tasks", after, limit)
+	if err != nil {
+		return TaskProjectionList{}, err
+	}
+	var page TaskProjectionList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return TaskProjectionList{}, err
+	}
+	if page.Tasks == nil || len(page.Tasks) > limit {
+		return TaskProjectionList{}, errors.New("control task page is invalid")
+	}
+	for index, projection := range page.Tasks {
+		if projection.TenantID != tenantID || projection.Validate() != nil {
+			return TaskProjectionList{}, errors.New("control task page contains an invalid projection")
+		}
+		if index > 0 {
+			previous := page.Tasks[index-1]
+			if previous.LastObservedAt < projection.LastObservedAt ||
+				previous.LastObservedAt == projection.LastObservedAt && previous.ProjectionID <= projection.ProjectionID {
+				return TaskProjectionList{}, errors.New("control task page is not canonical")
+			}
+		}
+	}
+	if page.NextAfter != "" && (len(page.Tasks) == 0 || page.NextAfter != page.Tasks[len(page.Tasks)-1].ProjectionID) {
+		return TaskProjectionList{}, errors.New("control task page cursor is inconsistent")
 	}
 	return page, nil
 }

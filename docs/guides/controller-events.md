@@ -47,6 +47,37 @@ and MCP server expose the same tenant-scoped retained data; see
 [APIs and schemas]({{ '/reference/api/' | relative_url }}) and
 [MCP operations]({{ '/guides/mcp/' | relative_url }}).
 
+## Read task progress
+
+Set `task_id` on related status and finding events to make them appear as one
+fleet task projection:
+
+```console
+stewardctl control task list \
+  -tenant-id research \
+  -limit 100 \
+  -token-file /etc/steward/control-operator.token
+```
+
+Steward groups events by tenant, task ID, instance ID, and instance generation.
+This prevents a reused task ID from merging two different workload lineages.
+Use these stable event codes when they match the actual lifecycle:
+
+| Code | Projected state |
+| --- | --- |
+| `task_started`, `task_progress` | `agent_reported_running` |
+| `task_completed` | `agent_reported_completed` |
+| `task_failed` | `agent_reported_failed` |
+| `task_cancelled` | `agent_reported_cancelled` |
+| Any other code with `task_id` | `agent_reported_activity` |
+
+The first reported terminal state remains sticky. If later events claim a
+different terminal state, run ID, node, or runtime, Steward adds a conflict
+condition instead of silently replacing history. The projection retains only
+bounded metadata and disappears when all of its contributing events age out.
+It is not a task queue, cancellation API, artifact store, or proof that the
+agent performed the reported work correctly.
+
 ## Trust and retention
 
 Event content is untrusted agent output. Display it as data, do not execute markup

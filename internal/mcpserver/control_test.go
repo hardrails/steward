@@ -47,6 +47,11 @@ func (control *fakeControl) ListInstanceEvents(_ context.Context, tenantID, afte
 	return controlclient.InstanceEventList{Events: []controlstore.InstanceEvent{}}, control.err
 }
 
+func (control *fakeControl) ListTaskProjections(_ context.Context, tenantID, after string, limit int) (controlclient.TaskProjectionList, error) {
+	control.calls = append(control.calls, "task-list:"+tenantID+":"+after+":"+strconv.Itoa(limit))
+	return controlclient.TaskProjectionList{Tasks: []controlstore.TaskProjection{}}, control.err
+}
+
 func (control *fakeControl) GetNode(_ context.Context, tenantID, nodeID string) (controlclient.Node, error) {
 	control.calls = append(control.calls, "node-status:"+tenantID+":"+nodeID)
 	return controlclient.Node{NodeID: nodeID, TenantIDs: []string{tenantID}, State: "active"}, control.err
@@ -191,14 +196,14 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 15 {
+	if len(listed) != 16 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
 	for _, name := range []string{
 		"steward_control_tenant_list", "steward_control_tenant_create", "steward_control_node_list",
 		"steward_control_node_status", "steward_control_node_revoke", "steward_control_command_submit",
-		"steward_control_event_list",
+		"steward_control_event_list", "steward_control_task_list",
 		"steward_control_command_status", "steward_control_operations_summary",
 		"steward_control_attention_list", "steward_control_command_list",
 		"steward_control_incident_timeline",
@@ -233,6 +238,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_attention_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_incident_timeline"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_event_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_task_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_command_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_agent_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_credential_list"], true, false, true, false)
@@ -252,7 +258,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	for _, toolName := range []string{
 		"steward_control_operations_summary", "steward_control_attention_list",
 		"steward_control_incident_timeline",
-		"steward_control_event_list",
+		"steward_control_event_list", "steward_control_task_list",
 		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
 	} {
 		schema := definitions[toolName]["inputSchema"].(map[string]any)
@@ -319,6 +325,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
 	eventCursor := "event-" + strings.Repeat("a", 64)
+	taskCursor := "task-" + strings.Repeat("a", 64)
 	directCalls := []struct {
 		name      string
 		arguments map[string]any
@@ -347,6 +354,12 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 			name: "steward_control_event_list",
 			arguments: map[string]any{
 				"tenant_id": "tenant-a", "after": eventCursor, "limit": 25,
+			},
+		},
+		{
+			name: "steward_control_task_list",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a", "after": taskCursor, "limit": 25,
 			},
 		},
 		{
@@ -398,6 +411,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		"attention-list:tenant-a:node_stale:" + attentionCursor + ":25",
 		"incident-timeline:tenant-a:node-a:containment:critical:" + incidentCursor + ":20",
 		"event-list:tenant-a:" + eventCursor + ":25",
+		"task-list:tenant-a:" + taskCursor + ":25",
 		"agent-list:tenant-a:node-a:running:" + agentCursor + ":40",
 		"command-list:tenant-a:node-a:terminal:failed:" + commandCursor + ":50",
 		"credential-list:tenant-a:operator:tenant_operator::false:" + credentialCursor + ":10",
@@ -436,6 +450,10 @@ func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 		{name: "event cursor", tool: "steward_control_event_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "event-invalid"}},
 		{name: "event cursor alphabet", tool: "steward_control_event_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "event-" + strings.Repeat("G", 64)}},
 		{name: "event limit", tool: "steward_control_event_list", arguments: map[string]any{"tenant_id": "tenant-a", "limit": 101}},
+		{name: "task tenant", tool: "steward_control_task_list", arguments: map[string]any{}},
+		{name: "task cursor", tool: "steward_control_task_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "task-invalid"}},
+		{name: "task cursor alphabet", tool: "steward_control_task_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "task-" + strings.Repeat("G", 64)}},
+		{name: "task limit", tool: "steward_control_task_list", arguments: map[string]any{"tenant_id": "tenant-a", "limit": 101}},
 		{name: "command state", tool: "steward_control_command_list", arguments: map[string]any{"state": "running"}},
 		{name: "command terminal without state", tool: "steward_control_command_list", arguments: map[string]any{"terminal_status": "failed"}},
 		{name: "command terminal status", tool: "steward_control_command_list", arguments: map[string]any{"state": "terminal", "terminal_status": "running"}},

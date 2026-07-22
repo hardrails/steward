@@ -533,7 +533,10 @@ and `task run` performs useful work through the enforced boundary.
 
 - Consolidate common operations behind one `steward` command while retaining
   expert commands and stable JSON output.
-- Add canonical deployment, instance, task, result, and condition models.
+- Extend the shipped bounded, read-only task projection into canonical submitted
+  task, result, and condition models. The current projection groups retained
+  untrusted instance events by workload lineage; it is not yet a dispatcher or
+  result authority.
 - Make Control-level task submission asynchronous and idempotent, with progress,
   cancellation, deadlines, bounded retention, and content-addressed result
   metadata. Reuse the shipped instance outbox instead of creating another event

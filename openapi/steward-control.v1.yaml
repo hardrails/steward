@@ -55,6 +55,8 @@ tags:
     description: Tenant-projected node inventory and site-wide revocation.
   - name: deployments
     description: Bounded desired agent state reconciled under tenant-signed controller delegation.
+  - name: tasks
+    description: Bounded, read-only task projections derived from untrusted agent events.
   - name: evidence
     description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
@@ -1637,6 +1639,50 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstanceEventPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tasks]
+      operationId: listTaskProjections
+      summary: List recent fleet task projections
+      description: |
+        Groups retained instance events by tenant, task ID, instance ID, and
+        generation, newest first. These projections are agent-reported
+        operational visibility, not command authority or proof that work was
+        performed correctly. A terminal state remains sticky; later conflicting
+        terminal or identity reports appear as conditions. Projections disappear
+        after all contributing events leave the bounded retention window.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: A bounded page of retained task projections.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskProjectionPage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -4281,6 +4327,113 @@ components:
         next_after:
           type: string
           pattern: '^event-[0-9a-f]{64}$'
+    TaskProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - projection_id
+        - tenant_id
+        - task_id
+        - instance_id
+        - generation
+        - node_id
+        - runtime_ref
+        - state
+        - latest_code
+        - latest_severity
+        - highest_severity
+        - latest_summary
+        - event_count
+        - finding_count
+        - first_observed_at
+        - last_observed_at
+        - latest_event_id
+        - conditions
+      properties:
+        projection_id:
+          type: string
+          pattern: '^task-[0-9a-f]{64}$'
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        run_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        state:
+          type: string
+          enum:
+            - agent_reported_activity
+            - agent_reported_running
+            - agent_reported_completed
+            - agent_reported_failed
+            - agent_reported_cancelled
+        latest_code:
+          $ref: "#/components/schemas/Identifier128"
+        latest_severity:
+          type: string
+          enum: [info, warning, critical]
+        highest_severity:
+          type: string
+          enum: [info, warning, critical]
+        latest_summary:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        event_count:
+          type: integer
+          minimum: 1
+        finding_count:
+          type: integer
+          minimum: 0
+        first_observed_at:
+          type: string
+          format: date-time
+        last_observed_at:
+          type: string
+          format: date-time
+        latest_event_id:
+          type: string
+          pattern: '^event-[0-9a-f]{64}$'
+        conditions:
+          type: array
+          uniqueItems: true
+          maxItems: 3
+          items:
+            type: string
+            enum: [run_identity_conflict, terminal_state_conflict, workload_identity_conflict]
+      description: >-
+        Agent-reported metadata projected from retained events. It is neither a
+        signed execution receipt nor proof that the reported work is correct.
+    TaskProjectionPage:
+      type: object
+      additionalProperties: false
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/TaskProjection"
+        next_after:
+          type: string
+          pattern: '^task-[0-9a-f]{64}$'
     NodeList:
       type: object
       additionalProperties: false

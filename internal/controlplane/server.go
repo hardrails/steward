@@ -158,6 +158,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}", server.deployment)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout", server.deploymentRollout)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/instance-events", server.instanceEvents)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/tasks", server.tasks)
 	server.mux.HandleFunc("/v1/operations/summary", server.operationsSummary)
 	server.mux.HandleFunc("/v1/operations/freeze", server.siteOperationalFreeze)
 	server.mux.HandleFunc("/v1/operations/attention", server.operationsAttention)
@@ -1065,6 +1066,59 @@ func pageInstanceEvents(values []controlstore.InstanceEvent, page pageRequest) (
 		return values[start:], "", true
 	}
 	return values[start:end], values[end-1].Event.EventID, true
+}
+
+func (server *Server) tasks(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	page, ok := parsePage(writer, request)
+	if !ok {
+		return
+	}
+	if page.limit > 100 {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "task limit must be between 1 and 100")
+		return
+	}
+	projections, err := server.store.ListTaskProjections(identity, request.PathValue("tenant_id"))
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	selected, next, ok := pageTaskProjections(projections, page)
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "after cursor does not identify a retained task projection")
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Tasks     []controlstore.TaskProjection `json:"tasks"`
+		NextAfter string                        `json:"next_after,omitempty"`
+	}{Tasks: selected, NextAfter: next})
+}
+
+func pageTaskProjections(values []controlstore.TaskProjection, page pageRequest) ([]controlstore.TaskProjection, string, bool) {
+	start := 0
+	if page.after != "" {
+		found := false
+		for index, projection := range values {
+			if projection.ProjectionID == page.after {
+				start, found = index+1, true
+				break
+			}
+		}
+		if !found {
+			return nil, "", false
+		}
+	}
+	end := start + page.limit
+	if end >= len(values) {
+		return values[start:], "", true
+	}
+	return values[start:end], values[end-1].ProjectionID, true
 }
 
 func (server *Server) executorReport(writer http.ResponseWriter, request *http.Request) {

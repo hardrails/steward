@@ -28,6 +28,7 @@ type Control interface {
 	CreateTenant(context.Context, string) (controlclient.Tenant, error)
 	ListNodes(context.Context, string, string, int) (controlclient.NodeList, error)
 	ListInstanceEvents(context.Context, string, string, int) (controlclient.InstanceEventList, error)
+	ListTaskProjections(context.Context, string, string, int) (controlclient.TaskProjectionList, error)
 	GetNode(context.Context, string, string) (controlclient.Node, error)
 	RevokeNode(context.Context, string) (controlclient.NodeRevocation, error)
 	SubmitCommand(context.Context, string, string, []byte) (controlclient.Command, error)
@@ -58,6 +59,12 @@ type controlNodeListArgs struct {
 }
 
 type controlEventListArgs struct {
+	TenantID string `json:"tenant_id"`
+	After    string `json:"after,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+type controlTaskListArgs struct {
 	TenantID string `json:"tenant_id"`
 	After    string `json:"after,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
@@ -188,6 +195,21 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 		result, err := s.control.ListInstanceEvents(ctx, arguments.TenantID, arguments.After, limit)
 		if err != nil {
 			return nil, controlFailure("instance event list", err)
+		}
+		return result, nil
+	case "steward_control_task_list":
+		var arguments controlTaskListArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.TenantID, 128) ||
+			!validControlTaskCursor(arguments.After) || !validControlPage(arguments.After, arguments.Limit) || arguments.Limit > 100 {
+			return nil, errors.New("steward_control_task_list requires tenant_id and accepts only a bounded task projection cursor and limit up to 100")
+		}
+		limit := arguments.Limit
+		if limit == 0 {
+			limit = 100
+		}
+		result, err := s.control.ListTaskProjections(ctx, arguments.TenantID, arguments.After, limit)
+		if err != nil {
+			return nil, controlFailure("task projection list", err)
 		}
 		return result, nil
 	case "steward_control_node_list":
@@ -402,13 +424,21 @@ func validControlPage(after string, limit int) bool {
 }
 
 func validControlEventCursor(after string) bool {
+	return validControlDigestCursor(after, "event-")
+}
+
+func validControlTaskCursor(after string) bool {
+	return validControlDigestCursor(after, "task-")
+}
+
+func validControlDigestCursor(after, prefix string) bool {
 	if after == "" {
 		return true
 	}
-	if len(after) != len("event-")+64 || !strings.HasPrefix(after, "event-") {
+	if len(after) != len(prefix)+64 || !strings.HasPrefix(after, prefix) {
 		return false
 	}
-	for _, character := range strings.TrimPrefix(after, "event-") {
+	for _, character := range strings.TrimPrefix(after, prefix) {
 		if character < '0' || character > '9' && character < 'a' || character > 'f' {
 			return false
 		}
@@ -606,6 +636,13 @@ func controlTools() []any {
 				"properties": map[string]any{
 					"tenant_id": id128,
 					"after":     map[string]any{"type": "string", "maxLength": 70, "pattern": "^$|^event-[a-f0-9]{64}$"},
+					"limit":     map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
+				}}, true, false, true, false),
+		tool("steward_control_task_list", "List fleet tasks", "List bounded task progress projected from recent untrusted agent events. Terminal conflicts are preserved as conditions; projections are neither command authority nor proof of correct work.",
+			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tenant_id"},
+				"properties": map[string]any{
+					"tenant_id": id128,
+					"after":     map[string]any{"type": "string", "maxLength": 69, "pattern": "^$|^task-[a-f0-9]{64}$"},
 					"limit":     map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
 				}}, true, false, true, false),
 		tool("steward_control_node_revoke", "Revoke node", "Permanently disable one node and its retained credentials. acknowledge_node_revocation is a model-visible safety acknowledgment, not authority.",

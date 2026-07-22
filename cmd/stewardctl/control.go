@@ -98,6 +98,8 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlAgentList(arguments[2:], stdout)
 	case "event list":
 		return controlEventList(arguments[2:], stdout)
+	case "task list":
+		return controlTaskList(arguments[2:], stdout)
 	case "command submit":
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
@@ -132,7 +134,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 func controlEventList(arguments []string, stdout io.Writer) error {
@@ -159,6 +161,32 @@ func controlEventList(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, events)
+}
+
+func controlTaskList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control task list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	after := flags.String("after", "", "exclusive task projection cursor")
+	limit := flags.Int("limit", 100, "maximum task projections to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *tenantID == "" || *limit <= 0 || *limit > 100 || flags.NArg() != 0 {
+		return errors.New("control task list requires tenant and a limit between 1 and 100")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tasks, err := client.ListTaskProjections(ctx, *tenantID, *after, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, tasks)
 }
 
 type controlFlags struct {
