@@ -163,6 +163,9 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 	} else if fork != nil {
 		deploymentID = forkPlan.DeploymentID
 	}
+	if fork != nil && deploymentID != forkPlan.DeploymentID {
+		return errors.New("deployment name does not match the deployment bound into the fork plan")
+	}
 	capsuleRaw, err := readCLIArtifact(*capsulePath)
 	if err != nil {
 		return fmt.Errorf("read workload capsule: %w", err)
