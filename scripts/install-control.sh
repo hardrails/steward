@@ -1393,7 +1393,8 @@ prove_admin_token() {
 		exec timeout --signal=TERM --kill-after=2 12 runuser -u "$service_user" -- /bin/sh -c \
 			'printf "steward-proof-pid=%s\n" "$$"; exec "$@"' _ \
 			"$release_dir/steward-control" -addr 127.0.0.1:0 \
-			-state-dir "$state_dir" -auth-key-file "$state_dir/auth.key"
+			-state-dir "$state_dir" -auth-key-file "$state_dir/auth.key" \
+			-authority-mode "$authority_mode"
 	) >"$work/proof.stdout" 2>"$work/proof.stderr" &
 	proof_wrapper_pid=$!
 	address_line=
@@ -1414,10 +1415,11 @@ prove_admin_token() {
 		identity_valid=true
 	elif [[ -z $proof_executable && -r /proc/$proof_child_pid/cmdline ]]; then
 		mapfile -d '' -t proof_argv <"/proc/$proof_child_pid/cmdline" || true
-		if (( ${#proof_argv[@]} == 7 )) && [[ ${proof_argv[0]} == "$release_dir/steward-control" &&
+		if (( ${#proof_argv[@]} == 9 )) && [[ ${proof_argv[0]} == "$release_dir/steward-control" &&
 			${proof_argv[1]} == -addr && ${proof_argv[2]} == 127.0.0.1:0 &&
 			${proof_argv[3]} == -state-dir && ${proof_argv[4]} == "$state_dir" &&
-			${proof_argv[5]} == -auth-key-file && ${proof_argv[6]} == "$state_dir/auth.key" ]]; then
+			${proof_argv[5]} == -auth-key-file && ${proof_argv[6]} == "$state_dir/auth.key" &&
+			${proof_argv[7]} == -authority-mode && ${proof_argv[8]} == "$authority_mode" ]]; then
 			identity_valid=true
 		fi
 	fi
