@@ -216,6 +216,13 @@ jobs:
           recover_completion=$("$cli_verify/stewardctl" __complete recover -)
           grep -Fxq -- '-apply' <<<"$recover_completion"
           grep -Fxq -- '-output' <<<"$recover_completion"
+          backup_completion=$("$cli_verify/stewardctl" __complete control backup -)
+          grep -Fxq -- 'create' <<<"$backup_completion"
+          grep -Fxq -- 'verify' <<<"$backup_completion"
+          grep -Fxq -- 'restore' <<<"$backup_completion"
+          restore_completion=$("$cli_verify/stewardctl" __complete control backup restore -)
+          grep -Fxq -- '-apply' <<<"$restore_completion"
+          grep -Fxq -- '-state-dir' <<<"$restore_completion"
           rm -rf "$cli_verify"
           darwin_archive="dist/steward_${STEWARD_RELEASE_VERSION}_darwin_${{ matrix.goarch }}.tar.gz"
           tar -tzf "$darwin_archive" steward-control >/dev/null

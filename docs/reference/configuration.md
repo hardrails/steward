@@ -22,6 +22,12 @@ measured, legitimate higher capacity requires more memory, use a reviewed system
 drop-in rather than editing the packaged unit, and qualify startup, compaction,
 backup, and restore under the new limit before production use.
 
+The supported checkpoint command expects the default authentication, controller,
+and witness paths inside `-state-dir`. A custom external path remains valid for
+Control, but `stewardctl control backup create` refuses to claim that the resulting
+directory is a complete recovery unit. See
+[Control backup and restore]({{ '/guides/control-backup/' | relative_url }}).
+
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `-addr` | `127.0.0.1:8443` | Control API listener; a non-loopback address requires TLS |

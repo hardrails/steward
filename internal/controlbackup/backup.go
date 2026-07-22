@@ -269,7 +269,9 @@ func inspect(archivePath string, consume func(ManifestFile, io.Reader) error) (R
 	}
 	defer archive.Close()
 	hash := sha256.New()
-	tarReader := tar.NewReader(io.TeeReader(io.LimitReader(archive, maxArchiveBytes+1), hash))
+	limited := &io.LimitedReader{R: archive, N: maxArchiveBytes + 1}
+	hashed := io.TeeReader(limited, hash)
+	tarReader := tar.NewReader(hashed)
 	header, err := tarReader.Next()
 	if err != nil || !validTarHeader(header, manifestName, 0o600, maxManifestBytes) {
 		return Report{}, errors.New("Control backup manifest entry is invalid")
@@ -306,6 +308,9 @@ func inspect(archivePath string, consume func(ManifestFile, io.Reader) error) (R
 	}
 	if header, err := tarReader.Next(); err != io.EOF || header != nil {
 		return Report{}, errors.New("Control backup contains an undeclared trailing entry")
+	}
+	if trailing, err := io.ReadAll(hashed); err != nil || len(trailing) != 0 {
+		return Report{}, errors.New("Control backup contains bytes after the canonical tar terminator")
 	}
 	if current, err := archive.Stat(); err != nil || !sameFile(info, current) {
 		return Report{}, errors.New("Control backup changed while being read")
@@ -486,7 +491,8 @@ func writeTarEntry(writer *tar.Writer, name string, mode os.FileMode, raw []byte
 func validTarHeader(header *tar.Header, name string, mode os.FileMode, size int64) bool {
 	return header != nil && header.Name == name && header.Typeflag == tar.TypeReg && header.Mode == int64(mode.Perm()) &&
 		header.Size >= 0 && header.Size <= size && header.Linkname == "" && header.PAXRecords == nil &&
-		header.Uid == 0 && header.Gid == 0
+		header.Uid == 0 && header.Gid == 0 && header.Uname == "" && header.Gname == "" &&
+		header.Devmajor == 0 && header.Devminor == 0 && header.Format == tar.FormatUSTAR
 }
 
 func decodeStrict(raw []byte, destination any) error {

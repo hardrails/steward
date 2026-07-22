@@ -148,6 +148,19 @@ func TestVerifyRejectsHostileControlBackupEntries(t *testing.T) {
 			t.Fatalf("trailing entry error = %v", err)
 		}
 	})
+	t.Run("bytes after terminator", func(t *testing.T) {
+		changed := filepath.Join(root, "appended.tar")
+		raw, err := os.ReadFile(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(changed, append(raw, []byte("smuggled")...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Verify(changed); err == nil || !strings.Contains(err.Error(), "terminator") {
+			t.Fatalf("appended bytes error = %v", err)
+		}
+	})
 }
 
 func TestRestoreIsPreviewSafeByConstruction(t *testing.T) {

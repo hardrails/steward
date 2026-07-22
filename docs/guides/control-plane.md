@@ -1144,18 +1144,19 @@ but possession of a backup still carries authentication authority and private
 workload content, not just inventory.
 
 1. Stop `steward-control` and confirm it is inactive.
-2. Copy the entire owner-only state directory as one unit while preserving owner,
-   modes, and its regular-file, single-link layout.
-3. Protect the backup with the same controls as the live management host.
-4. Restore only the entire directory to a stopped controller of a compatible
-   release. On a replacement host, verify that it contains only single-link regular
-   files, set the directory to mode `0700`, set
-   `witness.public.pem` and `controller.public.pem` to mode `0644`, and set every
-   other file to mode `0600`
-   under the target `steward-control` user and group. Start the service, then run
-   the controller doctor to verify configuration and readiness. The doctor
-   deliberately reports an inactive service as a failure, even when its
-   stopped-state validation succeeds.
+2. Run `stewardctl control backup create` as the `steward-control` identity. The
+   command takes the writer lock, validates the full default identity set, and
+   records the exact checkpoint generation, sequence, inventory, and hashes.
+3. Move the owner-only archive to approved encrypted custody and independently
+   retain the reported archive digest.
+4. Run `stewardctl control backup verify` after every transfer. Preview
+   `stewardctl control backup restore` into a new directory, then repeat with
+   `-apply`. Restore never overwrites or merges with an existing directory.
+5. Cut over while Control is stopped, run `steward-control -check-config`, start
+   the service, and verify readiness and node polling.
+
+The complete commands, service ownership rules, limits, and rollback caveats are
+in [Control backup and restore]({{ '/guides/control-backup/' | relative_url }}).
 
 Never restore only the write-ahead log, snapshot, manifest, authentication key, or
 one key file. Restore the witness pair and controller-signing pair together or the
