@@ -74,3 +74,14 @@ variable "release_mirror" {
     error_message = "release_mirror must be null or contain credential-free ASCII HTTP(S) archive/manifest URLs no longer than 512 characters and without query strings, fragments, or whitespace, plus an independent lowercase archive SHA-256 pin; archive_url must end in .tar.gz."
   }
 }
+
+variable "authority_mode" {
+  description = "Control authority profile: bounded-autonomous reconciles under tenant-signed delegations; strict-sovereign transports only exact externally signed commands."
+  type        = string
+  default     = "bounded-autonomous"
+
+  validation {
+    condition     = contains(["bounded-autonomous", "strict-sovereign"], var.authority_mode)
+    error_message = "authority_mode must be bounded-autonomous or strict-sovereign."
+  }
+}

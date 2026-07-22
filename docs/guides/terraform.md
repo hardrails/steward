@@ -81,6 +81,7 @@ module "steward_control" {
   )
   installer_sha256 = var.steward_control_installer_sha256
   manifest_sha256  = var.steward_control_manifest_sha256
+  authority_mode   = "strict-sovereign"
 }
 
 resource "example_linux_server" "control" {
@@ -102,6 +103,11 @@ limited to 16 KiB raw and
 21,848 bytes after base64 encoding. An optional `release_mirror` supplies the
 controller archive URL and independent archive pin plus the manifest URL; it uses
 the same required top-level manifest pin and never falls back to a public artifact.
+
+Set `authority_mode = "strict-sovereign"` when this host must not hold an online
+controller signing key. The default, `bounded-autonomous`, supports automatic
+desired-state reconciliation inside tenant-signed delegations. The selected mode
+is non-secret and is safe to retain in Terraform state.
 
 Bootstrap installs and starts the controller only on
 `http://127.0.0.1:8443`. It creates or recovers the first site-administrator token

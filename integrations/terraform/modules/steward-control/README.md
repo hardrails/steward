@@ -49,6 +49,7 @@ module "steward_control" {
   )
   installer_sha256 = var.steward_control_installer_sha256
   manifest_sha256  = var.steward_control_manifest_sha256
+  authority_mode   = "strict-sovereign"
 }
 ```
 
@@ -162,6 +163,7 @@ controller, not a safe in-place upgrade.
 | `installer_sha256` | yes | Independently obtained lowercase SHA-256 of the installer. |
 | `manifest_sha256` | yes | Independently obtained lowercase SHA-256 of the exact release `checksums.txt`. |
 | `release_mirror` | no | Controller archive URL and SHA-256 plus manifest URL, each URL at most 512 characters; `null` uses the public exact-tag endpoints with the required manifest pin. |
+| `authority_mode` | no | `bounded-autonomous` (default) loads the delegated online controller key; `strict-sovereign` omits that key and desired-state reconciliation. |
 
 | Output | Meaning |
 | --- | --- |

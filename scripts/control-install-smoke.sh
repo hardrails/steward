@@ -59,6 +59,7 @@ func main() {
 	flag.Duration("command-overdue-after", 5*time.Minute, "")
 	flag.Duration("reconcile-interval", 5*time.Second, "")
 	flag.String("controller-key-id", "controller-default", "")
+	flag.String("authority-mode", "bounded-autonomous", "")
 	flag.Int("capacity-warning-percent", 80, "")
 	flag.Parse()
 	if *showVersion {
@@ -667,6 +668,7 @@ grep -Fxq 'STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=/var/lib/steward-control/c
 	/etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_CONTROLLER_KEY_ID=controller-default' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_RECONCILE_INTERVAL=5s' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_AUTHORITY_MODE=bounded-autonomous' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_ENABLE_METRICS=false' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_NODE_STALE_AFTER=2m' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m' /etc/steward-control/control.env
@@ -741,6 +743,7 @@ STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE=/var/lib/steward-control/controller.
 STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=/var/lib/steward-control/controller.public.pem
 STEWARD_CONTROL_CONTROLLER_KEY_ID=controller-default
 STEWARD_CONTROL_RECONCILE_INTERVAL=5s
+STEWARD_CONTROL_AUTHORITY_MODE=bounded-autonomous
 STEWARD_CONTROL_TLS_CERT_FILE=/etc/steward-control/tls.crt
 STEWARD_CONTROL_TLS_KEY_FILE=/etc/steward-control/tls.key
 STEWARD_CONTROL_ENABLE_METRICS=false
@@ -902,6 +905,7 @@ grep -Fxq "STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE=$controller_private" /etc
 grep -Fxq "STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=$controller_public" /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_CONTROLLER_KEY_ID=controller-default' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_RECONCILE_INTERVAL=5s' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_AUTHORITY_MODE=bounded-autonomous' /etc/steward-control/control.env
 install_version v1.0.0
 [[ $(sha256sum "$controller_private" "$controller_public") == "$legacy_controller_hash" ]]
 
@@ -1340,11 +1344,26 @@ tar -C "$real_stage" -czf "$fixture/real-assets/steward-control_v9.9.0_linux_${t
 	LICENSE control.env control-doctor.sh steward-control steward-control.service
 (cd "$fixture/real-assets" && sha256sum ./*.tar.gz >checksums.txt)
 install_real() {
+	local authority_mode=${1:-bounded-autonomous}
 	/bin/bash -p /repo/scripts/install-control.sh --non-interactive --no-start --version v9.9.0 \
 		--artifact "$fixture/real-assets/steward-control_v9.9.0_linux_${test_goarch}.tar.gz" \
 		--checksums "$fixture/real-assets/checksums.txt" \
+		--authority-mode "$authority_mode" \
 		--admin-token-out /root/steward-control-admin.token
 }
+
+install_real strict-sovereign
+grep -Fxq 'STEWARD_CONTROL_AUTHORITY_MODE=strict-sovereign' /etc/steward-control/control.env
+[[ ! -e /var/lib/steward-control/controller.private.pem ]]
+[[ ! -e /var/lib/steward-control/controller.public.pem ]]
+runuser -u steward-control -- /usr/local/bin/steward-control \
+	-check-config -authority-mode strict-sovereign \
+	-state-dir /var/lib/steward-control -auth-key-file /var/lib/steward-control/auth.key >/dev/null
+rm -rf /var/lib/steward-control /etc/steward-control /opt/steward-control \
+	/usr/local/libexec/steward-control /root/steward-control-admin.token
+rm -f /usr/local/bin/steward-control /etc/systemd/system/steward-control.service
+rm -rf /run/fake-systemctl/*
+
 install_real
 [[ $(/usr/local/bin/steward-control -version) == 'steward-control v9.9.0' ]]
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control) == 'steward-control:steward-control 700' ]]
@@ -1363,6 +1382,14 @@ real_witness_hash=$(sha256sum /var/lib/steward-control/witness.private.pem \
 	/var/lib/steward-control/witness.public.pem)
 real_controller_hash=$(sha256sum /var/lib/steward-control/controller.private.pem \
 	/var/lib/steward-control/controller.public.pem)
+if install_real strict-sovereign >/tmp/control-strict-existing-key.out 2>&1; then
+	echo "control-install-smoke: strict-sovereign accepted an online controller key" >&2
+	exit 1
+fi
+grep -Fq 'requires both controller signing-key files to be absent' /tmp/control-strict-existing-key.out
+[[ $(sha256sum /var/lib/steward-control/controller.private.pem \
+	/var/lib/steward-control/controller.public.pem) == "$real_controller_hash" ]]
+grep -Fxq 'STEWARD_CONTROL_AUTHORITY_MODE=bounded-autonomous' /etc/steward-control/control.env
 ln /root/steward-control-admin.token "${publication_prefix}interrupted-link"
 install_real >/dev/null
 [[ ! -e ${publication_prefix}interrupted-link ]]

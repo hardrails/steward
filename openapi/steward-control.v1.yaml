@@ -1263,6 +1263,12 @@ paths:
         trusted; Executor verifies that signature against authenticated site
         policy before every effect. Exact retries are idempotent. A changed
         generation must supply the current `expected_revision`.
+
+        This mutation is available only in `bounded-autonomous` authority mode.
+        In `strict-sovereign`, Control returns
+        `409 autonomous_reconciliation_disabled`; operators use the exact signed
+        command courier instead. Control refuses strict-mode startup while an
+        online controller signing-key file exists.
       requestBody:
         required: true
         content:
@@ -1291,7 +1297,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/DeploymentAuthorityDisabledOrConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -1309,7 +1315,8 @@ paths:
       description: |
         Marks desired state as absent; it does not erase the reconciliation
         cursor or audit linkage. The current revision is required to prevent a
-        stale operator from removing a newer rollout.
+        stale operator from removing a newer rollout. This mutation is disabled
+        in `strict-sovereign` authority mode.
       requestBody:
         required: true
         content:
@@ -1332,7 +1339,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/DeploymentAuthorityDisabledOrConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -1355,6 +1362,8 @@ paths:
         the operation cannot strand an instance after its source runtime has
         been destroyed. The current revision prevents a stale operator from
         changing a newer rollout.
+
+        This mutation is disabled in `strict-sovereign` authority mode.
       requestBody:
         required: true
         content:
@@ -1377,7 +1386,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/DeploymentAuthorityDisabledOrConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -2711,6 +2720,17 @@ components:
             type: integer
             minimum: 1
             maximum: 3600
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    DeploymentAuthorityDisabledOrConflict:
+      description: |
+        The request conflicts with retained deployment state, or Control is in
+        `strict-sovereign` mode and returned
+        `autonomous_reconciliation_disabled`. Strict mode transports exact
+        externally signed commands but does not retain desired-state mutations
+        that require Control to mint lifecycle commands.
       content:
         application/json:
           schema:

@@ -113,6 +113,39 @@ func TestDeploymentHTTPContractAppliesProjectsListsAndRemoves(t *testing.T) {
 	}
 }
 
+func TestStrictSovereignModeRejectsDesiredStateMutation(t *testing.T) {
+	fixture := newServerFixture(t)
+	server, err := New(Config{
+		Store: fixture.store, Auth: fixture.server.auth, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: 2 * time.Minute, MaxPoll: 32, AuthorityMode: AuthorityModeStrictSovereign,
+		Now: func() time.Time { return fixture.now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.server = server
+	for _, request := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/v1/tenants/tenant-a/deployments/research"},
+		{http.MethodDelete, "/v1/tenants/tenant-a/deployments/research"},
+		{http.MethodPut, "/v1/tenants/tenant-a/deployments/research/rollout"},
+	} {
+		requireError(
+			t,
+			fixture.request(t, request.method, request.path, fixture.adminToken, `{}`),
+			http.StatusConflict,
+			"autonomous_reconciliation_disabled",
+		)
+	}
+	requireStatus(
+		t,
+		fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a/deployments", fixture.adminToken, ""),
+		http.StatusOK,
+	)
+}
+
 func TestDeploymentHTTPContractFailsClosedAtRoutingAndEncodingBoundaries(t *testing.T) {
 	fixture := newServerFixture(t)
 	for _, test := range []struct {

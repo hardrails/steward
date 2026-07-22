@@ -64,6 +64,7 @@ Listener and bootstrap:
   --admin-token-out FILE     First-install/recovery token path; never overwritten
 
 Operations:
+  --authority-mode MODE       bounded-autonomous (default) or strict-sovereign
   --enable-metrics           Expose authenticated Prometheus metrics
   --disable-metrics          Disable Prometheus metrics (default)
   --node-stale-after DURATION
@@ -86,7 +87,7 @@ Environment equivalents: STEWARD_CONTROL_VERSION, STEWARD_CONTROL_OFFLINE_DIR,
 STEWARD_CONTROL_ARTIFACT, STEWARD_CONTROL_CHECKSUMS, STEWARD_CONTROL_ADDR,
 STEWARD_CONTROL_TLS_CERT, STEWARD_CONTROL_TLS_KEY, and
 STEWARD_CONTROL_ADMIN_TOKEN_OUT. Operations equivalents are
-STEWARD_CONTROL_ENABLE_METRICS, STEWARD_CONTROL_NODE_STALE_AFTER,
+STEWARD_CONTROL_AUTHORITY_MODE, STEWARD_CONTROL_ENABLE_METRICS, STEWARD_CONTROL_NODE_STALE_AFTER,
 STEWARD_CONTROL_EVIDENCE_STALE_AFTER, STEWARD_CONTROL_COMMAND_OVERDUE_AFTER,
 and STEWARD_CONTROL_CAPACITY_WARNING_PERCENT.
 
@@ -104,6 +105,7 @@ address=${STEWARD_CONTROL_ADDR:-}
 tls_cert=${STEWARD_CONTROL_TLS_CERT:-}
 tls_key=${STEWARD_CONTROL_TLS_KEY:-}
 admin_token_out=${STEWARD_CONTROL_ADMIN_TOKEN_OUT:-}
+authority_mode=${STEWARD_CONTROL_AUTHORITY_MODE:-}
 enable_metrics=${STEWARD_CONTROL_ENABLE_METRICS:-}
 node_stale_after=${STEWARD_CONTROL_NODE_STALE_AFTER:-}
 evidence_stale_after=${STEWARD_CONTROL_EVIDENCE_STALE_AFTER:-}
@@ -111,6 +113,8 @@ command_overdue_after=${STEWARD_CONTROL_COMMAND_OVERDUE_AFTER:-}
 capacity_warning_percent=${STEWARD_CONTROL_CAPACITY_WARNING_PERCENT:-}
 address_set=false
 [[ -z ${STEWARD_CONTROL_ADDR:-} ]] || address_set=true
+authority_mode_set=false
+[[ ${STEWARD_CONTROL_AUTHORITY_MODE+x} == x ]] && authority_mode_set=true
 metrics_set=false
 [[ ${STEWARD_CONTROL_ENABLE_METRICS+x} == x ]] && metrics_set=true
 node_stale_set=false
@@ -721,6 +725,7 @@ while [[ $# -gt 0 ]]; do
 		--tls-key) tls_key=${2:-}; tls_supplied=true; shift 2 ;;
 		--clear-tls) clear_tls=true; shift ;;
 		--admin-token-out) admin_token_out=${2:-}; shift 2 ;;
+		--authority-mode) authority_mode=${2:-}; authority_mode_set=true; shift 2 ;;
 		--enable-metrics) enable_metrics=true; metrics_set=true; ((metrics_cli_choices += 1)); shift ;;
 		--disable-metrics) enable_metrics=false; metrics_set=true; ((metrics_cli_choices += 1)); shift ;;
 		--node-stale-after) node_stale_after=${2:-}; node_stale_set=true; shift 2 ;;
@@ -800,7 +805,7 @@ read_existing_config() {
 	fi
 	while IFS= read -r line || [[ -n $line ]]; do
 		case "$line" in "" | \#*) continue ;; esac
-		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_KEY_ID|STEWARD_CONTROL_RECONCILE_INTERVAL|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE|STEWARD_CONTROL_ENABLE_METRICS|STEWARD_CONTROL_NODE_STALE_AFTER|STEWARD_CONTROL_EVIDENCE_STALE_AFTER|STEWARD_CONTROL_COMMAND_OVERDUE_AFTER|STEWARD_CONTROL_CAPACITY_WARNING_PERCENT)=([^[:space:]]*)$ ]]; then
+		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_KEY_ID|STEWARD_CONTROL_RECONCILE_INTERVAL|STEWARD_CONTROL_AUTHORITY_MODE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE|STEWARD_CONTROL_ENABLE_METRICS|STEWARD_CONTROL_NODE_STALE_AFTER|STEWARD_CONTROL_EVIDENCE_STALE_AFTER|STEWARD_CONTROL_COMMAND_OVERDUE_AFTER|STEWARD_CONTROL_CAPACITY_WARNING_PERCENT)=([^[:space:]]*)$ ]]; then
 			echo "install-control: unsupported or malformed setting in $config_file" >&2; exit 1
 		fi
 		key=${BASH_REMATCH[1]}
@@ -849,6 +854,12 @@ read_existing_config() {
 		echo "install-control: existing reconciliation interval is not installer-managed" >&2
 		exit 1
 	fi
+	if [[ ${existing[STEWARD_CONTROL_AUTHORITY_MODE]+present} == present &&
+		${existing[STEWARD_CONTROL_AUTHORITY_MODE]} != bounded-autonomous &&
+		${existing[STEWARD_CONTROL_AUTHORITY_MODE]} != strict-sovereign ]]; then
+		echo "install-control: existing authority mode is invalid" >&2
+		exit 1
+	fi
 	if [[ -n ${existing[STEWARD_CONTROL_TLS_CERT_FILE]} || -n ${existing[STEWARD_CONTROL_TLS_KEY_FILE]} ]]; then
 		if [[ ${existing[STEWARD_CONTROL_TLS_CERT_FILE]} != "$tls_cert_dest" || ${existing[STEWARD_CONTROL_TLS_KEY_FILE]} != "$tls_key_dest" ]]; then
 			echo "install-control: existing TLS paths are not installer-managed" >&2; exit 1
@@ -892,6 +903,14 @@ if [[ $metrics_set == false ]]; then
 		enable_metrics=${existing[STEWARD_CONTROL_ENABLE_METRICS]}
 	else
 		enable_metrics=false
+	fi
+fi
+if [[ $authority_mode_set == false ]]; then
+	if [[ $have_existing_config == true &&
+		${existing[STEWARD_CONTROL_AUTHORITY_MODE]+present} == present ]]; then
+		authority_mode=${existing[STEWARD_CONTROL_AUTHORITY_MODE]}
+	else
+		authority_mode=bounded-autonomous
 	fi
 fi
 if [[ $node_stale_set == false ]]; then
@@ -960,6 +979,10 @@ fi
 if [[ $version != latest ]] && ! valid_release_version "$version"; then echo "install-control: version must be latest or a vX.Y.Z release tag" >&2; exit 2; fi
 if [[ $enable_metrics != true && $enable_metrics != false ]]; then
 	echo "install-control: metrics setting must be true or false" >&2
+	exit 2
+fi
+if [[ $authority_mode != bounded-autonomous && $authority_mode != strict-sovereign ]]; then
+	echo "install-control: authority mode must be bounded-autonomous or strict-sovereign" >&2
 	exit 2
 fi
 if ! valid_operations_duration "$node_stale_after" ||
@@ -1086,6 +1109,7 @@ if [[ $dry_run == true ]]; then
 	echo "  transport:    $([[ $tls_supplied == true || $preserve_tls == true ]] && echo TLS || echo loopback-HTTP)"
 	echo "  state:        $state_dir (preserved)"
 	echo "  metrics:      $([[ $enable_metrics == true ]] && echo authenticated || echo disabled)"
+	echo "  authority:    $authority_mode"
 	echo "  attention:    node=$node_stale_after evidence=$evidence_stale_after command=$command_overdue_after capacity=${capacity_warning_percent}%"
 	echo "  token output: ${admin_token_out:-required on first install}"
 	echo "  service:      $([[ $start_service == true ]] && echo enable-and-start || echo install-only)"
@@ -1778,6 +1802,12 @@ fi
 if [[ -e $current_link && ! -L $current_link ]] || [[ -e $binary_link && ! -L $binary_link ]] || [[ -e $doctor_link && ! -L $doctor_link ]] || [[ -e $unit_link && ! -L $unit_link ]]; then
 	echo "install-control: refusing to replace a non-installer file at a managed link path" >&2; exit 1
 fi
+if [[ $authority_mode == strict-sovereign ]] &&
+	{ [[ -e $controller_private_key || -L $controller_private_key ]] ||
+		[[ -e $controller_public_key || -L $controller_public_key ]]; }; then
+	echo "install-control: strict-sovereign requires both controller signing-key files to be absent; expire every delegation that names the key, archive any required public identity, and remove both files before retrying" >&2
+	exit 1
+fi
 snapshot_control_service_state || exit 1
 if ! prepare_durable_transaction; then
 	echo "install-control: could not persist the rollback journal before changing controller state" >&2
@@ -1814,6 +1844,7 @@ config_tmp=$config_dir/.control.env.$$
 	echo "STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=$controller_public_key"
 	echo "STEWARD_CONTROL_CONTROLLER_KEY_ID=$controller_key_id"
 	echo "STEWARD_CONTROL_RECONCILE_INTERVAL=$reconcile_interval"
+	echo "STEWARD_CONTROL_AUTHORITY_MODE=$authority_mode"
 	echo "STEWARD_CONTROL_TLS_CERT_FILE=$desired_cert"
 	echo "STEWARD_CONTROL_TLS_KEY_FILE=$desired_key"
 	echo "STEWARD_CONTROL_ENABLE_METRICS=$enable_metrics"
@@ -1880,7 +1911,8 @@ if [[ $handoff_needed == true ]]; then
 		-witness-private-key-file "$witness_private_key" \
 		-witness-public-key-file "$witness_public_key" \
 		-controller-private-key-file "$controller_private_key" \
-		-controller-public-key-file "$controller_public_key")
+		-controller-public-key-file "$controller_public_key" \
+		-authority-mode "$authority_mode")
 	if [[ $state_identity == service ]]; then
 		if ! timeout --signal=TERM --kill-after=2 30 \
 			runuser -u "$service_user" -- "$release_dir/steward-control" "${initialize_args[@]}" >/dev/null; then
@@ -1914,14 +1946,16 @@ if [[ $(stat -c '%u:%g:%a' -- "$state_dir") != "$service_uid:$service_gid:700" ]
 fi
 validate_state_tree "$service_uid" "$service_gid"
 
-controller_args=(-initialize-controller-key -addr 127.0.0.1:0 -state-dir "$state_dir" \
-	-auth-key-file "$state_dir/auth.key" \
-	-controller-private-key-file "$controller_private_key" \
-	-controller-public-key-file "$controller_public_key")
-if ! timeout --signal=TERM --kill-after=2 30 \
-	runuser -u "$service_user" -- "$release_dir/steward-control" "${controller_args[@]}" >/dev/null; then
-	echo "install-control: controller signing-key initialization failed or exceeded its 30-second bound; existing key files were not replaced" >&2
-	exit 1
+if [[ $authority_mode == bounded-autonomous ]]; then
+	controller_args=(-initialize-controller-key -addr 127.0.0.1:0 -state-dir "$state_dir" \
+		-auth-key-file "$state_dir/auth.key" \
+		-controller-private-key-file "$controller_private_key" \
+		-controller-public-key-file "$controller_public_key")
+	if ! timeout --signal=TERM --kill-after=2 30 \
+		runuser -u "$service_user" -- "$release_dir/steward-control" "${controller_args[@]}" >/dev/null; then
+		echo "install-control: controller signing-key initialization failed or exceeded its 30-second bound; existing key files were not replaced" >&2
+		exit 1
+	fi
 fi
 validate_state_tree "$service_uid" "$service_gid"
 
@@ -1955,7 +1989,8 @@ check_args=(-check-config -addr "$address" -state-dir "$state_dir" \
 	-controller-private-key-file "$controller_private_key" \
 	-controller-public-key-file "$controller_public_key" \
 	-controller-key-id "$controller_key_id" \
-	-reconcile-interval "$reconcile_interval")
+	-reconcile-interval "$reconcile_interval" \
+	-authority-mode "$authority_mode")
 if [[ -n $desired_cert ]]; then check_args+=(-tls-cert-file "$desired_cert" -tls-key-file "$desired_key"); fi
 if ! timeout --signal=TERM --kill-after=2 15 \
 	runuser -u "$service_user" -- "$release_dir/steward-control" "${check_args[@]}" >/dev/null; then
@@ -1994,6 +2029,11 @@ echo "Steward Control $version is installed."
 echo "  listener: $address"
 echo "  state:    $state_dir"
 echo "  witness public key: $witness_public_key"
-echo "  controller public key: $controller_public_key ($controller_key_id)"
+echo "  authority mode: $authority_mode"
+if [[ $authority_mode == bounded-autonomous ]]; then
+	echo "  controller public key: $controller_public_key ($controller_key_id)"
+else
+	echo "  controller signing key: not loaded or created"
+fi
 echo "  doctor:   sudo $doctor_link"
 if [[ $admin_token_created == true ]]; then echo "  admin token: $admin_token_out (contents shown once in that file only)"; fi

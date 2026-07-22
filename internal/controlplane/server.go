@@ -35,6 +35,24 @@ const (
 	evidenceExportRetryAfter  = 1
 )
 
+// AuthorityMode defines whether Control may mint lifecycle commands under a
+// tenant-signed delegation. Exact commands signed outside Control remain
+// transportable in either mode.
+type AuthorityMode string
+
+const (
+	AuthorityModeStrictSovereign   AuthorityMode = "strict-sovereign"
+	AuthorityModeBoundedAutonomous AuthorityMode = "bounded-autonomous"
+)
+
+func ParseAuthorityMode(value string) (AuthorityMode, error) {
+	mode := AuthorityMode(value)
+	if mode != AuthorityModeStrictSovereign && mode != AuthorityModeBoundedAutonomous {
+		return "", fmt.Errorf("authority mode must be %q or %q", AuthorityModeStrictSovereign, AuthorityModeBoundedAutonomous)
+	}
+	return mode, nil
+}
+
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
 
 type Config struct {
@@ -45,6 +63,7 @@ type Config struct {
 	MaxPoll              int
 	EnableMetrics        bool
 	OperationsThresholds controlstore.OperationsThresholds
+	AuthorityMode        AuthorityMode
 	Now                  func() time.Time
 	Logger               *slog.Logger
 }
@@ -57,6 +76,7 @@ type Server struct {
 	maxPoll              int
 	enableMetrics        bool
 	operationsThresholds controlstore.OperationsThresholds
+	authorityMode        AuthorityMode
 	now                  func() time.Time
 	logger               *slog.Logger
 	mux                  *http.ServeMux
@@ -72,6 +92,13 @@ func New(config Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("control server operations thresholds: %w", err)
 	}
+	authorityMode := config.AuthorityMode
+	if authorityMode == "" {
+		authorityMode = AuthorityModeBoundedAutonomous
+	}
+	if _, err := ParseAuthorityMode(string(authorityMode)); err != nil {
+		return nil, fmt.Errorf("control server: %w", err)
+	}
 	now := config.Now
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
@@ -83,7 +110,7 @@ func New(config Config) (*Server, error) {
 	server := &Server{
 		store: config.Store, auth: config.Auth, witnessKey: append(ed25519.PrivateKey(nil), config.WitnessPrivateKey...), lease: config.LeaseDuration,
 		maxPoll: config.MaxPoll, enableMetrics: config.EnableMetrics, operationsThresholds: operationsThresholds,
-		now: now, logger: logger, mux: http.NewServeMux(),
+		authorityMode: authorityMode, now: now, logger: logger, mux: http.NewServeMux(),
 	}
 	server.routes()
 	return server, nil

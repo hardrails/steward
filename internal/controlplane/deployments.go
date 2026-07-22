@@ -131,6 +131,9 @@ func (server *Server) deployment(writer http.ResponseWriter, request *http.Reque
 		}
 		writeJSON(writer, http.StatusOK, view)
 	case http.MethodPut:
+		if !server.autonomousReconciliationAllowed(writer) {
+			return
+		}
 		var input deploymentApplyRequest
 		if !server.decode(writer, request, &input) {
 			return
@@ -166,6 +169,9 @@ func (server *Server) deployment(writer http.ResponseWriter, request *http.Reque
 		}
 		writeJSON(writer, status, view)
 	case http.MethodDelete:
+		if !server.autonomousReconciliationAllowed(writer) {
+			return
+		}
 		var input deploymentDeleteRequest
 		if !server.decode(writer, request, &input) {
 			return
@@ -196,6 +202,9 @@ func (server *Server) deploymentRollout(writer http.ResponseWriter, request *htt
 	if !ok {
 		return
 	}
+	if !server.autonomousReconciliationAllowed(writer) {
+		return
+	}
 	var input deploymentRolloutControlRequest
 	if !server.decode(writer, request, &input) {
 		return
@@ -215,6 +224,19 @@ func (server *Server) deploymentRollout(writer http.ResponseWriter, request *htt
 		return
 	}
 	writeJSON(writer, http.StatusOK, view)
+}
+
+func (server *Server) autonomousReconciliationAllowed(writer http.ResponseWriter) bool {
+	if server.authorityMode == AuthorityModeBoundedAutonomous {
+		return true
+	}
+	writeError(
+		writer,
+		http.StatusConflict,
+		"autonomous_reconciliation_disabled",
+		"Control is running in strict-sovereign mode; submit an exact externally signed command instead of desired deployment state",
+	)
+	return false
 }
 
 func deploymentView(value controlstore.Deployment) (deploymentResponse, error) {

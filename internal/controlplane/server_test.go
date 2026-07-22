@@ -767,6 +767,12 @@ func TestControlServerLeaseLimitMatchesStore(t *testing.T) {
 	}); err == nil {
 		t.Fatal("missing evidence witness key was accepted")
 	}
+	if _, err := New(Config{
+		Store: fixture.store, Auth: fixture.server.auth, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: time.Minute, MaxPoll: 1, AuthorityMode: AuthorityMode("root-controls-everything"),
+	}); err == nil {
+		t.Fatal("unknown authority mode was accepted")
+	}
 }
 
 func (fixture *serverFixture) request(t *testing.T, method, path, token, body string) *httptest.ResponseRecorder {
