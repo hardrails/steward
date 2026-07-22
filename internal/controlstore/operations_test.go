@@ -633,6 +633,30 @@ func TestAttentionAndSummaryAreDeterministicProjectedStickyAndNonMutating(t *tes
 	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("changed-filter attention cursor error = %v", err)
 	}
+	commandResourceID := ""
+	for _, item := range items {
+		if item.CommandID != "" {
+			commandResourceID = item.CommandID
+			break
+		}
+	}
+	exactAttention, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		ResourceID: commandResourceID, Now: now, Thresholds: DefaultOperationsThresholds(),
+		Limit: MaxInventoryPageLimit,
+	})
+	if err != nil || commandResourceID == "" || len(exactAttention.Items) == 0 {
+		t.Fatalf("resource-filtered attention = (%+v, %q, %v)", exactAttention, commandResourceID, err)
+	}
+	for _, item := range exactAttention.Items {
+		if attentionResourceID(item) != commandResourceID {
+			t.Fatalf("resource filter returned %+v", item)
+		}
+	}
+	if _, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		ResourceID: "invalid/resource", Now: now, Thresholds: DefaultOperationsThresholds(),
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid resource attention filter error = %v", err)
+	}
 	tenantAttention, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
 		TenantID: "tenant-a", Now: now, Thresholds: DefaultOperationsThresholds(), Limit: 1,
 	})

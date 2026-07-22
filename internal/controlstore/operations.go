@@ -277,6 +277,7 @@ type AttentionItem struct {
 type AttentionQuery struct {
 	TenantID   string
 	Reason     AttentionReason
+	ResourceID string
 	Now        time.Time
 	Thresholds OperationsThresholds
 	Limit      int
@@ -566,6 +567,9 @@ func (store *Store) ListAttention(actor controlauth.Identity, query AttentionQue
 	if query.Reason != "" && !validAttentionReason(query.Reason) {
 		return AttentionPage{}, invalid("attention reason filter is invalid")
 	}
+	if query.ResourceID != "" && !validRecordID(query.ResourceID, 128) {
+		return AttentionPage{}, invalid("attention resource identity filter is invalid")
+	}
 	limit, err := normalizeInventoryLimit(query.Limit)
 	if err != nil {
 		return AttentionPage{}, err
@@ -582,14 +586,18 @@ func (store *Store) ListAttention(actor controlauth.Identity, query AttentionQue
 	if err != nil {
 		return AttentionPage{}, err
 	}
-	cursorBinding := operationsCursorBinding("attention-v1", scope, string(query.Reason))
+	bindingFields := []string{string(query.Reason)}
+	if query.ResourceID != "" {
+		bindingFields = append(bindingFields, "resource:"+query.ResourceID)
+	}
+	cursorBinding := operationsCursorBinding("attention-v1", scope, bindingFields...)
 	after, err := decodeOperationsCursor(cursorBinding, query.Cursor)
 	if err != nil {
 		return AttentionPage{}, err
 	}
 
 	collector := &attentionCollector{
-		after: after, limit: limit, reason: query.Reason,
+		after: after, limit: limit, reason: query.Reason, resourceID: query.ResourceID,
 		items: make([]AttentionItem, 0, limit), cursorBinding: cursorBinding,
 	}
 	store.emitAttentionLocked(collector, scope, query.Now, query.Thresholds)
@@ -1067,6 +1075,7 @@ type attentionCollector struct {
 	after         string
 	limit         int
 	reason        AttentionReason
+	resourceID    string
 	items         []AttentionItem
 	lastKey       string
 	more          bool
@@ -1076,6 +1085,9 @@ type attentionCollector struct {
 func (collector *attentionCollector) add(item AttentionItem) bool {
 	item = withAttentionGuidance(item)
 	if collector.reason != "" && item.Reason != collector.reason {
+		return true
+	}
+	if collector.resourceID != "" && attentionResourceID(item) != collector.resourceID {
 		return true
 	}
 	key := attentionSortKey(item)
@@ -1427,6 +1439,19 @@ func attentionSortKey(item AttentionItem) string {
 	}
 	return item.TenantID + "\x00" + resourceRank + "\x00" + resourceID + "\x00" +
 		string(item.Reason) + "\x00" + string(item.Resource)
+}
+
+func attentionResourceID(item AttentionItem) string {
+	switch item.Resource {
+	case AttentionResourceCapacity:
+		return string(item.CapacityResource)
+	case AttentionResourceQuota:
+		return item.QuotaResource
+	case AttentionResourceCommand:
+		return item.CommandID
+	default:
+		return item.NodeID
+	}
 }
 
 func validAttentionReason(reason AttentionReason) bool {

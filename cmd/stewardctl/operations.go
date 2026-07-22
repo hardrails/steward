@@ -389,7 +389,13 @@ func collectControlAttention(
 	cursor := ""
 	seen := 0
 	for {
-		page, err := client.ListAttention(ctx, tenantID, "", cursor, limit)
+		var page controlstore.AttentionPage
+		var err error
+		if target == "" {
+			page, err = client.ListAttention(ctx, tenantID, "", cursor, limit)
+		} else {
+			page, err = client.ListAttentionForResource(ctx, tenantID, target, cursor, limit)
+		}
 		if err != nil {
 			return findings, false, err
 		}
@@ -399,9 +405,10 @@ func collectControlAttention(
 		}
 		for _, item := range page.Items {
 			finding := controlAttentionFinding(item)
-			if target == "" || finding.ResourceID == target {
-				findings = append(findings, finding)
+			if target != "" && finding.ResourceID != target {
+				return findings, false, errors.New("Control returned an attention finding outside the requested resource filter")
 			}
+			findings = append(findings, finding)
 		}
 		if page.NextCursor == "" {
 			return findings, false, nil
@@ -418,14 +425,13 @@ func collectControlAttention(
 
 func controlAttentionFinding(item controlstore.AttentionItem) operatorFinding {
 	resourceID := item.NodeID
-	if resourceID == "" {
-		resourceID = item.CommandID
-	}
-	if resourceID == "" {
+	switch item.Resource {
+	case controlstore.AttentionResourceCapacity:
 		resourceID = string(item.CapacityResource)
-	}
-	if resourceID == "" {
+	case controlstore.AttentionResourceQuota:
 		resourceID = item.QuotaResource
+	case controlstore.AttentionResourceCommand:
+		resourceID = item.CommandID
 	}
 	return operatorFinding{
 		Code: string(item.Reason), Severity: string(item.Severity), Resource: string(item.Resource),
