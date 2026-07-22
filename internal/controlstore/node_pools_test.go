@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"sort"
 	"testing"
@@ -403,6 +404,128 @@ func TestNodePoolRejectsInvalidCapacityAndFailsClosed(t *testing.T) {
 	}
 	if _, _, err := unavailable.ApplyNodePool(fixture.admin, valid, 0, fixture.now); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("nil apply error=%v", err)
+	}
+}
+
+func TestNodePoolOperationsFailClosedAcrossAuthorizationAndRevisionBoundaries(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxNodePools = 1
+	fixture := newRecordsFixture(t, limits)
+	fixture.createTenant(t, "tenant-a")
+	poolInput := NodePool{ID: "pool-a", TenantIDs: []string{"tenant-a"}, MinNodes: 0, DesiredNodes: 1, MaxNodes: 2}
+	notAdmin := controlauth.Identity{Role: controlauth.RoleTenantOperator, TenantID: "tenant-a", CredentialID: "tenant-operator"}
+	staleAdmin := fixture.admin
+	staleAdmin.CredentialID = "missing-credential"
+
+	if _, err := fixture.store.ListNodePools(notAdmin); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant list error=%v", err)
+	}
+	if _, err := fixture.store.GetNodePoolStatus(notAdmin, poolInput.ID, fixture.now, time.Minute); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant status error=%v", err)
+	}
+	if _, err := fixture.store.ListNodePoolStatuses(notAdmin, fixture.now, time.Minute); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant status list error=%v", err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(notAdmin, poolInput, 0, fixture.now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant apply error=%v", err)
+	}
+	if err := fixture.store.DeleteNodePool(notAdmin, poolInput.ID, 1); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant delete error=%v", err)
+	}
+	if _, err := fixture.store.GetNodePoolStatus(fixture.admin, "bad pool", fixture.now, time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid status error=%v", err)
+	}
+	if _, err := fixture.store.ListNodePoolStatuses(fixture.admin, time.Time{}, time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid status list error=%v", err)
+	}
+	if err := fixture.store.DeleteNodePool(fixture.admin, poolInput.ID, 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid delete error=%v", err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 1, fixture.now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("create with revision error=%v", err)
+	}
+	created, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 0, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, NodePool{
+		ID: "pool-b", TenantIDs: []string{"tenant-a"}, MinNodes: 0, DesiredNodes: 1, MaxNodes: 2,
+	}, 0, fixture.now); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("pool capacity error=%v", err)
+	}
+	if _, err := fixture.store.GetNodePoolStatus(fixture.admin, "missing", fixture.now, time.Minute); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing status error=%v", err)
+	}
+	if err := fixture.store.DeleteNodePool(fixture.admin, "missing", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing delete error=%v", err)
+	}
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, created.Revision, fixture.now.Add(-time.Second)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("retrograde update error=%v", err)
+	}
+
+	fixture.store.mu.Lock()
+	retained := fixture.store.current.nodePools[poolInput.ID]
+	retained.Revision = math.MaxUint64
+	fixture.store.current.nodePools[poolInput.ID] = retained
+	fixture.store.mu.Unlock()
+	poolInput.DesiredNodes = 2
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, math.MaxUint64, fixture.now.Add(time.Minute)); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("revision exhaustion error=%v", err)
+	}
+
+	fixture.store.mu.Lock()
+	retained.Revision = 1
+	retained.MembershipGeneration = math.MaxUint64
+	fixture.store.current.nodePools[poolInput.ID] = retained
+	fixture.store.mu.Unlock()
+	poolInput.Architecture = "amd64"
+	if _, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 1, fixture.now.Add(time.Minute)); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("membership generation exhaustion error=%v", err)
+	}
+
+	for name, check := range map[string]func() error{
+		"list": func() error { _, err := fixture.store.ListNodePools(staleAdmin); return err },
+		"get": func() error {
+			_, err := fixture.store.GetNodePoolStatus(staleAdmin, poolInput.ID, fixture.now, time.Minute)
+			return err
+		},
+		"list status": func() error {
+			_, err := fixture.store.ListNodePoolStatuses(staleAdmin, fixture.now, time.Minute)
+			return err
+		},
+		"apply": func() error {
+			_, _, err := fixture.store.ApplyNodePool(staleAdmin, poolInput, 1, fixture.now)
+			return err
+		},
+		"delete": func() error { return fixture.store.DeleteNodePool(staleAdmin, poolInput.ID, 1) },
+	} {
+		if err := check(); !errors.Is(err, controlauth.ErrUnauthorized) {
+			t.Fatalf("stale administrator %s error=%v", name, err)
+		}
+	}
+
+	fixture.store.mu.Lock()
+	fixture.store.closed = true
+	fixture.store.mu.Unlock()
+	for name, check := range map[string]func() error{
+		"list": func() error { _, err := fixture.store.ListNodePools(fixture.admin); return err },
+		"get": func() error {
+			_, err := fixture.store.GetNodePoolStatus(fixture.admin, poolInput.ID, fixture.now, time.Minute)
+			return err
+		},
+		"list status": func() error {
+			_, err := fixture.store.ListNodePoolStatuses(fixture.admin, fixture.now, time.Minute)
+			return err
+		},
+		"apply": func() error {
+			_, _, err := fixture.store.ApplyNodePool(fixture.admin, poolInput, 1, fixture.now)
+			return err
+		},
+		"delete": func() error { return fixture.store.DeleteNodePool(fixture.admin, poolInput.ID, 1) },
+	} {
+		if err := check(); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("closed store %s error=%v", name, err)
+		}
 	}
 }
 
