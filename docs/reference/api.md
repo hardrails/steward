@@ -58,6 +58,9 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
 | `PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout` | Pause or resume new replacements in an active rollout; in-flight work reaches a safe boundary |
 | `DELETE /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Mark one deployment absent; reconciliation performs bounded cleanup asynchronously |
+| `GET or POST /v1/tenants/{tenant_id}/task-requests` | Page canonical asynchronous task metadata or retain one exact tenant-signed task and request for node delivery |
+| `GET or DELETE /v1/tenants/{tenant_id}/task-requests/{task_id}` | Inspect task lifecycle metadata or request cancellation without claiming that dispatched work stopped |
+| `GET /v1/tenants/{tenant_id}/task-requests/{task_id}/result` | Explicitly retrieve a retained terminal observation of at most 512 KiB; ordinary task views remain metadata-only |
 | `GET /v1/nodes/{node_id}/evidence` | Read the site-admin-only last-good Executor receipt checkpoint and any sticky divergence finding |
 | `GET /v1/nodes/{node_id}/evidence/export` | Sign a portable evidence checkpoint with the controller's dedicated witness key |
 | `POST /v1/nodes/{node_id}/evidence/captures` | Arm one site-admin-only bounded activation evidence capture from the current witnessed head |
@@ -76,6 +79,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
 | `GET /metrics` | Optional authenticated Prometheus exposition with fixed bounded labels |
 | `POST /executor-uplink/poll`, `POST /executor-uplink/report` | Lease signed commands to an enrolled Executor and settle fenced reports |
+| `POST /executor-uplink/tasks/poll`, `POST /executor-uplink/tasks/report` | Lease exact signed task requests to the assigned node and return Gateway-backed lifecycle state and bounded terminal results |
 | `POST /evidence-uplink/poll`, `POST /evidence-uplink/report` | Return a credential-bound challenge, then verify and retain a receipt-key-signed evidence batch |
 
 Every request body and response is bounded. Tenant and node inventory uses the
@@ -85,6 +89,13 @@ query parameters, redirects are not used, and every error has the common
 `{"error":"...","message":"..."}` shape. The controller parses signed-command
 identity to bind it to the route but does not treat that parse as authorization;
 Executor verifies the signature and local policy before applying the command.
+
+Asynchronous task submission follows the same courier boundary. Control parses
+bounded task-permit fields to bind tenant, node, instance generation, request
+digest, and deadline, but those unverified fields do not authorize dispatch.
+Gateway authenticates the permit against the task-authority key admitted for the
+running service and spends it before contacting the agent. See [remote tasks and
+results]({{ '/guides/async-tasks/' | relative_url }}).
 
 Operational freeze records use optimistic revisions. The first change expects
 revision `0`; each successful state change advances the revision. A stale revision

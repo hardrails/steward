@@ -308,7 +308,7 @@ outbound-only deployment.
 | `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Append-only signed receipt chain; capped at 64 MiB |
 | `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
 | `-admission-evidence-epoch` | `1` | Receipt-key epoch expected by offline verification |
-| `-gateway-control-socket` | empty | Gateway Unix socket; enables inference, service, connector, and egress grants with a complete Gateway/relay setup, plus the closed activation canary when Executor uplink protocol 4 is active |
+| `-gateway-control-socket` | empty | Gateway Unix socket; enables inference, service, connector, and egress grants with a complete Gateway/relay setup, plus the closed activation canary and asynchronous task courier when Executor uplink protocol 4 is active |
 | `-gateway-grant-root` | `/run/steward-gateway/grants` | Host directory containing per-grant capability sockets |
 | `-relay-image` | empty | Trusted relay image pinned by repository digest or local Docker image ID |
 | `-relay-gid` | `0` | Nonzero host GID used for per-grant relay socket access |

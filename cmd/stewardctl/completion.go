@@ -32,7 +32,7 @@ var completionTree = map[string][]string{
 	"policy":                      {"sign", "verify"},
 	"permit":                      {"context", "issue", "approve", "verify", "audit", "bundle"},
 	"permit bundle":               {"issue", "approve", "verify", "audit"},
-	"task":                        {"run", "enqueue", "list", "get", "cancel", "issue", "verify", "audit", "submit", "status", "observe", "wait"},
+	"task":                        {"run", "enqueue", "list", "get", "result", "cancel", "issue", "verify", "audit", "submit", "status", "observe", "wait"},
 	"executor-command":            {"delegation", "issue", "verify"},
 	"executor-command delegation": {"issue", "verify"},
 	"control":                     {"pki", "tenant", "operator", "enrollment", "node", "node-pool", "node-credential", "snapshot", "operations", "quota", "freeze", "attention", "incident", "agent", "event", "task", "command", "credential", "evidence", "evidence-capture", "support-bundle"},

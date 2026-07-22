@@ -1133,14 +1133,15 @@ remain the security boundary.
 
 The state directory contains the authentication key, witness private and public
 keys, credential verifiers, tenants, node bindings, exact signed commands,
-delivery state, and terminal reports. Treat a backup as a sensitive control-plane
-artifact even though bearer tokens are not stored in plaintext. The authentication
+delivery state, terminal reports, queued task request bytes, short-lived signed
+task permits, and bounded terminal task results. Treat a backup as a sensitive
+control-plane artifact even though bearer tokens are not stored in plaintext. The authentication
 key and retained request metadata are sufficient to reproduce credentials that use
 deterministic retry. The witness private key can sign exports under the controller's
 established audit identity.
 The controller exposes bootstrap recovery only under the narrow conditions above,
-but possession of a backup still carries authentication authority, not just
-inventory.
+but possession of a backup still carries authentication authority and private
+workload content, not just inventory.
 
 1. Stop `steward-control` and confirm it is inactive.
 2. Copy the entire owner-only state directory as one unit while preserving owner,

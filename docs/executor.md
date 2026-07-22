@@ -513,6 +513,15 @@ node. Protocols 3 and 4 share the same durable delivery ledger but never share a
 retained record: startup blocks a protocol switch until every unsettled record for
 the other protocol is reconciled.
 
+Protocol 4 also polls the separate `/executor-uplink/tasks/poll` route when a
+host-local Gateway control client is configured. Control can lease an exact
+tenant-signed task to only the node named by its permit. Executor submits and
+observes through Gateway, then reports generation-fenced lifecycle metadata and a
+terminal observation only when it is at most 512 KiB. This courier has no tenant
+signing key and cannot bypass Gateway permit verification. Its delivery state is
+held durably by Control; Gateway's one-use permit ledger makes exact redelivery
+safe after a lost acknowledgement.
+
 Protocol 4 always advertises `rollout-authorization-context-v1`, showing that its
 strict signed-command decoder accepts the optional rollout authorization digest.
 It also enables the fixed release-selected agent activation canary when signed admission has a

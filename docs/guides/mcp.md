@@ -191,6 +191,9 @@ lineage is one workload's persistent state history.
 | `steward_control_incident_timeline` | Page current metadata-only containment, evidence, access, and failed-workload facts. This is a retained view, not a complete audit log, and it cannot acknowledge or remediate anything. |
 | `steward_control_event_list` | Page recent untrusted agent status and finding events with Gateway-derived workload identity. |
 | `steward_control_task_list` | Page bounded, durable task progress projected from accepted events. Raw-event eviction cannot regress terminal state; conflicting terminal, run, or workload identities remain visible as conditions. |
+| `steward_control_task_request_list` / `steward_control_task_request_status` | Read canonical asynchronous task lifecycle and content-addressed result metadata. Prompts, permits, and result bodies are excluded. |
+| `steward_control_task_request_submit` | Queue an exact pre-signed task and request after `acknowledge_task_submission=true`. Control does not authenticate the permit; Gateway still verifies it against admitted tenant authority. |
+| `steward_control_task_request_cancel` | Cancel queued work or record cancellation intent after `acknowledge_task_cancellation=true`. The response preserves `outcome_may_continue` when dispatched work may not have stopped. |
 | `steward_control_agent_list` | Page through non-secret agent runtime observations. It reports the last successful workload status separately from the latest signed operation and never schedules, retries, or mutates a workload. |
 | `steward_control_command_list` | Page and filter secret-free command metadata without returning the signed command body, terminal result body, reported status text, or error codes. |
 | `steward_control_credential_list` | Page and filter non-secret operator and node credential metadata without returning bearer material or token verifiers. |
@@ -208,6 +211,12 @@ lineage is one workload's persistent state history.
 | `steward_task_submit` | Submit one exact request and signed permit. Required arguments are `service_path`, `operation_path`, `request_base64`, `permit_base64`, and `acknowledge_external_effects=true`. Returns task and permit digests plus the durable receipt marker, never raw agent output. |
 | `steward_task_status` | Read durable lifecycle metadata by task and permit digest without contacting the agent. |
 | `steward_task_observe` | Make one bounded status observation. If terminal output is available, verify its digest and length and save it under the deterministic result path. MCP receives only the path, digest, length, and status metadata. |
+
+The Control MCP surface deliberately has no raw-result tool. A terminal result can
+contain retrieved prompt injection or private workload content, so use
+`stewardctl task result` or the explicit authenticated HTTP result endpoint and
+handle the saved bytes as untrusted data. The node-local `steward_task_observe`
+tool writes a result to a private file and returns only its path and digest.
 
 Create the version-2 lifecycle bundle with `stewardctl task issue` on the trusted
 signing station. Its `service_path`, `operation.path`, `request_base64`, and

@@ -13,6 +13,7 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 // maxControlCommandBytes leaves room for the canonical base64 value and its
@@ -29,6 +30,10 @@ type Control interface {
 	ListNodes(context.Context, string, string, int) (controlclient.NodeList, error)
 	ListInstanceEvents(context.Context, string, string, int) (controlclient.InstanceEventList, error)
 	ListTaskProjections(context.Context, string, string, int) (controlclient.TaskProjectionList, error)
+	ListTaskRequests(context.Context, string, string, int) (controlclient.TaskRequestList, error)
+	GetTaskRequest(context.Context, string, string) (controlstore.TaskRequest, error)
+	SubmitTaskRequest(context.Context, string, string, []byte) (controlstore.TaskRequest, error)
+	CancelTaskRequest(context.Context, string, string) (controlstore.TaskRequest, error)
 	ListNodePools(context.Context, string, int) (controlclient.NodePoolList, error)
 	GetNodePool(context.Context, string) (controlstore.NodePoolStatus, error)
 	GetNode(context.Context, string, string) (controlclient.Node, error)
@@ -70,6 +75,24 @@ type controlTaskListArgs struct {
 	TenantID string `json:"tenant_id"`
 	After    string `json:"after,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
+}
+
+type controlTaskRequestStatusArgs struct {
+	TenantID string `json:"tenant_id"`
+	TaskID   string `json:"task_id"`
+}
+
+type controlTaskRequestSubmitArgs struct {
+	TenantID                  string `json:"tenant_id"`
+	TaskPermit                string `json:"task_permit"`
+	RequestBase64             string `json:"request_base64"`
+	AcknowledgeTaskSubmission bool   `json:"acknowledge_task_submission"`
+}
+
+type controlTaskRequestCancelArgs struct {
+	TenantID                    string `json:"tenant_id"`
+	TaskID                      string `json:"task_id"`
+	AcknowledgeTaskCancellation bool   `json:"acknowledge_task_cancellation"`
 }
 
 type controlNodeStatusArgs struct {
@@ -216,6 +239,65 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 		result, err := s.control.ListTaskProjections(ctx, arguments.TenantID, arguments.After, limit)
 		if err != nil {
 			return nil, controlFailure("task projection list", err)
+		}
+		return result, nil
+	case "steward_control_task_request_list":
+		var arguments controlTaskListArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.TenantID, 128) ||
+			!validControlPage(arguments.After, arguments.Limit) || arguments.Limit > 100 {
+			return nil, errors.New("steward_control_task_request_list requires tenant_id and accepts only a bounded task ID cursor and limit up to 100")
+		}
+		limit := arguments.Limit
+		if limit == 0 {
+			limit = 100
+		}
+		result, err := s.control.ListTaskRequests(ctx, arguments.TenantID, arguments.After, limit)
+		if err != nil {
+			return nil, controlFailure("task request list", err)
+		}
+		return result, nil
+	case "steward_control_task_request_status":
+		var arguments controlTaskRequestStatusArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.TenantID, 128) ||
+			!validControlIdentifier(arguments.TaskID, 128) {
+			return nil, errors.New("steward_control_task_request_status requires tenant_id and task_id")
+		}
+		result, err := s.control.GetTaskRequest(ctx, arguments.TenantID, arguments.TaskID)
+		if err != nil {
+			return nil, controlFailure("task request status", err)
+		}
+		return result, nil
+	case "steward_control_task_request_submit":
+		var arguments controlTaskRequestSubmitArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.TenantID, 128) ||
+			!arguments.AcknowledgeTaskSubmission {
+			return nil, errors.New("steward_control_task_request_submit requires tenant_id, task_permit, request_base64, and acknowledge_task_submission=true")
+		}
+		permit, err := taskpermit.DecodeHeader(arguments.TaskPermit)
+		if err != nil {
+			return nil, errors.New("task_permit must be one canonical bounded task permit")
+		}
+		if _, err := taskpermit.InspectUnverified(permit); err != nil {
+			return nil, errors.New("task_permit must be one canonical bounded task permit")
+		}
+		request, err := decodeControlTaskRequest(arguments.RequestBase64)
+		if err != nil {
+			return nil, err
+		}
+		result, err := s.control.SubmitTaskRequest(ctx, arguments.TenantID, arguments.TaskPermit, request)
+		if err != nil {
+			return nil, controlFailure("task request submission", err)
+		}
+		return result, nil
+	case "steward_control_task_request_cancel":
+		var arguments controlTaskRequestCancelArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.TenantID, 128) ||
+			!validControlIdentifier(arguments.TaskID, 128) || !arguments.AcknowledgeTaskCancellation {
+			return nil, errors.New("steward_control_task_request_cancel requires tenant_id, task_id, and acknowledge_task_cancellation=true")
+		}
+		result, err := s.control.CancelTaskRequest(ctx, arguments.TenantID, arguments.TaskID)
+		if err != nil {
+			return nil, controlFailure("task request cancellation", err)
 		}
 		return result, nil
 	case "steward_control_node_list":
@@ -445,6 +527,18 @@ func decodeControlCommand(value string) ([]byte, error) {
 	envelope, err := dsse.Parse(raw)
 	if err != nil || envelope.PayloadType != admission.CommandPayloadType {
 		return nil, errors.New("command_dsse_base64 must contain one strict Executor command DSSE envelope")
+	}
+	return raw, nil
+}
+
+func decodeControlTaskRequest(value string) ([]byte, error) {
+	if value == "" || len(value) > base64.StdEncoding.EncodedLen(int(taskpermit.MaxRequestBytes)) {
+		return nil, errors.New("request_base64 is empty or exceeds its bound")
+	}
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || len(raw) == 0 || int64(len(raw)) > taskpermit.MaxRequestBytes ||
+		base64.StdEncoding.EncodeToString(raw) != value {
+		return nil, errors.New("request_base64 must be canonical bounded standard base64")
 	}
 	return raw, nil
 }
@@ -680,6 +774,31 @@ func controlTools() []any {
 					"after":     map[string]any{"type": "string", "maxLength": 69, "pattern": "^$|^task-[a-f0-9]{64}$"},
 					"limit":     map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
 				}}, true, false, true, false),
+		tool("steward_control_task_request_list", "List submitted tasks", "List metadata for canonical tasks submitted through Control. Prompts, signed permits, and result bodies are excluded.",
+			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tenant_id"},
+				"properties": map[string]any{
+					"tenant_id": id128, "after": id128,
+					"limit": map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
+				}}, true, false, true, false),
+		tool("steward_control_task_request_status", "Inspect submitted task", "Read canonical task delivery, deadline, cancellation, uncertainty, and content-addressed result metadata without returning prompt or result bytes.",
+			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tenant_id", "task_id"},
+				"properties": map[string]any{"tenant_id": id128, "task_id": id128}}, true, false, true, false),
+		tool("steward_control_task_request_submit", "Submit signed task", "Queue an exact tenant-signed task and request after acknowledge_task_submission=true. The acknowledgement is model-visible intent, not authority; Gateway verifies the permit before dispatch.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"required": []string{"tenant_id", "task_permit", "request_base64", "acknowledge_task_submission"},
+				"properties": map[string]any{
+					"tenant_id":                   id128,
+					"task_permit":                 map[string]any{"type": "string", "minLength": 1, "maxLength": base64.RawURLEncoding.EncodedLen(taskpermit.MaxEnvelopeBytes)},
+					"request_base64":              map[string]any{"type": "string", "minLength": 4, "maxLength": base64.StdEncoding.EncodedLen(int(taskpermit.MaxRequestBytes))},
+					"acknowledge_task_submission": map[string]any{"type": "boolean", "const": true},
+				}}, false, true, true, true),
+		tool("steward_control_task_request_cancel", "Cancel submitted task", "Cancel queued work or record cancellation intent for work that may already be running. acknowledge_task_cancellation=true does not prove a dispatched task stopped.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"required": []string{"tenant_id", "task_id", "acknowledge_task_cancellation"},
+				"properties": map[string]any{
+					"tenant_id": id128, "task_id": id128,
+					"acknowledge_task_cancellation": map[string]any{"type": "boolean", "const": true},
+				}}, false, true, true, false),
 		tool("steward_control_node_revoke", "Revoke node", "Permanently disable one node and its retained credentials. acknowledge_node_revocation is a model-visible safety acknowledgment, not authority.",
 			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"node_id", "acknowledge_node_revocation"},
 				"properties": map[string]any{"node_id": id128, "acknowledge_node_revocation": map[string]any{"type": "boolean", "const": true}}},

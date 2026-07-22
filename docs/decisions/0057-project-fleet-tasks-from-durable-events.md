@@ -6,9 +6,13 @@ section: Architecture decision
 
 # ADR 0057: Project fleet tasks from durable events
 
-- Status: Accepted
+- Status: Superseded in part by ADR 0059
 - Date: 2026-07-21
 - Rung: in-house
+
+ADR 0059 later added a separate canonical courier for exact tenant-signed task
+requests and bounded terminal results. This decision still governs agent-reported
+task projections: they remain untrusted read models and never authorize work.
 
 ## Context
 

@@ -132,12 +132,14 @@ func (server *Server) taskRequest(writer http.ResponseWriter, request *http.Requ
 
 func (server *Server) taskResult(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
-	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) ||
-		!emptyTaskRequestBody(writer, request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
 		return
 	}
 	identity, ok := server.operatorIdentity(writer, request)
 	if !ok {
+		return
+	}
+	if !emptyTaskRequestBody(writer, request) {
 		return
 	}
 	result, found, err := server.store.GetTaskResult(

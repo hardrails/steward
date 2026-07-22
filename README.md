@@ -34,6 +34,7 @@ they can verify without a vendor service.
 | Web research over hostile content | A bounded Hermes profile reaches search and extraction through credential-isolating connectors, then reports source-linked findings over a durable event channel. |
 | Repository work with coding agents | Hermes delegates to Codex or Claude Code in a separate isolated worker with its own clean Git worktree and authentication store. |
 | Signed collaboration requests | An optional, tenant-specific Buzz bridge durably queues allowed signed mentions, runs bounded concurrent Hermes tasks, and verifies correctly threaded replies without putting either signing key inside the agent. |
+| Remote task delivery | Control durably couriers an exact tenant-signed request to its assigned node, reports honest cancellation and uncertainty, and retains bounded terminal results without gaining task-signing authority. |
 | Disconnected and sovereign sites | Uses local keys, static Go binaries, local state, offline OCI archives, and customer-operated control services. No hosted service is required after transfer. |
 | Incident review and audit | Writes signed, hash-linked Executor and Gateway receipts. Receipt exports can be verified offline and omit prompt, request, response, and secret plaintext. |
 
@@ -172,6 +173,7 @@ security boundary.
 - [Run a web research agent](https://hardrails.github.io/steward/guides/research-agents/)
 - [Let Hermes use Codex or Claude Code](https://hardrails.github.io/steward/guides/coding-workers/)
 - [Receive events from running agents](https://hardrails.github.io/steward/guides/controller-events/)
+- [Queue remote tasks and retrieve results](https://hardrails.github.io/steward/guides/async-tasks/)
 - [Understand workload admission](https://hardrails.github.io/steward/guides/signed-admission/)
 - [Configure inference, services, connectors, and egress](https://hardrails.github.io/steward/guides/positive-capabilities/)
 
@@ -245,6 +247,20 @@ prompt or result. If the terminal or host fails after dispatch, resume the retai
 bundle with `task submit` and `task wait`; do not create replacement authority that
 might duplicate the work. The explicit request, operation, and output flags remain
 available for automation and off-node signing.
+
+When the operator is not connected to the node-local Gateway, use Control's
+crash-safe courier instead:
+
+```console
+stewardctl task enqueue workspace-auditor "Review this workspace and propose one issue"
+stewardctl task get TASK_ID
+stewardctl task result TASK_ID -out ./result.json
+```
+
+Control retains the request, short-lived signed permit, and terminal result up to
+512 KiB in its sensitive owner-only state. Gateway still authenticates and spends
+the permit. See [remote tasks and results](https://hardrails.github.io/steward/guides/async-tasks/)
+for deadlines, cancellation limits, and backup implications.
 
 ## Authorize real work
 
