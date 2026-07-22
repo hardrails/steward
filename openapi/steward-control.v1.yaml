@@ -963,8 +963,9 @@ paths:
       description: |
         Requires a site-administrator credential. `scale_out_needed` is an
         exact infrastructure creation deficit. `scale_in_candidates` contains
-        only exact nodes whose Steward drain completed and which have no
-        assigned deployment instance. Neither field performs a provider action.
+        at most the current surplus of exact nodes whose Steward drain completed
+        and which have no assigned deployment instance. Neither field performs
+        a provider action.
       responses:
         "200":
           description: Retained intent and current operational observation.
@@ -1816,12 +1817,13 @@ paths:
       operationId: listTaskProjections
       summary: List recent fleet task projections
       description: |
-        Groups retained instance events by tenant, task ID, instance ID, and
-        generation, newest first. These projections are agent-reported
+        Durably summarizes accepted instance events by tenant, task ID, instance
+        ID, and generation, newest first. These projections are agent-reported
         operational visibility, not command authority or proof that work was
         performed correctly. A terminal state remains sticky; later conflicting
-        terminal or identity reports appear as conditions. Projections disappear
-        after all contributing events leave the bounded retention window.
+        terminal or identity reports appear as conditions. Projections have a
+        separate bounded retention window, so raw-event eviction cannot regress
+        terminal state.
       parameters:
         - $ref: "#/components/parameters/After"
         - name: limit
@@ -4560,9 +4562,11 @@ components:
         event_count:
           type: integer
           minimum: 1
+          maximum: 2147483647
         finding_count:
           type: integer
           minimum: 0
+          maximum: 2147483647
         first_observed_at:
           type: string
           format: date-time
@@ -4580,8 +4584,9 @@ components:
             type: string
             enum: [run_identity_conflict, terminal_state_conflict, workload_identity_conflict]
       description: >-
-        Agent-reported metadata projected from retained events. It is neither a
-        signed execution receipt nor proof that the reported work is correct.
+        Bounded, durable agent-reported metadata projected from accepted events.
+        It is neither a signed execution receipt nor proof that the reported work
+        is correct.
     TaskProjectionPage:
       type: object
       additionalProperties: false
@@ -4703,7 +4708,7 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/Identifier128"
-          description: Exact drained, empty nodes eligible for a provider driver to remove.
+          description: At most the current surplus of exact drained, empty nodes eligible for a provider driver to remove.
         conditions:
           type: array
           maxItems: 3
