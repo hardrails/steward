@@ -139,6 +139,47 @@ func TestNodePoolScaleInCandidatesRequireCompletedDrainAndEmptyNode(t *testing.T
 	}
 }
 
+func TestNodePoolScaleInCandidatesNeverExceedSurplus(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	pool := NodePool{
+		ID: "pool-a", Revision: 1, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		MinNodes: 1, DesiredNodes: 4, MaxNodes: 6,
+		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+	}
+	current := emptyState()
+	for index := 0; index < 5; index++ {
+		nodeID := "node-" + string(rune('a'+index))
+		observation := storeSchedulingObservation(nodeID)
+		observation.Labels = append(observation.Labels, controlprotocol.ExecutorSchedulingLabelV1{
+			Key: NodePoolLabelKey, Value: pool.ID,
+		})
+		sort.Slice(observation.Labels, func(i, j int) bool { return observation.Labels[i].Key < observation.Labels[j].Key })
+		node := Node{
+			ID: nodeID, Active: true, TenantIDs: []string{"tenant-a"},
+			Scheduling: &NodeScheduling{Observation: observation, ObservedAt: now.Format(time.RFC3339Nano)},
+		}
+		if index < 3 {
+			node.Drain = &NodeDrain{
+				RequestID: "drain-" + nodeID, State: NodeDrainCompleted, Reason: "scale in",
+				RequestedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+			}
+		}
+		current.nodes[nodeID] = node
+	}
+	status := nodePoolStatusLocked(current, pool, now.Add(time.Second), time.Minute)
+	if status.RegisteredNodes != 5 || !slices.Equal(status.ScaleInCandidates, []string{"node-a"}) ||
+		!slices.Contains(status.Conditions, NodePoolConditionScaleInAvailable) {
+		t.Fatalf("bounded scale-in status=%+v", status)
+	}
+	if err := status.Validate(); err != nil {
+		t.Fatalf("bounded scale-in status rejected: %v", err)
+	}
+	status.ScaleInCandidates = []string{"node-a", "node-b"}
+	if err := status.Validate(); err == nil {
+		t.Fatal("status accepted scale-in candidates beyond the pool surplus")
+	}
+}
+
 func TestNodePoolNodeStateValidationRejectsContradictoryDrainFacts(t *testing.T) {
 	valid := []NodePoolNode{
 		{NodeID: "ready", Ready: true},

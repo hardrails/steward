@@ -23,7 +23,7 @@ execution authority.
 | `tenant_ids` | Tenant scopes a registered node must already carry to count in the pool | Permission to add those scopes to a node |
 | `architecture` | Optional exact scheduling architecture | Permission to change or trust a host |
 | `scale_out_needed` | `desired_nodes - registered_nodes`, never less than zero | Enrollment or placement authority |
-| `scale_in_candidates` | Exact nodes that completed a Steward drain and have no assigned deployment instance | Permission to choose or delete another node |
+| `scale_in_candidates` | At most the current surplus of exact nodes that completed a Steward drain and have no assigned deployment instance | Permission to choose or delete another node |
 
 Deleting a pool removes only this intent record. It does not drain, revoke, or
 destroy a node.
@@ -101,8 +101,9 @@ The driver loop is intentionally small:
    as uncertain; do not repeat a deletion against a different node.
 
 The driver must never infer a scale-in victim from `registered_nodes`, CPU use, or
-cloud group order. Steward names candidates only after the drain is durable and
-the node has no assigned deployment instance.
+cloud group order. Steward returns no more candidates than
+`registered_nodes - desired_nodes`, and names them only after the drain is durable
+and the node has no assigned deployment instance.
 
 ## Current automation boundary
 

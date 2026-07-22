@@ -31,7 +31,8 @@ Build a bounded `NodePool` resource in Control that declares a desired, minimum,
 and maximum node count for one reserved pool label. Control derives registered
 and ready counts from existing authenticated scheduling observations. It exposes
 an exact scale-out deficit and names scale-in candidates only after a node is
-drained, empty, and still belongs to that pool.
+drained, empty, and still belongs to that pool. Each observation returns no more
+scale-in candidates than the current surplus above desired capacity.
 
 The resource is operational intent, not workload authority. It does not create
 machines, issue enrollment credentials, expand a tenant delegation, or authorize

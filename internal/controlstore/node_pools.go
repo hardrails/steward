@@ -52,6 +52,7 @@ func (status NodePoolStatus) Validate() error {
 	if status.Pool.Validate() != nil || status.Nodes == nil || status.ScaleInCandidates == nil ||
 		status.Conditions == nil || status.RegisteredNodes != len(status.Nodes) || status.ReadyNodes < 0 ||
 		status.ReadyNodes > status.RegisteredNodes || status.ScaleOutNeeded != max(0, status.Pool.DesiredNodes-status.RegisteredNodes) ||
+		len(status.ScaleInCandidates) > max(0, status.RegisteredNodes-status.Pool.DesiredNodes) ||
 		!validTimestamp(status.ObservedAt) {
 		return errors.New("node pool status is invalid")
 	}
@@ -339,6 +340,10 @@ func nodePoolStatusLocked(current state, pool NodePool, now time.Time, staleAfte
 	sort.Slice(status.Nodes, func(i, j int) bool { return status.Nodes[i].NodeID < status.Nodes[j].NodeID })
 	sort.Strings(status.ScaleInCandidates)
 	status.RegisteredNodes = len(status.Nodes)
+	surplus := max(0, status.RegisteredNodes-pool.DesiredNodes)
+	if len(status.ScaleInCandidates) > surplus {
+		status.ScaleInCandidates = status.ScaleInCandidates[:surplus]
+	}
 	if status.RegisteredNodes < pool.DesiredNodes {
 		status.ScaleOutNeeded = pool.DesiredNodes - status.RegisteredNodes
 		status.Conditions = append(status.Conditions, NodePoolConditionCapacityShortfall)
