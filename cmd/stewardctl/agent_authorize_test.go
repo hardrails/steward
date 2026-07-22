@@ -111,7 +111,7 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 	forkPlan := agentapp.ForkPlan{
 		Schema: agentapp.ForkSchema, DeploymentID: "workspace-auditor-fork",
 		SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
-		InstanceID: "workspace-auditor-fork-0", LineageID: "lineage-fork-a", Generation: 1,
+		InstanceID: "workspace-auditor-fork-0", LineageID: "lineage-fork-a", Generation: 7,
 		SourceNodeID: "node-b", SourceLineageID: "lineage-source-a",
 		ExpiresAt: timeNow().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
 	}
@@ -145,6 +145,8 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 		!slices.Equal(forkStatement.Operations, []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"}) ||
 		len(forkStatement.Instances) != 1 || forkStatement.Instances[0].InstanceID != forkPlan.InstanceID ||
 		forkStatement.Instances[0].LineageID != forkPlan.LineageID || forkStatement.Admission == nil ||
+		forkStatement.Instances[0].MinInstanceGeneration != forkPlan.Generation ||
+		forkStatement.Instances[0].MaxInstanceGeneration != forkPlan.Generation ||
 		forkStatement.Admission.StateDisposition != "resume" {
 		t.Fatalf("fork delegation = %+v", forkStatement)
 	}

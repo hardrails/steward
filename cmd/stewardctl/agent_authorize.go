@@ -79,6 +79,10 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 	}
 	var forkPlan *agentapp.ForkPlan
 	if *forkPlanPath != "" {
+		generationExplicit := false
+		flags.Visit(func(current *flag.Flag) {
+			generationExplicit = generationExplicit || current.Name == "generation"
+		})
 		raw, readErr := readCLIArtifact(*forkPlanPath)
 		if readErr != nil {
 			return fmt.Errorf("read fork plan: %w", readErr)
@@ -93,10 +97,12 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 		forkPlan = &plan
 		if *deploymentID != "" && *deploymentID != plan.DeploymentID ||
 			*instanceID != "" && *instanceID != plan.InstanceID ||
-			*lineageID != "" && *lineageID != plan.LineageID || *generation != plan.Generation {
+			*lineageID != "" && *lineageID != plan.LineageID ||
+			generationExplicit && *generation != plan.Generation {
 			return errors.New("fork plan conflicts with an explicitly selected deployment, instance, lineage, or generation")
 		}
 		*deploymentID, *instanceID, *lineageID = plan.DeploymentID, plan.InstanceID, plan.LineageID
+		*generation = plan.Generation
 		if *nodeIDsValue == "" {
 			*nodeIDsValue = plan.SourceNodeID
 		}
