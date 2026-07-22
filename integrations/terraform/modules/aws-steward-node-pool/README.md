@@ -3,7 +3,7 @@
 This module creates a private, multi-zone EC2 Auto Scaling Group from an existing
 AMI, subnets, security groups, KMS key, and exact Steward release. It uses IMDSv2,
 metadata hop limit one, encrypted gp3 storage, detailed monitoring, launch-template
-versioning, and a rolling instance refresh with rollback.
+versioning, and an Auto Scaling Group that can span private subnets.
 
 The machine image must already contain Docker, gVisor, systemd, cloud-init, curl,
 `timeout`, and `sha256sum`. The module stages Steward but does not enroll nodes.
@@ -31,5 +31,8 @@ New instances are VM-healthy before they are Steward-ready. Enroll each node and
 run the node doctor before expecting Control to place work there. EC2 health alone
 must not be used as proof of enrollment or policy continuity. Do not enable
 automatic scale-in until its termination workflow cordons and drains the selected
-node; the module deliberately creates no cloud-specific Lambda or shared join
-credential.
+node. Terraform creates initial capacity but ignores later `min_size`,
+`desired_capacity`, and `max_size` changes, and it does not start instance refresh.
+After a drain, use an explicit Auto Scaling operation to terminate or replace that
+exact instance. The module deliberately creates no cloud-specific Lambda or shared
+join credential.

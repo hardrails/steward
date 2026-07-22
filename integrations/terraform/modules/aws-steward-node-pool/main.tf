@@ -79,22 +79,11 @@ resource "aws_autoscaling_group" "this" {
   health_check_type         = "EC2"
   health_check_grace_period = var.instance_warmup_seconds
   capacity_rebalance        = true
-  termination_policies      = ["OldestLaunchTemplate"]
   wait_for_capacity_timeout = "30m"
 
   launch_template {
     id      = aws_launch_template.this.id
     version = aws_launch_template.this.latest_version
-  }
-
-  instance_refresh {
-    strategy = "Rolling"
-    preferences {
-      auto_rollback          = true
-      instance_warmup        = var.instance_warmup_seconds
-      min_healthy_percentage = var.min_healthy_percentage
-      skip_matching          = true
-    }
   }
 
   dynamic "tag" {
@@ -107,6 +96,11 @@ resource "aws_autoscaling_group" "this" {
   }
 
   lifecycle {
+    # Terraform creates initial capacity but must not select a live Steward node
+    # for replacement or scale-in. Change these values through a post-drain fleet
+    # operation until Steward can prove the complete join/drain handshake.
+    ignore_changes = [min_size, desired_capacity, max_size]
+
     precondition {
       condition     = var.capacity.min > 0
       error_message = "the hardened pool requires at least one retained node; use an explicit break-glass change to remove the pool instead of scaling it to zero."

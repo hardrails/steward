@@ -67,6 +67,10 @@ resource "azurerm_linux_virtual_machine_scale_set" "this" {
   })
 
   lifecycle {
+    # Terraform creates initial capacity but must not select a live Steward node
+    # for scale-in. Resize through a post-drain fleet operation.
+    ignore_changes = [instances]
+
     precondition {
       condition     = length(module.bootstrap.cloud_init) <= 65535
       error_message = "rendered cloud-init exceeds Azure custom-data capacity."

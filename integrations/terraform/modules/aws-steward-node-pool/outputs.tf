@@ -23,6 +23,6 @@ output "next_steps" {
     "Wait for /var/lib/steward-bootstrap/complete on each new instance.",
     "Prepare and securely deliver one node-specific enrollment package; never place it in Terraform or EC2 user data.",
     "Run stewardctl site node activate on the destination and then ${module.bootstrap.node_readiness_command}.",
-    "Before reducing desired capacity, cordon and drain the selected Steward node, then allow Auto Scaling termination.",
+    "Terraform does not mutate live pool capacity or start instance refresh. Cordon and drain a selected Steward node before an explicit Auto Scaling replacement or termination.",
   ]
 }

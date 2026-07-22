@@ -373,8 +373,8 @@ The roadmap starts from working primitives rather than a blank design:
   logs; and
 - supported private AWS Auto Scaling Group, Google Cloud regional Managed Instance
   Group, and Azure Virtual Machine Scale Set modules that reuse native fleet
-  lifecycle, pin non-secret first boot, and keep node enrollment out of Terraform
-  state.
+  resources, pin non-secret first boot, keep node enrollment out of Terraform
+  state, and refuse automatic replacement or scale-in before a Steward drain.
 
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and

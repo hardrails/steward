@@ -58,8 +58,9 @@ deployment metadata into fleet enrollment authority.
 - A new VM is installed but unschedulable until its node-specific enrollment is
   completed. This is deliberate and must remain visible in documentation and
   outputs.
-- Cloud replacement protects VM availability. Steward cordon and drain remain the
-  required scale-in ceremony for active agent workloads.
+- Cloud services retain their replacement APIs, but the modules do not
+  automatically invoke them. Steward cordon and drain remain the required ceremony
+  before replacing or terminating an active node.
 - The first modules do not claim secure zero-touch scale-out, application-aware
   autohealing, controller high availability, or host protection from a cloud
   administrator.

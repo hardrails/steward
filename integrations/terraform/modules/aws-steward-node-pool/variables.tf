@@ -56,7 +56,7 @@ variable "instance_profile_name" {
 }
 
 variable "capacity" {
-  description = "Pool size. Keep min equal to desired until scale-in is integrated with Steward cordon and drain."
+  description = "Initial pool bounds. Terraform ignores later capacity changes so it cannot select an undrained node for scale-in."
   type = object({
     min     = number
     desired = number
@@ -107,16 +107,6 @@ variable "instance_warmup_seconds" {
   validation {
     condition     = var.instance_warmup_seconds >= 60 && var.instance_warmup_seconds <= 7200
     error_message = "instance_warmup_seconds must be from 60 through 7200."
-  }
-}
-
-variable "min_healthy_percentage" {
-  description = "Minimum VM capacity retained during an instance refresh."
-  type        = number
-  default     = 90
-  validation {
-    condition     = var.min_healthy_percentage >= 0 && var.min_healthy_percentage <= 100
-    error_message = "min_healthy_percentage must be from 0 through 100."
   }
 }
 

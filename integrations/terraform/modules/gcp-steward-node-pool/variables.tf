@@ -30,7 +30,7 @@ variable "machine_type" {
   default = "n2-standard-2"
 }
 variable "capacity" {
-  description = "Fixed target size. Attach a native autoscaler only after scale-in is joined to Steward cordon and drain."
+  description = "Initial target size. Terraform ignores later size changes so it cannot select an undrained node for scale-in."
   type        = number
   default     = 2
   validation {

@@ -37,6 +37,7 @@ approved channel and require the node doctor to pass before placement.
 Upgrade mode is deliberately `Manual`. Azure requires a valid Application Health
 signal for safe rolling upgrade and automatic repair, while Steward's complete
 readiness check is local and authenticated. Treating raw VM health as node
-readiness would allow an installed but unenrolled node to pass. Apply model changes
-in explicit batches until the attested enrollment and health integration is
-qualified.
+readiness would allow an installed but unenrolled node to pass. Terraform also
+ignores later `instances` changes. Apply model changes or capacity changes to
+explicit, already drained instances until the attested enrollment and health
+integration is qualified.

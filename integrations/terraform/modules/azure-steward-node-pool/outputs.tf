@@ -20,7 +20,7 @@ output "next_steps" {
     "Wait for /var/lib/steward-bootstrap/complete on each new instance.",
     "Prepare and securely deliver one node-specific enrollment package; never place it in Terraform or VMSS custom data.",
     "Run stewardctl site node activate on the destination and then ${module.bootstrap.node_readiness_command}.",
-    "Before reducing instance count, cordon and drain the selected Steward node, then update the scale set capacity.",
+    "Terraform does not mutate the live instance count. Cordon and drain a selected Steward node before an explicit scale-set update or deletion.",
     "Apply image-model changes to instances in deliberate batches; automatic upgrades remain disabled until Steward readiness is connected to Azure Application Health.",
   ]
 }

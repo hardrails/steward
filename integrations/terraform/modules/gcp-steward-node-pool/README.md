@@ -3,8 +3,8 @@
 This module creates a private regional Managed Instance Group from existing
 network, image, service-account, and Cloud KMS resources. Instances have no
 external IP, project SSH keys are blocked, OS Login is enabled, Shielded VM secure
-boot/vTPM/integrity monitoring are enabled, and image changes roll out with one
-surge VM and zero planned unavailability.
+boot/vTPM/integrity monitoring are enabled, and image changes publish a new
+template for future or explicitly replaced instances.
 
 ```hcl
 module "steward_nodes" {
@@ -34,8 +34,10 @@ First boot stages the exact release but does not enroll the VM as a Steward node
 Deliver one short-lived, node-specific enrollment package through a separate
 approved channel and require the node doctor to pass before placement.
 
-The group intentionally has no application autohealing or autoscaler. A Compute
-Engine VM can be healthy while Steward is not enrolled, and automatic scale-in can
-terminate an active agent without a drain. Add those behaviors only after their
-health and termination actions are joined to Steward's readiness, cordon, and drain
+The group intentionally has no application autohealing or autoscaler. Its update
+policy is `OPPORTUNISTIC`, so a new instance template does not proactively replace
+live nodes, and Terraform ignores later `target_size` changes. A Compute Engine VM
+can be healthy while Steward is not enrolled. Cordon and drain a selected node,
+then update or delete that exact MIG instance. Add automatic behavior only after
+health and termination are joined to Steward's readiness, cordon, and drain
 contracts.

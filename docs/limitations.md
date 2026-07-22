@@ -316,10 +316,12 @@ profile; it is not available today.
 
 Cloud VM health does not cover Steward policy continuity, authenticated Executor
 readiness, or Gateway state. The modules therefore do not claim application-aware
-autohealing. Automatic scale-in must not select an arbitrary active node: cordon
-and drain the node first, decide how to handle persistent state, then permit cloud
-termination. Azure model updates remain manual until a complete Application Health
-signal is qualified.
+autohealing. Terraform creates initial pool capacity but ignores later live size
+changes; AWS instance refresh is absent, Google updates are opportunistic, and
+Azure updates remain manual. Cordon and drain a chosen node, decide how to handle
+persistent state, then use an instance-specific cloud operation. A generic scale-in
+can still select an active node and is unsupported until the lifecycle integration
+is qualified.
 
 The bundled controller remains one bounded active writer even when its node pool
 spans zones. Keep its store on encrypted persistent storage and test backup and

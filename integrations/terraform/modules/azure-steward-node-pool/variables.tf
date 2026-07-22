@@ -37,8 +37,9 @@ variable "sku" {
   default = "Standard_D2as_v5"
 }
 variable "capacity" {
-  type    = number
-  default = 2
+  description = "Initial instance count. Terraform ignores later size changes so it cannot select an undrained node for scale-in."
+  type        = number
+  default     = 2
   validation {
     condition     = var.capacity >= 1 && var.capacity <= 1000 && floor(var.capacity) == var.capacity
     error_message = "capacity must be an integer from 1 through 1000."

@@ -28,12 +28,15 @@ terraform fmt -check -recursive "$modules/aws-steward-node-pool" \
 require_text "$modules/aws-steward-node-pool/main.tf" 'http_tokens                 = "required"'
 require_text "$modules/aws-steward-node-pool/main.tf" 'http_put_response_hop_limit = 1'
 require_text "$modules/aws-steward-node-pool/main.tf" 'version = aws_launch_template.this.latest_version'
-require_text "$modules/aws-steward-node-pool/main.tf" 'auto_rollback          = true'
+require_text "$modules/aws-steward-node-pool/main.tf" 'ignore_changes = [min_size, desired_capacity, max_size]'
+reject_text "$modules/aws-steward-node-pool/main.tf" 'instance_refresh {'
 require_text "$modules/gcp-steward-node-pool/main.tf" 'enable_secure_boot          = true'
-require_text "$modules/gcp-steward-node-pool/main.tf" 'max_unavailable_fixed          = 0'
+require_text "$modules/gcp-steward-node-pool/main.tf" 'type                           = "OPPORTUNISTIC"'
+require_text "$modules/gcp-steward-node-pool/main.tf" 'ignore_changes = [target_size]'
 reject_text "$modules/gcp-steward-node-pool/main.tf" 'access_config {'
 require_text "$modules/azure-steward-node-pool/main.tf" 'disable_password_authentication = true'
 require_text "$modules/azure-steward-node-pool/main.tf" 'upgrade_mode                    = "Manual"'
+require_text "$modules/azure-steward-node-pool/main.tf" 'ignore_changes = [instances]'
 reject_text "$modules/azure-steward-node-pool/main.tf" 'admin_password'
 
 for module in aws-steward-node-pool gcp-steward-node-pool azure-steward-node-pool; do

@@ -82,13 +82,16 @@ resource "google_compute_region_instance_group_manager" "this" {
   }
 
   update_policy {
-    type                           = "PROACTIVE"
+    type                           = "OPPORTUNISTIC"
     minimal_action                 = "REPLACE"
     most_disruptive_allowed_action = "REPLACE"
-    replacement_method             = "SUBSTITUTE"
-    max_surge_fixed                = 1
-    max_unavailable_fixed          = 0
   }
 
   wait_for_instances_status = "STABLE"
+
+  lifecycle {
+    # Terraform creates initial capacity but must not select a live Steward node
+    # for replacement or scale-in. Resize through a post-drain fleet operation.
+    ignore_changes = [target_size]
+  }
 }

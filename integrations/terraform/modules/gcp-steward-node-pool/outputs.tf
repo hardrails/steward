@@ -23,6 +23,6 @@ output "next_steps" {
     "Wait for /var/lib/steward-bootstrap/complete on each new instance.",
     "Prepare and securely deliver one node-specific enrollment package; never place it in Terraform or Compute Engine metadata.",
     "Run stewardctl site node activate on the destination and then ${module.bootstrap.node_readiness_command}.",
-    "Before reducing target size, cordon and drain the selected Steward node, then resize the Managed Instance Group.",
+    "Terraform does not mutate live target size or proactively replace instances. Cordon and drain a selected Steward node before an explicit Managed Instance Group update or deletion.",
   ]
 }

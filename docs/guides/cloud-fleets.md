@@ -18,8 +18,8 @@ do not want Kubernetes to become a required part of the Steward trust boundary.
 
 | Cloud | Steward module | Cloud service it creates | Safe update behavior |
 | --- | --- | --- | --- |
-| AWS | `aws-steward-node-pool` | EC2 Auto Scaling Group | Versioned launch template and rolling instance refresh with rollback |
-| Google Cloud | `gcp-steward-node-pool` | Regional Managed Instance Group | Proactive replacement with one surge VM and zero planned unavailability |
+| AWS | `aws-steward-node-pool` | EC2 Auto Scaling Group | Versioned launch template; explicit post-drain instance replacement |
+| Google Cloud | `gcp-steward-node-pool` | Regional Managed Instance Group | Opportunistic template update; explicit post-drain instance replacement |
 | Azure | `azure-steward-node-pool` | Linux Virtual Machine Scale Set | Manual instance batches until a complete Steward health signal is qualified |
 
 All three modules:
@@ -105,8 +105,9 @@ module "steward_nodes" {
 ```
 
 The module requires Instance Metadata Service v2, limits metadata forwarding to
-one hop, disables metadata tags, encrypts the root disk, and rolls launch-template
-changes through EC2 Auto Scaling instance refresh. AWS documents the underlying
+one hop, disables metadata tags, and encrypts the root disk. A launch-template
+change does not start instance refresh; replace a selected node only after its
+Steward drain completes. AWS documents the underlying
 [launch-template](https://docs.aws.amazon.com/autoscaling/ec2/userguide/launch-templates.html)
 and [Auto Scaling lifecycle](https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-auto-scaling.html).
 
@@ -135,8 +136,9 @@ module "steward_nodes" {
 
 The module blocks project SSH keys, enables OS Login and Shielded VM controls, and
 uses no external IP. The supplied service account receives no role and no OAuth
-scope from this module. Google documents regional groups and their
-[controlled rolling updates](https://cloud.google.com/compute/docs/instance-groups/rolling-out-updates-to-managed-instance-groups).
+scope from this module. Template updates are opportunistic and do not proactively
+replace live nodes. Google documents regional groups and their
+[controlled update choices](https://cloud.google.com/compute/docs/instance-groups/rolling-out-updates-to-managed-instance-groups).
 
 ## Azure
 
@@ -201,7 +203,8 @@ so Steward does not offer that shortcut.
 
 ### Scale out
 
-1. Increase desired capacity.
+1. Add capacity with an explicit cloud pool operation. Terraform records the
+   initial size but ignores later live-capacity changes.
 2. Wait for the staging marker on each new VM.
 3. Enroll each new node.
 4. Require the node doctor to pass and confirm that Control sees fresh capacity.
@@ -220,9 +223,11 @@ node:
 5. verify the node becomes stale or retired in Control without a late generation
    regaining authority.
 
-Keep AWS `capacity.min`, the Google target size, or the Azure instance count fixed
-until this termination workflow is automated in your environment. The modules do
-not create a cloud-specific function with broad Steward administrator authority.
+Terraform ignores later live-capacity changes and does not start automatic
+replacement. After draining a selected node, use the cloud's instance-specific
+replacement or deletion operation rather than lowering a generic desired count and
+letting the cloud choose a victim. The modules do not create a cloud-specific
+function with broad Steward administrator authority.
 
 ## Controller availability
 
