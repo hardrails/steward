@@ -486,14 +486,14 @@ func main() {
 
 	if srv != nil {
 		go func() {
-			logger.Info("steward listening", "addr", cfg.addr, "version", server.Version)
+			logger.Info("steward listening", "addr", cfg.addr, "version", server.ResolveVersion())
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Error("server error", "err", err)
 				reportRuntimeFailure()
 			}
 		}()
 	} else {
-		logger.Info("inbound listener disabled; serving via uplink only", "version", server.Version)
+		logger.Info("inbound listener disabled; serving via uplink only", "version", server.ResolveVersion())
 	}
 
 	<-ctx.Done()
