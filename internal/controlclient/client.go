@@ -608,7 +608,9 @@ func (c *Client) ListTaskProjections(
 		}
 		if index > 0 {
 			previous := page.Tasks[index-1]
-			if previous.LastObservedAt < projection.LastObservedAt ||
+			previousAt, _ := time.Parse(time.RFC3339Nano, previous.LastObservedAt)
+			projectionAt, _ := time.Parse(time.RFC3339Nano, projection.LastObservedAt)
+			if previousAt.Before(projectionAt) ||
 				previous.LastObservedAt == projection.LastObservedAt && previous.ProjectionID <= projection.ProjectionID {
 				return TaskProjectionList{}, errors.New("control task page is not canonical")
 			}

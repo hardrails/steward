@@ -92,6 +92,28 @@ func TestListTaskProjectionsRejectsInvalidRequestsAndResponses(t *testing.T) {
 	}
 }
 
+func TestListTaskProjectionsAcceptsChronologicalFractionalOrder(t *testing.T) {
+	newer := controlClientTaskProjection("tenant-a", "task-new", "researcher-a", 1)
+	older := controlClientTaskProjection("tenant-a", "task-old", "researcher-a", 1)
+	older.FirstObservedAt = "2026-07-21T01:00:00Z"
+	older.LastObservedAt = "2026-07-21T01:00:00Z"
+	newer.FirstObservedAt = "2026-07-21T01:00:00.000000001Z"
+	newer.LastObservedAt = "2026-07-21T01:00:00.000000001Z"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(TaskProjectionList{Tasks: []controlstore.TaskProjection{newer, older}})
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "operator", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.ListTaskProjections(context.Background(), "tenant-a", "", 2)
+	if err != nil || len(page.Tasks) != 2 {
+		t.Fatalf("fractional task page=%+v err=%v", page, err)
+	}
+}
+
 func controlClientTaskProjection(tenantID, taskID, instanceID string, generation uint64) controlstore.TaskProjection {
 	digest := sha256.Sum256([]byte(
 		"steward-task-projection-v1\x00" + tenantID + "\x00" + taskID + "\x00" + instanceID + "\x00" +
