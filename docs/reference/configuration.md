@@ -33,6 +33,7 @@ backup, and restore under the new limit before production use.
 | `-controller-public-key-file` | `<state-dir>/controller.public.pem` | Matching public key bound into tenant-signed delegations |
 | `-controller-key-id` | `controller-default` | Stable key ID that a delegation must name |
 | `-reconcile-interval` | `5s` | Desired-deployment reconciliation cadence; from `1s` through `1h` |
+| `-authority-mode` | `bounded-autonomous` | `bounded-autonomous` permits delegated desired-state reconciliation; `strict-sovereign` does not load the controller signing key and accepts only exact externally signed commands |
 | `-tls-cert-file` | empty | PEM server certificate; must be paired with the key |
 | `-tls-key-file` | empty | Owner-only PEM server private key |
 | `-enable-metrics` | `false` | Expose authenticated Prometheus metrics on `/metrics` |
@@ -55,6 +56,16 @@ backup, and restore under the new limit before production use.
 | `-max-deployments` | `1024` | Retained desired deployments across the site |
 | `-max-deployments-per-tenant` | `128` | Retained desired deployments for one tenant |
 | `-terminal-retention` | `24h` | Minimum retention before a known terminal outcome may be reclaimed for command capacity |
+
+`strict-sovereign` is a real enforcement mode, not a dashboard label. Control
+refuses to start while either online controller key file exists, does not start the reconciler,
+and rejects desired-deployment create, update, delete, pause, and resume requests
+with `409 autonomous_reconciliation_disabled`. Read-only deployment inspection
+and the exact signed-command courier remain available. Switching modes does not
+revoke a delegation already accepted by a node. Before changing the trust
+boundary, operators must expire every delegation that names the key, archive any
+required public identity, and remove both controller-key files. The installer
+refuses to delete key material automatically.
 
 When the certificate and key are configured, Steward Control accepts TLS 1.3 only.
 The Steward Control client used by `stewardctl control` and `steward-mcp` likewise

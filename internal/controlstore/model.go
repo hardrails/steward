@@ -28,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion            = 1
-	stateFormatWriteVersion              = 16
+	stateFormatWriteVersion              = 18
 	stateFormatMaxReadVersion            = stateFormatWriteVersion
 	stateFormatEvidenceVersion           = 2
 	stateFormatExecutorV4Version         = 3
@@ -45,8 +45,10 @@ const (
 	stateFormatSnapshotQuarantineVersion = 14
 	stateFormatRolloutControlVersion     = 15
 	stateFormatInstanceEventsVersion     = 16
+	stateFormatNodePoolVersion           = 17
+	stateFormatTaskProjectionVersion     = 18
 	transactionFormatMinReadVersion      = 1
-	transactionFormatWriteVersion        = 16
+	transactionFormatWriteVersion        = 18
 	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
 	transactionEvidenceVersion           = 2
 	transactionExecutorV4Version         = 3
@@ -63,6 +65,8 @@ const (
 	transactionSnapshotQuarantineVersion = 14
 	transactionRolloutControlVersion     = 15
 	transactionInstanceEventsVersion     = 16
+	transactionNodePoolVersion           = 17
+	transactionTaskProjectionVersion     = 18
 	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -119,6 +123,7 @@ type Limits struct {
 	MaxCommandsPerNode      int
 	MaxDeployments          int
 	MaxDeploymentsPerTenant int
+	MaxNodePools            int
 	MaxCommandBytes         int
 	MaxReportBytes          int
 	MaxStateBytes           int
@@ -133,7 +138,7 @@ func DefaultLimits() Limits {
 		MaxCredentials: 16384, MaxCredentialsPerTenant: 2048,
 		MaxEnrollments: 4096, MaxEnrollmentsPerTenant: 512,
 		MaxCommands: 16384, MaxCommandsPerTenant: 1024, MaxCommandsPerNode: 256,
-		MaxDeployments: 1024, MaxDeploymentsPerTenant: 128,
+		MaxDeployments: 1024, MaxDeploymentsPerTenant: 128, MaxNodePools: 256,
 		MaxCommandBytes: 1 << 20, MaxReportBytes: 64 << 10,
 		MaxStateBytes: 64 << 20, MaxRecordBytes: 2 << 20, MaxWALBytes: 64 << 20,
 		TerminalRetention: 24 * time.Hour,
@@ -145,7 +150,7 @@ func (limits Limits) Validate() error {
 		limits.MaxCredentials <= 0 || limits.MaxCredentialsPerTenant <= 0 ||
 		limits.MaxEnrollments <= 0 || limits.MaxEnrollmentsPerTenant <= 0 ||
 		limits.MaxCommands <= 0 || limits.MaxCommandsPerTenant <= 0 || limits.MaxCommandsPerNode <= 0 ||
-		limits.MaxDeployments <= 0 || limits.MaxDeploymentsPerTenant <= 0 ||
+		limits.MaxDeployments <= 0 || limits.MaxDeploymentsPerTenant <= 0 || limits.MaxNodePools <= 0 ||
 		limits.MaxCommandBytes <= 0 || limits.MaxReportBytes <= 0 || limits.MaxStateBytes <= 0 ||
 		limits.MaxRecordBytes <= 0 || limits.MaxWALBytes <= 0 || limits.TerminalRetention <= 0 {
 		return errors.New("every control store limit must be positive")
@@ -166,6 +171,21 @@ type Tenant struct {
 	CreatedAt string               `json:"created_at"`
 	Active    bool                 `json:"active"`
 	Quota     *TenantResourceQuota `json:"quota,omitempty"`
+}
+
+// NodePool is provider-neutral desired infrastructure capacity. Matching a
+// pool never grants workload authority; tenant delegations continue to name
+// exact nodes until independently verifiable pool membership is implemented.
+type NodePool struct {
+	ID           string   `json:"id"`
+	Revision     uint64   `json:"revision"`
+	TenantIDs    []string `json:"tenant_ids"`
+	Architecture string   `json:"architecture,omitempty"`
+	MinNodes     int      `json:"min_nodes"`
+	DesiredNodes int      `json:"desired_nodes"`
+	MaxNodes     int      `json:"max_nodes"`
+	CreatedAt    string   `json:"created_at"`
+	UpdatedAt    string   `json:"updated_at"`
 }
 
 type TenantQuotaAction string
@@ -598,6 +618,8 @@ type snapshotState struct {
 	Captures    []storedEvidenceCapture `json:"captures"`
 	Deployments []storedDeployment      `json:"deployments"`
 	Events      []InstanceEvent         `json:"instance_events"`
+	NodePools   []NodePool              `json:"node_pools"`
+	Tasks       []TaskProjection        `json:"task_projections"`
 }
 
 type storedCredential struct {
@@ -679,16 +701,18 @@ type storedDeploymentRollout struct {
 }
 
 type state struct {
-	tenants     map[string]Tenant
-	freezes     map[string]OperationalFreeze
-	quarantines map[string]SnapshotQuarantine
-	nodes       map[string]Node
-	credentials map[string]controlauth.Credential
-	enrollments map[string]controlauth.Enrollment
-	commands    map[string]Command
-	captures    map[string]storedEvidenceCapture
-	deployments map[string]Deployment
-	events      map[string]InstanceEvent
+	tenants         map[string]Tenant
+	freezes         map[string]OperationalFreeze
+	quarantines     map[string]SnapshotQuarantine
+	nodes           map[string]Node
+	credentials     map[string]controlauth.Credential
+	enrollments     map[string]controlauth.Enrollment
+	commands        map[string]Command
+	captures        map[string]storedEvidenceCapture
+	deployments     map[string]Deployment
+	events          map[string]InstanceEvent
+	nodePools       map[string]NodePool
+	taskProjections map[string]TaskProjection
 }
 
 type transaction struct {
@@ -713,6 +737,8 @@ type mutation struct {
 	Deployment   *storedDeployment      `json:"deployment,omitempty"`
 	Event        *InstanceEvent         `json:"instance_event,omitempty"`
 	EventID      string                 `json:"instance_event_id,omitempty"`
+	NodePool     *NodePool              `json:"node_pool,omitempty"`
+	NodePoolID   string                 `json:"node_pool_id,omitempty"`
 }
 
 type commandReference struct {
@@ -742,6 +768,8 @@ const (
 	mutationDeployment          = "deployment_upsert"
 	mutationInstanceEvent       = "instance_event_upsert"
 	mutationInstanceEventDelete = "instance_event_delete"
+	mutationNodePool            = "node_pool_upsert"
+	mutationNodePoolDelete      = "node_pool_delete"
 )
 
 func emptyState() state {
@@ -751,6 +779,7 @@ func emptyState() state {
 		credentials: make(map[string]controlauth.Credential), enrollments: make(map[string]controlauth.Enrollment),
 		commands: make(map[string]Command), captures: make(map[string]storedEvidenceCapture),
 		deployments: make(map[string]Deployment), events: make(map[string]InstanceEvent),
+		nodePools: make(map[string]NodePool), taskProjections: make(map[string]TaskProjection),
 	}
 }
 
@@ -795,6 +824,12 @@ func (current state) clone() state {
 	}
 	for key, event := range current.events {
 		next.events[key] = cloneInstanceEvent(event)
+	}
+	for key, pool := range current.nodePools {
+		next.nodePools[key] = cloneNodePool(pool)
+	}
+	for key, projection := range current.taskProjections {
+		next.taskProjections[key] = cloneTaskProjection(projection)
 	}
 	return next
 }
@@ -1128,7 +1163,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
 		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Freezes: []OperationalFreeze{}, Quarantines: []SnapshotQuarantine{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
-		Deployments: []storedDeployment{}, Events: []InstanceEvent{},
+		Deployments: []storedDeployment{}, Events: []InstanceEvent{}, NodePools: []NodePool{}, Tasks: []TaskProjection{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
@@ -1165,6 +1200,12 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, event := range current.events {
 		snapshot.Events = append(snapshot.Events, cloneInstanceEvent(event))
 	}
+	for _, projection := range current.taskProjections {
+		snapshot.Tasks = append(snapshot.Tasks, cloneTaskProjection(projection))
+	}
+	for _, pool := range current.nodePools {
+		snapshot.NodePools = append(snapshot.NodePools, cloneNodePool(pool))
+	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Freezes, func(i, j int) bool {
 		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
@@ -1198,6 +1239,8 @@ func encodeState(current state, limit int) ([]byte, error) {
 		return left.ID < right.ID
 	})
 	sort.Slice(snapshot.Events, func(i, j int) bool { return snapshot.Events[i].Event.EventID < snapshot.Events[j].Event.EventID })
+	sort.Slice(snapshot.NodePools, func(i, j int) bool { return snapshot.NodePools[i].ID < snapshot.NodePools[j].ID })
+	sort.Slice(snapshot.Tasks, func(i, j int) bool { return snapshot.Tasks[i].ProjectionID < snapshot.Tasks[j].ProjectionID })
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, err
@@ -1225,7 +1268,11 @@ func decodeState(raw []byte, limit int) (state, error) {
 		snapshot.Version >= stateFormatDeploymentVersion && snapshot.Deployments == nil ||
 		snapshot.Version < stateFormatDeploymentVersion && snapshot.Deployments != nil ||
 		snapshot.Version >= stateFormatInstanceEventsVersion && snapshot.Events == nil ||
-		snapshot.Version < stateFormatInstanceEventsVersion && len(snapshot.Events) != 0 {
+		snapshot.Version < stateFormatInstanceEventsVersion && len(snapshot.Events) != 0 ||
+		snapshot.Version >= stateFormatNodePoolVersion && snapshot.NodePools == nil ||
+		snapshot.Version < stateFormatNodePoolVersion && len(snapshot.NodePools) != 0 ||
+		snapshot.Version >= stateFormatTaskProjectionVersion && snapshot.Tasks == nil ||
+		snapshot.Version < stateFormatTaskProjectionVersion && len(snapshot.Tasks) != 0 {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
 	current := emptyState()
@@ -1366,6 +1413,28 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		current.events[event.Event.EventID] = cloneInstanceEvent(event)
 	}
+	for _, pool := range snapshot.NodePools {
+		if !validNodePool(pool) {
+			return state{}, errors.New("control snapshot contains an invalid node pool")
+		}
+		if _, duplicate := current.nodePools[pool.ID]; duplicate {
+			return state{}, errors.New("control snapshot contains a duplicate node pool")
+		}
+		current.nodePools[pool.ID] = cloneNodePool(pool)
+	}
+	if snapshot.Version < stateFormatTaskProjectionVersion {
+		current.taskProjections = rebuildTaskProjections(current.events)
+	} else {
+		for _, projection := range snapshot.Tasks {
+			if projection.Validate() != nil {
+				return state{}, errors.New("control snapshot contains an invalid task projection")
+			}
+			if _, duplicate := current.taskProjections[projection.ProjectionID]; duplicate {
+				return state{}, errors.New("control snapshot contains a duplicate task projection")
+			}
+			current.taskProjections[projection.ProjectionID] = cloneTaskProjection(projection)
+		}
+	}
 	return current, nil
 }
 
@@ -1435,6 +1504,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 			present++
 		}
 		if change.EventID != "" {
+			present++
+		}
+		if change.NodePool != nil {
+			present++
+		}
+		if change.NodePoolID != "" {
 			present++
 		}
 		if present != 1 {
@@ -1620,7 +1695,14 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionInstanceEventsVersion || change.Event == nil || !validInstanceEvent(*change.Event) {
 				return state{}, errors.New("instance event mutation is invalid for this transaction version")
 			}
+			if existing, duplicate := next.events[change.Event.Event.EventID]; duplicate {
+				if !instanceEventsEqual(existing.Event, change.Event.Event) {
+					return state{}, errors.New("instance event mutation conflicts with retained identity")
+				}
+				break
+			}
 			next.events[change.Event.Event.EventID] = cloneInstanceEvent(*change.Event)
+			observeTaskProjection(next.taskProjections, *change.Event)
 		case mutationInstanceEventDelete:
 			if value.Version < transactionInstanceEventsVersion || change.EventID == "" {
 				return state{}, errors.New("instance event deletion is invalid for this transaction version")
@@ -1629,6 +1711,19 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("instance event deletion references missing state")
 			}
 			delete(next.events, change.EventID)
+		case mutationNodePool:
+			if value.Version < transactionNodePoolVersion || change.NodePool == nil || !validNodePool(*change.NodePool) {
+				return state{}, errors.New("node pool mutation is invalid for this transaction version")
+			}
+			next.nodePools[change.NodePool.ID] = cloneNodePool(*change.NodePool)
+		case mutationNodePoolDelete:
+			if value.Version < transactionNodePoolVersion || !validRecordID(change.NodePoolID, 128) {
+				return state{}, errors.New("node pool deletion is invalid for this transaction version")
+			}
+			if _, exists := next.nodePools[change.NodePoolID]; !exists {
+				return state{}, errors.New("node pool deletion references missing state")
+			}
+			delete(next.nodePools, change.NodePoolID)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -1693,7 +1788,8 @@ func validateState(current state, limits Limits) error {
 		len(current.quarantines) > MaxSnapshotQuarantines || len(current.nodes) > limits.MaxNodes ||
 		len(current.credentials) > limits.MaxCredentials || len(current.enrollments) > limits.MaxEnrollments ||
 		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained ||
-		len(current.deployments) > limits.MaxDeployments || len(current.events) > MaxInstanceEventsRetained {
+		len(current.deployments) > limits.MaxDeployments || len(current.events) > MaxInstanceEventsRetained ||
+		len(current.nodePools) > limits.MaxNodePools || len(current.taskProjections) > MaxTaskProjectionsRetained {
 		return ErrCapacityExceeded
 	}
 	for key, tenant := range current.tenants {
@@ -1711,6 +1807,16 @@ func validateState(current state, limits Limits) error {
 			}
 		}
 	}
+	for key, pool := range current.nodePools {
+		if key != pool.ID || !validNodePool(pool) {
+			return errors.New("control state contains an invalid node pool")
+		}
+		for _, tenantID := range pool.TenantIDs {
+			if tenant, ok := current.tenants[tenantID]; !ok || !tenant.Active {
+				return errors.New("control node pool references an unknown tenant")
+			}
+		}
+	}
 	eventsByTenant := make(map[string]int)
 	for key, event := range current.events {
 		if key != event.Event.EventID || !validInstanceEvent(event) {
@@ -1722,6 +1828,21 @@ func validateState(current state, limits Limits) error {
 		}
 		eventsByTenant[event.Event.TenantID]++
 		if eventsByTenant[event.Event.TenantID] > MaxInstanceEventsPerTenant {
+			return ErrCapacityExceeded
+		}
+	}
+	projectionsByTenant := make(map[string]int)
+	for key, projection := range current.taskProjections {
+		if key != projection.ProjectionID || projection.Validate() != nil {
+			return errors.New("control state contains an invalid task projection")
+		}
+		node, nodeOK := current.nodes[projection.NodeID]
+		if _, tenantOK := current.tenants[projection.TenantID]; !nodeOK || !tenantOK ||
+			!tenantMember(node.TenantIDs, projection.TenantID) {
+			return errors.New("task projection references an unknown tenant node")
+		}
+		projectionsByTenant[projection.TenantID]++
+		if projectionsByTenant[projection.TenantID] > MaxTaskProjectionsPerTenant {
 			return ErrCapacityExceeded
 		}
 	}

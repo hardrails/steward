@@ -239,6 +239,25 @@ type InstanceEventList struct {
 	NextAfter string                       `json:"next_after,omitempty"`
 }
 
+type TaskProjectionList struct {
+	Tasks     []controlstore.TaskProjection `json:"tasks"`
+	NextAfter string                        `json:"next_after,omitempty"`
+}
+
+type NodePoolList struct {
+	NodePools []controlstore.NodePoolStatus `json:"node_pools"`
+	NextAfter string                        `json:"next_after,omitempty"`
+}
+
+type NodePoolApply struct {
+	ExpectedRevision uint64
+	TenantIDs        []string
+	Architecture     string
+	MinNodes         int
+	DesiredNodes     int
+	MaxNodes         int
+}
+
 type NodeRevocation struct {
 	NodeID             string `json:"node_id"`
 	RevokedCredentials int    `json:"revoked_credentials"`
@@ -562,6 +581,126 @@ func (c *Client) ListInstanceEvents(
 		return InstanceEventList{}, errors.New("control instance event page cursor is inconsistent")
 	}
 	return page, nil
+}
+
+func (c *Client) ListTaskProjections(
+	ctx context.Context,
+	tenantID, after string,
+	limit int,
+) (TaskProjectionList, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || limit <= 0 || limit > 100 {
+		return TaskProjectionList{}, errors.New("task list requires a tenant and limit from 1 to 100")
+	}
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/tasks", after, limit)
+	if err != nil {
+		return TaskProjectionList{}, err
+	}
+	var page TaskProjectionList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return TaskProjectionList{}, err
+	}
+	if page.Tasks == nil || len(page.Tasks) > limit {
+		return TaskProjectionList{}, errors.New("control task page is invalid")
+	}
+	for index, projection := range page.Tasks {
+		if projection.TenantID != tenantID || projection.Validate() != nil {
+			return TaskProjectionList{}, errors.New("control task page contains an invalid projection")
+		}
+		if index > 0 {
+			previous := page.Tasks[index-1]
+			previousAt, _ := time.Parse(time.RFC3339Nano, previous.LastObservedAt)
+			projectionAt, _ := time.Parse(time.RFC3339Nano, projection.LastObservedAt)
+			if previousAt.Before(projectionAt) ||
+				previous.LastObservedAt == projection.LastObservedAt && previous.ProjectionID <= projection.ProjectionID {
+				return TaskProjectionList{}, errors.New("control task page is not canonical")
+			}
+		}
+	}
+	if page.NextAfter != "" && (len(page.Tasks) == 0 || page.NextAfter != page.Tasks[len(page.Tasks)-1].ProjectionID) {
+		return TaskProjectionList{}, errors.New("control task page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) ListNodePools(ctx context.Context, after string, limit int) (NodePoolList, error) {
+	if limit <= 0 || limit > 500 {
+		return NodePoolList{}, errors.New("node pool list limit must be between 1 and 500")
+	}
+	path, err := paginatedPath("/v1/node-pools", after, limit)
+	if err != nil {
+		return NodePoolList{}, err
+	}
+	var page NodePoolList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return NodePoolList{}, err
+	}
+	if page.NodePools == nil || len(page.NodePools) > limit {
+		return NodePoolList{}, errors.New("control node pool page is invalid")
+	}
+	previous := ""
+	for _, status := range page.NodePools {
+		if status.Validate() != nil || previous != "" && previous >= status.Pool.ID {
+			return NodePoolList{}, errors.New("control node pool page contains an invalid status")
+		}
+		previous = status.Pool.ID
+	}
+	if page.NextAfter != "" && (len(page.NodePools) == 0 || page.NextAfter != previous) {
+		return NodePoolList{}, errors.New("control node pool page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) GetNodePool(ctx context.Context, poolID string) (controlstore.NodePoolStatus, error) {
+	if !validOperationsIdentifier(poolID, 128, false) {
+		return controlstore.NodePoolStatus{}, errors.New("node pool identity is invalid")
+	}
+	var status controlstore.NodePoolStatus
+	if err := c.do(ctx, http.MethodGet, "/v1/node-pools/"+url.PathEscape(poolID), nil, &status, true); err != nil {
+		return controlstore.NodePoolStatus{}, err
+	}
+	if status.Pool.ID != poolID || status.Validate() != nil {
+		return controlstore.NodePoolStatus{}, errors.New("control node pool response is invalid")
+	}
+	return status, nil
+}
+
+func (c *Client) ApplyNodePool(
+	ctx context.Context,
+	poolID string,
+	input NodePoolApply,
+) (controlstore.NodePoolStatus, error) {
+	if !validOperationsIdentifier(poolID, 128, false) {
+		return controlstore.NodePoolStatus{}, errors.New("node pool identity is invalid")
+	}
+	var status controlstore.NodePoolStatus
+	err := c.do(ctx, http.MethodPut, "/v1/node-pools/"+url.PathEscape(poolID), struct {
+		ExpectedRevision uint64   `json:"expected_revision"`
+		TenantIDs        []string `json:"tenant_ids"`
+		Architecture     string   `json:"architecture,omitempty"`
+		MinNodes         int      `json:"min_nodes"`
+		DesiredNodes     int      `json:"desired_nodes"`
+		MaxNodes         int      `json:"max_nodes"`
+	}{
+		ExpectedRevision: input.ExpectedRevision, TenantIDs: input.TenantIDs,
+		Architecture: input.Architecture, MinNodes: input.MinNodes,
+		DesiredNodes: input.DesiredNodes, MaxNodes: input.MaxNodes,
+	}, &status, true)
+	if err != nil {
+		return controlstore.NodePoolStatus{}, err
+	}
+	if status.Pool.ID != poolID || status.Validate() != nil {
+		return controlstore.NodePoolStatus{}, errors.New("control node pool response is invalid")
+	}
+	return status, nil
+}
+
+func (c *Client) DeleteNodePool(ctx context.Context, poolID string, expectedRevision uint64) error {
+	if !validOperationsIdentifier(poolID, 128, false) || expectedRevision == 0 {
+		return errors.New("node pool deletion requires an identity and nonzero revision")
+	}
+	return c.do(ctx, http.MethodDelete, "/v1/node-pools/"+url.PathEscape(poolID), struct {
+		ExpectedRevision uint64 `json:"expected_revision"`
+	}{ExpectedRevision: expectedRevision}, nil, true)
 }
 
 func (c *Client) RemoveDeployment(

@@ -84,7 +84,7 @@ Initial authentication has a two-minute hard deadline. Navigation or `pagehide`
 also clears the credential while those first reads are still in flight; a stalled
 response cannot retain pre-session authority indefinitely.
 
-## Read the eight views
+## Read the ten views
 
 Every view starts with the effective command-delivery state for the selected
 scope. A green banner means Control may deliver new commands. A red striped banner
@@ -103,9 +103,12 @@ The console does not set or clear a freeze. Use the authenticated
 | Attention | Deterministic findings derived from retained facts and current process observations, including the bounded cause, impact, safest next step, and a copyable `stewardctl explain` command; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, direct remediation, or incident workflow |
 | Incident view | Current containment, evidence divergence, access revocation, and failed-workload facts in newest-first order, with site or tenant scope and bounded reasons | Complete history, overwritten transitions, command or result bodies, credentials, prompts, logs, acknowledgement, or remediation |
 | Nodes | Node state, placement mode, durable drain state and request ID, failed drain instance when applicable, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
+| Node pools | Site-wide provider-neutral capacity intent, registered and ready counts, exact scale-out deficits, conditions, and exact post-drain empty-node scale-in candidates | Cloud credentials, provider mutations, enrollment authority, or permission to place a workload; this site-admin-only view remains site-wide when a tenant projection is selected |
 | Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
 | Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
 | Agents | One card per signed runtime identity and instance generation with its last successful workload status, latest signed operation, node, logical egress routes, and connector IDs | Desired state, automatic recovery promises, command bytes, task authorities, relay endpoints, free-form errors, and secrets |
+| Fleet tasks | Bounded task-correlated progress, findings, reported lifecycle, and preserved conflicts for one selected tenant | Task submission, verified result claims, retries, or cross-tenant content |
+| Agent signals | Identity-stamped bounded status and finding events from running instances for one selected tenant | Proof that agent-authored content is correct, desired-state changes, or action authority |
 
 The Incident view is a retained chronology, not an append-only audit log. A later
 transition replaces the earlier retained state, and bounded records can disappear.
@@ -127,11 +130,12 @@ and use the [diagnosis and recovery guide]({{ '/guides/troubleshooting/' |
 relative_url }}) before applying a change.
 
 The console refreshes a visible page every 30 seconds and also provides a manual
-refresh. Operations pages request at most 100 records and the selected tenant's
-node view requests at most 500. The tenant selector loads at most 500 records at
-a time and offers the next page when more tenants exist. When another view says
-more records exist, use the bounded API cursor through an authenticated client;
-the console does not silently claim that its first page is complete.
+refresh. Operations pages request at most 100 records; the selected tenant's node
+view and the site-administrator node-pool view each request at most 500. The tenant
+selector loads at most 500 records at a time and offers the next page when more
+tenants exist. When another view says more records exist, use the bounded API
+cursor through an authenticated client; the console does not silently claim that
+its first page is complete.
 
 ## Submit one offline-signed command
 

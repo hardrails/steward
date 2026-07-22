@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"os/exec"
@@ -169,6 +170,7 @@ func TestParseOptionsRejectsUnsafePathsAndCapacity(t *testing.T) {
 		{"-state-dir", "/tmp/control", "-max-poll-deliveries", "129"},
 		{"-state-dir", "/tmp/control", "-max-tenants", "0"},
 		{"-state-dir", "/tmp/control", "-max-deployments", "0"},
+		{"-state-dir", "/tmp/control", "-authority-mode", "automatic"},
 		{"-state-dir", "/tmp/control", "-reconcile-interval", "0s"},
 		{"-state-dir", "/tmp/control", "-reconcile-interval", "2h"},
 		{"-state-dir", "/tmp/control", "-node-stale-after", "0s"},
@@ -202,6 +204,46 @@ func TestParseOptionsRejectsUnsafePathsAndCapacity(t *testing.T) {
 			CommandOverdueAfter: 11 * time.Minute, CapacityWarningPercent: 75,
 		}) {
 		t.Fatalf("operations options = %+v metrics=%v", parsed.operationsThresholds, parsed.enableMetrics)
+	}
+}
+
+func TestStrictSovereignConfigurationDoesNotRequireOrCreateControllerKey(t *testing.T) {
+	stateDirectory := filepath.Join(t.TempDir(), "control")
+	arguments := []string{
+		"-initialize", "-authority-mode", "strict-sovereign",
+		"-state-dir", stateDirectory, "-addr", "127.0.0.1:0",
+	}
+	if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"controller.private.pem", "controller.public.pem"} {
+		if _, err := os.Stat(filepath.Join(stateDirectory, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("strict-sovereign initialization created %s: %v", name, err)
+		}
+	}
+	if err := run([]string{
+		"-check-config", "-authority-mode", "strict-sovereign",
+		"-state-dir", stateDirectory, "-addr", "127.0.0.1:0",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("strict-sovereign check requires an unused controller key: %v", err)
+	}
+	if err := run([]string{
+		"-check-config", "-authority-mode", "bounded-autonomous",
+		"-state-dir", stateDirectory, "-addr", "127.0.0.1:0",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "controller signing key") {
+		t.Fatalf("bounded-autonomous check accepted a missing controller key: %v", err)
+	}
+	if err := run([]string{
+		"-initialize-controller-key", "-authority-mode", "strict-sovereign",
+		"-state-dir", stateDirectory, "-addr", "127.0.0.1:0",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"-check-config", "-authority-mode", "strict-sovereign",
+		"-state-dir", stateDirectory, "-addr", "127.0.0.1:0",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "files to be absent") {
+		t.Fatalf("strict-sovereign check accepted an accessible controller key: %v", err)
 	}
 }
 

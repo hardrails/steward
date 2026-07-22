@@ -35,6 +35,8 @@ const (
 
 type options struct {
 	address, stateDirectory, authKeyFile string
+	authorityModeRaw                     string
+	authorityMode                        controlplane.AuthorityMode
 	adminTokenFile                       string
 	witnessPrivateKeyFile                string
 	witnessPublicKeyFile                 string
@@ -102,25 +104,33 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err := validateWitnessTLSKeySeparation(tlsConfig, witnessPrivateKey); err != nil {
 		return err
 	}
-	controllerPrivateKey, controllerPublicKey, err := controlwitness.LoadPair(
-		parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile,
-	)
-	if err != nil {
-		return fmt.Errorf("load controller signing key: %w", err)
-	}
-	if err := validateControllerKeySeparation(tlsConfig, witnessPrivateKey, controllerPublicKey); err != nil {
-		return err
-	}
 	if err := controlplane.ValidateTLSHostPolicy(tlsConfig); err != nil {
 		return err
 	}
-	reconciler, err := controlreconcile.New(controlreconcile.Config{
-		Store: store, KeyID: parsed.controllerKeyID, PrivateKey: controllerPrivateKey,
-		Interval: parsed.reconcileInterval, NodeStaleAfter: parsed.operationsThresholds.NodeStaleAfter,
-		Logger: logger,
-	})
-	if err != nil {
-		return err
+	var background func(context.Context) error
+	if parsed.authorityMode == controlplane.AuthorityModeStrictSovereign {
+		if err := requireControllerKeyAbsent(parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile); err != nil {
+			return err
+		}
+	} else {
+		controllerPrivateKey, controllerPublicKey, err := controlwitness.LoadPair(
+			parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile,
+		)
+		if err != nil {
+			return fmt.Errorf("load controller signing key: %w", err)
+		}
+		if err := validateControllerKeySeparation(tlsConfig, witnessPrivateKey, controllerPublicKey); err != nil {
+			return err
+		}
+		reconciler, err := controlreconcile.New(controlreconcile.Config{
+			Store: store, KeyID: parsed.controllerKeyID, PrivateKey: controllerPrivateKey,
+			Interval: parsed.reconcileInterval, NodeStaleAfter: parsed.operationsThresholds.NodeStaleAfter,
+			Logger: logger,
+		})
+		if err != nil {
+			return err
+		}
+		background = reconciler.Run
 	}
 	if parsed.checkConfig {
 		_, err := fmt.Fprintln(stdout, "steward-control configuration is valid")
@@ -130,11 +140,25 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		Store: store, Auth: manager, WitnessPrivateKey: witnessPrivateKey, LeaseDuration: parsed.leaseDuration,
 		MaxPoll: parsed.maxPoll, Logger: logger, EnableMetrics: parsed.enableMetrics,
 		OperationsThresholds: parsed.operationsThresholds,
+		AuthorityMode:        parsed.authorityMode,
 	})
 	if err != nil {
 		return err
 	}
-	return serve(parsed.address, handler, tlsConfig, logger, reconciler.Run)
+	logger.Info("Steward Control authority configured", "authority_mode", parsed.authorityMode,
+		"autonomous_reconciliation", parsed.authorityMode == controlplane.AuthorityModeBoundedAutonomous)
+	return serve(parsed.address, handler, tlsConfig, logger, background)
+}
+
+func requireControllerKeyAbsent(paths ...string) error {
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("strict-sovereign authority requires controller signing-key files to be absent; expire every delegation that names the key, archive any required public identity, and remove both key files before retrying: %s", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect controller signing-key path for strict-sovereign authority: %w", err)
+		}
+	}
+	return nil
 }
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {
@@ -152,6 +176,7 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	flags.StringVar(&parsed.controllerPrivateKeyFile, "controller-private-key-file", "", "owner-only online controller signing key (default: <state-dir>/controller.private.pem)")
 	flags.StringVar(&parsed.controllerPublicKeyFile, "controller-public-key-file", "", "published online controller signing key (default: <state-dir>/controller.public.pem)")
 	flags.StringVar(&parsed.controllerKeyID, "controller-key-id", "controller-default", "controller key ID named by tenant delegations")
+	flags.StringVar(&parsed.authorityModeRaw, "authority-mode", string(controlplane.AuthorityModeBoundedAutonomous), "control authority mode: strict-sovereign or bounded-autonomous")
 	flags.StringVar(&parsed.tlsCertFile, "tls-cert-file", "", "TLS server certificate PEM for a non-loopback listener")
 	flags.StringVar(&parsed.tlsKeyFile, "tls-key-file", "", "owner-only TLS server private key PEM")
 	flags.BoolVar(&parsed.initialize, "initialize", false, "initialize state and print a one-time site-admin token")
@@ -209,6 +234,11 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	if parsed.version {
 		return parsed, nil
 	}
+	authorityMode, err := controlplane.ParseAuthorityMode(parsed.authorityModeRaw)
+	if err != nil {
+		return options{}, err
+	}
+	parsed.authorityMode = authorityMode
 	if !filepath.IsAbs(parsed.stateDirectory) || filepath.Clean(parsed.stateDirectory) != parsed.stateDirectory ||
 		parsed.stateDirectory == string(filepath.Separator) {
 		return options{}, errors.New("-state-dir must be a clean absolute non-root path")
@@ -337,8 +367,10 @@ func initialize(parsed options, stdout io.Writer) error {
 	if _, _, err := ensureWitnessKeyPair(parsed.witnessPrivateKeyFile, parsed.witnessPublicKeyFile); err != nil {
 		return err
 	}
-	if _, _, err := ensureControllerKeyPair(parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile); err != nil {
-		return err
+	if parsed.authorityMode == controlplane.AuthorityModeBoundedAutonomous {
+		if _, _, err := ensureControllerKeyPair(parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile); err != nil {
+			return err
+		}
 	}
 	output, err := reserveSecretOutput(parsed.adminTokenFile)
 	if err != nil {

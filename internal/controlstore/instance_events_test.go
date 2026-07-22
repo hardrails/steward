@@ -90,6 +90,20 @@ func TestInstanceEventRetentionSelectsOldestPerTenant(t *testing.T) {
 	}
 }
 
+func TestInstanceEventOrderingParsesFractionalTimestamps(t *testing.T) {
+	base := time.Date(2026, 7, 21, 1, 0, 0, 0, time.UTC)
+	older := testControllerEvent("tenant-a", "node-1", "whole-second", base)
+	newer := testControllerEvent("tenant-a", "node-1", "fractional-second", base.Add(time.Nanosecond))
+	events := []InstanceEvent{
+		{Event: newer, ReceivedAt: newer.AcceptedAt},
+		{Event: older, ReceivedAt: older.AcceptedAt},
+	}
+	sortOldestEvents(events)
+	if events[0].Event.EventID != older.EventID {
+		t.Fatalf("oldest event=%s want=%s", events[0].ReceivedAt, older.AcceptedAt)
+	}
+}
+
 func TestInstanceEventReceiptOrderSurvivesControllerClockRollback(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")

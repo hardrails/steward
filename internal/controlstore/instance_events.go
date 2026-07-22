@@ -137,7 +137,7 @@ func (store *Store) ListInstanceEvents(actor controlauth.Identity, tenantID stri
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Event.AcceptedAt != result[j].Event.AcceptedAt {
-			return result[i].Event.AcceptedAt > result[j].Event.AcceptedAt
+			return timestampBefore(result[j].Event.AcceptedAt, result[i].Event.AcceptedAt)
 		}
 		return result[i].Event.EventID > result[j].Event.EventID
 	})
@@ -183,8 +183,14 @@ func retentionEvictions(events map[string]InstanceEvent) []string {
 func sortOldestEvents(events []InstanceEvent) {
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].ReceivedAt != events[j].ReceivedAt {
-			return events[i].ReceivedAt < events[j].ReceivedAt
+			return timestampBefore(events[i].ReceivedAt, events[j].ReceivedAt)
 		}
 		return events[i].Event.EventID < events[j].Event.EventID
 	})
+}
+
+func timestampBefore(left, right string) bool {
+	leftTime, leftErr := parseTimestamp(left)
+	rightTime, rightErr := parseTimestamp(right)
+	return leftErr == nil && rightErr == nil && leftTime.Before(rightTime)
 }

@@ -16,6 +16,14 @@ const (
 	MaxInstanceEventBatch   = 64
 	MaxInstanceEventAttrs   = 16
 	MaxInstanceEventSummary = 1024
+
+	// These codes give task-aware consumers a shared lifecycle vocabulary.
+	// Other codes remain valid and project as agent-reported activity.
+	InstanceEventCodeTaskStarted   = "task_started"
+	InstanceEventCodeTaskProgress  = "task_progress"
+	InstanceEventCodeTaskCompleted = "task_completed"
+	InstanceEventCodeTaskFailed    = "task_failed"
+	InstanceEventCodeTaskCancelled = "task_cancelled"
 )
 
 // InstanceEventV1 is an untrusted agent observation whose workload identity

@@ -6,7 +6,7 @@ section: Product
 
 # Product roadmap
 
-> Research note: Reviewed 2026-07-19 against the linked public primary sources.
+> Research note: Reviewed 2026-07-21 against the linked public primary sources.
 > Project capabilities and maturity can change. This roadmap describes direction,
 > not a support commitment for unfinished work. See the
 > [market analysis]({{ '/product/market-analysis/' | relative_url }}) for the
@@ -14,7 +14,7 @@ section: Product
 
 ## Product decision
 
-Steward is being built as the **customer-owned runtime and authority plane for AI
+Steward is being built as the **sovereign authority and operations platform for AI
 agents**.
 
 It should let an operator package Hermes, or another future qualified agent, as
@@ -22,6 +22,11 @@ one portable application; run it on infrastructure the operator controls; keep
 reusable authority outside the agent; continuously reconcile its lifecycle; and
 produce enforcement evidence that an auditor can verify without contacting a
 vendor.
+
+Steward uses Kubernetes-style desired state, placement, reconciliation, drain, and
+rollout concepts where they fit agent workloads. It is not a general replacement
+for Kubernetes or Nomad. "Kubernetes for agents" is a useful explanation of the
+operating model, not the product's differentiator.
 
 Steward should not compete with agent projects on reasoning, memory, personalities,
 or prompt workflows. It should make those projects safe and operable enough to use
@@ -35,10 +40,12 @@ The durable promise is:
 
 This is the differentiator. Docker isolation, network allowlists, dashboards, and
 an MCP server are necessary, but they are no longer sufficient by themselves.
+The platform must also be straightforward enough that operators do not bypass its
+authority boundary to get useful work done.
 
 ## Why this direction fits the market
 
-The market is converging on four useful but incomplete product categories:
+The market is converging on five useful but incomplete product categories:
 
 1. Agent frameworks provide reasoning, tools, skills, and memory, but normally run
    with the authority available to their process.
@@ -48,6 +55,9 @@ The market is converging on four useful but incomplete product categories:
    one-use action authority, or prompt-injection-driven effects.
 4. Governance proxies protect credentials or inspect tool calls, but often do not
    own workload generation, state lineage, node enforcement, and offline evidence.
+5. Managed agent platforms combine runtime, identity, tools, observability, and
+   elastic scale, but place the vendor and its cloud inside the operating trust
+   boundary.
 
 Steward should connect those boundaries. Recent work supports that choice:
 
@@ -69,6 +79,12 @@ Steward should connect those boundaries. Recent work supports that choice:
 The missing record is the connection among one user's intent, one application
 digest, one instance generation, one state lineage, one external action, and one
 verifiable outcome.
+
+Sandboxing, credential injection, provider routing, snapshots, warm pools,
+Kubernetes scheduling, Terraform, MCP, and dashboards are now table stakes. They
+must work well, but they are not a moat. Steward's defensible position is the
+customer-held authority chain across those capabilities, including when Control,
+a node, or an agent is compromised.
 
 ## Primary users
 
@@ -102,6 +118,7 @@ install site
   -> apply desired state
   -> schedule and start a healthy instance
   -> submit a real task or chat request
+  -> receive progress, findings, results, and artifacts
   -> mediate tools, MCP, inference, and external effects
   -> observe, approve, revoke, snapshot, fork, upgrade, or destroy
   -> export and verify evidence offline
@@ -123,10 +140,14 @@ They should not be prerequisites for the first useful task.
 
 | Project | Strong pattern to adopt or reuse | Boundary Steward must preserve |
 | --- | --- | --- |
-| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) and [OpenShell](https://github.com/NVIDIA/OpenShell) | Guided onboarding, runtime profiles, policy explanation, hot network policy, provider abstraction, and Docker, Podman, microVM, and Kubernetes compute drivers | Runtime neutrality, disconnected operation, tenant-signed delegated automation, exact effect authority, and independently verifiable evidence |
+| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) and [OpenShell](https://github.com/NVIDIA/OpenShell) | Guided onboarding, runtime profiles, policy explanation, hot network policy, provider abstraction, credential-isolating inference, and Docker, Podman, microVM, and Kubernetes compute drivers | Treat OpenShell as an optional compatibility substrate rather than a second authority plane; preserve disconnected operation, tenant-signed delegation, exact effect authority, and independently verifiable evidence |
+| [Agyn](https://github.com/agynio/platform) | Terraform-defined agents, Kubernetes-native scale-to-zero execution, separately isolated MCP tools, zero-trust service access, and per-organization observability | Steward must remain useful without Kubernetes and must prevent Control from inventing authority rather than relying only on central policy and telemetry |
 | [OpenClaw Machines](https://github.com/mathaix/OpenClawMachines) | A self-hosted mini-cloud experience: host enrollment, placement, machine lifecycle, backups, separate browser machines, chat, terminal, and workspace MCP integration | No mandatory Cloudflare data plane, no OpenClaw-only contract, no KVM-only installation, and no ambient workspace credential authority |
 | [Kubernetes Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) | `Sandbox`, `Template`, `Claim`, snapshot, stable identity, persistent storage, scheduled shutdown, and warm-pool semantics | Steward remains useful on one ordinary Linux host and carries its authority and evidence contract across the Kubernetes substrate |
-| [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) | A clear backend protocol, SDK and CLI ergonomics, Docker and Kubernetes execution, multiple isolation technologies, MCP access, and sandbox pools | Steward is an agent authority product, not a generic remote shell, file API, code interpreter, desktop, or training service |
+| [Sandbox0](https://github.com/sandbox0-ai/sandbox0) and [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) | Clear backend protocols, SDK and CLI ergonomics, Docker and Kubernetes execution, snapshots, forks, warm pools, credential projection, MCP access, and multiple isolation technologies | Steward is an agent authority product, not a generic remote shell, file API, code interpreter, desktop, or training service |
+| [Google AX](https://github.com/google/ax) | Durable event logging, isolated actors, recovery, and resumable distributed agent execution | Steward needs an equally credible task, event, result, and recovery contract while keeping external effects under customer-held authority |
+| [WSO2 Agent Manager](https://wso2.github.io/agent-manager/docs/cloud/overview/what-is-amp/) | Enterprise lifecycle, identity, governance, evaluation, and OpenTelemetry observability for internal and external agents | Central governance and telemetry do not replace node-local enforcement, replay protection, or portable signed authorization-to-outcome evidence |
+| [AWS AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) and [Microsoft Foundry](https://azure.microsoft.com/en-us/products/ai-foundry/agent-service/) | Managed scale, identity, private networking, tools, browser and code execution, and broad enterprise integration | No mandatory hosted trust root, regional dependency, cloud identity, or Internet control path |
 | Hosted sandbox platforms | Fast create, pause, resume, snapshot, fork, TTL, idle timeout, and developer-friendly task APIs | Customer-owned, air-gapped operation; new authority on every restore or fork; no hosted control-plane dependency |
 | WorkFlux | Outcome-first onboarding, explicit action-required states, progressive disclosure, and useful operational metrics | No hosted credential custody, business-agent catalog, or Internet-dependent control path |
 | Kubernetes and Nomad | Mature placement concepts, leases, taints, drain, disruption budgets, rollout, and recovery | Do not recreate a general cluster scheduler or require either platform for a secure single-server deployment |
@@ -186,22 +207,87 @@ node set, lifecycle verbs, generations, and expiry. Executor independently verif
 the delegation and the controller-signed command. Tenant root keys can remain
 offline or in an external signing system.
 
+Steward must publish two explicit control-compromise profiles:
+
+- **strict sovereign**: Control proposes changes but every mutation requires an
+  external tenant signature. Control compromise can deny service or hide recent
+  observations, but cannot mint new workload or effect authority; and
+- **bounded autonomous**: Control may reconcile within a signed, expiring
+  delegation. Compromise can exercise only that delegation's applications, nodes,
+  verbs, generations, quotas, and lifetime.
+
+Neither profile can promise availability after Control compromise. Executor must
+reject every transition that falls outside the signed desired state and active
+delegation.
+
+### Task, event, result, and artifact plane
+
+Agent work must be a durable product primitive rather than a synchronous request
+to a container. The common contract should provide:
+
+- asynchronous, idempotent task submission with deadlines, cancellation,
+  priorities, bounded retries, and explicit uncertain outcomes;
+- instance leases, progress events, findings, terminal results, and
+  content-addressed artifacts;
+- a durable instance-to-controller outbox with bounded retention, replay, and
+  backpressure;
+- per-tenant and per-application concurrency, fairness, and result-retention
+  limits; and
+- retry policy derived from effect safety, never from transport status alone.
+
+The task plane has two authorization tiers. Read-only or otherwise non-consequential
+work can run under a signed, bounded capability with destination, data-transfer,
+time, concurrency, and call limits. Consequential actions require exact normalized
+authority and retain the current spend-before-network and uncertain-outcome rules.
+This keeps parallel research practical without weakening write, message, payment,
+administrative, or other material effects.
+
+Agents communicate through mediated `AgentService` and `ServiceBinding` resources,
+not direct east-west network access. A binding authenticates the caller, tenant,
+service, operation, generation, quota, and task/result correlation at Gateway.
+Steward should not add a general workflow or directed-acyclic-graph engine.
+
 ### Execution backends
 
 Steward should own one small backend contract and a conformance suite:
 
 - Docker plus gVisor remains the default qualified Linux backend.
-- OpenShell should be evaluated as the first optional reusable backend for
-  microVM, Podman, and Kubernetes breadth.
-- A Kubernetes Agent Sandbox adapter should serve operators who already run
-  Kubernetes.
+- A Kubernetes Agent Sandbox adapter should be the preferred cluster backend for
+  operators who already run Kubernetes.
+- Incus virtual machines should be qualified as the initial candidate for a
+  separate-kernel, non-Kubernetes backend because it already owns VM lifecycle,
+  storage, networking, snapshots, migration, and a stable API.
+- OpenShell should be evaluated as an optional compatibility backend. Its own
+  gateway, credential, policy, and inference features must not become a competing
+  source of authority or silently weaken Steward enforcement.
 - Kata Containers or Firecracker can be added through a backend only when a
   supported deployment needs a separate guest kernel.
 - macOS uses a development backend and reports which Linux controls are absent.
 
 Every backend must pass the same lifecycle, identity, capacity, network-closure,
 credential-exclusion, crash-recovery, and evidence tests. A backend cannot weaken
-Steward's native admission floor.
+Steward's native admission floor or silently downgrade a requested assurance
+profile. The public application and evidence contracts must not contain
+Docker-specific identifiers.
+
+### Elastic fleet and node trust
+
+`NodePool` should describe an elastic capacity class rather than one cloud
+implementation. It includes accepted enrollment identities, required assurance
+profile and attestation, architecture, labels, taints, capacity bounds, disruption
+policy, image or node-release pin, and provider-neutral scale limits.
+
+Joining a node should require one command, a one-use short-lived claim, an approved
+cloud workload identity, or a finite offline enrollment bundle. The node generates
+its identity locally and never receives a site root, tenant signing key, reusable
+sibling-enrollment credential, or provider-wide credential. A node cannot address
+another node directly.
+
+Node reports are authenticated but remain untrusted observations. Root compromise
+of one node means every workload on that node might be compromised. Steward's
+promise is containment: quarantine, revoke, fence, preserve evidence, and replace
+the node without granting a path to other nodes, Control authority, tenant roots,
+or reusable provider credentials.
 
 ### Capability and secret broker
 
@@ -228,6 +314,13 @@ at dispatch. A secret binding names a purpose, provider reference, scope, rotati
 epoch, and maximum lease lifetime. The agent, console, Control, MCP adapter, and
 receipts never receive secret plaintext.
 
+Gateway should run off-node for the strict sovereign profile, with per-tenant trust
+domains, short-lived dynamic credentials where supported, and a network boundary
+independent of the workload node. A compromised Gateway can still misuse authority
+and credentials available to it during their active scope. Short lifetimes,
+purpose separation, exact effects, revocation, and external network policy bound
+that residual risk; documentation must not claim it is eliminated.
+
 The first supported profiles should be protected file materialization for minimal
 offline sites, OpenBao for stored or dynamic secrets, and SPIFFE/SPIRE for
 workload identity. Steward should not implement a vault, certificate authority, or
@@ -246,6 +339,12 @@ A durable backend must enforce tenant ownership, byte and inode quotas, snapshot
 clones, retention, and deletion evidence. The first production backend should use
 a quota-capable filesystem such as ZFS; Kubernetes deployments should use CSI
 storage. Unquotaed Docker volumes remain dedicated-host only.
+
+Task results and immutable artifacts should use a content-addressed catalog with
+tenant-scoped encryption, quotas, retention, and deletion evidence. An
+S3-compatible object store should be the production reference while a bounded
+local backend preserves single-host and disconnected use. Control stores metadata
+and integrity references, not unbounded result bodies.
 
 Initial snapshots should be cold filesystem snapshots. Hot memory cloning is
 deferred because it can copy credentials, permits, network sessions, random state,
@@ -275,6 +374,11 @@ useful:
 Telemetry is operational data. Signed receipts are enforcement evidence. The UI
 and documentation must not blur them.
 
+Evidence is also subject to the weakest trusted boundary. A valid node signature
+does not prove that the node was uncompromised when it signed a record. Every
+assurance profile must state the trusted components, enforced controls, freshness,
+rollback detection, known bypasses, and residual risks that bound each claim.
+
 ## Ownership decisions
 
 | Capability | Decision | Reason |
@@ -283,24 +387,46 @@ and documentation must not blur them.
 | Policy language | `open-source`: OPA | Policy evaluation is established infrastructure. Native safety floors remain code; OPA may only deny or narrow. |
 | Human-facing schema | `open-source`: CUE | CUE provides constraints, defaults, and explanation without becoming the signed runtime format. |
 | Default Linux isolation | `native-platform`: Docker, gVisor, Linux, systemd | These primitives meet the ordinary-server profile without introducing another control plane. |
-| Stronger or cluster isolation | `open-source`: OpenShell, Kubernetes Agent Sandbox, Kata, or Firecracker | Steward should test and adapt mature substrates instead of writing a container runtime or VMM. |
+| Stronger or cluster isolation | `open-source`: Kubernetes Agent Sandbox and Incus; optional OpenShell, Kata, or Firecracker backends | Steward should test and adapt mature substrates instead of writing a container runtime or VMM. OpenShell's overlapping authority surfaces require additional scrutiny. |
 | Agent-specific reconciliation | `in-house` | Deployment generations, delegation, placement explanation, state lineage, capability binding, and evidence are the product. |
+| Durable task, event, result, and service semantics | `in-house` | Effect-aware recovery, instance outbox, mediated agent services, and authority linkage are agent-specific product behavior. |
 | General scheduling and consensus | `do-nothing` | Use a narrow single-controller scheduler, Kubernetes, or a future backend. Do not build Raft or a general orchestrator. |
 | Secret storage and workload identity | `open-source`: OpenBao and SPIFFE/SPIRE | Mature projects own storage, rotation, leases, attestation, and federation. Steward binds their output to its instance identity. |
 | Artifact provenance | `open-source`: Cosign/Sigstore and in-toto/SLSA | Steward should verify and enforce provenance, not issue a new provenance format. |
 | Offline update security | `open-source`: TUF-compatible metadata | Threshold and offline signing are established update-security problems. |
-| State bytes and snapshots | `native-platform` and `open-source`: ZFS or CSI | Steward owns lineage and authority semantics; storage systems own quotas, snapshots, and clones. |
+| State, artifact bytes, and snapshots | `native-platform` and `open-source`: ZFS, CSI, and S3-compatible storage | Steward owns catalogs, lineage, authority, quotas, and retention semantics; storage systems own bytes, snapshots, clones, and durability. |
 | Observability | `open-source`: OpenTelemetry and OCSF-compatible export | Do not build a tracing or security-data ecosystem. Keep signed receipts separate. |
 | Capability permits, replay, and evidence | `in-house` | Exact action authority, spend-before-network replay control, generation binding, and offline evidence are core differentiation. |
 | Browser and computer use | `open-source`, separate worker | Never embed arbitrary desktop automation or command execution in a Steward authority process. |
+| Hardened node appliance | `open-source` immutable Linux base plus Steward packaging | Ship a reproducible, API-managed appliance profile without owning a kernel, general-purpose distribution, or interactive host-management stack. |
 
-Decision: use `in-house` for the connected authority semantics and the narrow
-controller that depends on them. Tradeoff: these are the reasons to choose Steward
-and must stay portable and auditable. Rejected: a general in-house orchestrator,
-vault, PKI, VMM, policy language, and observability stack because mature reusable
-systems satisfy those context requirements with less trusted code and lower
-operational ownership. Revisit only when a supported sovereign profile cannot meet
-an enforcement requirement through a narrow external contract.
+Decision: use `in-house` for the application identity, connected authority
+semantics, task and effect recovery rules, generation fencing, and narrow
+reconciler.
+Why: these are the reasons to choose Steward and must remain portable and
+independently auditable.
+Rejected: another agent control plane because its authority, recovery, and evidence
+semantics would become Steward's trust root.
+Revisit if: an open standard provides equivalent disconnected, customer-held
+authorization and evidence semantics.
+
+Decision: use `open-source` for isolation, policy evaluation, secret storage,
+workload identity, persistence, provenance, observability, and update security.
+Why: mature projects cover these commodity capabilities with less trusted code and
+lower operating ownership.
+Rejected: implementing a vault, PKI, VMM, database, policy language, telemetry
+stack, or Linux distribution inside Steward.
+Revisit if: a supported sovereign profile cannot satisfy one enforcement
+requirement through a narrow, replaceable external contract.
+
+Decision: use `do-nothing` for general workflow graphs, model serving, broad
+computer-use infrastructure, and a public connector marketplace.
+Why: these features do not strengthen the authority boundary and would delay the
+complete operator workflow.
+Rejected: feature-parity development because established agent frameworks,
+sandbox platforms, and managed services already own those categories.
+Revisit if: a measured customer workflow cannot be completed through a qualified
+external agent, worker, or connector.
 
 ## Delivery roadmap
 
@@ -326,11 +452,14 @@ The roadmap starts from working primitives rather than a blank design:
 - atomic deployment-transition and command enqueue, deterministic command IDs,
   restart-safe progress, and explicit degraded outcomes;
 - health-aware placement that rejects stale nodes, durable bounded blocked reasons,
-  and deliberate refusal to replace an assigned node without fencing proof; and
+  and deliberate refusal to replace an assigned node without fencing proof;
 - public HTTP, client, OpenAPI, and context-aware CLI operations for applying,
   inspecting, listing, waiting for, and removing desired deployments;
 - task-ready desired state that retains the exact verified intent and authenticated
-  admission projection without retaining private keys; and
+  admission projection without retaining private keys;
+- a bounded, durable instance-to-controller event outbox with stable sequence,
+  replay, backpressure, retention, authenticated uplink, Control API, CLI, MCP,
+  and console projections;
 - a recovery-safe `task run` workflow that writes signed authority before dispatch,
   joins deployment wait, task issuance, Gateway submission, terminal observation,
   and result storage, and can derive the qualified Hermes request from
@@ -366,15 +495,23 @@ The roadmap starts from working primitives rather than a blank design:
   with the optimization kept separate from signed admission authority;
 - opt-in image retrieval from one operator-approved OCI registry, with protected
   registry authentication, exact signed-digest pulls, and mandatory post-pull
-  image inspection; and
+  image inspection;
 - a strict, owner-only incident support bundle that joins non-secret controller
   inventory and node evidence checkpoints for offline inspection without exporting
   prompts, bodies, command envelopes, credentials, private keys, result text, or
-  logs; and
+  logs;
 - supported private AWS Auto Scaling Group, Google Cloud regional Managed Instance
   Group, and Azure Virtual Machine Scale Set modules that reuse native fleet
   resources, pin non-secret first boot, keep node enrollment out of Terraform
-  state, and refuse automatic replacement or scale-in before a Steward drain.
+  state, and refuse automatic replacement or scale-in before a Steward drain; and
+- a bounded provider-neutral `NodePool` resource with optimistic revisions,
+  desired/minimum/maximum capacity, exact scale-out deficits, post-drain empty-node
+  scale-in candidates, public API/client/CLI contracts, and an explicit rule that
+  self-reported pool membership never grants workload authority; and
+- explicit `strict-sovereign` and `bounded-autonomous` Control authority modes;
+  strict mode refuses accessible controller signing-key files, never starts the
+  reconciler, and rejects desired-state mutations, while bounded mode preserves
+  tenant-delegated reconciliation.
 
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and
@@ -400,18 +537,26 @@ and `task run` performs useful work through the enforced boundary.
 
 - Consolidate common operations behind one `steward` command while retaining
   expert commands and stable JSON output.
-- Add canonical deployment, instance, task, result, and condition models.
+- Extend the shipped bounded, read-only task projection into canonical submitted
+  task, result, and condition models. The current projection durably summarizes
+  accepted, untrusted instance events by workload lineage under an independent
+  bounded retention window; it is not yet a dispatcher or result authority.
+- Make Control-level task submission asynchronous and idempotent, with progress,
+  cancellation, deadlines, bounded retention, and content-addressed result
+  metadata. Reuse the shipped instance outbox instead of creating another event
+  channel.
 - Implement a crash-safe, idempotent desired-state loop with generations, bounded
   retry, garbage collection, and explicit degraded states.
 - Join bundle build, placement, signed admission, start, health, task, result,
   egress, secrets, and evidence into one operation.
-- Complete Executor-verifiable, time-bounded controller delegation without placing
-  tenant root keys in Control.
+- Join the implemented Executor-verifiable, time-bounded controller delegation to
+  task and health recovery without placing tenant root keys in Control.
 - Keep one pinned Hermes adapter qualified through the task, health, and result
   contract. Add another runtime only after a concrete user need justifies its
   security and maintenance surface.
 - Qualify the shipped protected GitHub issue preset through the release acceptance
-  workflow, and add one generic read-only OpenAPI example.
+  workflow, and add one generic read-only OpenAPI example that uses bounded
+  pre-authorized research capability rather than one human signature per read.
 
 Acceptance gates:
 
@@ -419,6 +564,9 @@ Acceptance gates:
   protocol artifact transfer.
 - Restarting Control, Executor, Gateway, or the host converges without duplicate
   external effects.
+- A running instance can publish progress and findings, disconnect, reconnect, and
+  resume the controller outbox without losing, duplicating, or reordering a
+  terminal result.
 - The agent never receives an inference or connector API key.
 - DNS, IPv4, IPv6, redirects, proxy headers, rebinding, and alternate routes cannot
   bypass default-deny egress in the supported topology.
@@ -436,6 +584,12 @@ supportable through one coherent operational surface.
 - Extend the implemented node leases, resources, reservations, labels, taints and
   tolerations, isolation classes, topology, and image locality with portable state
   locality.
+- Extend the shipped provider-neutral `NodePool` capacity signal with short-lived,
+  independently verifiable pool membership, node-specific zero-touch enrollment,
+  cloud workload identity adapters, exact-node lifecycle notices, and provider
+  driver conformance. Keep infrastructure reconciliation outside Control and do
+  not enable pool-scoped placement until both Control and Executor verify the same
+  finite membership statement.
 - Make placement an actual controller decision with stale-plan detection and
   Executor revalidation.
 - Extend implemented lease-fenced replacement, rescheduling, topology placement,
@@ -447,8 +601,9 @@ supportable through one coherent operational surface.
   collection state machines.
 - Add `agent fork`, fork-on-task, descendant and retained-byte limits, lineage, and
   clean warm pools.
-- Add a Kubernetes Agent Sandbox backend after the local backend contract passes
-  conformance.
+- Qualify an Incus virtual-machine backend and a Kubernetes Agent Sandbox backend
+  after the local backend contract passes conformance; reject silent assurance
+  downgrade across all three profiles.
 - Add an agent-facing MCP broker distinct from the operator MCP server.
 - Pin MCP server identity, tool schema, version, and requested capabilities; run
   untrusted MCP servers as separately admitted workloads.
@@ -459,6 +614,13 @@ supportable through one coherent operational surface.
 - Bind SPIFFE/SPIRE-attested cloud instance identity to short-lived, node-specific
   enrollment so elastic pools can add capacity without shared bootstrap tokens.
 - Add a connector conformance kit and two or three anchor connectors.
+- Add mediated `AgentService` and `ServiceBinding` resources with authenticated
+  task/result correlation, quotas, and no direct workload-to-workload network.
+- Add an S3-compatible artifact backend plus bounded local storage, tenant
+  encryption, quotas, retention, and deletion evidence.
+- Complete the strict-sovereign external proposal/signature workflow and prove
+  both shipped Control profiles' distinct compromise claims through hostile-path
+  tests.
 - Extend the implemented site and tenant freeze, node quarantine, snapshot
   quarantine, retained Control incident timeline, and metadata-only support
   bundle with capability revocation and cross-plane verified evidence.
@@ -470,6 +632,8 @@ Acceptance gates:
 
 - Concurrent reconciliation cannot oversubscribe capacity or double-place an
   instance.
+- Concurrent task submission cannot bypass tenant fairness or dispatch one
+  idempotency key twice.
 - Node loss produces a visible lease expiry and a fenced replacement; late commands
   cannot resurrect the old generation.
 - A rollout can be interrupted at every transition and safely resumed or rolled
@@ -482,6 +646,10 @@ Acceptance gates:
 - A seven-day mixed-workload soak and documented chaos suite pass.
 - A malicious skill or MCP server cannot choose its upstream origin, receive the
   reusable credential, widen policy, or replay spent authority.
+- A compromised Control cannot mint work in strict-sovereign mode and cannot act
+  outside or after its signed delegation in bounded-autonomous mode.
+- A compromised node cannot enroll another node, reach another workload directly,
+  obtain tenant signing material, or use a provider-wide credential.
 - Secret rotation takes effect without redeploying the agent; stale epochs fail
   according to policy.
 - An uncertain external outcome is never silently retried with new authority.
@@ -506,6 +674,9 @@ contracts are reproducible and independently verifiable as one supported system.
 - Add optional TPM, measured-boot, or confidential-computing evidence through
   SPIRE or platform attestors. Report it as evidence, not proof that the host is
   trustworthy.
+- Publish a reproducible hardened node appliance on an immutable Linux base with
+  no SSH by default, declarative configuration, signed A/B updates, recovery,
+  amd64 and arm64 images, cloud and bare-metal formats, and offline installation.
 - Freeze the application, backend, capability, storage, receipt, and control
   contracts with a compatibility policy and migration tools.
 - Remove the legacy compatibility supervisor and transitional command surfaces.
@@ -516,8 +687,10 @@ contracts are reproducible and independently verifiable as one supported system.
   compromise, snapshot authority cloning, and evidence rollback.
 - Publish capacity limits, performance envelopes, fault-injection results, recovery
   objectives, supported topologies, and known limitations.
-- Maintain at least two qualified agent engines, two isolation backends, two
-  secret or identity profiles, and one complete disconnected reference deployment.
+- Maintain one deeply qualified Hermes engine, at least two isolation backends,
+  two secret or identity profiles, and one complete disconnected reference
+  deployment. Add another agent engine only after a concrete supported use case
+  justifies its security, qualification, and maintenance cost.
 
 Acceptance gates:
 
@@ -534,6 +707,8 @@ Acceptance gates:
 - Every supported migration is crash-tested from every retained format.
 - Every supported profile has explicit security claims, residual risks, capacity
   limits, and conformance evidence.
+- A released node image boots, enrolls, upgrades, rolls back, and recovers without
+  interactive shell access or an Internet dependency.
 
 ## Pareto order
 
@@ -541,13 +716,17 @@ The smallest set of work that changes Steward from strong primitives into a usef
 product is:
 
 1. one-command first task;
-2. a real desired-state controller joined to execution;
-3. Executor-verifiable delegated automation;
-4. tested egress and secret mediation;
-5. one real protected external action;
-6. multi-node reconciliation and failure recovery;
-7. quota-capable state plus a cold fork; and
-8. one incident and evidence view.
+2. a durable task, event, result, and artifact path;
+3. a real desired-state controller joined to execution;
+4. Executor-verifiable delegated automation and Control-compromise profiles;
+5. tested egress and secret mediation with low-risk and exact-effect tiers;
+6. one real read-only workflow and one protected external action;
+7. extend shipped `NodePool` capacity and safe scale-in with independently verified
+   elastic enrollment, pool-scoped placement, provider reconciliation, and failure
+   recovery;
+8. quota-capable state plus an authority-scrubbed cold fork;
+9. two backend assurance profiles that pass one conformance suite; and
+10. one incident and offline evidence view.
 
 More adapters, schemas, UI pages, policy documents, or signed artifact types do not
 compensate for a missing end-to-end path.
@@ -561,6 +740,7 @@ decision:
   serving;
 - GPU scheduling, inference cost optimization, and a general model gateway;
 - a generic workflow builder or catalog of business agents;
+- a general remote shell, file, desktop, or code-interpreter API;
 - a public skill or connector marketplace before signing and qualification are
   complete;
 - an embedded secret vault, PKI, SSO product, wallet, VMM, database, or consensus
@@ -570,18 +750,34 @@ decision:
 - arbitrary host commands, terminal access, or computer use inside Steward's
   authority processes;
 - hot process-memory snapshots before an authority-scrubbing design is proven;
-- a general replacement for Kubernetes, Nomad, OpenShell, ZFS, or CSI; and
+- a general replacement for Kubernetes, Nomad, OpenShell, ZFS, or CSI;
+- a custom kernel or Linux distribution rather than a packaged immutable node
+  appliance;
+- a second agent engine without a concrete supported workflow and qualification
+  budget;
+- multi-site federation, global scheduling, and cross-site authority; and
 - hosted-only analytics, assets, or update dependencies.
 
 ## Adversarial product questions
 
 ### Why not just use OpenShell or NemoClaw?
 
-Use them when their sandbox and onboarding are sufficient. Steward should support
-OpenShell as a backend rather than duplicate it. Steward earns its place only when
-the operator also needs runtime-neutral application identity, offline-root
-delegation, fleet reconciliation, state lineage, exact one-use action authority,
-and independent offline evidence.
+Use them when their sandbox, policy, provider routing, and onboarding are
+sufficient. Steward may support OpenShell through the backend contract, but its
+gateway, credentials, policy, and inference controls cannot replace or conflict
+with Steward's authority boundary. Steward earns its place only when the operator
+also needs runtime-neutral application identity, offline-root delegation, fleet
+reconciliation, state lineage, exact one-use action authority, and independent
+offline evidence.
+
+### Why not Agyn?
+
+Choose Agyn for a Kubernetes-native internal-agent platform with Terraform,
+scale-to-zero invocation, isolated MCP tools, zero-trust service access, chat, and
+per-organization observability. Choose Steward when Kubernetes cannot be required,
+the site must disconnect fully, tenant roots must remain outside the controller,
+node transitions require independently verified delegation, or external effects
+need portable signed authorization-to-outcome evidence.
 
 ### Why not OpenClaw Machines?
 
@@ -591,12 +787,21 @@ Choose Steward when the site uses Hermes, must avoid a mandatory Cloudflare data
 plane, run without KVM, remain fully disconnected, or bind every
 managed action to customer-held authority and offline evidence.
 
-### Why not Kubernetes Agent Sandbox or OpenSandbox?
+### Why not Kubernetes Agent Sandbox, Sandbox0, or OpenSandbox?
 
-Both are strong execution substrates. Steward should integrate them. Neither by
+These are strong execution substrates. Steward should integrate them. None by
 itself defines the customer-held application, delegation, exact effect, replay,
 state-authority, and offline evidence record Steward owns. If an operator only
 needs isolated code execution, they should use those projects directly.
+
+### Why not WSO2 Agent Manager, AWS AgentCore, or Microsoft Foundry?
+
+Choose those platforms for broad enterprise identity, evaluation, observability,
+managed scale, and vendor integrations. Choose Steward when the operator must own
+the complete trust boundary, retain offline roots, run without a hosted dependency,
+or independently verify what authority reached one external outcome. Steward
+should reuse their standards and operational patterns rather than imitate their
+cloud service catalogs.
 
 ### Why not Kubernetes or Nomad directly?
 
@@ -604,6 +809,15 @@ They already solve broad scheduling and workload lifecycle. Steward should not
 rebuild those systems. Its small scheduler serves one secure site without another
 control plane; existing clusters remain reusable backends. Steward adds the
 agent-specific authority and evidence contract above placement.
+
+### Why should Control be trusted at all?
+
+It should not be trusted with tenant roots. In strict-sovereign mode Control can
+propose work but cannot authorize it. In bounded-autonomous mode it can act only
+inside a signed, expiring delegation that Executor revalidates. Control compromise
+can still disrupt availability, hide observations, and exercise valid authority
+remaining inside an active delegation; Steward must state that residual risk
+plainly.
 
 ### Why not a hosted sandbox platform?
 
@@ -642,12 +856,17 @@ Security and correctness:
 - duplicate external effects after fault injection;
 - stale-generation and replay rejection rates;
 - managed effects with complete authorization-to-outcome evidence; and
-- snapshot authority-contamination failures.
+- snapshot authority-contamination failures;
+- unauthorized mutations possible after simulated Control compromise; and
+- cross-node reachability or reusable-credential findings after simulated node
+  compromise.
 
 Reliability:
 
 - reconciliation convergence time;
+- task queue latency, instance-outbox lag, and terminal-result loss or duplication;
 - placement and reservation conflict rate;
+- elastic node ready and safe scale-in time;
 - node-loss detection and replacement time;
 - upgrade and rollback success under injected crashes;
 - cold and warm fork readiness latency;

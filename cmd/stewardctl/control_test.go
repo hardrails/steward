@@ -42,6 +42,8 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	grantID := "grant-" + strings.Repeat("d", 64)
 	eventDigest := sha256.Sum256([]byte("steward-instance-event-v1\x00" + grantID + "\x00finding-1"))
 	eventID := "event-" + hex.EncodeToString(eventDigest[:])
+	taskDigest := sha256.Sum256([]byte("steward-task-projection-v1\x00tenant-a\x00research-task-a\x00researcher-a\x001"))
+	taskProjectionID := "task-" + hex.EncodeToString(taskDigest[:])
 	retainedEvent := controlstore.InstanceEvent{
 		Event: controlprotocol.InstanceEventV1{
 			SchemaVersion: controlprotocol.InstanceEventSchemaV1,
@@ -53,6 +55,15 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 			ObservedAt: "2026-07-21T01:00:00Z", AcceptedAt: "2026-07-21T01:00:01Z",
 		},
 		ReceivedAt: "2026-07-21T01:00:02Z",
+	}
+	taskProjection := controlstore.TaskProjection{
+		ProjectionID: taskProjectionID, TenantID: "tenant-a", TaskID: "research-task-a",
+		InstanceID: "researcher-a", Generation: 1, NodeID: "node-1",
+		RuntimeRef: "executor-" + strings.Repeat("a", 64), RunID: "research-run-a",
+		State: controlstore.TaskStateRunning, LatestCode: "task_progress", LatestSeverity: "info",
+		HighestSeverity: "info", LatestSummary: "Research is running.", EventCount: 1,
+		FirstObservedAt: "2026-07-21T01:00:02Z", LastObservedAt: "2026-07-21T01:00:02Z",
+		LatestEventID: eventID, Conditions: []string{},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/enroll" && request.Header.Get("Authorization") != "Bearer admin-secret" {
@@ -165,6 +176,14 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(controlclient.InstanceEventList{
 				Events: []controlstore.InstanceEvent{retainedEvent}, NextAfter: eventID,
+			})
+		case "/v1/tenants/tenant-a/tasks":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("after") != "task-before" || query.Get("limit") != "1" {
+				t.Fatalf("task request=%s %s", request.Method, request.URL.String())
+			}
+			_ = json.NewEncoder(w).Encode(controlclient.TaskProjectionList{
+				Tasks: []controlstore.TaskProjection{taskProjection}, NextAfter: taskProjectionID,
 			})
 		case "/v1/operations/credentials":
 			query := request.URL.Query()
@@ -373,6 +392,16 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 		t.Fatalf("instance event output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
+	taskListArguments := append([]string{"control", "task", "list"}, common...)
+	taskListArguments = append(
+		taskListArguments, "-tenant-id", "tenant-a", "-after", "task-before", "-limit", "1",
+	)
+	if err := run(taskListArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"projection_id":"`+taskProjectionID+`"`) ||
+		!strings.Contains(output.String(), `"state":"agent_reported_running"`) {
+		t.Fatalf("task projection output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
 	commandListArguments := append([]string{"control", "command", "list"}, common...)
 	commandListArguments = append(
 		commandListArguments, "-tenant-id", "tenant-a", "-node-id", "node-1",
@@ -452,6 +481,10 @@ func TestControlOperationsCommandsRejectInvalidFilters(t *testing.T) {
 		{name: "event oversized limit", call: controlEventList, args: []string{"-tenant-id", "tenant-a", "-limit", "101"}},
 		{name: "event positional", call: controlEventList, args: []string{"-tenant-id", "tenant-a", "unexpected"}},
 		{name: "event invalid flag", call: controlEventList, args: []string{"-tenant-id", "tenant-a", "-limit", "not-a-number"}},
+		{name: "task tenant", call: controlTaskList, args: nil},
+		{name: "task zero limit", call: controlTaskList, args: []string{"-tenant-id", "tenant-a", "-limit", "0"}},
+		{name: "task oversized limit", call: controlTaskList, args: []string{"-tenant-id", "tenant-a", "-limit", "101"}},
+		{name: "task positional", call: controlTaskList, args: []string{"-tenant-id", "tenant-a", "unexpected"}},
 		{name: "command state", call: controlCommandList, args: []string{"-state", "running"}},
 		{name: "command terminal without state", call: controlCommandList, args: []string{"-terminal-status", "failed"}},
 		{name: "command terminal status", call: controlCommandList, args: []string{"-state", "terminal", "-terminal-status", "running"}},
@@ -474,6 +507,9 @@ func TestControlOperationsCommandsRejectInvalidFilters(t *testing.T) {
 	}
 	if err := controlEventList([]string{"-tenant-id", "tenant-a"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "token") {
 		t.Fatalf("event list without token error=%v", err)
+	}
+	if err := controlTaskList([]string{"-tenant-id", "tenant-a"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Fatalf("task list without token error=%v", err)
 	}
 }
 

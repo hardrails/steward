@@ -22,6 +22,22 @@ controller can exercise active delegated verbs until expiry, but cannot mint new
 tenant authority or add an undeclared instance, node, generation, resource,
 capability, route, or connector.
 
+Control has two authority modes:
+
+- `bounded-autonomous` is the default. It loads the online controller key and
+  reconciles desired deployments only within a tenant-signed delegation.
+- `strict-sovereign` refuses to start while that online key exists and does not run the
+  desired-state reconciler. It can still observe the fleet and courier an exact
+  command signed outside Control. Desired-deployment mutations return
+  `409 autonomous_reconciliation_disabled` instead of silently remaining pending.
+
+Use strict mode when compromise of the Control host must not expose an online key
+that can change instances. This mode trades automatic rollout, replacement,
+scaling, and fork cleanup for a smaller online authority boundary. Removing the
+key from Control is only one part of the boundary: do not issue an active tenant
+delegation to that key, and expire or revoke old delegations before treating a
+site as strict. The installer never deletes signing keys for you.
+
 ## Choose a deployment shape
 
 Use a dedicated Linux management host. The packaged controller and Executor node
@@ -70,6 +86,17 @@ client.
 When HTTPS is configured, Steward Control accepts TLS 1.3 only. The Steward Control
 client shared by `stewardctl control` and `steward-mcp` also rejects HTTPS servers
 that cannot negotiate TLS 1.3.
+
+To install the strict profile, make the choice explicit:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/hardrails/steward/releases/latest/download/install-control.sh | \
+  sudo /bin/bash -p -s -- --authority-mode strict-sovereign
+```
+
+The installer preserves the chosen mode on upgrade unless
+`--authority-mode` is supplied again.
 
 The guided first install asks for a path for the first site-administrator bearer.
 For unattended installation, make that choice explicit:
@@ -134,8 +161,7 @@ There is no boot-time recovery unit, so system startup alone does not complete o
 roll back an interrupted installation. Do not remove
 `/var/lib/steward-control-installer/transaction` by hand.
 
-The first installation creates two purpose-separated Ed25519 identities. The
-evidence-witness identity is:
+Every first installation creates an evidence-witness Ed25519 identity:
 
 - private key: `/var/lib/steward-control/witness.private.pem`, mode `0600`;
 - public key: `/var/lib/steward-control/witness.public.pem`, mode `0644`.
@@ -156,7 +182,8 @@ creates the pair only if both paths are absent. A partial pair, unsafe metadata,
 symlink, or mismatch stops the upgrade so an operator can investigate instead of
 silently accepting a new audit identity.
 
-The online controller-signing identity is:
+In `bounded-autonomous` mode, installation also creates the online
+controller-signing identity:
 
 - private key: `/var/lib/steward-control/controller.private.pem`, mode `0600`;
 - public key: `/var/lib/steward-control/controller.public.pem`, mode `0644`;
@@ -167,6 +194,13 @@ controller delegation. This key is not the TLS identity, evidence-witness identi
 or tenant authority. An upgrade from older state creates the pair only when both
 paths are absent and preserves it on later runs. A partial, linked, mismatched, or
 unsafe pair stops installation.
+
+A fresh strict-mode installation leaves both controller-key paths absent.
+Switching an existing controller to strict mode requires you to expire every
+delegation that names the key, archive any required public identity, and remove
+both key files. The installer refuses the switch instead of destructively deleting
+them. `control-doctor` treats absence as required while still checking the witness
+key and all other service boundaries.
 
 Verify the installed service:
 

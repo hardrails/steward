@@ -33,7 +33,9 @@ operator attention—not full prompts, page bodies, binary artifacts, or secrets
 
 ## Read events
 
-The React control room has an **Agent signals** view. From a trusted terminal:
+The React control room has **Fleet tasks** and **Agent signals** views. The task
+view groups correlated progress; the signal view preserves each retained event.
+From a trusted terminal:
 
 ```console
 stewardctl control event list \
@@ -47,6 +49,37 @@ and MCP server expose the same tenant-scoped retained data; see
 [APIs and schemas]({{ '/reference/api/' | relative_url }}) and
 [MCP operations]({{ '/guides/mcp/' | relative_url }}).
 
+## Read task progress
+
+Set `task_id` on related status and finding events to make them appear as one
+fleet task projection:
+
+```console
+stewardctl control task list \
+  -tenant-id research \
+  -limit 100 \
+  -token-file /etc/steward/control-operator.token
+```
+
+Steward groups events by tenant, task ID, instance ID, and instance generation.
+This prevents a reused task ID from merging two different workload lineages.
+Use these stable event codes when they match the actual lifecycle:
+
+| Code | Projected state |
+| --- | --- |
+| `task_started`, `task_progress` | `agent_reported_running` |
+| `task_completed` | `agent_reported_completed` |
+| `task_failed` | `agent_reported_failed` |
+| `task_cancelled` | `agent_reported_cancelled` |
+| Any other code with `task_id` | `agent_reported_activity` |
+
+The first reported terminal state remains sticky. If later events claim a
+different terminal state, run ID, node, or runtime, Steward adds a conflict
+condition instead of silently replacing history. The projection retains only
+bounded metadata. It survives eviction of its source events, then ages out under
+its own oldest-first limits. It is not a task queue, cancellation API, artifact
+store, or proof that the agent performed the reported work correctly.
+
 ## Trust and retention
 
 Event content is untrusted agent output. Display it as data, do not execute markup
@@ -55,7 +88,9 @@ rendered content and never turns an event into a mutation.
 
 Control retains the newest 1,024 events per tenant and 4,096 across the site,
 evicting the oldest records in the same durable transaction that accepts newer
-ones. Gateway's undelivered outbox is separately capped at 16 events per grant,
+ones. Task projections use separate limits of 1,024 per tenant and 4,096 across
+the site, so raw-event eviction does not roll completed work back to an earlier
+state. Gateway's undelivered outbox is separately capped at 16 events per grant,
 32 per tenant, and 64 per node. If Control is unavailable, the node retries
 without discarding an acknowledged event; when the outbox is full, new events fail
 visibly until delivery frees capacity. Include enough source or task context in

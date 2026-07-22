@@ -35,6 +35,24 @@ const (
 	evidenceExportRetryAfter  = 1
 )
 
+// AuthorityMode defines whether Control may mint lifecycle commands under a
+// tenant-signed delegation. Exact commands signed outside Control remain
+// transportable in either mode.
+type AuthorityMode string
+
+const (
+	AuthorityModeStrictSovereign   AuthorityMode = "strict-sovereign"
+	AuthorityModeBoundedAutonomous AuthorityMode = "bounded-autonomous"
+)
+
+func ParseAuthorityMode(value string) (AuthorityMode, error) {
+	mode := AuthorityMode(value)
+	if mode != AuthorityModeStrictSovereign && mode != AuthorityModeBoundedAutonomous {
+		return "", fmt.Errorf("authority mode must be %q or %q", AuthorityModeStrictSovereign, AuthorityModeBoundedAutonomous)
+	}
+	return mode, nil
+}
+
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
 
 type Config struct {
@@ -45,6 +63,7 @@ type Config struct {
 	MaxPoll              int
 	EnableMetrics        bool
 	OperationsThresholds controlstore.OperationsThresholds
+	AuthorityMode        AuthorityMode
 	Now                  func() time.Time
 	Logger               *slog.Logger
 }
@@ -57,6 +76,7 @@ type Server struct {
 	maxPoll              int
 	enableMetrics        bool
 	operationsThresholds controlstore.OperationsThresholds
+	authorityMode        AuthorityMode
 	now                  func() time.Time
 	logger               *slog.Logger
 	mux                  *http.ServeMux
@@ -72,6 +92,13 @@ func New(config Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("control server operations thresholds: %w", err)
 	}
+	authorityMode := config.AuthorityMode
+	if authorityMode == "" {
+		authorityMode = AuthorityModeBoundedAutonomous
+	}
+	if _, err := ParseAuthorityMode(string(authorityMode)); err != nil {
+		return nil, fmt.Errorf("control server: %w", err)
+	}
 	now := config.Now
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
@@ -83,7 +110,7 @@ func New(config Config) (*Server, error) {
 	server := &Server{
 		store: config.Store, auth: config.Auth, witnessKey: append(ed25519.PrivateKey(nil), config.WitnessPrivateKey...), lease: config.LeaseDuration,
 		maxPoll: config.MaxPoll, enableMetrics: config.EnableMetrics, operationsThresholds: operationsThresholds,
-		now: now, logger: logger, mux: http.NewServeMux(),
+		authorityMode: authorityMode, now: now, logger: logger, mux: http.NewServeMux(),
 	}
 	server.routes()
 	return server, nil
@@ -116,6 +143,8 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/placement", server.nodePlacement)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/drain", server.nodeDrain)
+	server.mux.HandleFunc("/v1/node-pools", server.nodePools)
+	server.mux.HandleFunc("/v1/node-pools/{pool_id}", server.nodePool)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures", server.evidenceCaptures)
@@ -131,6 +160,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}", server.deployment)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout", server.deploymentRollout)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/instance-events", server.instanceEvents)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/tasks", server.tasks)
 	server.mux.HandleFunc("/v1/operations/summary", server.operationsSummary)
 	server.mux.HandleFunc("/v1/operations/freeze", server.siteOperationalFreeze)
 	server.mux.HandleFunc("/v1/operations/attention", server.operationsAttention)
@@ -1038,6 +1068,59 @@ func pageInstanceEvents(values []controlstore.InstanceEvent, page pageRequest) (
 		return values[start:], "", true
 	}
 	return values[start:end], values[end-1].Event.EventID, true
+}
+
+func (server *Server) tasks(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	page, ok := parsePage(writer, request)
+	if !ok {
+		return
+	}
+	if page.limit > 100 {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "task limit must be between 1 and 100")
+		return
+	}
+	projections, err := server.store.ListTaskProjections(identity, request.PathValue("tenant_id"))
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	selected, next, ok := pageTaskProjections(projections, page)
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "after cursor does not identify a retained task projection")
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Tasks     []controlstore.TaskProjection `json:"tasks"`
+		NextAfter string                        `json:"next_after,omitempty"`
+	}{Tasks: selected, NextAfter: next})
+}
+
+func pageTaskProjections(values []controlstore.TaskProjection, page pageRequest) ([]controlstore.TaskProjection, string, bool) {
+	start := 0
+	if page.after != "" {
+		found := false
+		for index, projection := range values {
+			if projection.ProjectionID == page.after {
+				start, found = index+1, true
+				break
+			}
+		}
+		if !found {
+			return nil, "", false
+		}
+	}
+	end := start + page.limit
+	if end >= len(values) {
+		return values[start:], "", true
+	}
+	return values[start:end], values[end-1].ProjectionID, true
 }
 
 func (server *Server) executorReport(writer http.ResponseWriter, request *http.Request) {

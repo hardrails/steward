@@ -5,7 +5,7 @@ info:
   description: |
     Public contract for Steward's optional, self-hosted fleet controller. The
     controller manages tenant scopes, operator credentials, one-time node
-    enrollment, node inventory, bounded desired deployments, reclaimable
+    enrollment, node inventory, provider-neutral node-pool capacity, bounded desired deployments, reclaimable
     delivery of signed Executor commands, independently witnessed Executor evidence heads, and
     authenticated fleet operations views and emergency command-delivery freezes. The embedded React console
     can also courier one exact offline-signed command through the existing command
@@ -53,8 +53,12 @@ tags:
     description: One-time node enrollment capabilities.
   - name: nodes
     description: Tenant-projected node inventory and site-wide revocation.
+  - name: node-pools
+    description: Provider-neutral infrastructure capacity intent. Node-pool membership is operational state and never grants workload authority.
   - name: deployments
     description: Bounded desired agent state reconciled under tenant-signed controller delegation.
+  - name: tasks
+    description: Bounded, read-only task projections derived from untrusted agent events.
   - name: evidence
     description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
@@ -915,6 +919,160 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/node-pools:
+    get:
+      tags: [node-pools]
+      operationId: listControlNodePools
+      summary: List provider-neutral node-pool capacity
+      description: |
+        Requires a site-administrator credential. Returns retained desired
+        infrastructure capacity and a current observation of nodes that report
+        the exact `steward.io/node-pool` label, required tenant scopes, and
+        optional architecture. A matching label is operational metadata, not
+        tenant execution authority; existing workload delegations continue to
+        name exact node IDs.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: One bounded, identity-ordered page of node-pool status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodePoolList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/node-pools/{pool_id}:
+    parameters:
+      - $ref: "#/components/parameters/PoolID"
+    get:
+      tags: [node-pools]
+      operationId: getControlNodePool
+      summary: Read one node-pool capacity observation
+      description: |
+        Requires a site-administrator credential. `scale_out_needed` is an
+        exact infrastructure creation deficit. `scale_in_candidates` contains
+        at most the current surplus of exact nodes whose Steward drain completed
+        and which have no assigned deployment instance. Neither field performs
+        a provider action.
+      responses:
+        "200":
+          description: Retained intent and current operational observation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodePoolStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [node-pools]
+      operationId: applyControlNodePool
+      summary: Create or revise node-pool capacity intent
+      description: |
+        Requires a site-administrator credential. Creation omits
+        `expected_revision`; an update must match the retained revision. This
+        stores a provider-neutral capacity target only. It does not create a
+        machine, issue enrollment authority, expand a tenant delegation, or
+        place a workload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodePoolApplyRequest"
+      responses:
+        "200":
+          description: Existing node-pool intent was retained or revised.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodePoolStatus"
+        "201":
+          description: Node-pool intent was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodePoolStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [node-pools]
+      operationId: deleteControlNodePool
+      summary: Delete node-pool capacity intent
+      description: |
+        Requires a site-administrator credential and the exact retained
+        revision. Deletion removes only the capacity record. It does not drain,
+        revoke, or destroy any node or workload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodePoolDeleteRequest"
+      responses:
+        "204":
+          description: Node-pool intent was deleted. The response has no body.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/nodes/{node_id}/evidence:
     parameters:
       - $ref: "#/components/parameters/NodeID"
@@ -1263,6 +1421,12 @@ paths:
         trusted; Executor verifies that signature against authenticated site
         policy before every effect. Exact retries are idempotent. A changed
         generation must supply the current `expected_revision`.
+
+        This mutation is available only in `bounded-autonomous` authority mode.
+        In `strict-sovereign`, Control returns
+        `409 autonomous_reconciliation_disabled`; operators use the exact signed
+        command courier instead. Control refuses strict-mode startup while an
+        online controller signing-key file exists.
       requestBody:
         required: true
         content:
@@ -1291,7 +1455,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/DeploymentAuthorityDisabledOrConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -1309,7 +1473,8 @@ paths:
       description: |
         Marks desired state as absent; it does not erase the reconciliation
         cursor or audit linkage. The current revision is required to prevent a
-        stale operator from removing a newer rollout.
+        stale operator from removing a newer rollout. This mutation is disabled
+        in `strict-sovereign` authority mode.
       requestBody:
         required: true
         content:
@@ -1332,7 +1497,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/DeploymentAuthorityDisabledOrConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -1355,6 +1520,8 @@ paths:
         the operation cannot strand an instance after its source runtime has
         been destroyed. The current revision prevents a stale operator from
         changing a newer rollout.
+
+        This mutation is disabled in `strict-sovereign` authority mode.
       requestBody:
         required: true
         content:
@@ -1377,7 +1544,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/DeploymentAuthorityDisabledOrConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -1628,6 +1795,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstanceEventPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tasks]
+      operationId: listTaskProjections
+      summary: List recent fleet task projections
+      description: |
+        Durably summarizes accepted instance events by tenant, task ID, instance
+        ID, and generation, newest first. These projections are agent-reported
+        operational visibility, not command authority or proof that work was
+        performed correctly. A terminal state remains sticky; later conflicting
+        terminal or identity reports appear as conditions. Projections have a
+        separate bounded retention window, so raw-event eviction cannot regress
+        terminal state.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: A bounded page of retained task projections.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskProjectionPage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2367,6 +2579,12 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/Identifier128"
+    PoolID:
+      name: pool_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
     SnapshotID:
       name: snapshot_id
       in: path
@@ -2711,6 +2929,17 @@ components:
             type: integer
             minimum: 1
             maximum: 3600
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    DeploymentAuthorityDisabledOrConflict:
+      description: |
+        The request conflicts with retained deployment state, or Control is in
+        `strict-sovereign` mode and returned
+        `autonomous_reconciliation_disabled`. Strict mode transports exact
+        externally signed commands but does not retain desired-state mutations
+        that require Control to mint lifecycle commands.
       content:
         application/json:
           schema:
@@ -4261,6 +4490,116 @@ components:
         next_after:
           type: string
           pattern: '^event-[0-9a-f]{64}$'
+    TaskProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - projection_id
+        - tenant_id
+        - task_id
+        - instance_id
+        - generation
+        - node_id
+        - runtime_ref
+        - state
+        - latest_code
+        - latest_severity
+        - highest_severity
+        - latest_summary
+        - event_count
+        - finding_count
+        - first_observed_at
+        - last_observed_at
+        - latest_event_id
+        - conditions
+      properties:
+        projection_id:
+          type: string
+          pattern: '^task-[0-9a-f]{64}$'
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        run_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        state:
+          type: string
+          enum:
+            - agent_reported_activity
+            - agent_reported_running
+            - agent_reported_completed
+            - agent_reported_failed
+            - agent_reported_cancelled
+        latest_code:
+          $ref: "#/components/schemas/Identifier128"
+        latest_severity:
+          type: string
+          enum: [info, warning, critical]
+        highest_severity:
+          type: string
+          enum: [info, warning, critical]
+        latest_summary:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        event_count:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        finding_count:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        first_observed_at:
+          type: string
+          format: date-time
+        last_observed_at:
+          type: string
+          format: date-time
+        latest_event_id:
+          type: string
+          pattern: '^event-[0-9a-f]{64}$'
+        conditions:
+          type: array
+          uniqueItems: true
+          maxItems: 3
+          items:
+            type: string
+            enum: [run_identity_conflict, terminal_state_conflict, workload_identity_conflict]
+      description: >-
+        Bounded, durable agent-reported metadata projected from accepted events.
+        It is neither a signed execution receipt nor proof that the reported work
+        is correct.
+    TaskProjectionPage:
+      type: object
+      additionalProperties: false
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/TaskProjection"
+        next_after:
+          type: string
+          pattern: '^task-[0-9a-f]{64}$'
     NodeList:
       type: object
       additionalProperties: false
@@ -4273,6 +4612,170 @@ components:
             $ref: "#/components/schemas/Node"
         next_after:
           $ref: "#/components/schemas/Identifier128"
+    NodePool:
+      type: object
+      additionalProperties: false
+      required: [id, revision, tenant_ids, min_nodes, desired_nodes, max_nodes, created_at, updated_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier128"
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        tenant_ids:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+          description: Canonically sorted active tenant scopes every matching node must already carry.
+        architecture:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:/-]+$'
+        min_nodes:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        desired_nodes:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        max_nodes:
+          type: integer
+          minimum: 1
+          maximum: 4096
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      description: |
+        Provider-neutral infrastructure capacity intent. Counts satisfy
+        `0 <= min_nodes <= desired_nodes <= max_nodes`. This record grants no
+        workload, enrollment, cloud, or destruction authority.
+    NodePoolNode:
+      type: object
+      additionalProperties: false
+      required: [node_id, ready]
+      properties:
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        ready:
+          type: boolean
+        reason:
+          type: string
+          enum: [scheduling_unavailable, scheduling_stale, placement_blocked, draining, drained, drain_failed]
+        drain_state:
+          type: string
+          enum: [active, completed, cancelled, failed]
+      description: |
+        Operational projection for one exact registered node. A ready node has
+        no `reason`. Pool membership derives from authenticated but
+        self-reported scheduling data and is not execution authority.
+    NodePoolStatus:
+      type: object
+      additionalProperties: false
+      required: [pool, nodes, registered_nodes, ready_nodes, scale_out_needed, scale_in_candidates, conditions, observed_at]
+      properties:
+        pool:
+          $ref: "#/components/schemas/NodePool"
+        nodes:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: "#/components/schemas/NodePoolNode"
+        registered_nodes:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        ready_nodes:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        scale_out_needed:
+          type: integer
+          minimum: 0
+          maximum: 4096
+          description: Exact positive difference between desired and registered nodes.
+        scale_in_candidates:
+          type: array
+          maxItems: 4096
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+          description: At most the current surplus of exact drained, empty nodes eligible for a provider driver to remove.
+        conditions:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            enum: [capacity_shortfall, nodes_not_ready, scale_in_available]
+        observed_at:
+          type: string
+          format: date-time
+      description: Current provider-neutral capacity observation; it is not a signed authority statement.
+    NodePoolList:
+      type: object
+      additionalProperties: false
+      required: [node_pools]
+      properties:
+        node_pools:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/NodePoolStatus"
+        next_after:
+          $ref: "#/components/schemas/Identifier128"
+    NodePoolApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_ids, min_nodes, desired_nodes, max_nodes]
+      properties:
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Required on update and omitted on creation.
+        tenant_ids:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        architecture:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:/-]+$'
+        min_nodes:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        desired_nodes:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        max_nodes:
+          type: integer
+          minimum: 1
+          maximum: 4096
+      description: Counts must satisfy `0 <= min_nodes <= desired_nodes <= max_nodes`.
+    NodePoolDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      properties:
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 1
     NodeRevocation:
       type: object
       additionalProperties: false

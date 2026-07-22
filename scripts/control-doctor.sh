@@ -297,7 +297,7 @@ if [[ -r $config && -f $config && ! -L $config && $(stat -c '%h' -- "$config" 2>
 		case "$line" in
 			"" | \#*) continue ;;
 		esac
-		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_KEY_ID|STEWARD_CONTROL_RECONCILE_INTERVAL|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE|STEWARD_CONTROL_ENABLE_METRICS|STEWARD_CONTROL_NODE_STALE_AFTER|STEWARD_CONTROL_EVIDENCE_STALE_AFTER|STEWARD_CONTROL_COMMAND_OVERDUE_AFTER|STEWARD_CONTROL_CAPACITY_WARNING_PERCENT)=([^[:space:]]*)$ ]]; then
+		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE|STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE|STEWARD_CONTROL_CONTROLLER_KEY_ID|STEWARD_CONTROL_RECONCILE_INTERVAL|STEWARD_CONTROL_AUTHORITY_MODE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE|STEWARD_CONTROL_ENABLE_METRICS|STEWARD_CONTROL_NODE_STALE_AFTER|STEWARD_CONTROL_EVIDENCE_STALE_AFTER|STEWARD_CONTROL_COMMAND_OVERDUE_AFTER|STEWARD_CONTROL_CAPACITY_WARNING_PERCENT)=([^[:space:]]*)$ ]]; then
 			config_valid=false
 			continue
 		fi
@@ -312,6 +312,7 @@ for key in STEWARD_CONTROL_ADDR STEWARD_CONTROL_STATE_DIR STEWARD_CONTROL_AUTH_K
 	STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE \
 	STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE \
 	STEWARD_CONTROL_CONTROLLER_KEY_ID STEWARD_CONTROL_RECONCILE_INTERVAL \
+	STEWARD_CONTROL_AUTHORITY_MODE \
 	STEWARD_CONTROL_TLS_CERT_FILE STEWARD_CONTROL_TLS_KEY_FILE STEWARD_CONTROL_ENABLE_METRICS \
 	STEWARD_CONTROL_NODE_STALE_AFTER STEWARD_CONTROL_EVIDENCE_STALE_AFTER \
 	STEWARD_CONTROL_COMMAND_OVERDUE_AFTER STEWARD_CONTROL_CAPACITY_WARNING_PERCENT; do
@@ -325,6 +326,8 @@ if [[ ${settings[STEWARD_CONTROL_STATE_DIR]:-} != "$state" ||
 	${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]:-} != "$state/controller.public.pem" ||
 	${settings[STEWARD_CONTROL_CONTROLLER_KEY_ID]:-} != controller-default ||
 	${settings[STEWARD_CONTROL_RECONCILE_INTERVAL]:-} != 5s ]] ||
+	{ [[ ${settings[STEWARD_CONTROL_AUTHORITY_MODE]:-} != bounded-autonomous ]] &&
+		[[ ${settings[STEWARD_CONTROL_AUTHORITY_MODE]:-} != strict-sovereign ]]; } ||
 	{ [[ -z ${settings[STEWARD_CONTROL_TLS_CERT_FILE]:-} ]] && [[ -n ${settings[STEWARD_CONTROL_TLS_KEY_FILE]:-} ]]; } ||
 	{ [[ -n ${settings[STEWARD_CONTROL_TLS_CERT_FILE]:-} ]] && [[ -z ${settings[STEWARD_CONTROL_TLS_KEY_FILE]:-} ]]; } ||
 	{ [[ ${settings[STEWARD_CONTROL_ENABLE_METRICS]:-} != true ]] &&
@@ -349,17 +352,28 @@ if [[ $config_valid == true ]]; then
 			pass "$witness_path size is within the 16 KiB witness-key bound"
 		fi
 	done
-	require_metadata "${settings[STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE]}" steward-control:steward-control 600 regular
-	require_metadata "${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]}" steward-control:steward-control 644 regular
-	for controller_path in "${settings[STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE]}" \
-		"${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]}"; do
-		if (( $(stat -c '%s' -- "$controller_path" 2>/dev/null || printf '16385') <= 0 ||
-			$(stat -c '%s' -- "$controller_path" 2>/dev/null || printf '16385') > 16384 )); then
-			fail "$controller_path size is outside the 16 KiB controller-key bound"
+	if [[ ${settings[STEWARD_CONTROL_AUTHORITY_MODE]} == bounded-autonomous ]]; then
+		require_metadata "${settings[STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE]}" steward-control:steward-control 600 regular
+		require_metadata "${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]}" steward-control:steward-control 644 regular
+		for controller_path in "${settings[STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE]}" \
+			"${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]}"; do
+			if (( $(stat -c '%s' -- "$controller_path" 2>/dev/null || printf '16385') <= 0 ||
+				$(stat -c '%s' -- "$controller_path" 2>/dev/null || printf '16385') > 16384 )); then
+				fail "$controller_path size is outside the 16 KiB controller-key bound"
+			else
+				pass "$controller_path size is within the 16 KiB controller-key bound"
+			fi
+		done
+	else
+		if [[ -e ${settings[STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE]} ||
+			-L ${settings[STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE]} ||
+			-e ${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]} ||
+			-L ${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]} ]]; then
+			fail "strict-sovereign mode requires controller signing-key files to be absent"
 		else
-			pass "$controller_path size is within the 16 KiB controller-key bound"
+			pass "strict-sovereign mode has no online controller signing key"
 		fi
-	done
+	fi
 fi
 
 if [[ -L $binary && -x $binary && $(readlink -f -- "$binary" 2>/dev/null) == /opt/steward-control/releases/*/steward-control ]]; then
@@ -449,6 +463,7 @@ else
 			-controller-public-key-file "${settings[STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE]}" \
 			-controller-key-id "${settings[STEWARD_CONTROL_CONTROLLER_KEY_ID]}" \
 			-reconcile-interval "${settings[STEWARD_CONTROL_RECONCILE_INTERVAL]}" \
+			-authority-mode "${settings[STEWARD_CONTROL_AUTHORITY_MODE]}" \
 			-enable-metrics="${settings[STEWARD_CONTROL_ENABLE_METRICS]}" \
 			-node-stale-after "${settings[STEWARD_CONTROL_NODE_STALE_AFTER]}" \
 			-evidence-stale-after "${settings[STEWARD_CONTROL_EVIDENCE_STALE_AFTER]}" \
