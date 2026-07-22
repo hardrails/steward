@@ -323,6 +323,16 @@ again before creation, so a stale controller decision cannot weaken the local
 limit. A missing or stale scheduling observation pauses new placement; it does
 not block lease renewal, stop, or destroy operations for assigned workloads.
 
+Executor also derives `steward.runtime-assurance.v1` from the effective startup
+configuration. The fixed-schema report includes Docker and gVisor, the isolated
+bridge, state isolation, the Gateway credential boundary, and host-admin intent.
+`shared-host-hardened` requires quota-enforced or ephemeral state and rejects
+host-admin intent; either compatibility option produces
+`dedicated-host-hardened`. Hardened agent authorization requires the shared-host
+profile. Use `stewardctl control node assurance` to recompute the report and
+freshness verdict before an independent pool signer approves that exact digest.
+This is authenticated node evidence, not remote attestation.
+
 Labels and taints use letters, digits, `.`, `_`, `:`, `/`, and `-`, with a
 maximum of 128 bytes per key or value. Do not put secrets in them. They are
 returned by the node status API and console.

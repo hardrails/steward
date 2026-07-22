@@ -99,8 +99,23 @@ binds the exact Control instance, pool membership generation, node, tenant set,
 architecture, boot identity, scheduling policy, and a validity window of no more
 than 24 hours.
 
+First, export a fresh, secret-free assurance report from Control. The command
+recomputes the scheduling and runtime-assurance digests, checks the requested
+profile, rejects stale observations, and produces the exact node measurements
+the independent signer needs:
+
+```console
+umask 077
+stewardctl control node assurance \
+  -tenant-id research \
+  -node-id research-0042 \
+  -required-profile shared-host-hardened \
+  > research-0042.assurance.json
+```
+
 An offline signer or separately protected identity adapter should issue the
-statement only after it verifies the machine:
+statement only after it verifies the machine. `-node-assurance` replaces five
+manual node and digest arguments:
 
 ```console
 stewardctl control node-pool membership-issue \
@@ -110,12 +125,8 @@ stewardctl control node-pool membership-issue \
   -pool-id research-amd64 \
   -pool-membership-generation 1 \
   -pool-created-at 2026-07-22T09:00:00Z \
-  -node-id research-0042 \
   -tenant-ids research \
-  -architecture amd64 \
-  -boot-identity-sha256 sha256:BOOT_IDENTITY_HEX \
-  -scheduling-policy-sha256 sha256:POLICY_HEX \
-  -runtime-assurance-sha256 sha256:ASSURANCE_HEX \
+  -node-assurance research-0042.assurance.json \
   -valid-for 1h \
   -out research-0042.membership.dsse.json
 ```
@@ -136,6 +147,12 @@ state isolation, the Gateway credential boundary, and whether host-admin intent
 is enabled. It does not independently measure the host. The boot claim still
 depends on the process that supplies the boot identity to Executor, and a valid
 node signature does not prove that the node was uncompromised.
+
+The report is bounded non-secret input, not signed evidence. Transfer it through
+the same reviewed operator channel as other enrollment metadata and inspect it at
+the membership-authority boundary. The issuer rejects a report whose freshness
+window has elapsed, whose digests do not recompute, or whose verdict is not
+`pass`. Expert workflows may supply the five raw fields directly.
 
 Memberships issued before runtime assurance was added remain valid only until
 their existing expiry, which is at most 24 hours. Renew them with the assurance

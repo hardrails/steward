@@ -28,7 +28,9 @@ weaker node configuration without invalidating pool eligibility.
 **Decision:** define a small, fixed-schema runtime-assurance statement derived by
 Executor from its effective startup configuration. Bind its SHA-256 digest into
 new independently signed pool memberships and allow tenant-signed placement to
-require an exact assurance profile.
+require an exact assurance profile. Executor rechecks the signed hard placement
+constraints before accepting delegated admission, so Control is not the final
+authority for its own scheduling choice.
 
 The first statement records the runtime, isolation boundary, network topology,
 state-isolation mode, credential boundary, and whether host-admin intent is

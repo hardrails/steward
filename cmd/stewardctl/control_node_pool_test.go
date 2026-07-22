@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/controlclient"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 )
 
@@ -107,6 +108,86 @@ func TestControlNodePoolMembershipIssueAndVerify(t *testing.T) {
 	if err := json.Unmarshal(verified.Bytes(), &statement); err != nil || statement.PoolID != "pool-a" ||
 		strings.Join(statement.TenantIDs, ",") != "tenant-a,tenant-b" {
 		t.Fatalf("verified=%s err=%v", verified.String(), err)
+	}
+}
+
+func TestNodeAssuranceReportFeedsOfflineMembershipIssue(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	assurance := controlprotocol.RuntimeAssuranceV1{
+		SchemaVersion: controlprotocol.RuntimeAssuranceSchemaV1,
+		Profile:       controlprotocol.RuntimeAssuranceSharedHost, Runtime: "docker",
+		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor, Network: "isolated-bridge",
+		StateIsolation: controlprotocol.RuntimeAssuranceStateQuota, CredentialBoundary: "gateway-only",
+	}
+	assuranceDigest, err := controlprotocol.RuntimeAssuranceDigest(assurance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := controlprotocol.ExecutorSchedulingPolicyV1{
+		PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 1, CPUMillis: 1, PIDs: 1, Workloads: 1},
+		Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2, CPUMillis: 2, PIDs: 2, Workloads: 2},
+		Tenant:          controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2, CPUMillis: 2, PIDs: 2, Workloads: 2},
+		RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 1, CPUMillis: 1, PIDs: 1},
+	}
+	policyDigest, err := controlprotocol.SchedulingPolicyDigest(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := controlclient.Node{
+		NodeID: "node-a", TenantIDs: []string{"tenant-a"}, Capabilities: []string{}, State: "active",
+		CreatedAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
+		Scheduling: &controlstore.NodeScheduling{
+			ObservedAt: now.Add(-time.Minute).Format(time.RFC3339Nano),
+			Observation: controlprotocol.ExecutorSchedulingObservationV1{
+				SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+				NodeID:        "node-a", CredentialScope: "node", OS: "linux", Architecture: "amd64",
+				Isolation:          controlprotocol.ExecutorSchedulingIsolationGVisor,
+				BootIdentitySHA256: "sha256:" + strings.Repeat("a", 64), SchedulingPolicySHA256: policyDigest,
+				RuntimeAssurance: &assurance, RuntimeAssuranceSHA256: assuranceDigest,
+				Labels: []controlprotocol.ExecutorSchedulingLabelV1{}, Taints: []string{},
+				CachedImageConfigDigests: []string{}, Policy: policy,
+			},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer operator" || request.URL.Path != "/v1/tenants/tenant-a/nodes/node-a" {
+			t.Fatalf("unexpected assurance request %s auth=%q", request.URL, request.Header.Get("Authorization"))
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(node)
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = originalNow })
+	var report bytes.Buffer
+	if err := run([]string{
+		"control", "node", "assurance", "-tenant-id", "tenant-a", "-node-id", "node-a",
+		"-control-url", server.URL, "-token-file", tokenPath, "-no-context",
+	}, &report, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var decoded nodeAssuranceReport
+	if err := json.Unmarshal(report.Bytes(), &decoded); err != nil || decoded.Status != "pass" || decoded.RuntimeAssuranceSHA256 != assuranceDigest {
+		t.Fatalf("assurance report=%s err=%v", report.String(), err)
+	}
+	reportPath := filepath.Join(directory, "node-assurance.json")
+	if err := os.WriteFile(reportPath, report.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	privatePath, _ := generateTestKeyPair(t, directory, "assurance-membership")
+	membershipPath := filepath.Join(directory, "membership.json")
+	if err := controlNodePoolMembershipIssue([]string{
+		"-private-key", privatePath, "-key-id", "pool-authority-1", "-controller-id", "control-a",
+		"-pool-id", "pool-a", "-pool-membership-generation", "1", "-pool-created-at", now.Add(-time.Hour).Format(time.RFC3339Nano),
+		"-tenant-ids", "tenant-a", "-node-assurance", reportPath, "-out", membershipPath,
+	}, io.Discard); err != nil {
+		t.Fatal(err)
 	}
 }
 

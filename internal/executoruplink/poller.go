@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1093,9 +1094,17 @@ func (p *Poller) decodeCommand(raw []byte, credential *stewarduplink.Credential)
 		if err != nil {
 			return command{}, err
 		}
+		delegation, err := admission.InspectCommandDelegation(delegationRaw, p.now())
+		if err != nil {
+			return command{}, err
+		}
 		statement, err = admission.VerifyDelegatedCommand(raw, delegationRaw, *p.commandPolicy, p.now())
 		if err != nil {
 			return command{}, err
+		}
+		if statement.Kind == "admit" && delegation.Admission != nil && delegation.Admission.Placement != nil &&
+			!executorPlacementMatches(p.scheduling, *delegation.Admission.Placement) {
+			return command{}, errors.New("signed placement requirements do not match this Executor")
 		}
 	} else {
 		keys, err := p.commandPolicy.TrustedCommandKeys(routed.TenantID, routed.Kind)
@@ -1123,6 +1132,43 @@ func (p *Poller) decodeCommand(raw []byte, credential *stewarduplink.Credential)
 		InstanceGeneration: statement.InstanceGeneration, CommandSequence: statement.CommandSequence,
 		signed: true,
 	}, nil
+}
+
+// executorPlacementMatches rechecks tenant-signed hard placement constraints
+// at the node boundary. Control's scheduler is useful but is not trusted to
+// choose a node that satisfies the delegation.
+func executorPlacementMatches(
+	observation *controlprotocol.ExecutorSchedulingObservationV1,
+	placement admission.CommandDelegationPlacement,
+) bool {
+	if observation == nil || observation.Validate() != nil {
+		return false
+	}
+	if placement.RequiredIsolation != "" && placement.RequiredIsolation != observation.Isolation {
+		return false
+	}
+	if placement.RequiredAssurance != "" {
+		if observation.RuntimeAssurance == nil || observation.RuntimeAssuranceSHA256 == "" ||
+			observation.RuntimeAssurance.Profile != placement.RequiredAssurance {
+			return false
+		}
+	}
+	for _, required := range placement.RequiredLabels {
+		index := sort.Search(len(observation.Labels), func(index int) bool {
+			return observation.Labels[index].Key >= required.Key
+		})
+		if index >= len(observation.Labels) || observation.Labels[index].Key != required.Key ||
+			observation.Labels[index].Value != required.Value {
+			return false
+		}
+	}
+	for _, taint := range observation.Taints {
+		index := sort.SearchStrings(placement.Tolerations, taint)
+		if index >= len(placement.Tolerations) || placement.Tolerations[index] != taint {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Poller) sendReport(ctx context.Context, credential string, report report) error {

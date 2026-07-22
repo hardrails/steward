@@ -28,6 +28,7 @@ they can verify without a vendor service.
 | --- | --- |
 | Untrusted agent images and configuration | Verifies signed workload and site-policy artifacts, sanitizes offline OCI imports, and admits only the pinned image and declared capabilities. |
 | Multiple tenants on one Linux host | Gives every workload a separate gVisor sandbox, resource reservation, lifecycle identity, command fence, and capability network. Persistent Docker volumes remain a dedicated-host compatibility feature. |
+| A scheduler silently choosing a weaker node | Binds the effective runtime, isolation, network, state, and credential-boundary profile into tenant-signed placement and independently signed elastic-pool membership. |
 | Prompt injection reaching a powerful tool | Keeps reusable connector credentials outside the workload. A protected action can require a tenant signature over the exact operation and request bytes. |
 | Replayed or stale authority | Spends one-use permits before network dispatch and rejects old instance generations and command sequences. |
 | Inference and service credentials | Gateway injects credentials only at the trusted outbound boundary. Agents receive a scoped route, not the upstream secret. |

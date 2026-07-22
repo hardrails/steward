@@ -353,6 +353,10 @@ intent, and either ephemeral state or a quota-enforced state backend. Steward's
 agent authorizer adds this requirement automatically for a `hardened` application.
 An authenticated runtime-assurance report describes the node configuration; it is
 not hardware attestation and does not prove the host is uncompromised.
+Control checks hard constraints before placement, then the destination Executor
+checks the signed isolation profile, assurance profile, required labels, and taint
+tolerations again before it accepts a delegated admission. Preferred labels and
+topology spreading remain controller ranking hints and do not grant authority.
 
 The arrays must be sorted and contain no duplicates. Keys, values, and
 tolerations may contain letters, digits, `.`, `_`, `:`, `/`, and `-`, up to 128
