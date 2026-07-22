@@ -1398,6 +1398,19 @@ policy = {
     "runtime_overhead": resources(67108864, 100, 32, 0),
 }
 policy_digest = "sha256:" + hashlib.sha256(json.dumps(policy, separators=(",", ":")).encode()).hexdigest()
+runtime_assurance = {
+    "schema_version": "steward.runtime-assurance.v1",
+    "profile": "shared-host-hardened",
+    "runtime": "docker",
+    "isolation": "gvisor",
+    "network": "isolated-bridge",
+    "state_isolation": "ephemeral-only",
+    "credential_boundary": "gateway-only",
+    "host_admin_intent": False,
+}
+runtime_assurance_digest = "sha256:" + hashlib.sha256(
+    json.dumps(runtime_assurance, separators=(",", ":")).encode()
+).hexdigest()
 observation = {
     "schema_version": "steward.executor-scheduling.v1",
     "node_id": sys.argv[2],
@@ -1407,6 +1420,8 @@ observation = {
     "isolation": "gvisor",
     "boot_identity_sha256": "sha256:" + "a" * 64,
     "scheduling_policy_sha256": policy_digest,
+    "runtime_assurance": runtime_assurance,
+    "runtime_assurance_sha256": runtime_assurance_digest,
     "labels": [{"key": "steward.io/node-pool", "value": sys.argv[3]}],
     "taints": [],
     "cached_image_config_digests": [],
@@ -1461,13 +1476,14 @@ print(controller, created, generation)
 PY
 )
 pool_membership=$work/pool-membership.dsse.json
-scheduling_policy_sha256=$(python3 -I - "$work/scheduling-observation.json" <<'PY'
+read -r scheduling_policy_sha256 runtime_assurance_sha256 < <(python3 -I - \
+	"$work/scheduling-observation.json" <<'PY'
 import json
 import pathlib
 import sys
 
 observation = json.loads(pathlib.Path(sys.argv[1]).read_text())
-print(observation["scheduling_policy_sha256"])
+print(observation["scheduling_policy_sha256"], observation["runtime_assurance_sha256"])
 PY
 )
 run_bounded 30 "$work" "$work/pool-membership-issue.stdout" "$work/pool-membership-issue.stderr" \
@@ -1477,6 +1493,7 @@ run_bounded 30 "$work" "$work/pool-membership-issue.stdout" "$work/pool-membersh
 	-node-id "$node_id" -tenant-ids "$tenant_id" -architecture amd64 \
 	-boot-identity-sha256 sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
 	-scheduling-policy-sha256 "$scheduling_policy_sha256" \
+	-runtime-assurance-sha256 "$runtime_assurance_sha256" \
 	-valid-for 1h -out "$pool_membership" -no-context
 assert_owner_file "$pool_membership"
 run_bounded 30 "$work" "$work/pool-membership-verify.stdout" "$work/pool-membership-verify.stderr" \

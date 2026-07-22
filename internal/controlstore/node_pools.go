@@ -454,7 +454,9 @@ func nodeMeasurementsMatchMembership(node Node, membership *NodePoolMembership) 
 	observation := node.Scheduling.Observation
 	return observation.BootIdentitySHA256 != "" && observation.SchedulingPolicySHA256 != "" &&
 		observation.BootIdentitySHA256 == membership.BootIdentitySHA256 &&
-		observation.SchedulingPolicySHA256 == membership.SchedulingPolicySHA256
+		observation.SchedulingPolicySHA256 == membership.SchedulingPolicySHA256 &&
+		(membership.RuntimeAssuranceSHA256 == "" ||
+			observation.RuntimeAssuranceSHA256 == membership.RuntimeAssuranceSHA256)
 }
 
 func nodePoolNodeReady(node Node, now time.Time, staleAfter time.Duration) (bool, string) {
@@ -551,6 +553,7 @@ func validStoredNodePoolMembership(value *NodePoolMembership, nodeID string, ten
 	if value == nil || !validRecordID(value.PoolID, 128) || value.PoolMembershipGeneration == 0 ||
 		!validTimestamp(value.PoolCreatedAt) || !validSHA256Digest(value.Digest) || !validRecordID(value.KeyID, 128) ||
 		!validSHA256Digest(value.BootIdentitySHA256) || !validSHA256Digest(value.SchedulingPolicySHA256) ||
+		value.RuntimeAssuranceSHA256 != "" && !validSHA256Digest(value.RuntimeAssuranceSHA256) ||
 		!validTimestamp(value.IssuedAt) || !validTimestamp(value.NotAfter) {
 		return false
 	}
@@ -563,6 +566,7 @@ func validStoredNodePoolMembership(value *NodePoolMembership, nodeID string, ten
 		claim.PoolID != value.PoolID || claim.PoolMembershipGeneration != value.PoolMembershipGeneration ||
 		claim.PoolCreatedAt != value.PoolCreatedAt || claim.Architecture != value.Architecture ||
 		claim.BootIdentitySHA256 != value.BootIdentitySHA256 || claim.SchedulingPolicySHA256 != value.SchedulingPolicySHA256 ||
+		claim.RuntimeAssuranceSHA256 != value.RuntimeAssuranceSHA256 ||
 		claim.IssuedAt != value.IssuedAt || claim.NotAfter != value.NotAfter {
 		return false
 	}
@@ -619,7 +623,8 @@ func (store *Store) BindNodePoolMembership(identity controlauth.NodeIdentity, au
 		PoolID: claim.PoolID, PoolMembershipGeneration: claim.PoolMembershipGeneration, PoolCreatedAt: claim.PoolCreatedAt, Digest: verified.Digest, KeyID: verified.KeyID,
 		EnvelopeBase64: base64.StdEncoding.EncodeToString(raw), Architecture: claim.Architecture,
 		BootIdentitySHA256: claim.BootIdentitySHA256, SchedulingPolicySHA256: claim.SchedulingPolicySHA256,
-		IssuedAt: claim.IssuedAt, NotAfter: claim.NotAfter,
+		RuntimeAssuranceSHA256: claim.RuntimeAssuranceSHA256,
+		IssuedAt:               claim.IssuedAt, NotAfter: claim.NotAfter,
 	}
 	if !nodeMeasurementsMatchMembership(node, membership) {
 		return Node{}, ErrConflict

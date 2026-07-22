@@ -608,6 +608,57 @@ func TestNodeScopedDecoderAcceptsOnlyExecutorVerifiedControllerDelegation(t *tes
 	}
 }
 
+func TestExecutorPlacementRevalidationFailsClosed(t *testing.T) {
+	assurance := controlprotocol.RuntimeAssuranceV1{
+		SchemaVersion: controlprotocol.RuntimeAssuranceSchemaV1,
+		Profile:       controlprotocol.RuntimeAssuranceSharedHost, Runtime: "docker",
+		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor, Network: "isolated-bridge",
+		StateIsolation: controlprotocol.RuntimeAssuranceStateQuota, CredentialBoundary: "gateway-only",
+	}
+	assuranceDigest, err := controlprotocol.RuntimeAssuranceDigest(assurance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := controlprotocol.ExecutorSchedulingPolicyV1{
+		PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 1, CPUMillis: 1, PIDs: 1, Workloads: 1},
+		Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2, CPUMillis: 2, PIDs: 2, Workloads: 2},
+		Tenant:          controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2, CPUMillis: 2, PIDs: 2, Workloads: 2},
+		RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 1, CPUMillis: 1, PIDs: 1},
+	}
+	observation := &controlprotocol.ExecutorSchedulingObservationV1{
+		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+		NodeID:        "node-1", CredentialScope: "node", OS: "linux", Architecture: "amd64",
+		Isolation:        controlprotocol.ExecutorSchedulingIsolationGVisor,
+		RuntimeAssurance: &assurance, RuntimeAssuranceSHA256: assuranceDigest,
+		Labels: []controlprotocol.ExecutorSchedulingLabelV1{{Key: "region", Value: "west"}},
+		Taints: []string{"dedicated"}, CachedImageConfigDigests: []string{}, Policy: policy,
+	}
+	placement := admission.CommandDelegationPlacement{
+		RequiredIsolation: "gvisor", RequiredAssurance: controlprotocol.RuntimeAssuranceSharedHost,
+		RequiredLabels: []admission.CommandDelegationLabel{{Key: "region", Value: "west"}},
+		Tolerations:    []string{"dedicated"},
+	}
+	if !executorPlacementMatches(observation, placement) {
+		t.Fatal("matching signed placement was rejected")
+	}
+	missing := *observation
+	missing.RuntimeAssurance = nil
+	missing.RuntimeAssuranceSHA256 = ""
+	if executorPlacementMatches(&missing, placement) {
+		t.Fatal("missing runtime assurance satisfied signed placement")
+	}
+	wrongLabel := placement
+	wrongLabel.RequiredLabels = []admission.CommandDelegationLabel{{Key: "region", Value: "east"}}
+	if executorPlacementMatches(observation, wrongLabel) {
+		t.Fatal("wrong label satisfied signed placement")
+	}
+	untolerated := placement
+	untolerated.Tolerations = []string{}
+	if executorPlacementMatches(observation, untolerated) {
+		t.Fatal("untolerated taint satisfied signed placement")
+	}
+}
+
 func TestNodeScopedRestartUsesCurrentPolicyAndSiteCleanupAuthority(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	oldTenantPublic, oldTenantPrivate, err := ed25519.GenerateKey(rand.Reader)

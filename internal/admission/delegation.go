@@ -75,6 +75,7 @@ type CommandDelegationAdmissionTemplate struct {
 // where Control may place an instance but does not grant Executor authority.
 type CommandDelegationPlacement struct {
 	RequiredIsolation string                   `json:"required_isolation,omitempty"`
+	RequiredAssurance string                   `json:"required_assurance,omitempty"`
 	RequiredLabels    []CommandDelegationLabel `json:"required_labels"`
 	PreferredLabels   []CommandDelegationLabel `json:"preferred_labels,omitempty"`
 	SpreadBy          string                   `json:"spread_by,omitempty"`
@@ -190,6 +191,8 @@ func (template CommandDelegationAdmissionTemplate) Validate() error {
 
 func validCommandDelegationPlacement(placement CommandDelegationPlacement) bool {
 	if placement.RequiredIsolation != "" && placement.RequiredIsolation != "gvisor" ||
+		placement.RequiredAssurance != "" && placement.RequiredAssurance != controlprotocol.RuntimeAssuranceSharedHost &&
+			placement.RequiredAssurance != controlprotocol.RuntimeAssuranceDedicatedHost ||
 		placement.RequiredLabels == nil || len(placement.RequiredLabels) > maxCommandPlacementLabels ||
 		len(placement.PreferredLabels) > maxCommandPlacementLabels ||
 		placement.SpreadBy != "" && !controlprotocol.ValidSchedulingAttribute(placement.SpreadBy) ||

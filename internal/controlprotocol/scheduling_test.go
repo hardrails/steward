@@ -23,6 +23,13 @@ func TestExecutorSchedulingObservationV1ValidatesCanonicalBoundedProfile(t *test
 		{"policy digest", func(value *ExecutorSchedulingObservationV1) {
 			value.SchedulingPolicySHA256 = "sha256:" + strings.Repeat("a", 64)
 		}},
+		{"assurance without digest", func(value *ExecutorSchedulingObservationV1) { value.RuntimeAssuranceSHA256 = "" }},
+		{"assurance digest", func(value *ExecutorSchedulingObservationV1) {
+			value.RuntimeAssuranceSHA256 = "sha256:" + strings.Repeat("a", 64)
+		}},
+		{"weakened shared host", func(value *ExecutorSchedulingObservationV1) {
+			value.RuntimeAssurance.StateIsolation = RuntimeAssuranceStateDedicated
+		}},
 		{"nil labels", func(value *ExecutorSchedulingObservationV1) { value.Labels = nil }},
 		{"unsorted labels", func(value *ExecutorSchedulingObservationV1) {
 			value.Labels = []ExecutorSchedulingLabelV1{{Key: "zone", Value: "b"}, {Key: "region", Value: "a"}}
@@ -83,6 +90,46 @@ func TestExecutorSchedulingObservationPreservesReportedEmptyImageInventory(t *te
 	}
 }
 
+func TestRuntimeAssuranceProfilesRejectWeakerOrAmbiguousBoundaries(t *testing.T) {
+	shared := RuntimeAssuranceV1{
+		SchemaVersion: RuntimeAssuranceSchemaV1, Profile: RuntimeAssuranceSharedHost,
+		Runtime: "docker", Isolation: ExecutorSchedulingIsolationGVisor, Network: "isolated-bridge",
+		StateIsolation: RuntimeAssuranceStateEphemeral, CredentialBoundary: "not-configured",
+	}
+	if _, err := RuntimeAssuranceDigest(shared); err != nil {
+		t.Fatalf("valid shared-host assurance: %v", err)
+	}
+	dedicated := shared
+	dedicated.Profile = RuntimeAssuranceDedicatedHost
+	dedicated.StateIsolation = RuntimeAssuranceStateDedicated
+	dedicated.HostAdminIntent = true
+	if _, err := RuntimeAssuranceDigest(dedicated); err != nil {
+		t.Fatalf("valid dedicated-host assurance: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*RuntimeAssuranceV1)
+	}{
+		{"schema", func(value *RuntimeAssuranceV1) { value.SchemaVersion = "steward.runtime-assurance.v2" }},
+		{"runtime", func(value *RuntimeAssuranceV1) { value.Runtime = "containerd" }},
+		{"isolation", func(value *RuntimeAssuranceV1) { value.Isolation = "runc" }},
+		{"network", func(value *RuntimeAssuranceV1) { value.Network = "host" }},
+		{"credential boundary", func(value *RuntimeAssuranceV1) { value.CredentialBoundary = "environment" }},
+		{"shared host admin", func(value *RuntimeAssuranceV1) { value.HostAdminIntent = true }},
+		{"shared unquotaed", func(value *RuntimeAssuranceV1) { value.StateIsolation = RuntimeAssuranceStateDedicated }},
+		{"unknown profile", func(value *RuntimeAssuranceV1) { value.Profile = "unknown" }},
+		{"unknown state", func(value *RuntimeAssuranceV1) { value.StateIsolation = "unknown" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := shared
+			test.mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid runtime assurance was accepted")
+			}
+		})
+	}
+}
+
 func schedulingObservationFixture() ExecutorSchedulingObservationV1 {
 	observation := ExecutorSchedulingObservationV1{
 		SchemaVersion: ExecutorSchedulingSchemaV1,
@@ -103,5 +150,15 @@ func schedulingObservationFixture() ExecutorSchedulingObservationV1 {
 	}
 	observation.BootIdentitySHA256 = "sha256:" + strings.Repeat("b", 64)
 	observation.SchedulingPolicySHA256 = digest
+	assurance := RuntimeAssuranceV1{
+		SchemaVersion: RuntimeAssuranceSchemaV1, Profile: RuntimeAssuranceSharedHost,
+		Runtime: "docker", Isolation: ExecutorSchedulingIsolationGVisor, Network: "isolated-bridge",
+		StateIsolation: RuntimeAssuranceStateQuota, CredentialBoundary: "gateway-only",
+	}
+	observation.RuntimeAssurance = &assurance
+	observation.RuntimeAssuranceSHA256, err = RuntimeAssuranceDigest(assurance)
+	if err != nil {
+		panic(err)
+	}
 	return observation
 }

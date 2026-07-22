@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -205,6 +206,7 @@ func TestDelegatedAdmissionBindsExactCapsule(t *testing.T) {
 func TestCommandDelegationPlacementRequiresCanonicalFiniteConstraints(t *testing.T) {
 	valid := CommandDelegationPlacement{
 		RequiredIsolation: "gvisor",
+		RequiredAssurance: controlprotocol.RuntimeAssuranceSharedHost,
 		RequiredLabels: []CommandDelegationLabel{
 			{Key: "accelerator", Value: "gpu"},
 			{Key: "region", Value: "west"},
@@ -224,6 +226,7 @@ func TestCommandDelegationPlacementRequiresCanonicalFiniteConstraints(t *testing
 		mutate func(*CommandDelegationPlacement)
 	}{
 		{"isolation", func(value *CommandDelegationPlacement) { value.RequiredIsolation = "runc" }},
+		{"assurance", func(value *CommandDelegationPlacement) { value.RequiredAssurance = "self-reported-magic" }},
 		{"nil labels", func(value *CommandDelegationPlacement) { value.RequiredLabels = nil }},
 		{"unsorted labels", func(value *CommandDelegationPlacement) {
 			value.RequiredLabels[0], value.RequiredLabels[1] = value.RequiredLabels[1], value.RequiredLabels[0]

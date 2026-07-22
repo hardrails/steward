@@ -12,6 +12,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
@@ -97,7 +98,8 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 		!statement.Admission.Capabilities.State || !statement.Admission.Capabilities.Inference ||
 		!statement.Admission.Capabilities.Service || statement.Admission.ServiceID != "hermes-api" ||
 		statement.Admission.InferenceRouteID != "local" || statement.Admission.ModelAlias != "default" ||
-		statement.Admission.Placement == nil || statement.Admission.Placement.RequiredIsolation != "gvisor" {
+		statement.Admission.Placement == nil || statement.Admission.Placement.RequiredIsolation != "gvisor" ||
+		statement.Admission.Placement.RequiredAssurance != controlprotocol.RuntimeAssuranceSharedHost {
 		t.Fatalf("verified delegation = %+v", statement)
 	}
 	decodedController, err := base64PublicKey(statement.ControllerPublicKey)

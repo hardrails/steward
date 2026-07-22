@@ -404,12 +404,39 @@ func main() {
 	var schedulingObservation *controlprotocol.ExecutorSchedulingObservationV1
 	if secureNodeID != "" {
 		runtimeOverhead := executor.RuntimeOverheadResources()
+		assuranceProfile := controlprotocol.RuntimeAssuranceSharedHost
+		stateIsolation := controlprotocol.RuntimeAssuranceStateEphemeral
+		if *stateBackendSocket != "" {
+			stateIsolation = controlprotocol.RuntimeAssuranceStateQuota
+		}
+		if *allowUnquotaedState {
+			stateIsolation = controlprotocol.RuntimeAssuranceStateDedicated
+		}
+		if *admissionAllowHostAdmin || *allowUnquotaedState {
+			assuranceProfile = controlprotocol.RuntimeAssuranceDedicatedHost
+		}
+		credentialBoundary := "not-configured"
+		if *gatewayControlSocket != "" {
+			credentialBoundary = "gateway-only"
+		}
+		runtimeAssurance := controlprotocol.RuntimeAssuranceV1{
+			SchemaVersion: controlprotocol.RuntimeAssuranceSchemaV1,
+			Profile:       assuranceProfile, Runtime: "docker", Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
+			Network: "isolated-bridge", StateIsolation: stateIsolation,
+			CredentialBoundary: credentialBoundary, HostAdminIntent: *admissionAllowHostAdmin,
+		}
+		assuranceDigest, err := controlprotocol.RuntimeAssuranceDigest(runtimeAssurance)
+		if err != nil {
+			slog.Error("derive node runtime assurance digest", "err", err)
+			os.Exit(2)
+		}
 		schedulingObservation = &controlprotocol.ExecutorSchedulingObservationV1{
 			SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
 			NodeID:        secureNodeID, CredentialScope: "node", OS: "linux",
 			Architecture: runtime.GOARCH, Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
 			BootIdentitySHA256: *nodeBootIdentitySHA256,
-			Labels:             schedulingLabels, Taints: schedulingTaints,
+			RuntimeAssurance:   &runtimeAssurance, RuntimeAssuranceSHA256: assuranceDigest,
+			Labels: schedulingLabels, Taints: schedulingTaints,
 			Policy: controlprotocol.ExecutorSchedulingPolicyV1{
 				PerWorkload: controlprotocol.ExecutorSchedulingResourcesV1{
 					MemoryBytes: policy.MaxMemoryBytes, CPUMillis: policy.MaxCPUMillis,

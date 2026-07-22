@@ -14,6 +14,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
@@ -230,8 +231,10 @@ func agentDelegationTemplate(intent admission.InstanceIntent, placement agentapp
 	tolerations := append([]string{}, placement.Tolerations...)
 	slices.Sort(tolerations)
 	requiredIsolation := ""
+	requiredAssurance := ""
 	if placement.Isolation == "hardened" {
 		requiredIsolation = "gvisor"
+		requiredAssurance = controlprotocol.RuntimeAssuranceSharedHost
 	}
 	return &admission.CommandDelegationAdmissionTemplate{
 		CapsuleDigest: intent.CapsuleDigest, Resources: intent.Resources, Capabilities: intent.Capabilities,
@@ -240,7 +243,8 @@ func agentDelegationTemplate(intent admission.InstanceIntent, placement agentapp
 		EgressRouteIDs: append([]string(nil), intent.EgressRouteIDs...),
 		ConnectorIDs:   append([]string(nil), intent.ConnectorIDs...), EffectMode: intent.EffectMode,
 		Placement: &admission.CommandDelegationPlacement{
-			RequiredIsolation: requiredIsolation, RequiredLabels: required, PreferredLabels: preferred,
+			RequiredIsolation: requiredIsolation, RequiredAssurance: requiredAssurance,
+			RequiredLabels: required, PreferredLabels: preferred,
 			SpreadBy: placement.SpreadBy, Tolerations: tolerations,
 		},
 	}

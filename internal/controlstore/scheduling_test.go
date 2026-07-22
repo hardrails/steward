@@ -120,6 +120,7 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	}
 	placement := &admission.CommandDelegationPlacement{
 		RequiredIsolation: "gvisor",
+		RequiredAssurance: controlprotocol.RuntimeAssuranceSharedHost,
 		RequiredLabels:    []admission.CommandDelegationLabel{{Key: "region", Value: "west"}},
 		Tolerations:       []string{"dedicated"},
 	}
@@ -130,6 +131,17 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	wrongIsolation.RequiredIsolation = "native"
 	if schedulingPlacementMatches(tainted.Scheduling.Observation, &wrongIsolation) {
 		t.Fatal("wrong required isolation matched")
+	}
+	missingAssurance := cloneNode(tainted)
+	missingAssurance.Scheduling.Observation.RuntimeAssurance = nil
+	missingAssurance.Scheduling.Observation.RuntimeAssuranceSHA256 = ""
+	if schedulingPlacementMatches(missingAssurance.Scheduling.Observation, placement) {
+		t.Fatal("missing required assurance matched")
+	}
+	wrongAssurance := *placement
+	wrongAssurance.RequiredAssurance = controlprotocol.RuntimeAssuranceDedicatedHost
+	if schedulingPlacementMatches(tainted.Scheduling.Observation, &wrongAssurance) {
+		t.Fatal("wrong required assurance matched")
 	}
 	missingLabel := *placement
 	missingLabel.RequiredLabels = []admission.CommandDelegationLabel{{Key: "zone", Value: "one"}}
@@ -220,10 +232,22 @@ func TestSchedulingFormatRejectsLegacyStateSmuggling(t *testing.T) {
 }
 
 func storeSchedulingObservation(nodeID string) controlprotocol.ExecutorSchedulingObservationV1 {
+	assurance := controlprotocol.RuntimeAssuranceV1{
+		SchemaVersion: controlprotocol.RuntimeAssuranceSchemaV1,
+		Profile:       controlprotocol.RuntimeAssuranceSharedHost, Runtime: "docker",
+		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor, Network: "isolated-bridge",
+		StateIsolation: controlprotocol.RuntimeAssuranceStateQuota, CredentialBoundary: "gateway-only",
+	}
+	assuranceDigest, err := controlprotocol.RuntimeAssuranceDigest(assurance)
+	if err != nil {
+		panic(err)
+	}
 	return controlprotocol.ExecutorSchedulingObservationV1{
 		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
 		NodeID:        nodeID, CredentialScope: "node", OS: "linux", Architecture: "amd64",
 		Isolation:                controlprotocol.ExecutorSchedulingIsolationGVisor,
+		RuntimeAssurance:         &assurance,
+		RuntimeAssuranceSHA256:   assuranceDigest,
 		Labels:                   []controlprotocol.ExecutorSchedulingLabelV1{{Key: "region", Value: "west"}},
 		Taints:                   []string{},
 		CachedImageConfigDigests: []string{"sha256:" + strings.Repeat("a", 64)},

@@ -59,6 +59,8 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeList(arguments[2:], stdout)
 	case "node status":
 		return controlNodeStatus(arguments[2:], stdout)
+	case "node assurance":
+		return controlNodeAssurance(arguments[2:], stdout)
 	case "node revoke":
 		return controlNodeRevoke(arguments[2:], stdout)
 	case "node cordon":
@@ -153,7 +155,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete|membership-issue|membership-verify|membership-bind, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|assurance|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete|membership-issue|membership-verify|membership-bind, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 func controlEventList(arguments []string, stdout io.Writer) error {
@@ -323,10 +325,23 @@ func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error 
 	architecture := flags.String("architecture", "", "node architecture")
 	bootDigest := flags.String("boot-identity-sha256", "", "measured or immutable boot identity digest")
 	policyDigest := flags.String("scheduling-policy-sha256", "", "node scheduling policy digest")
+	assuranceDigest := flags.String("runtime-assurance-sha256", "", "node runtime assurance digest")
+	assuranceReportPath := flags.String("node-assurance", "", "node assurance report; derives node, architecture, and measurement digests")
 	validFor := flags.Duration("valid-for", time.Hour, "membership lifetime, at most 24 hours")
 	output := flags.String("out", "", "new signed membership envelope")
 	if err := flags.Parse(arguments); err != nil {
 		return err
+	}
+	if *assuranceReportPath != "" {
+		if *nodeID != "" || *architecture != "" || *bootDigest != "" || *policyDigest != "" || *assuranceDigest != "" {
+			return errors.New("membership issue -node-assurance replaces node, architecture, boot, policy, and runtime assurance flags")
+		}
+		report, err := loadNodeAssuranceReport(*assuranceReportPath, timeNow().UTC())
+		if err != nil {
+			return err
+		}
+		*nodeID, *architecture = report.NodeID, report.Architecture
+		*bootDigest, *policyDigest, *assuranceDigest = report.BootIdentitySHA256, report.SchedulingPolicySHA256, report.RuntimeAssuranceSHA256
 	}
 	tenants, err := parseTenantIDs(*tenantList)
 	if err != nil {
@@ -334,9 +349,9 @@ func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error 
 	}
 	slices.Sort(tenants)
 	if *privateKeyPath == "" || *keyID == "" || *controllerID == "" || *poolID == "" || *membershipGeneration == 0 || *poolCreatedAt == "" ||
-		*nodeID == "" || *bootDigest == "" || *policyDigest == "" || *validFor <= 0 || *validFor > poolmembership.MaxLifetime ||
+		*nodeID == "" || *bootDigest == "" || *policyDigest == "" || *assuranceDigest == "" || *validFor <= 0 || *validFor > poolmembership.MaxLifetime ||
 		*output == "" || flags.NArg() != 0 {
-		return errors.New("membership issue requires a key, controller, exact pool membership generation, node, tenants, boot and policy digests, bounded validity, and output")
+		return errors.New("membership issue requires a key, controller, exact pool membership generation, node, tenants, boot, policy, and runtime assurance digests, bounded validity, and output")
 	}
 	privateKey, err := readPrivateKey(*privateKeyPath)
 	if err != nil {
@@ -348,7 +363,8 @@ func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error 
 		PoolCreatedAt: *poolCreatedAt,
 		NodeID:        *nodeID, TenantIDs: tenants, Architecture: *architecture,
 		BootIdentitySHA256: *bootDigest, SchedulingPolicySHA256: *policyDigest,
-		IssuedAt: now.Format(time.RFC3339Nano), NotAfter: now.Add(*validFor).Format(time.RFC3339Nano),
+		RuntimeAssuranceSHA256: *assuranceDigest,
+		IssuedAt:               now.Format(time.RFC3339Nano), NotAfter: now.Add(*validFor).Format(time.RFC3339Nano),
 	}, *keyID, privateKey)
 	if err != nil {
 		return err
@@ -359,6 +375,35 @@ func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error 
 	}
 	_, err = fmt.Fprintln(stdout, strings.TrimSpace(dsse.Digest(raw[:len(raw)-1])))
 	return err
+}
+
+func loadNodeAssuranceReport(path string, now time.Time) (nodeAssuranceReport, error) {
+	raw, err := securefile.Read(path, 64<<10, securefile.TrustFile)
+	if err != nil {
+		return nodeAssuranceReport{}, fmt.Errorf("read node assurance report: %w", err)
+	}
+	var report nodeAssuranceReport
+	if err := dsse.DecodeStrictInto(raw, 64<<10, &report); err != nil {
+		return nodeAssuranceReport{}, fmt.Errorf("decode node assurance report: %w", err)
+	}
+	if report.SchemaVersion != nodeAssuranceReportSchemaV1 || report.Status != "pass" || report.NodeID == "" ||
+		report.Architecture == "" || report.RuntimeAssurance == nil || report.RuntimeAssurance.Validate() != nil ||
+		report.Profile != report.RuntimeAssurance.Profile || report.BootIdentitySHA256 == "" ||
+		report.SchedulingPolicySHA256 == "" || report.RuntimeAssuranceSHA256 == "" || len(report.Reasons) != 0 ||
+		report.MaximumAgeSeconds <= 0 || report.MaximumAgeSeconds > int64(time.Hour.Seconds()) || now.IsZero() {
+		return nodeAssuranceReport{}, errors.New("node assurance report is incomplete or failed")
+	}
+	digest, err := controlprotocol.RuntimeAssuranceDigest(*report.RuntimeAssurance)
+	if err != nil || digest != report.RuntimeAssuranceSHA256 || !controlprotocol.ValidSHA256Digest(report.BootIdentitySHA256) ||
+		!controlprotocol.ValidSHA256Digest(report.SchedulingPolicySHA256) {
+		return nodeAssuranceReport{}, errors.New("node assurance report digests are invalid")
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, report.ObservedAt)
+	maximumAge := time.Duration(report.MaximumAgeSeconds) * time.Second
+	if err != nil || observedAt.After(now.Add(30*time.Second)) || !now.Before(observedAt.Add(maximumAge)) {
+		return nodeAssuranceReport{}, errors.New("node assurance report is stale or has a future observation time")
+	}
+	return report, nil
 }
 
 func controlNodePoolMembershipVerify(arguments []string, stdout io.Writer) error {
@@ -801,6 +846,95 @@ func controlNodeStatus(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, node)
+}
+
+const nodeAssuranceReportSchemaV1 = "steward.node-runtime-assurance-report.v1"
+
+type nodeAssuranceReport struct {
+	SchemaVersion          string                              `json:"schema_version"`
+	Status                 string                              `json:"status"`
+	NodeID                 string                              `json:"node_id"`
+	Architecture           string                              `json:"architecture,omitempty"`
+	Profile                string                              `json:"profile,omitempty"`
+	BootIdentitySHA256     string                              `json:"boot_identity_sha256,omitempty"`
+	SchedulingPolicySHA256 string                              `json:"scheduling_policy_sha256,omitempty"`
+	RuntimeAssuranceSHA256 string                              `json:"runtime_assurance_sha256,omitempty"`
+	RuntimeAssurance       *controlprotocol.RuntimeAssuranceV1 `json:"runtime_assurance,omitempty"`
+	ObservedAt             string                              `json:"observed_at,omitempty"`
+	MaximumAgeSeconds      int64                               `json:"maximum_age_seconds"`
+	PoolMembershipBound    bool                                `json:"pool_membership_bound"`
+	Reasons                []string                            `json:"reasons"`
+}
+
+func controlNodeAssurance(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node assurance", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	nodeID := flags.String("node-id", "", "node identity")
+	requiredProfile := flags.String("required-profile", controlprotocol.RuntimeAssuranceSharedHost, "required runtime assurance profile")
+	maximumAge := flags.Duration("max-age", 5*time.Minute, "maximum scheduling observation age")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *tenantID == "" || *nodeID == "" ||
+		(*requiredProfile != controlprotocol.RuntimeAssuranceSharedHost && *requiredProfile != controlprotocol.RuntimeAssuranceDedicatedHost) ||
+		*maximumAge < time.Second || *maximumAge > time.Hour || flags.NArg() != 0 {
+		return errors.New("control node assurance requires tenant, node, a known assurance profile, and max-age from 1s through 1h")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	node, err := client.GetNode(ctx, *tenantID, *nodeID)
+	if err != nil {
+		return err
+	}
+	report := nodeAssuranceReport{
+		SchemaVersion: nodeAssuranceReportSchemaV1, Status: "fail", NodeID: node.NodeID,
+		MaximumAgeSeconds: int64(maximumAge.Seconds()), Reasons: []string{},
+	}
+	if node.Scheduling == nil {
+		report.Reasons = append(report.Reasons, "scheduling observation is unavailable")
+	} else {
+		observation := node.Scheduling.Observation
+		report.Architecture = observation.Architecture
+		report.BootIdentitySHA256 = observation.BootIdentitySHA256
+		report.SchedulingPolicySHA256 = observation.SchedulingPolicySHA256
+		report.RuntimeAssuranceSHA256 = observation.RuntimeAssuranceSHA256
+		report.ObservedAt = node.Scheduling.ObservedAt
+		if observation.RuntimeAssurance != nil {
+			assurance := *observation.RuntimeAssurance
+			report.RuntimeAssurance = &assurance
+			report.Profile = assurance.Profile
+		}
+		if err := observation.Validate(); err != nil {
+			report.Reasons = append(report.Reasons, "runtime assurance observation is invalid")
+		}
+		observedAt, parseErr := time.Parse(time.RFC3339Nano, node.Scheduling.ObservedAt)
+		now := timeNow().UTC()
+		if parseErr != nil || observedAt.After(now.Add(30*time.Second)) || !now.Before(observedAt.Add(*maximumAge)) {
+			report.Reasons = append(report.Reasons, "runtime assurance observation is stale")
+		}
+		if observation.BootIdentitySHA256 == "" || observation.SchedulingPolicySHA256 == "" ||
+			observation.RuntimeAssuranceSHA256 == "" {
+			report.Reasons = append(report.Reasons, "boot, scheduling, and runtime assurance digests are required")
+		}
+		if observation.RuntimeAssurance == nil || observation.RuntimeAssurance.Profile != *requiredProfile {
+			report.Reasons = append(report.Reasons, "runtime assurance profile does not satisfy the requested profile")
+		}
+		if node.PoolMembership != nil && node.PoolMembership.RuntimeAssuranceSHA256 == observation.RuntimeAssuranceSHA256 &&
+			node.PoolMembership.BootIdentitySHA256 == observation.BootIdentitySHA256 &&
+			node.PoolMembership.SchedulingPolicySHA256 == observation.SchedulingPolicySHA256 {
+			report.PoolMembershipBound = true
+		}
+	}
+	if len(report.Reasons) == 0 {
+		report.Status = "pass"
+	}
+	return writeControlJSON(stdout, report)
 }
 
 func controlNodeRevoke(arguments []string, stdout io.Writer) error {

@@ -64,6 +64,7 @@ var controlContextCommands = map[string]controlContextCommandSpec{
 	"enrollment exchange":       {network: true},
 	"node list":                 {network: true, token: true, tenant: true},
 	"node status":               {network: true, token: true, tenant: true, node: true},
+	"node assurance":            {network: true, token: true, tenant: true, node: true},
 	"node revoke":               {network: true, token: true},
 	"node cordon":               {network: true, token: true},
 	"node uncordon":             {network: true, token: true},

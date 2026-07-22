@@ -329,6 +329,7 @@ To narrow placement, add this optional object to `admission-template.json`:
 {
   "placement": {
     "required_isolation": "gvisor",
+    "required_assurance": "shared-host-hardened",
     "required_labels": [
       {"key": "region", "value": "west"}
     ],
@@ -346,6 +347,16 @@ more exact matches rank ahead of lower load. `spread_by` first prefers nodes
 that report the label, then the topology value with the fewest instances from
 this deployment. The stored instance includes the matched keys, spread value,
 same-domain count, node load, and decision time.
+
+`shared-host-hardened` requires gVisor, isolated-bridge networking, no host-admin
+intent, and either ephemeral state or a quota-enforced state backend. Steward's
+agent authorizer adds this requirement automatically for a `hardened` application.
+An authenticated runtime-assurance report describes the node configuration; it is
+not hardware attestation and does not prove the host is uncompromised.
+Control checks hard constraints before placement, then the destination Executor
+checks the signed isolation profile, assurance profile, required labels, and taint
+tolerations again before it accepts a delegated admission. Preferred labels and
+topology spreading remain controller ranking hints and do not grant authority.
 
 The arrays must be sorted and contain no duplicates. Keys, values, and
 tolerations may contain letters, digits, `.`, `_`, `:`, `/`, and `-`, up to 128

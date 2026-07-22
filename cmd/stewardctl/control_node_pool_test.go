@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/controlclient"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 )
 
@@ -87,6 +88,7 @@ func TestControlNodePoolMembershipIssueAndVerify(t *testing.T) {
 		"-tenant-ids", "tenant-b,tenant-a", "-architecture", "amd64",
 		"-boot-identity-sha256", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"-scheduling-policy-sha256", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"-runtime-assurance-sha256", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		"-valid-for", "1h", "-out", output, "-no-context",
 	}, &digest, &bytes.Buffer{})
 	if err != nil || !strings.HasPrefix(strings.TrimSpace(digest.String()), "sha256:") {
@@ -106,6 +108,139 @@ func TestControlNodePoolMembershipIssueAndVerify(t *testing.T) {
 	if err := json.Unmarshal(verified.Bytes(), &statement); err != nil || statement.PoolID != "pool-a" ||
 		strings.Join(statement.TenantIDs, ",") != "tenant-a,tenant-b" {
 		t.Fatalf("verified=%s err=%v", verified.String(), err)
+	}
+}
+
+func TestNodeAssuranceReportFeedsOfflineMembershipIssue(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	assurance := controlprotocol.RuntimeAssuranceV1{
+		SchemaVersion: controlprotocol.RuntimeAssuranceSchemaV1,
+		Profile:       controlprotocol.RuntimeAssuranceSharedHost, Runtime: "docker",
+		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor, Network: "isolated-bridge",
+		StateIsolation: controlprotocol.RuntimeAssuranceStateQuota, CredentialBoundary: "gateway-only",
+	}
+	assuranceDigest, err := controlprotocol.RuntimeAssuranceDigest(assurance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := controlprotocol.ExecutorSchedulingPolicyV1{
+		PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 1, CPUMillis: 1, PIDs: 1, Workloads: 1},
+		Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2, CPUMillis: 2, PIDs: 2, Workloads: 2},
+		Tenant:          controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2, CPUMillis: 2, PIDs: 2, Workloads: 2},
+		RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 1, CPUMillis: 1, PIDs: 1},
+	}
+	policyDigest, err := controlprotocol.SchedulingPolicyDigest(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := controlclient.Node{
+		NodeID: "node-a", TenantIDs: []string{"tenant-a"}, Capabilities: []string{}, State: "active",
+		CreatedAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
+		Scheduling: &controlstore.NodeScheduling{
+			ObservedAt: now.Add(-time.Minute).Format(time.RFC3339Nano),
+			Observation: controlprotocol.ExecutorSchedulingObservationV1{
+				SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+				NodeID:        "node-a", CredentialScope: "node", OS: "linux", Architecture: "amd64",
+				Isolation:          controlprotocol.ExecutorSchedulingIsolationGVisor,
+				BootIdentitySHA256: "sha256:" + strings.Repeat("a", 64), SchedulingPolicySHA256: policyDigest,
+				RuntimeAssurance: &assurance, RuntimeAssuranceSHA256: assuranceDigest,
+				Labels: []controlprotocol.ExecutorSchedulingLabelV1{}, Taints: []string{},
+				CachedImageConfigDigests: []string{}, Policy: policy,
+			},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer operator" || request.URL.Path != "/v1/tenants/tenant-a/nodes/node-a" {
+			t.Fatalf("unexpected assurance request %s auth=%q", request.URL, request.Header.Get("Authorization"))
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(node)
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = originalNow })
+	var report bytes.Buffer
+	if err := run([]string{
+		"control", "node", "assurance", "-tenant-id", "tenant-a", "-node-id", "node-a",
+		"-control-url", server.URL, "-token-file", tokenPath, "-no-context",
+	}, &report, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var decoded nodeAssuranceReport
+	if err := json.Unmarshal(report.Bytes(), &decoded); err != nil || decoded.Status != "pass" || decoded.RuntimeAssuranceSHA256 != assuranceDigest {
+		t.Fatalf("assurance report=%s err=%v", report.String(), err)
+	}
+	reportPath := filepath.Join(directory, "node-assurance.json")
+	if err := os.WriteFile(reportPath, report.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	privatePath, _ := generateTestKeyPair(t, directory, "assurance-membership")
+	membershipPath := filepath.Join(directory, "membership.json")
+	if err := controlNodePoolMembershipIssue([]string{
+		"-private-key", privatePath, "-key-id", "pool-authority-1", "-controller-id", "control-a",
+		"-pool-id", "pool-a", "-pool-membership-generation", "1", "-pool-created-at", now.Add(-time.Hour).Format(time.RFC3339Nano),
+		"-tenant-ids", "tenant-a", "-node-assurance", reportPath, "-out", membershipPath,
+	}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	// A report is useful even when assurance fails: operators get bounded,
+	// machine-readable reasons instead of a generic command error.
+	node.Scheduling = nil
+	var missing bytes.Buffer
+	if err := run([]string{
+		"control", "node", "assurance", "-tenant-id", "tenant-a", "-node-id", "node-a",
+		"-control-url", server.URL, "-token-file", tokenPath, "-no-context",
+	}, &missing, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var failed nodeAssuranceReport
+	if err := json.Unmarshal(missing.Bytes(), &failed); err != nil || failed.Status != "fail" ||
+		strings.Join(failed.Reasons, ",") != "scheduling observation is unavailable" {
+		t.Fatalf("missing assurance report=%s err=%v", missing.String(), err)
+	}
+
+	invalidScheduling := decodedSchedulingFromReport(t, decoded, policy)
+	invalidScheduling.ObservedAt = now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	invalidScheduling.Observation.BootIdentitySHA256 = ""
+	invalidScheduling.Observation.RuntimeAssurance = nil
+	node.Scheduling = &invalidScheduling
+	var invalid bytes.Buffer
+	if err := run([]string{
+		"control", "node", "assurance", "-tenant-id", "tenant-a", "-node-id", "node-a",
+		"-required-profile", controlprotocol.RuntimeAssuranceDedicatedHost, "-max-age", "1m",
+		"-control-url", server.URL, "-token-file", tokenPath, "-no-context",
+	}, &invalid, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(invalid.Bytes(), &failed); err != nil || failed.Status != "fail" || len(failed.Reasons) != 4 {
+		t.Fatalf("invalid assurance report=%s err=%v", invalid.String(), err)
+	}
+}
+
+func decodedSchedulingFromReport(
+	t *testing.T,
+	report nodeAssuranceReport,
+	policy controlprotocol.ExecutorSchedulingPolicyV1,
+) controlstore.NodeScheduling {
+	t.Helper()
+	return controlstore.NodeScheduling{
+		ObservedAt: report.ObservedAt,
+		Observation: controlprotocol.ExecutorSchedulingObservationV1{
+			SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+			NodeID:        report.NodeID, CredentialScope: "node", OS: "linux", Architecture: report.Architecture,
+			Isolation:          controlprotocol.ExecutorSchedulingIsolationGVisor,
+			BootIdentitySHA256: report.BootIdentitySHA256, SchedulingPolicySHA256: report.SchedulingPolicySHA256,
+			RuntimeAssurance: report.RuntimeAssurance, RuntimeAssuranceSHA256: report.RuntimeAssuranceSHA256,
+			Labels: []controlprotocol.ExecutorSchedulingLabelV1{}, Taints: []string{},
+			CachedImageConfigDigests: []string{}, Policy: policy,
+		},
 	}
 }
 
@@ -165,6 +300,7 @@ func TestControlNodePoolMembershipCommandsReportArtifactFailures(t *testing.T) {
 		"-node-id", "node-a", "-tenant-ids", "tenant-a",
 		"-boot-identity-sha256", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"-scheduling-policy-sha256", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"-runtime-assurance-sha256", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		"-valid-for", "1h", "-out", output,
 	}
 	badKey := append([]string(nil), issue...)

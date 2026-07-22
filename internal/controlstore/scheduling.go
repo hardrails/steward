@@ -155,6 +155,13 @@ func schedulingPlacementMatches(
 	if placement.RequiredIsolation != "" && placement.RequiredIsolation != observation.Isolation {
 		return false
 	}
+	if placement.RequiredAssurance != "" {
+		if observation.RuntimeAssurance == nil || observation.RuntimeAssuranceSHA256 == "" ||
+			observation.RuntimeAssurance.Validate() != nil ||
+			observation.RuntimeAssurance.Profile != placement.RequiredAssurance {
+			return false
+		}
+	}
 	for _, required := range placement.RequiredLabels {
 		index := sort.Search(len(observation.Labels), func(index int) bool {
 			return observation.Labels[index].Key >= required.Key
@@ -219,6 +226,10 @@ func (store *Store) ObserveNodeScheduling(
 func cloneSchedulingObservation(
 	value controlprotocol.ExecutorSchedulingObservationV1,
 ) controlprotocol.ExecutorSchedulingObservationV1 {
+	if value.RuntimeAssurance != nil {
+		assurance := *value.RuntimeAssurance
+		value.RuntimeAssurance = &assurance
+	}
 	if value.Labels != nil {
 		value.Labels = append([]controlprotocol.ExecutorSchedulingLabelV1{}, value.Labels...)
 	}
