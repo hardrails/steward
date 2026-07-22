@@ -360,10 +360,26 @@ exercise_activation_service_boundaries() {
 	helper="$work/exercise-activation-service-boundaries.sh"
 	{
 		printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail'
-		for function_name in read_service_activity stop_active_services replace_selector; do
+		for function_name in valid_release_version managed_unit_symlink read_service_activity stop_active_services replace_selector; do
 			sed -n "/^${function_name}() {$/,/^}$/p" "$root/scripts/activate-node-release.sh"
 		done
 		cat <<'EOF'
+links=$(mktemp -d)
+trap 'rm -rf "$links"' EXIT
+ln -s /opt/steward/releases/v3.0.0/integration/deploy/systemd/steward.service "$links/release"
+ln -s /opt/steward/current/integration/deploy/systemd/steward.service "$links/current"
+ln -s /opt/steward/releases/v03.0.0/integration/deploy/systemd/steward.service "$links/invalid-version"
+ln -s /opt/steward/releases/v3.0.0/nested/integration/deploy/systemd/steward.service "$links/nested"
+ln -s /etc/passwd "$links/foreign"
+managed_unit_symlink "$links/release" steward.service
+managed_unit_symlink "$links/current" steward.service
+for unsafe in invalid-version nested foreign; do
+	if managed_unit_symlink "$links/$unsafe" steward.service; then
+		echo "node-upgrade-smoke: activation accepted unsafe managed unit link $unsafe" >&2
+		exit 1
+	fi
+done
+
 SMOKE_GATEWAY_ACTIVITY=inactive
 SMOKE_STEWARD_ACTIVITY=inactive
 SMOKE_EXECUTOR_ACTIVITY=inactive
@@ -453,12 +469,13 @@ fi
 EOF
 	} >"$helper"
 	chmod 0755 "$helper"
-	for function_name in read_service_activity stop_active_services replace_selector; do
+	for function_name in valid_release_version managed_unit_symlink read_service_activity stop_active_services replace_selector; do
 		grep -Fq "$function_name() {" "$helper" || {
 			echo "node-upgrade-smoke: could not extract activation helper $function_name" >&2
 			return 1
 		}
 	done
+	grep -Fq 'managed_unit_symlink "$legacy" "$unit"' "$root/scripts/install-node.sh"
 	bash "$helper"
 }
 
@@ -691,7 +708,20 @@ EOF
 }
 
 exercise_packaged_protocol_wiring() {
-	local configure_helper error_file help_output protocol_helper
+	local configure_helper error_file help_output line protocol_helper
+	while IFS= read -r line || [[ -n $line ]]; do
+		[[ -z $line || $line == \#* ]] && continue
+		if [[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+			echo "node-upgrade-smoke: packaged executor environment contains an invalid assignment: ${line%%=*}" >&2
+			return 1
+		fi
+	done <"$root/deploy/config/executor.env"
+	grep -Fq '[[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]' "$root/scripts/node-preflight.sh"
+	grep -Fq '[[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]' "$root/scripts/node-doctor.sh"
+	grep -Fq '"/opt/steward/releases/$version/integration/scripts/configure-node.sh" "${configure_args[@]}"' \
+		"$root/scripts/install-steward.sh"
+	grep -Fq 'preflight_bin=$release_dir/integration/scripts/node-preflight.sh' \
+		"$root/scripts/configure-node.sh"
 	grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$root/deploy/config/executor.env"
 	grep -Fxq 'Environment=EXECUTOR_UPLINK_PROTOCOL_VERSION=0' \
 		"$root/deploy/systemd/steward-executor.service"

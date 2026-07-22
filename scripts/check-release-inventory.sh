@@ -36,14 +36,17 @@ read_inventory() {
 
 read_inventory "$root/scripts/write-release-manifest.sh" "$work/manifest"
 read_inventory "$root/scripts/install-node.sh" "$work/installer"
+read_inventory "$root/scripts/activate-node-release.sh" "$work/activation"
 # Order is part of the canonical release.json byte contract. The installer
-# reconstructs the manifest in this order before cmp, so set equality is not
-# sufficient: differently ordered inventories would still self-reject.
-if ! cmp -s "$work/manifest" "$work/installer"; then
-	echo "check-release-inventory: manifest writer and node installer inventories differ" >&2
-	diff -u "$work/manifest" "$work/installer" >&2 || true
-	exit 1
-fi
+# and activator reconstruct the manifest in this order before cmp, so set
+# equality is not sufficient: differently ordered inventories self-reject.
+for candidate in "$work/installer" "$work/activation"; do
+	if ! cmp -s "$work/manifest" "$candidate"; then
+		echo "check-release-inventory: release payload inventories differ" >&2
+		diff -u "$work/manifest" "$candidate" >&2 || true
+		exit 1
+	fi
+done
 
 # The Debian builder copies selected top-level trees rather than the complete
 # stage. Derive those trees from the canonical inventory so adding a new payload

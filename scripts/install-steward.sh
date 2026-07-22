@@ -1268,7 +1268,7 @@ else
 			--executor-evidence-public-key "$receipt_public"
 		)
 	fi
-	/usr/local/libexec/steward/configure-node "${configure_args[@]}"
+	"/opt/steward/releases/$version/integration/scripts/configure-node.sh" "${configure_args[@]}"
 fi
 
 echo "install-steward: local Executor roles use /etc/steward/executor-observer-token, /etc/steward/executor-operator-token, and /etc/steward/executor-token"

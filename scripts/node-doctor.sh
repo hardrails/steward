@@ -408,7 +408,7 @@ configure_docker_target() {
 	fi
 	while IFS= read -r line || [[ -n $line ]]; do
 		[[ -z $line || $line == \#* ]] && continue
-		if (( ${#line} > 1024 )) || [[ ! $line =~ ^([A-Z_]+)=(.*)$ ]]; then
+		if (( ${#line} > 1024 )) || [[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
 			add_check docker.target fail 'Executor environment contains an invalid line'
 			return 1
 		fi
@@ -561,7 +561,10 @@ check_docker() {
 	else
 		add_check docker.version fail 'Docker server returned no bounded, valid semantic version'
 	fi
-	if capture_bounded runtimes 8192 "$command_seconds" "$docker_bin" --config "$DOCKER_CONFIG" --host "$DOCKER_HOST" info --format '{{json .Runtimes}}' &&
+	# Docker 29 includes a large OCI feature document under each runtime. Keep
+	# the response bounded, but allow the registered runsc key to survive that
+	# legitimate expansion (17 KiB on the qualified Docker 29 host).
+	if capture_bounded runtimes 65536 "$command_seconds" "$docker_bin" --config "$DOCKER_CONFIG" --host "$DOCKER_HOST" info --format '{{json .Runtimes}}' &&
 		[[ $runtimes =~ \"runsc\"[[:space:]]*: ]]; then
 		add_check docker.runsc pass 'Docker runtime runsc is registered'
 	else

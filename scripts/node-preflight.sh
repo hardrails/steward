@@ -254,7 +254,7 @@ optional=' EXECUTOR_OPERATOR_TOKEN_FILE EXECUTOR_OBSERVER_TOKEN_FILE EXECUTOR_UP
 allowed="$required$uplink$optional"
 while IFS= read -r line || [[ -n $line ]]; do
 	[[ -z $line || $line == \#* ]] && continue
-	if [[ ! $line =~ ^([A-Z_]+)=(.*)$ ]]; then
+	if [[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
 		echo "node-preflight: invalid executor.env line" >&2
 		exit 2
 	fi

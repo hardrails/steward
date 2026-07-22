@@ -58,6 +58,12 @@ info)
 			for ((index = 0; index < 10000; index++)); do printf 'untrusted-runtime-output'; done
 			exit 0
 		fi
+		if [[ ${FAKE_DOCKER_MODERN_RUNTIMES:-0} == 1 ]]; then
+			printf '{"runc":{},"runsc":{"status":"'
+			for ((index = 0; index < 850; index++)); do printf 'oci-runtime-feature'; done
+			printf '"}}\n'
+			exit 0
+		fi
 		printf '{"runc":{},"runsc":{}}\n'
 	fi
 	exit 0
@@ -201,7 +207,7 @@ connector=$work/state/connector\"receipts.ndjson
 chmod 0600 "$fence" "$journal" "$evidence" "$uplink" "$uplink_delivery" "$connector"
 executor_env=$work/state/executor.env
 docker_socket=$work/state/docker.sock
-printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_OPERATOR_TOKEN_FILE=%s\nEXECUTOR_OBSERVER_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\nEXECUTOR_UPLINK_DELIVERY_STATE_FILE=%s\n' \
+printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_OPERATOR_TOKEN_FILE=%s\nEXECUTOR_OBSERVER_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\nEXECUTOR_UPLINK_DELIVERY_STATE_FILE=%s\nEXECUTOR_NODE_BOOT_IDENTITY_SHA256=\n' \
 	"$docker_socket" "$token" "$operator_token" "$observer_token" "$uplink" "$uplink_delivery" >"$executor_env"
 chmod 0600 "$executor_env"
 : >"$work/curl.log"
@@ -276,6 +282,10 @@ json=$(run_doctor)
 [[ $json == *'"id":"identity.executor_observer_token","status":"pass"'* ]]
 [[ $json != *doctor-super-secret* && $json != *actual-agent-work-secret* ]]
 [[ $(printf '%s\n' "$json" | wc -l | tr -d ' ') == 1 ]]
+
+doctor_arguments=(--json)
+modern_runtimes=$(run_doctor FAKE_DOCKER_MODERN_RUNTIMES=1)
+[[ $modern_runtimes == *'"id":"docker.runsc","status":"pass"'* ]]
 
 doctor_arguments=(--json)
 clean_preflight=$(run_doctor STEWARD_BIN=/tmp/untrusted-steward \

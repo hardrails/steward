@@ -642,6 +642,15 @@ func TestListenerEnabledByDefault(t *testing.T) {
 		if waitErr != nil {
 			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
 		}
+		versionOutput, err := exec.Command(bin, "-version").CombinedOutput()
+		if err != nil {
+			t.Fatalf("read binary version: %v\n%s", err, versionOutput)
+		}
+		expectedVersion := strings.TrimPrefix(strings.TrimSpace(string(versionOutput)), "steward ")
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, `"version":"`+expectedVersion+`"`) {
+			t.Fatalf("startup log does not report resolved binary version %q:\n%s", expectedVersion, joined)
+		}
 	})
 
 	t.Run("uplink on", func(t *testing.T) {
