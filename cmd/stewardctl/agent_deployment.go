@@ -118,8 +118,8 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 	if *maxUnavailable < -1 {
 		return errors.New("agent deployment apply requires max-unavailable to be zero or greater")
 	}
-	if (*forkPlanPath == "") != (*forkSourceNode == "") {
-		return errors.New("agent deployment apply requires fork-plan and source-node together")
+	if *forkPlanPath == "" && *forkSourceNode != "" {
+		return errors.New("agent deployment apply requires fork-plan with source-node")
 	}
 	bundleRaw, err := readCLIArtifact(*bundlePath)
 	if err != nil {
@@ -147,9 +147,12 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 		if forkPlan.BundleDigest != bundleDigest {
 			return errors.New("fork plan does not bind the selected agent bundle")
 		}
+		if *forkSourceNode != "" && *forkSourceNode != forkPlan.SourceNodeID {
+			return errors.New("source-node does not match the source node bound into the fork plan")
+		}
 		fork = &controlstore.DeploymentFork{
 			SnapshotID: forkPlan.SnapshotID, SourceLineageID: forkPlan.SourceLineageID,
-			SourceNodeID: *forkSourceNode, ExpiresAt: forkPlan.ExpiresAt,
+			SourceNodeID: forkPlan.SourceNodeID, ExpiresAt: forkPlan.ExpiresAt,
 		}
 	}
 	deploymentID := bundle.Definition.Name
@@ -157,6 +160,11 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 		deploymentID = leadingName
 	} else if flags.NArg() == 1 {
 		deploymentID = flags.Arg(0)
+	} else if fork != nil {
+		deploymentID = forkPlan.DeploymentID
+	}
+	if fork != nil && deploymentID != forkPlan.DeploymentID {
+		return errors.New("deployment name does not match the deployment bound into the fork plan")
 	}
 	capsuleRaw, err := readCLIArtifact(*capsulePath)
 	if err != nil {

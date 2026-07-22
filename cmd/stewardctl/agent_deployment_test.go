@@ -80,9 +80,9 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 	}
 	delegationRaw, _ := json.Marshal(delegationEnvelope)
 	forkRaw, _ := json.Marshal(agentapp.ForkPlan{
-		Schema: agentapp.ForkSchema, SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
+		Schema: agentapp.ForkSchema, DeploymentID: "auditor", SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
 		InstanceID: "auditor-0", LineageID: "auditor-lineage", Generation: 1,
-		SourceLineageID: "source-lineage", ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
+		SourceNodeID: "node-a", SourceLineageID: "source-lineage", ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
 	})
 	for name, raw := range map[string][]byte{
 		"auditor.bundle.json":     bundleRaw,
@@ -222,6 +222,14 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			!strings.Contains(output.String(), `"deployments":[`) {
 			t.Fatalf("run %v output=%s", command, output.String())
 		}
+	}
+	mismatch := append([]string{
+		"wrong-deployment", "-bundle", "auditor.bundle.json", "-capsule", "auditor.capsule.json",
+		"-delegation", "auditor.delegation.json", "-fork-plan", "auditor.fork.json",
+	}, common...)
+	if err := agentDeploymentApply(mismatch, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "does not match the deployment bound") {
+		t.Fatalf("mismatched fork deployment error = %v", err)
 	}
 	wantRequests := "GET /v1/tenants/tenant-a/deployments/auditor," +
 		"PUT /v1/tenants/tenant-a/deployments/auditor," +

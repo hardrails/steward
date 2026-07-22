@@ -81,7 +81,7 @@ func TestSnapshotQuarantineBlocksOnlyNewForkAdmission(t *testing.T) {
 	}, fixture.now.Add(time.Minute), time.Minute, 1); err != nil {
 		t.Fatal(err)
 	}
-	input := snapshotQuarantineForkApplyFixture(t, fixture.now)
+	input := snapshotQuarantineForkApplyFixture(t, fixture.now, "fork-a")
 	if _, _, err := fixture.store.ChangeSnapshotQuarantine(
 		fixture.admin, "tenant-a", "node-1", "snapshot-a", SnapshotQuarantineActionSet,
 		0, "suspected contamination", fixture.now.Add(2*time.Minute),
@@ -113,7 +113,42 @@ func TestSnapshotQuarantineBlocksOnlyNewForkAdmission(t *testing.T) {
 	}
 }
 
-func snapshotQuarantineForkApplyFixture(t *testing.T, now time.Time) DeploymentApply {
+func TestSnapshotForkDescendantLimitIsAtomicAndReleasesAfterRemoval(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxForksPerSnapshot = 1
+	fixture := newRecordsFixture(t, limits)
+	fixture.createTenant(t, "tenant-a")
+	_, nodeIdentity := fixture.createNode(t, "tenant-a")
+	if _, err := fixture.store.PollV4(nodeIdentity, []string{
+		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+		controlprotocol.ExecutorCapabilityStateSnapshotsV1,
+	}, fixture.now.Add(time.Minute), time.Minute, 1); err != nil {
+		t.Fatal(err)
+	}
+	firstInput := snapshotQuarantineForkApplyFixture(t, fixture.now, "fork-a")
+	first, changed, err := fixture.store.ApplyDeployment(fixture.admin, firstInput, fixture.now.Add(2*time.Minute))
+	if err != nil || !changed {
+		t.Fatalf("first fork apply = (%+v, %v, %v)", first, changed, err)
+	}
+	secondInput := snapshotQuarantineForkApplyFixture(t, fixture.now, "fork-b")
+	if _, _, err := fixture.store.ApplyDeployment(fixture.admin, secondInput, fixture.now.Add(3*time.Minute)); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("second descendant error = %v", err)
+	}
+
+	fixture.store.mu.Lock()
+	removed := fixture.store.current.deployments[deploymentKey("tenant-a", "fork-a")]
+	removed.DesiredState = DeploymentAbsent
+	removed.Phase = DeploymentRemoved
+	removed.Instances[0].Phase = DeploymentInstanceRemoved
+	fixture.store.current.deployments[deploymentKey("tenant-a", "fork-a")] = removed
+	fixture.store.mu.Unlock()
+	second, changed, err := fixture.store.ApplyDeployment(fixture.admin, secondInput, fixture.now.Add(4*time.Minute))
+	if err != nil || !changed || second.ID != "fork-b" {
+		t.Fatalf("fork after descendant cleanup = (%+v, %v, %v)", second, changed, err)
+	}
+}
+
+func snapshotQuarantineForkApplyFixture(t *testing.T, now time.Time, forkID string) DeploymentApply {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -136,14 +171,14 @@ func snapshotQuarantineForkApplyFixture(t *testing.T, now time.Time) DeploymentA
 	}
 	delegation := admission.CommandDelegation{
 		SchemaVersion:       admission.CommandDelegationSchemaV1,
-		DelegationID:        "fork-authority-a",
+		DelegationID:        forkID + "-authority",
 		TenantID:            "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
 		Operations:          []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"},
 		NodeIDs:             []string{"node-1"},
 		Instances: []admission.CommandDelegationInstance{{
-			InstanceID: "fork-a-0", LineageID: "fork-lineage-a",
+			InstanceID: forkID + "-0", LineageID: forkID + "-lineage",
 			MinInstanceGeneration: 1, MaxInstanceGeneration: 1,
 		}},
 		ClaimGeneration: 1,
@@ -175,8 +210,8 @@ func snapshotQuarantineForkApplyFixture(t *testing.T, now time.Time) DeploymentA
 		t.Fatal(err)
 	}
 	return DeploymentApply{
-		TenantID: "tenant-a", ID: "fork-a", Generation: 1, AgentName: "agent-a",
-		BundleDigest: digestBytes([]byte("fork-bundle")), CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
+		TenantID: "tenant-a", ID: forkID, Generation: 1, AgentName: "agent-a",
+		BundleDigest: digestBytes([]byte("fork-bundle-" + forkID)), CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
 		Fork: &DeploymentFork{
 			SnapshotID: "snapshot-a", SourceLineageID: "source-lineage-a", SourceNodeID: "node-1",
 			ExpiresAt: now.Add(time.Hour).UTC().Format(time.RFC3339Nano),

@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -26,6 +28,10 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 	}
 	bundle := publishedAgentBundle(t, "hermes", "registry.example/agent@"+manifestDigest)
 	bundleRaw, err := agentapp.MarshalCanonical(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleDigest, err := agentapp.DigestJSON(bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +106,57 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 	}
 	if summary.DelegationDigest != dsse.Digest(raw) {
 		t.Fatalf("summary digest = %q, want %q", summary.DelegationDigest, dsse.Digest(raw))
+	}
+
+	forkPlan := agentapp.ForkPlan{
+		Schema: agentapp.ForkSchema, DeploymentID: "workspace-auditor-fork",
+		SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
+		InstanceID: "workspace-auditor-fork-0", LineageID: "lineage-fork-a", Generation: 7,
+		SourceNodeID: "node-b", SourceLineageID: "lineage-source-a",
+		ExpiresAt: timeNow().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
+	}
+	forkRaw, err := agentapp.MarshalCanonical(forkPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkPath := filepath.Join(directory, "fork.json")
+	if err := os.WriteFile(forkPath, forkRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forkDelegationPath := filepath.Join(directory, "fork.delegation.dsse.json")
+	if err := agentAuthorize([]string{
+		siteDirectory, "-bundle", bundlePath, "-capsule", capsulePath,
+		"-controller-public-key", controllerPath, "-fork-plan", forkPath,
+		"-out", forkDelegationPath,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	forkDelegationRaw, err := os.ReadFile(forkDelegationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedFork, err := admission.VerifyCommandDelegation(forkDelegationRaw, verifiedSite.policy, timeNow().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkStatement := verifiedFork.Statement
+	if forkStatement.DelegationID != forkPlan.DeploymentID ||
+		!slices.Equal(forkStatement.NodeIDs, []string{forkPlan.SourceNodeID}) ||
+		!slices.Equal(forkStatement.Operations, []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"}) ||
+		len(forkStatement.Instances) != 1 || forkStatement.Instances[0].InstanceID != forkPlan.InstanceID ||
+		forkStatement.Instances[0].LineageID != forkPlan.LineageID || forkStatement.Admission == nil ||
+		forkStatement.Instances[0].MinInstanceGeneration != forkPlan.Generation ||
+		forkStatement.Instances[0].MaxInstanceGeneration != forkPlan.Generation ||
+		forkStatement.Admission.StateDisposition != "resume" {
+		t.Fatalf("fork delegation = %+v", forkStatement)
+	}
+	delegationExpires, err := time.Parse(time.RFC3339Nano, forkStatement.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkExpires, _ := time.Parse(time.RFC3339Nano, forkPlan.ExpiresAt)
+	if delegationExpires.Before(forkExpires.Add(controlstore.MinDeploymentForkCleanupWindow)) {
+		t.Fatalf("fork cleanup authority expires too early: %s", forkStatement.ExpiresAt)
 	}
 }
 

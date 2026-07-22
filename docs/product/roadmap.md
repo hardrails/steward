@@ -595,10 +595,12 @@ supportable through one coherent operational surface.
   durable rollout pause/resume with health-gated canaries and mixed-generation
   rollback.
 - Add the storage backend contract and one quota-capable local backend.
-- Add quiesce, snapshot, clone, archive, restore, TTL, idle expiry, and garbage
-  collection state machines.
-- Add `agent fork`, fork-on-task, descendant and retained-byte limits, lineage, and
-  clean warm pools.
+- Extend the implemented cold snapshot clone, lineage, TTL cleanup, exact fork
+  authorization, source-node binding, and descendant ceiling with quiesce,
+  controller-owned snapshot catalogs, archive, cross-node restore, retained-byte
+  accounting, idle expiry, and garbage collection.
+- Add fork-on-task and clean warm pools. A warm pool contains unprivileged
+  application state, never reusable agent authority or a live authorized session.
 - Qualify an Incus virtual-machine backend and a Kubernetes Agent Sandbox backend
   after the local backend contract passes conformance; reject silent assurance
   downgrade across all three profiles.

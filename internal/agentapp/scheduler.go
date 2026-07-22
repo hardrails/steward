@@ -188,17 +188,20 @@ type Snapshot struct {
 	BundleDigest  string `json:"bundle_digest"`
 	RuntimeEngine string `json:"runtime_engine"`
 	StateDigest   string `json:"state_digest"`
+	SourceNodeID  string `json:"source_node_id"`
 	SourceLineage string `json:"source_lineage"`
 	CreatedAt     string `json:"created_at"`
 }
 
 type ForkPlan struct {
 	Schema          string `json:"schema"`
+	DeploymentID    string `json:"deployment_id"`
 	SnapshotID      string `json:"snapshot_id"`
 	BundleDigest    string `json:"bundle_digest"`
 	InstanceID      string `json:"instance_id"`
 	LineageID       string `json:"lineage_id"`
 	Generation      uint64 `json:"generation"`
+	SourceNodeID    string `json:"source_node_id"`
 	SourceLineageID string `json:"source_lineage_id"`
 	ExpiresAt       string `json:"expires_at,omitempty"`
 	OnExpiry        string `json:"on_expiry,omitempty"`
@@ -216,9 +219,11 @@ func DecodeForkPlan(raw []byte) (ForkPlan, error) {
 }
 
 func (value ForkPlan) Validate() error {
-	if value.Schema != ForkSchema || !validToken(value.SnapshotID, 128) || !validDigest(value.BundleDigest) ||
+	if value.Schema != ForkSchema || !validToken(value.DeploymentID, 128) ||
+		!validToken(value.SnapshotID, 128) || !validDigest(value.BundleDigest) ||
 		!validToken(value.InstanceID, 128) || !validToken(value.LineageID, 128) ||
-		!validToken(value.SourceLineageID, 128) || value.LineageID == value.SourceLineageID || value.Generation == 0 {
+		!validToken(value.SourceNodeID, 128) || !validToken(value.SourceLineageID, 128) ||
+		value.LineageID == value.SourceLineageID || value.Generation == 0 {
 		return errors.New("fork plan is invalid")
 	}
 	if value.ExpiresAt == "" {
@@ -248,7 +253,7 @@ func DecodeSnapshot(raw []byte) (Snapshot, error) {
 func (value Snapshot) Validate() error {
 	if value.Schema != SnapshotSchema || !validToken(value.ID, 128) || !validDigest(value.BundleDigest) ||
 		!validDigest(value.StateDigest) || !validToken(value.SourceLineage, 128) ||
-		value.RuntimeEngine != "hermes" {
+		!validToken(value.SourceNodeID, 128) || value.RuntimeEngine != "hermes" {
 		return errors.New("snapshot metadata is invalid")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, value.CreatedAt); err != nil {
@@ -257,7 +262,7 @@ func (value Snapshot) Validate() error {
 	return nil
 }
 
-func Fork(bundle Bundle, snapshot Snapshot, instanceID, lineageID string, ttl time.Duration, onExpiry string, now time.Time) (ForkPlan, error) {
+func Fork(bundle Bundle, snapshot Snapshot, deploymentID, instanceID, lineageID string, ttl time.Duration, onExpiry string, now time.Time) (ForkPlan, error) {
 	if err := bundle.Validate(); err != nil {
 		return ForkPlan{}, err
 	}
@@ -271,10 +276,15 @@ func Fork(bundle Bundle, snapshot Snapshot, instanceID, lineageID string, ttl ti
 	if snapshot.BundleDigest != bundleDigest || snapshot.RuntimeEngine != bundle.Definition.Runtime.Engine {
 		return ForkPlan{}, errors.New("snapshot is not compatible with the selected agent bundle")
 	}
-	if !validToken(instanceID, 128) || !validToken(lineageID, 128) || lineageID == snapshot.SourceLineage {
+	if !validToken(deploymentID, 128) || !validToken(instanceID, 128) ||
+		!validToken(lineageID, 128) || lineageID == snapshot.SourceLineage {
 		return ForkPlan{}, errors.New("fork requires new bounded instance and lineage identities")
 	}
-	plan := ForkPlan{Schema: ForkSchema, SnapshotID: snapshot.ID, BundleDigest: bundleDigest, InstanceID: instanceID, LineageID: lineageID, SourceLineageID: snapshot.SourceLineage, Generation: 1}
+	plan := ForkPlan{
+		Schema: ForkSchema, DeploymentID: deploymentID, SnapshotID: snapshot.ID,
+		BundleDigest: bundleDigest, InstanceID: instanceID, LineageID: lineageID,
+		SourceNodeID: snapshot.SourceNodeID, SourceLineageID: snapshot.SourceLineage, Generation: 1,
+	}
 	if ttl != 0 {
 		if ttl < time.Minute || ttl > 30*24*time.Hour || onExpiry != "destroy" {
 			return ForkPlan{}, errors.New("fork TTL must be 1 minute-30 days with destroy expiry")

@@ -421,7 +421,10 @@ sign the command. The delegation fixes the allowed operations, nodes, exact
 instance and lineage identities, claim and instance generations, validity window,
 and—when it permits admission—the exact capsule, resources, capabilities, state
 disposition, model route, service, egress routes, connectors, and effect mode.
-Control cannot widen those fields. The delegation lifetime cannot exceed 24 hours.
+Control cannot widen those fields. An ordinary delegation cannot exceed 24 hours.
+One exact-node, one-instance resume delegation that includes both `clone-state`
+and `purge` may last up to 31 days. That narrow exception lets a 30-day temporary
+fork retain cleanup authority without granting broader placement or identity scope.
 Normal command fences still reject stale sequences and generations.
 
 `admit` carries the OpenAPI `SignedAdmissionRequest`. `renew` carries one bounded

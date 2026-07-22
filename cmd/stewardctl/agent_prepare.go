@@ -20,6 +20,7 @@ type agentAdmissionInputs struct {
 	InstanceID    string
 	LineageID     string
 	Generation    uint64
+	ResumeState   bool
 }
 
 type preparedAgentAdmission struct {
@@ -68,7 +69,11 @@ func prepareAgentAdmission(input agentAdmissionInputs) (preparedAgentAdmission, 
 	if err != nil {
 		return preparedAgentAdmission{}, err
 	}
-	intent, err := agentapp.BuildIntent(
+	buildIntent := agentapp.BuildIntent
+	if input.ResumeState {
+		buildIntent = agentapp.BuildResumeIntent
+	}
+	intent, err := buildIntent(
 		input.Bundle, verified, input.TenantID, input.NodeID, input.InstanceID, input.LineageID, input.Generation,
 	)
 	if err != nil {

@@ -19,6 +19,7 @@ const (
 	CommandDelegationSchemaV1      = "steward.executor-command-delegation.v1"
 	maxCommandDelegationBytes      = 64 << 10
 	maxCommandDelegationLifetime   = 24 * time.Hour
+	maxForkDelegationLifetime      = 31 * 24 * time.Hour
 	maxCommandDelegationNodes      = 64
 	maxCommandDelegationInstances  = 128
 	maxCommandPlacementLabels      = 32
@@ -151,7 +152,13 @@ func (delegation CommandDelegation) Validate(now time.Time) error {
 		return deny("invalid command delegation issue time")
 	}
 	expires, err := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
-	if err != nil || !expires.After(issued) || expires.Sub(issued) > maxCommandDelegationLifetime {
+	maxLifetime := maxCommandDelegationLifetime
+	if len(delegation.NodeIDs) == 1 && len(delegation.Instances) == 1 && delegation.Admission != nil &&
+		delegation.Admission.StateDisposition == "resume" &&
+		contains(delegation.Operations, "clone-state") && contains(delegation.Operations, "purge") {
+		maxLifetime = maxForkDelegationLifetime
+	}
+	if err != nil || !expires.After(issued) || expires.Sub(issued) > maxLifetime {
 		return deny("invalid command delegation expiry")
 	}
 	if !now.IsZero() {

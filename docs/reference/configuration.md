@@ -55,6 +55,7 @@ backup, and restore under the new limit before production use.
 | `-max-commands-per-node` | `256` | Retained commands for one node |
 | `-max-deployments` | `1024` | Retained desired deployments across the site |
 | `-max-deployments-per-tenant` | `128` | Retained desired deployments for one tenant |
+| `-max-forks-per-snapshot` | `32` | Live fork descendants allowed from one tenant and node snapshot |
 | `-terminal-retention` | `24h` | Minimum retention before a known terminal outcome may be reclaimed for command capacity |
 
 `strict-sovereign` is a real enforcement mode, not a dashboard label. Control

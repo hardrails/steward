@@ -200,6 +200,7 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	flags.IntVar(&parsed.limits.MaxCommandsPerNode, "max-commands-per-node", limits.MaxCommandsPerNode, "maximum retained commands per node")
 	flags.IntVar(&parsed.limits.MaxDeployments, "max-deployments", limits.MaxDeployments, "maximum retained desired deployments")
 	flags.IntVar(&parsed.limits.MaxDeploymentsPerTenant, "max-deployments-per-tenant", limits.MaxDeploymentsPerTenant, "maximum retained desired deployments per tenant")
+	flags.IntVar(&parsed.limits.MaxForksPerSnapshot, "max-forks-per-snapshot", limits.MaxForksPerSnapshot, "maximum live fork descendants of one tenant snapshot")
 	flags.DurationVar(&parsed.terminalRetention, "terminal-retention", limits.TerminalRetention, "minimum retention for completed command status")
 	flags.DurationVar(
 		&parsed.operationsThresholds.NodeStaleAfter,
