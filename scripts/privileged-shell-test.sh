@@ -150,7 +150,7 @@ run_supported_failure "$root/scripts/configure-admission.sh" direct direct-confi
 unset -f echo
 
 grep -Fq $'\t/etc/steward/gateway.json' "$root/scripts/configure-node.sh"
-grep -Fq '/usr/local/bin/stewardctl gateway identity set' "$root/scripts/configure-node.sh"
+grep -Fq '"$ctl_bin" gateway identity set' "$root/scripts/configure-node.sh"
 
 mkdir -p "$work/hostile-path"
 cat >"$work/hostile-path/cat" <<EOF

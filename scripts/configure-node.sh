@@ -191,6 +191,36 @@ if (( evidence_input_count == 3 )) && [[ $local_only == true ]]; then
 	echo "configure-node: Executor evidence enrollment requires a remote control plane" >&2
 	exit 2
 fi
+
+resolve_release_dir() {
+	local script_file=$1 candidate version
+	script_file=$(readlink -f -- "$script_file" 2>/dev/null) || return 1
+	case "$script_file" in
+		/opt/steward/releases/*/integration/scripts/configure-node.sh)
+			candidate=${script_file%/integration/scripts/configure-node.sh}
+			version=${candidate#/opt/steward/releases/}
+			[[ $version != "$candidate" && $version != */* &&
+				$version =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
+			;;
+		/usr/lib/steward-node/release/scripts/configure-node.sh)
+			candidate=/usr/lib/steward-node/release
+			;;
+		*) return 1 ;;
+	esac
+	[[ -f $candidate/release.json && ! -L $candidate/release.json ]] || return 1
+	printf '%s\n' "$candidate"
+}
+
+release_dir=$(resolve_release_dir "${BASH_SOURCE[0]}") || {
+	echo "configure-node: execute the helper from an installed immutable Steward release" >&2
+	exit 2
+}
+ctl_bin=$release_dir/stewardctl
+executor_bin=$release_dir/steward-executor
+preflight_bin=$release_dir/integration/scripts/node-preflight.sh
+admission_bin=$release_dir/integration/scripts/configure-admission.sh
+relay_builder_bin=$release_dir/integration/scripts/build-relay-image.sh
+
 if (( admission_required == 3 )); then
 	[[ $site_root_key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]] || {
 		echo "configure-node: invalid --site-root-key-id" >&2
@@ -208,14 +238,13 @@ for identity in steward steward-executor steward-gateway; do
 	}
 done
 for path in /etc/steward/steward.json /etc/steward/executor.env \
-	/usr/local/bin/stewardctl /usr/local/bin/steward-executor \
-	/usr/local/libexec/steward/node-preflight; do
+	"$ctl_bin" "$executor_bin" "$preflight_bin"; do
 	if [[ ! -e $path ]]; then
 		echo "configure-node: missing installed path $path; install Steward first" >&2
 		exit 2
 	fi
 done
-if (( admission_required == 3 )) && [[ ! -x /usr/local/libexec/steward/configure-admission ]]; then
+if (( admission_required == 3 )) && [[ ! -x $admission_bin ]]; then
 	echo "configure-node: missing signed-admission configurator; install Steward first" >&2
 	exit 2
 fi
@@ -573,7 +602,7 @@ if (( evidence_input_count == 3 )); then
 	if [[ $receipt_public_value != "$evidence_public_key" ]]; then
 		evidence_config_error "receipt public key does not match the enrollment evidence config"
 	fi
-	/usr/local/bin/stewardctl key match -private-key "$receipt_private" \
+	"$ctl_bin" key match -private-key "$receipt_private" \
 		-public-key "$receipt_public" >/dev/null
 fi
 
@@ -812,7 +841,7 @@ fi
 executor_credential_scope=
 executor_credential_node_id=
 if [[ $local_only == false ]]; then
-	credential_metadata=$(runuser -u steward-executor -- /usr/local/bin/steward-executor \
+	credential_metadata=$(runuser -u steward-executor -- "$executor_bin" \
 		-inspect-uplink-credential -uplink-credential-file /etc/steward/executor-uplink.json)
 	if [[ $credential_metadata != *$'\n'* ]]; then
 		transaction_error "Executor credential inspection returned invalid metadata"
@@ -866,7 +895,7 @@ done
 
 if [[ $local_only == false && ! -e $uplink_fence && ! -L $uplink_fence ]]; then
 	uplink_fence_created=true
-	runuser -u steward-executor -- /usr/local/bin/steward-executor \
+	runuser -u steward-executor -- "$executor_bin" \
 		-initialize-uplink-state -uplink-state-file "$uplink_fence"
 fi
 
@@ -900,7 +929,7 @@ if (( admission_required == 3 )); then
 		true) admission_args+=(--allow-unquotaed-state-on-dedicated-host) ;;
 		false) admission_args+=(--disallow-unquotaed-state-on-dedicated-host) ;;
 	esac
-	/usr/local/libexec/steward/configure-admission "${admission_args[@]}"
+	"$admission_bin" "${admission_args[@]}"
 fi
 
 # Task-bearing Gateway grants bind the admitted node identity into their signed
@@ -909,7 +938,7 @@ fi
 # replacing the config, so an unsafe re-enrollment fails and the outer rollback
 # restores every node configuration file.
 if [[ -n $node_id ]]; then
-	/usr/local/bin/stewardctl gateway identity set \
+	"$ctl_bin" gateway identity set \
 		-config /etc/steward/gateway.json -node-id "$node_id" >/dev/null
 fi
 
@@ -957,7 +986,7 @@ if [[ $executor_credential_scope == node ]]; then
 	fi
 	if [[ ! -e $uplink_delivery_state && ! -L $uplink_delivery_state ]]; then
 		uplink_delivery_state_created=true
-		runuser -u steward-executor -- /usr/local/bin/steward-executor \
+		runuser -u steward-executor -- "$executor_bin" \
 			-initialize-uplink-delivery-state \
 			-uplink-delivery-state-file "$uplink_delivery_state" \
 			-admission-node-id "$configured_node_id"
@@ -996,12 +1025,12 @@ if admission_env_complete; then
 	[[ -e $evidence_log || -L $evidence_log ]] || evidence_log_created=true
 	gateway_line=$(grep -v '^[[:space:]]*#' /etc/steward/executor-gateway.env 2>/dev/null | grep -v '^[[:space:]]*$' || true)
 	if [[ -z $gateway_line || $gateway_line == EXECUTOR_GATEWAY_ARGS= ]]; then
-		/usr/local/libexec/steward/node-preflight
-		/usr/local/libexec/steward/build-relay-image --configure
+		"$preflight_bin"
+		"$relay_builder_bin" --configure
 		derived_relay=true
 	fi
 fi
-/usr/local/libexec/steward/node-preflight
+"$preflight_bin"
 
 committed=true
 trap - ERR INT TERM

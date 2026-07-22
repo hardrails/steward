@@ -701,6 +701,10 @@ exercise_packaged_protocol_wiring() {
 	done <"$root/deploy/config/executor.env"
 	grep -Fq '[[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]' "$root/scripts/node-preflight.sh"
 	grep -Fq '[[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]' "$root/scripts/node-doctor.sh"
+	grep -Fq '"/opt/steward/releases/$version/integration/scripts/configure-node.sh" "${configure_args[@]}"' \
+		"$root/scripts/install-steward.sh"
+	grep -Fq 'preflight_bin=$release_dir/integration/scripts/node-preflight.sh' \
+		"$root/scripts/configure-node.sh"
 	grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$root/deploy/config/executor.env"
 	grep -Fxq 'Environment=EXECUTOR_UPLINK_PROTOCOL_VERSION=0' \
 		"$root/deploy/systemd/steward-executor.service"
