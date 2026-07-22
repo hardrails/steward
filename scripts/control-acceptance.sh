@@ -732,14 +732,22 @@ PY
 # a durable intent before the node advertises membership, prove idempotent and
 # optimistic revision handling, and leave the pool in revision 2 so restart
 # recovery can be verified against an exact retained value.
+pool_membership_private=$work/pool-membership.private
+pool_membership_public=$work/pool-membership.public
+run_bounded 30 "$work" "$work/pool-membership-keygen.stdout" "$work/pool-membership-keygen.stderr" \
+	"$ctl_bin" keygen -key-id acceptance-pool-authority -private-out "$pool_membership_private" \
+	-public-out "$pool_membership_public"
+assert_owner_file "$pool_membership_private"
 run_bounded 30 "$work" "$work/node-pool-create.stdout" "$work/node-pool-create.stderr" \
 	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
 	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
-	-min-nodes 1 -desired-nodes 2 -max-nodes 3
+	-min-nodes 1 -desired-nodes 2 -max-nodes 3 \
+	-membership-key-id acceptance-pool-authority -membership-public-key "$pool_membership_public"
 run_bounded 30 "$work" "$work/node-pool-retry.stdout" "$work/node-pool-retry.stderr" \
 	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
 	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
-	-min-nodes 1 -desired-nodes 2 -max-nodes 3 -revision 1
+	-min-nodes 1 -desired-nodes 2 -max-nodes 3 -revision 1 \
+	-membership-key-id acceptance-pool-authority -membership-public-key "$pool_membership_public"
 python3 -I - "$work/node-pool-create.stdout" "$work/node-pool-retry.stdout" \
 	"$pool_id" "$tenant_id" <<'PY'
 import json
@@ -750,7 +758,9 @@ for path in sys.argv[1:3]:
     status = json.loads(pathlib.Path(path).read_text())
     pool = status.get("pool", {})
     if pool.get("id") != sys.argv[3] or pool.get("tenant_ids") != [sys.argv[4]] or \
-            pool.get("architecture") != "amd64" or pool.get("revision") != 1:
+            pool.get("architecture") != "amd64" or pool.get("revision") != 1 or \
+            pool.get("membership_generation") != 1 or \
+            pool.get("membership_key_id") != "acceptance-pool-authority":
         raise SystemExit("control-acceptance: node-pool creation or idempotent retry changed intent")
     if status.get("registered_nodes") != 0 or status.get("ready_nodes") != 0 or \
             status.get("scale_out_needed") != 2 or status.get("scale_in_candidates") != [] or \
@@ -772,12 +782,14 @@ fi
 run_bounded 30 "$work" "$work/node-pool-update.stdout" "$work/node-pool-update.stderr" \
 	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
 	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
-	-min-nodes 1 -desired-nodes 3 -max-nodes 3 -revision 1
+	-min-nodes 1 -desired-nodes 3 -max-nodes 3 -revision 1 \
+	-membership-key-id acceptance-pool-authority -membership-public-key "$pool_membership_public"
 set +e
 run_bounded 30 "$work" "$work/node-pool-stale.stdout" "$work/node-pool-stale.stderr" \
 	"$ctl_bin" control node-pool apply -control-url "$control_url" -token-file "$admin_token" \
 	-pool-id "$pool_id" -tenant-ids "$tenant_id" -architecture amd64 \
-	-min-nodes 1 -desired-nodes 2 -max-nodes 3 -revision 1
+	-min-nodes 1 -desired-nodes 2 -max-nodes 3 -revision 1 \
+	-membership-key-id acceptance-pool-authority -membership-public-key "$pool_membership_public"
 node_pool_stale_status=$?
 set -e
 if (( node_pool_stale_status == 0 )) || [[ -s $work/node-pool-stale.stdout ]]; then
@@ -791,7 +803,8 @@ import sys
 
 status = json.loads(pathlib.Path(sys.argv[1]).read_text())
 pool = status.get("pool", {})
-if pool.get("id") != sys.argv[2] or pool.get("revision") != 2 or pool.get("desired_nodes") != 3 or \
+if pool.get("id") != sys.argv[2] or pool.get("revision") != 2 or pool.get("membership_generation") != 1 or \
+        pool.get("desired_nodes") != 3 or \
         status.get("registered_nodes") != 0 or status.get("scale_out_needed") != 3:
     raise SystemExit("control-acceptance: revised node-pool capacity is invalid")
 PY
@@ -1363,7 +1376,8 @@ import sys
 
 status = json.loads(pathlib.Path(sys.argv[1]).read_text())
 pool = status.get("pool", {})
-if pool.get("id") != sys.argv[2] or pool.get("revision") != 2 or pool.get("desired_nodes") != 3 or \
+if pool.get("id") != sys.argv[2] or pool.get("revision") != 2 or pool.get("membership_generation") != 1 or \
+        pool.get("membership_key_id") != "acceptance-pool-authority" or pool.get("desired_nodes") != 3 or \
         status.get("registered_nodes") != 0 or status.get("scale_out_needed") != 3:
     raise SystemExit("control-acceptance: controller restart changed node-pool intent")
 PY
@@ -1412,11 +1426,84 @@ nodes = status.get("nodes", [])
 if observed.get("applied") is not True or not observed.get("observed_at"):
     raise SystemExit("control-acceptance: node scheduling observation was not durably applied")
 if status.get("pool", {}).get("id") != sys.argv[3] or status.get("registered_nodes") != 1 or \
-        status.get("ready_nodes") != 1 or status.get("scale_out_needed") != 2 or \
-        status.get("scale_in_candidates") != [] or status.get("conditions") != ["capacity_shortfall"]:
-    raise SystemExit("control-acceptance: authenticated node-pool membership changed capacity incorrectly")
-if len(nodes) != 1 or nodes[0].get("node_id") != sys.argv[4] or nodes[0].get("ready") is not True:
-    raise SystemExit("control-acceptance: node-pool membership projection is invalid")
+        status.get("eligible_nodes") != 0 or status.get("ready_nodes") != 0 or \
+        status.get("scale_out_needed") != 3 or status.get("scale_in_candidates") != [] or \
+        status.get("conditions") != ["capacity_shortfall", "nodes_not_ready", "membership_unverified"]:
+    raise SystemExit("control-acceptance: an unsigned pool label satisfied verified capacity")
+if len(nodes) != 1 or nodes[0].get("node_id") != sys.argv[4] or nodes[0].get("ready") is not False or \
+        nodes[0].get("eligible") is not False or nodes[0].get("reason") != "membership_missing":
+    raise SystemExit("control-acceptance: unsigned node-pool projection is invalid")
+PY
+
+read -r controller_id pool_created_at pool_membership_generation < <(python3 -I - \
+	"$enrollment" "$work/node-pool-recovered.stdout" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+enrollment = json.loads(pathlib.Path(sys.argv[1]).read_text())
+status = json.loads(pathlib.Path(sys.argv[2]).read_text())
+controller = enrollment.get("controller_instance_id", "")
+pool = status.get("pool", {})
+created = pool.get("created_at", "")
+generation = pool.get("membership_generation")
+if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", controller) or \
+        not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+Z", created) or \
+        not isinstance(generation, int) or generation < 1:
+    raise SystemExit("control-acceptance: pool membership issuance inputs are invalid")
+print(controller, created, generation)
+PY
+)
+pool_membership=$work/pool-membership.dsse.json
+run_bounded 30 "$work" "$work/pool-membership-issue.stdout" "$work/pool-membership-issue.stderr" \
+	"$ctl_bin" control node-pool membership-issue -private-key "$pool_membership_private" \
+	-key-id acceptance-pool-authority -controller-id "$controller_id" -pool-id "$pool_id" \
+	-pool-membership-generation "$pool_membership_generation" -pool-created-at "$pool_created_at" \
+	-node-id "$node_id" -tenant-ids "$tenant_id" -architecture amd64 \
+	-boot-identity-sha256 sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+	-scheduling-policy-sha256 sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+	-valid-for 1h -out "$pool_membership" -no-context
+assert_owner_file "$pool_membership"
+run_bounded 30 "$work" "$work/pool-membership-verify.stdout" "$work/pool-membership-verify.stderr" \
+	"$ctl_bin" control node-pool membership-verify -in "$pool_membership" \
+	-public-key "$pool_membership_public" -key-id acceptance-pool-authority -no-context
+run_bounded 30 "$work" "$work/pool-membership-bind.stdout" "$work/pool-membership-bind.stderr" \
+	"$ctl_bin" control node-pool membership-bind -control-url "$control_url" \
+	-credential "$node_credential" -in "$pool_membership" -no-context
+run_bounded 30 "$work" "$work/pool-membership-bind-retry.stdout" "$work/pool-membership-bind-retry.stderr" \
+	"$ctl_bin" control node-pool membership-bind -control-url "$control_url" \
+	-credential "$node_credential" -in "$pool_membership" -no-context
+cmp -s "$work/pool-membership-bind.stdout" "$work/pool-membership-bind-retry.stdout" || {
+	echo "control-acceptance: exact pool membership retry changed the retained binding" >&2
+	exit 1
+}
+run_bounded 30 "$work" "$work/node-pool-verified-member.stdout" \
+	"$work/node-pool-verified-member.stderr" "$ctl_bin" control node-pool status \
+	-control-url "$control_url" -token-file "$admin_token" -pool-id "$pool_id"
+python3 -I - "$work/pool-membership-verify.stdout" "$work/pool-membership-bind.stdout" \
+	"$work/node-pool-verified-member.stdout" "$pool_id" "$node_id" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+claim = json.loads(pathlib.Path(sys.argv[1]).read_text())
+binding = json.loads(pathlib.Path(sys.argv[2]).read_text())
+status = json.loads(pathlib.Path(sys.argv[3]).read_text())
+membership = binding.get("membership", {})
+nodes = status.get("nodes", [])
+if claim.get("pool_id") != sys.argv[4] or claim.get("node_id") != sys.argv[5]:
+    raise SystemExit("control-acceptance: offline membership verification changed identity")
+if binding.get("node_id") != sys.argv[5] or membership.get("pool_id") != sys.argv[4] or \
+        not re.fullmatch(r"sha256:[0-9a-f]{64}", membership.get("digest", "")):
+    raise SystemExit("control-acceptance: retained membership binding is invalid")
+if status.get("eligible_nodes") != 1 or status.get("ready_nodes") != 1 or \
+        status.get("scale_out_needed") != 2 or status.get("conditions") != ["capacity_shortfall"]:
+    raise SystemExit("control-acceptance: verified member did not satisfy exactly one unit of capacity")
+if len(nodes) != 1 or nodes[0].get("eligible") is not True or nodes[0].get("ready") is not True or \
+        nodes[0].get("membership_digest") != membership.get("digest"):
+    raise SystemExit("control-acceptance: verified member projection is invalid")
 PY
 
 # MCP exposes the same provider-neutral observation to a site automation
@@ -1486,8 +1573,10 @@ if len(listed) != 1:
 for observation in (listed[0], status):
     if observation.get("pool", {}).get("id") != sys.argv[3] or \
             observation.get("pool", {}).get("revision") != 2 or \
-            observation.get("registered_nodes") != 1 or observation.get("ready_nodes") != 1 or \
+            observation.get("registered_nodes") != 1 or observation.get("eligible_nodes") != 1 or \
+            observation.get("ready_nodes") != 1 or \
             observation.get("nodes", [{}])[0].get("node_id") != sys.argv[4] or \
+            observation.get("nodes", [{}])[0].get("eligible") is not True or \
             observation.get("scale_out_needed") != 2:
         raise SystemExit("control-acceptance: node-pool MCP observation differs from the public API")
 PY
@@ -1931,4 +2020,4 @@ assert_secret_absent raw "$wrong_admin" "${process_outputs[@]}"
 assert_secret_absent raw "$wrong_witness_private" "${process_outputs[@]}"
 assert_secret_absent raw "$work/command.private" "${process_outputs[@]}"
 
-echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, provider-neutral NodePool capacity, retained incident chronology, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
+echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, independently signed NodePool eligibility, retained incident chronology, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."

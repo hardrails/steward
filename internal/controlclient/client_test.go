@@ -113,7 +113,7 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 		case "/v1/tenants/tenant-a/nodes":
 			_, _ = w.Write([]byte(`{"nodes":[{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z"}]}`))
 		case "/v1/tenants/tenant-a/nodes/node-1":
-			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":["signed-commands-v2"],"state":"active","created_at":"2026-07-13T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":["signed-commands-v2"],"state":"active","created_at":"2026-07-13T12:00:00Z","pool_membership":{"pool_id":"pool-a"}}`))
 		case "/v1/nodes/node-1":
 			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
 		case "/v1/nodes/node-1/placement":
@@ -176,7 +176,8 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	if nodes, err := client.ListNodes(ctx, "tenant-a", "", 100); err != nil || len(nodes.Nodes) != 1 {
 		t.Fatalf("nodes=%#v error=%v", nodes, err)
 	}
-	if node, err := client.GetNode(ctx, "tenant-a", "node-1"); err != nil || node.State != "active" {
+	if node, err := client.GetNode(ctx, "tenant-a", "node-1"); err != nil || node.State != "active" ||
+		node.PoolMembership == nil || node.PoolMembership.PoolID != "pool-a" {
 		t.Fatalf("node=%#v error=%v", node, err)
 	}
 	if change, err := client.ChangeNodePlacement(ctx, "node-1", controlstore.NodePlacementCordon, "maintenance"); err != nil ||
