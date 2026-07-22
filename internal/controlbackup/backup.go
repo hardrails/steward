@@ -109,15 +109,20 @@ func create(stateDirectory, output string, now time.Time, afterOutputOpen func()
 	if inside {
 		return Report{}, errors.New("control backup output must be outside the state directory")
 	}
+	stateRoot, err := os.OpenRoot(canonicalState)
+	if err != nil {
+		return Report{}, fmt.Errorf("open control backup state directory: %w", err)
+	}
+	defer stateRoot.Close()
+	stateInfo, err := stateRoot.Stat(".")
+	if err != nil {
+		return Report{}, fmt.Errorf("inspect control backup state directory: %w", err)
+	}
 	outputRoot, err := os.OpenRoot(canonicalOutputParent)
 	if err != nil {
 		return Report{}, fmt.Errorf("open control backup output parent: %w", err)
 	}
 	defer outputRoot.Close()
-	stateInfo, err := os.Stat(canonicalState)
-	if err != nil {
-		return Report{}, fmt.Errorf("inspect control backup state directory: %w", err)
-	}
 	outputInfo, err := outputRoot.Stat(".")
 	if err != nil {
 		return Report{}, fmt.Errorf("inspect control backup output parent: %w", err)
@@ -129,7 +134,7 @@ func create(stateDirectory, output string, now time.Time, afterOutputOpen func()
 		afterOutputOpen()
 	}
 
-	store, err := controlstore.Open(stateDirectory, controlstore.DefaultLimits())
+	store, err := controlstore.Open(canonicalState, controlstore.DefaultLimits())
 	if err != nil {
 		return Report{}, fmt.Errorf("open stopped Control state: %w", err)
 	}
@@ -138,14 +143,18 @@ func create(stateDirectory, output string, now time.Time, afterOutputOpen func()
 			err = closeErr
 		}
 	}()
+	currentStateInfo, err := os.Lstat(canonicalState)
+	if err != nil || !os.SameFile(stateInfo, currentStateInfo) {
+		return Report{}, errors.New("control backup state directory changed while opening")
+	}
 	status, err := store.Status()
 	if err != nil {
 		return Report{}, err
 	}
-	if err := validateDefaultIdentitySet(stateDirectory); err != nil {
+	if err := validateDefaultIdentitySetRoot(stateRoot); err != nil {
 		return Report{}, err
 	}
-	files, err := openStateFiles(stateDirectory)
+	files, err := openStateFilesRoot(stateRoot)
 	if err != nil {
 		return Report{}, err
 	}
@@ -218,6 +227,10 @@ func create(stateDirectory, output string, now time.Time, afterOutputOpen func()
 	currentOutputInfo, err := os.Lstat(canonicalOutputParent)
 	if err != nil || !os.SameFile(outputInfo, currentOutputInfo) {
 		return Report{}, errors.New("control backup output parent changed during creation")
+	}
+	currentStateInfo, err = os.Lstat(canonicalState)
+	if err != nil || !os.SameFile(stateInfo, currentStateInfo) {
+		return Report{}, errors.New("control backup state directory changed during creation")
 	}
 	keep = true
 	return reportFromManifest(manifest, "sha256:"+hex.EncodeToString(hash.Sum(nil))), nil
@@ -404,9 +417,26 @@ func inspect(archivePath string, consume func(ManifestFile, io.Reader) error) (R
 }
 
 func openStateFiles(directory string) ([]openedFile, error) {
-	entries, err := os.ReadDir(directory)
+	root, err := os.OpenRoot(directory)
 	if err != nil {
-		return nil, fmt.Errorf("read Control state directory: %w", err)
+		return nil, err
+	}
+	defer root.Close()
+	return openStateFilesRoot(root)
+}
+
+func openStateFilesRoot(root *os.Root) ([]openedFile, error) {
+	directory, err := root.Open(".")
+	if err != nil {
+		return nil, fmt.Errorf("open Control state directory: %w", err)
+	}
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read Control state directory: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close Control state directory: %w", closeErr)
 	}
 	if len(entries) == 0 || len(entries) > maxFiles+1 {
 		return nil, errors.New("Control state file inventory exceeds its limit")
@@ -422,7 +452,7 @@ func openStateFiles(directory string) ([]openedFile, error) {
 			closeOpened(files)
 			return nil, fmt.Errorf("Control state entry %q has an unsafe name", name)
 		}
-		file, info, err := openRegular(filepath.Join(directory, name), maxFileBytes, 0o600, 0o644)
+		file, info, err := openRootRegular(root, name, maxFileBytes, 0o600, 0o644)
 		if err != nil {
 			closeOpened(files)
 			return nil, fmt.Errorf("open Control state entry %q: %w", name, err)
@@ -631,24 +661,11 @@ func readRootRegular(root *os.Root, name string, limit int64, mode os.FileMode) 
 	if root == nil || limit <= 0 || !validStateName(name) {
 		return nil, errors.New("rooted file read requires a valid name and positive limit")
 	}
-	before, err := root.Lstat(name)
-	if err != nil {
-		return nil, err
-	}
-	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	file, opened, err := openRootRegular(root, name, limit, mode)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm() != mode ||
-		opened.Size() < 0 || opened.Size() > limit || linkCount(opened) != 1 {
-		return nil, errors.New("rooted file must be bounded, regular, singly linked, and have its required mode")
-	}
-	stat, ok := opened.Sys().(*syscall.Stat_t)
-	if !ok || int(stat.Uid) != os.Geteuid() {
-		return nil, errors.New("rooted file must be owned by the current user")
-	}
 	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil || int64(len(raw)) > limit {
 		return nil, errors.New("rooted file exceeds its read limit")
@@ -658,6 +675,32 @@ func readRootRegular(root *os.Root, name string, limit int64, mode os.FileMode) 
 		return nil, errors.New("rooted file changed while being read")
 	}
 	return raw, nil
+}
+
+func openRootRegular(root *os.Root, name string, limit int64, modes ...os.FileMode) (*os.File, os.FileInfo, error) {
+	if root == nil || limit <= 0 || !validStateName(name) || len(modes) == 0 {
+		return nil, nil, errors.New("rooted file open requires a valid name, positive limit, and allowed mode")
+	}
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) || !opened.Mode().IsRegular() || !slices.Contains(modes, opened.Mode().Perm()) ||
+		opened.Size() < 0 || opened.Size() > limit || linkCount(opened) != 1 {
+		_ = file.Close()
+		return nil, nil, errors.New("rooted file must be bounded, regular, singly linked, and have an allowed mode")
+	}
+	stat, ok := opened.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		_ = file.Close()
+		return nil, nil, errors.New("rooted file must be owned by the current user")
+	}
+	return file, opened, nil
 }
 
 func removeRootContents(root *os.Root) error {

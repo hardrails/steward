@@ -129,6 +129,27 @@ func TestCreateRetainsVerifiedOutputDirectoryIdentity(t *testing.T) {
 	}
 }
 
+func TestCreateRetainsStoppedStateDirectoryIdentity(t *testing.T) {
+	root := t.TempDir()
+	state := initializeControlState(t, root, false)
+	movedState := filepath.Join(root, "moved-state")
+	archive := filepath.Join(root, "backup.tar")
+	_, err := create(state, archive, time.Now().UTC(), func() {
+		if err := os.Rename(state, movedState); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(movedState, state); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil {
+		t.Fatalf("substituted state directory error = %v", err)
+	}
+	if _, statErr := os.Lstat(archive); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed backup remains: %v", statErr)
+	}
+}
+
 func TestVerifyRejectsHostileControlBackupEntries(t *testing.T) {
 	root := t.TempDir()
 	state := initializeControlState(t, root, false)
