@@ -60,6 +60,12 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return agentCommand(arguments[1:], stdout)
 	case "context":
 		return contextCommand(arguments[1:], stdout)
+	case "status":
+		return statusCommand(arguments[1:], stdout)
+	case "explain":
+		return explainCommand(arguments[1:], stdout)
+	case "recover":
+		return recoverCommand(arguments[1:], stdout)
 	case "completion":
 		return completionCommand(arguments[1:], stdout)
 	case "keygen":
@@ -104,6 +110,9 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "  site          Create and verify a secure site authority package")
 	fmt.Fprintln(writer, "  agent         Initialize, build, place, and fork Hermes agents")
 	fmt.Fprintln(writer, "  context       Save a control plane or node connection")
+	fmt.Fprintln(writer, "  status        Summarize Control and node health")
+	fmt.Fprintln(writer, "  explain       Turn current findings into safe next steps")
+	fmt.Fprintln(writer, "  recover       Preview or apply one proven-safe node recovery")
 	fmt.Fprintln(writer, "  node          Admit, inspect, start, stop, or destroy an agent")
 	fmt.Fprintln(writer, "  control       Enroll nodes and inspect the fleet")
 	fmt.Fprintln(writer, "  permit        Authorize one exact external action")
@@ -146,6 +155,9 @@ var commandHelp = map[string]string{
 	"site":             "Create a complete, offline-verifiable site authority package, establish least-privilege operator and task contexts, then prepare and activate finite node enrollment handoffs without transmitting tenant private keys.\n\nUsage: stewardctl site init DIRECTORY [options]\n       stewardctl site verify DIRECTORY [-site-root-public-key FILE]\n       stewardctl site connect DIRECTORY [options]\n       stewardctl site task connect DIRECTORY [options]\n       stewardctl site node prepare SITE_DIRECTORY NODE_ID [options]\n       stewardctl site node activate PACKAGE_DIRECTORY [options]\n       stewardctl site node verify PACKAGE_DIRECTORY [options]\n\nStart with: stewardctl site init steward-site -tenant-id default -control-server-names control.example.com\n",
 	"agent":            "Build and run portable Hermes agent applications, evaluate offline policy, publish signed image authority, delegate finite controller authority, activate the bounded Gateway service, explain fleet placement, and converge durable deployments.\n\nUsage: stewardctl agent create|init|validate|build|publish|authorize|service|plan|apply|deploy|deployment|fork|doctor ...\n\nCreate a project with: stewardctl agent create NAME -runtime hermes\nPublish its inspected OCI archive with: stewardctl agent publish SITE_DIRECTORY -archive image.tar\nAuthorize its finite deployment with: stewardctl agent authorize SITE_DIRECTORY -node-ids node-a\nActivate its service on the destination node with: stewardctl agent service activate -tenant-id TENANT -node-id NODE\nApply durable desired state with: stewardctl agent apply NAME\nThe expert single-node form remains available as agent apply with named flags only.\n",
 	"context":          "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
+	"status":           "Summarize the current context's Control and Executor health in concise operator language. JSON remains available for automation.\n\nUsage: stewardctl status [-output human|json] [-watch 5s]\n",
+	"explain":          "Explain current Control and Executor findings with their cause, impact, and safe next step. Optionally select one exact resource identity.\n\nUsage: stewardctl explain [RESOURCE_ID] [-output human|json]\n",
+	"recover":          "Preview one bounded node recovery. Only a single reconciliation-proven missing workload is currently eligible; --apply asks Executor to recheck every precondition before mutation.\n\nUsage: stewardctl recover RUNTIME_REF [--apply] [-output human|json]\n",
 	"node":             "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|snapshot-state|clone-state|delete-snapshot|purge-state|maintenance ...\n",
 	"control":          "Enroll nodes, manage scoped operators, freeze command delivery during incidents, quarantine suspect snapshots, place and drain agent workloads, inspect agent events and fleet evidence, and create metadata-only support bundles.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|snapshot|operations|quota|freeze|attention|agent|event|command|credential|evidence|evidence-capture|support-bundle ...\n",
 	"permit":           "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",

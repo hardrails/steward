@@ -2981,7 +2981,7 @@ components:
       description: |
         One derived action-required fact. This is not mutable workflow state.
         Resource-specific fields are present only when applicable.
-      required: [id, reason, severity, resource]
+      required: [id, reason, severity, resource, title, explanation, impact, next_step]
       properties:
         id:
           type: string
@@ -3027,6 +3027,26 @@ components:
           type: integer
           format: int64
           minimum: 1
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Concise operator-facing name for the stable reason code.
+        explanation:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Bounded cause derived from retained metadata, never raw backend error text.
+        impact:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: What remains unavailable or unsafe while the finding exists.
+        next_step:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The safest next operator action without granting new authority.
     IncidentTimelinePage:
       type: object
       additionalProperties: false

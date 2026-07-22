@@ -16,6 +16,30 @@ import (
 	"github.com/hardrails/steward/internal/executor"
 )
 
+func TestEveryAttentionReasonHasBoundedOperatorGuidance(t *testing.T) {
+	reasons := []AttentionReason{
+		AttentionNodeNeverSeen, AttentionNodeStale, AttentionEvidenceUnwitnessed,
+		AttentionEvidenceStale, AttentionRollbackDetected, AttentionEquivocationDetected,
+		AttentionCommandPendingOverdue, AttentionCommandLeaseExpired, AttentionCommandFailed,
+		AttentionCommandOutcomeUnknown, AttentionCapacityWarning, AttentionTenantQuotaWarning,
+		AttentionTenantQuotaExceeded,
+	}
+	for _, reason := range reasons {
+		title, explanation, impact, nextStep, ok := AttentionGuidance(reason)
+		if !ok || title == "" || explanation == "" || impact == "" || nextStep == "" {
+			t.Fatalf("attention reason %q has incomplete guidance", reason)
+		}
+		for _, value := range []string{title, explanation, impact, nextStep} {
+			if len(value) > 256 {
+				t.Fatalf("attention reason %q guidance exceeds 256 bytes", reason)
+			}
+		}
+	}
+	if _, _, _, _, ok := AttentionGuidance("unknown"); ok {
+		t.Fatal("unknown attention reason has guidance")
+	}
+}
+
 func TestOperationsThresholdsAndCapacityEqualityAreBounded(t *testing.T) {
 	defaults := DefaultOperationsThresholds()
 	if defaults.NodeStaleAfter != 2*time.Minute ||

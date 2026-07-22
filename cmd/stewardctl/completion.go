@@ -14,8 +14,8 @@ import (
 )
 
 var completionTree = map[string][]string{
-	"":                            {"help", "site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
-	"help":                        {"site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
+	"":                            {"help", "status", "explain", "recover", "site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
+	"help":                        {"status", "explain", "recover", "site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
 	"site":                        {"init", "verify", "connect", "task", "node"},
 	"site node":                   {"prepare", "activate", "verify"},
 	"site task":                   {"connect"},
@@ -71,6 +71,9 @@ var completionTree = map[string][]string{
 }
 
 var completionFlags = map[string][]string{
+	"status":                            {"-output", "-watch", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-url", "-node-token-file", "-no-context"},
+	"explain":                           {"-output", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-url", "-node-token-file", "-no-context"},
+	"recover":                           {"-apply", "-output", "-node-url", "-token-file", "-no-context"},
 	"site init":                         {"-site-id", "-tenant-id", "-repository", "-service-id", "-service-ids", "-connector-id", "-connector-ids", "-control-server-names", "-authorized-effects", "-dry-run"},
 	"site verify":                       {"-site-root-public-key"},
 	"site connect":                      {"-context", "-operator-token-out", "-request-id", "-node-id", "-site-root-public-key", "-control-url", "-token-file", "-ca-file", "-no-context"},
