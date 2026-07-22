@@ -1,8 +1,11 @@
 package controlstore
 
 import (
+	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -70,12 +73,45 @@ func TestTaskProjectionsSeparateReusedTaskIDsByInstanceGeneration(t *testing.T) 
 			Events: []controlprotocol.InstanceEventV1{event},
 		}
 		if _, err := fixture.store.RetainInstanceEvents(node, batch, fixture.now.Add(time.Duration(index+1)*time.Minute)); err != nil {
-			t.Fatal(err)
+			fixture.store.mu.Lock()
+			projections := maps.Clone(fixture.store.current.taskProjections)
+			fixture.store.mu.Unlock()
+			t.Fatalf("retain event %d: %v; projections=%+v", index, err, projections)
 		}
 	}
 	projections, err := fixture.store.ListTaskProjections(fixture.admin, "tenant-a")
 	if err != nil || len(projections) != 2 || projections[0].ProjectionID == projections[1].ProjectionID {
 		t.Fatalf("projections=%+v err=%v", projections, err)
+	}
+}
+
+func TestTaskProjectionListOrdersFractionalTimestampAfterWholeSecond(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	for index, retained := range []struct {
+		taskID string
+		now    time.Time
+	}{
+		{taskID: "task-older", now: base},
+		{taskID: "task-newer", now: base.Add(time.Nanosecond)},
+	} {
+		event := taskProjectionEvent(
+			"tenant-a", node.NodeID, "fractional-"+strconv.Itoa(index), "status",
+			controlprotocol.InstanceEventCodeTaskStarted, "info", "Started.", retained.taskID, "run-a", retained.now,
+		)
+		batch := controlprotocol.InstanceEventBatchRequestV1{
+			SchemaVersion: controlprotocol.InstanceEventBatchV1, NodeID: node.NodeID,
+			Events: []controlprotocol.InstanceEventV1{event},
+		}
+		if _, err := fixture.store.RetainInstanceEvents(node, batch, retained.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projections, err := fixture.store.ListTaskProjections(fixture.admin, "tenant-a")
+	if err != nil || len(projections) != 2 || projections[0].TaskID != "task-newer" {
+		t.Fatalf("ordered projections=%+v err=%v", projections, err)
 	}
 }
 
@@ -116,6 +152,7 @@ func TestTaskProjectionValidationRejectsNoncanonicalOrUnboundedFields(t *testing
 		{name: "runtime", mutate: func(value *TaskProjection) { value.RuntimeRef = "executor-invalid" }},
 		{name: "reversed time", mutate: func(value *TaskProjection) { value.FirstObservedAt = "2026-07-21T01:00:02Z" }},
 		{name: "severity regression", mutate: func(value *TaskProjection) { value.LatestSeverity = "critical" }},
+		{name: "event count", mutate: func(value *TaskProjection) { value.EventCount = MaxTaskProjectionEventCount + 1 }},
 		{name: "nil conditions", mutate: func(value *TaskProjection) { value.Conditions = nil }},
 		{name: "condition order", mutate: func(value *TaskProjection) {
 			value.Conditions = []string{TaskConditionWorkloadIdentityConflict, TaskConditionRunIdentityConflict}
@@ -134,6 +171,142 @@ func TestTaskProjectionValidationRejectsNoncanonicalOrUnboundedFields(t *testing
 			}
 		})
 	}
+}
+
+func TestTaskProjectionSurvivesSourceEventDeletionAndSnapshotRoundTrip(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	event := taskProjectionEvent(
+		"tenant-a", node.NodeID, "terminal", "status", controlprotocol.InstanceEventCodeTaskCompleted,
+		"info", "Completed.", "task-a", "run-a", fixture.now,
+	)
+	batch := controlprotocol.InstanceEventBatchRequestV1{
+		SchemaVersion: controlprotocol.InstanceEventBatchV1,
+		NodeID:        node.NodeID,
+		Events:        []controlprotocol.InstanceEventV1{event},
+	}
+	if applied, err := fixture.store.RetainInstanceEvents(node, batch, fixture.now.Add(time.Minute)); err != nil || applied != 1 {
+		t.Fatalf("retain terminal event=(%d, %v)", applied, err)
+	}
+	if err := fixture.store.applyMutations(mutation{Kind: mutationInstanceEventDelete, EventID: event.EventID}); err != nil {
+		t.Fatalf("delete source event: %v", err)
+	}
+	if events, err := fixture.store.ListInstanceEvents(fixture.admin, "tenant-a"); err != nil || len(events) != 0 {
+		t.Fatalf("source events=%+v err=%v", events, err)
+	}
+	projections, err := fixture.store.ListTaskProjections(fixture.admin, "tenant-a")
+	if err != nil || len(projections) != 1 || projections[0].State != TaskStateCompleted || projections[0].EventCount != 1 {
+		t.Fatalf("durable projections=%+v err=%v", projections, err)
+	}
+
+	raw, err := encodeState(fixture.store.current, fixture.limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := decodeState(raw, fixture.limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := recovered.taskProjections[projections[0].ProjectionID]
+	if projection.State != TaskStateCompleted || projection.EventCount != 1 {
+		t.Fatalf("recovered projection=%+v", projection)
+	}
+}
+
+func TestTaskProjectionStateFormatMigratesEventsAndRejectsSmuggling(t *testing.T) {
+	current, limits := populatedControlState(t)
+	nodeID := "node-a"
+	event := taskProjectionEvent(
+		"tenant-a", nodeID, "migration", "status", controlprotocol.InstanceEventCodeTaskCompleted,
+		"info", "Completed.", "task-a", "run-a", time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC),
+	)
+	retained := InstanceEvent{Event: event, ReceivedAt: "2026-07-21T12:01:00Z"}
+	current.events[event.EventID] = retained
+	observeTaskProjection(current.taskProjections, retained)
+	raw, err := encodeState(current, limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot snapshotState
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 1 {
+		t.Fatalf("current snapshot tasks=%+v", snapshot.Tasks)
+	}
+
+	legacy := snapshot
+	legacy.Version = stateFormatTaskProjectionVersion - 1
+	legacy.Tasks = nil
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := decodeState(legacyRaw, limits.MaxStateBytes)
+	if err != nil || len(migrated.taskProjections) != 1 {
+		t.Fatalf("legacy migration tasks=%+v err=%v", migrated.taskProjections, err)
+	}
+
+	legacy.Tasks = snapshot.Tasks
+	smuggled, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(smuggled, limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot smuggled task projection state")
+	}
+
+	snapshot.Tasks = append(snapshot.Tasks, snapshot.Tasks[0])
+	duplicate, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(duplicate, limits.MaxStateBytes); err == nil {
+		t.Fatal("snapshot accepted duplicate task projection identity")
+	}
+}
+
+func TestTaskProjectionRetentionIsBoundedPerTenantAndSite(t *testing.T) {
+	projections := make(map[string]TaskProjection)
+	for index := 0; index <= MaxTaskProjectionsPerTenant; index++ {
+		projection := retainedTaskProjection("tenant-a", index)
+		projections[projection.ProjectionID] = projection
+	}
+	for tenantIndex := 0; tenantIndex < 3; tenantIndex++ {
+		for index := 0; index < MaxTaskProjectionsPerTenant; index++ {
+			projection := retainedTaskProjection("tenant-"+string(rune('b'+tenantIndex)), index)
+			projections[projection.ProjectionID] = projection
+		}
+	}
+	evicted := taskProjectionEvictions(projections)
+	if len(evicted) != 1 || evicted[0] != retainedTaskProjection("tenant-a", 0).ProjectionID {
+		t.Fatalf("per-tenant evictions=%+v", evicted)
+	}
+
+	extra := retainedTaskProjection("tenant-e", 0)
+	projections[extra.ProjectionID] = extra
+	for _, id := range evicted {
+		delete(projections, id)
+	}
+	evicted = taskProjectionEvictions(projections)
+	if len(evicted) != 1 {
+		t.Fatalf("site evictions=%+v", evicted)
+	}
+}
+
+func retainedTaskProjection(tenantID string, index int) TaskProjection {
+	taskID := "task-" + strconv.Itoa(index)
+	observedAt := time.Date(2026, 7, 21, 12, 0, 0, index, time.UTC).Format(time.RFC3339Nano)
+	projection := TaskProjection{
+		TenantID: tenantID, TaskID: taskID, InstanceID: "researcher-a", Generation: 1,
+		NodeID: "node-a", RuntimeRef: "executor-" + strings.Repeat("a", 64), State: TaskStateActivity,
+		LatestCode: "activity", LatestSeverity: "info", HighestSeverity: "info", LatestSummary: "Activity.",
+		EventCount: 1, FirstObservedAt: observedAt, LastObservedAt: observedAt,
+		LatestEventID: "event-" + strings.Repeat("b", 64), Conditions: []string{},
+	}
+	projection.ProjectionID = taskProjectionID(tenantID, taskID, projection.InstanceID, projection.Generation)
+	return projection
 }
 
 func taskProjectionEvent(

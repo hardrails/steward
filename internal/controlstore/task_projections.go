@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,9 @@ import (
 )
 
 const (
+	MaxTaskProjectionsRetained            = 4096
+	MaxTaskProjectionsPerTenant           = 1024
+	MaxTaskProjectionEventCount           = math.MaxInt32
 	TaskStateActivity                     = "agent_reported_activity"
 	TaskStateRunning                      = "agent_reported_running"
 	TaskStateCompleted                    = "agent_reported_completed"
@@ -60,7 +64,8 @@ func (projection TaskProjection) Validate() error {
 		!validRecordID(projection.NodeID, 128) || !validExecutorRuntimeRef(projection.RuntimeRef) ||
 		projection.RunID != "" && !validProjectionText(projection.RunID, 256) || !validRecordID(projection.LatestCode, 128) ||
 		!validProjectionText(projection.LatestSummary, controlprotocol.MaxInstanceEventSummary) ||
-		projection.EventCount <= 0 || projection.FindingCount < 0 || projection.FindingCount > projection.EventCount ||
+		projection.EventCount <= 0 || projection.EventCount > MaxTaskProjectionEventCount ||
+		projection.FindingCount < 0 || projection.FindingCount > projection.EventCount ||
 		firstErr != nil || lastErr != nil || !validTimestamp(projection.FirstObservedAt) ||
 		!validTimestamp(projection.LastObservedAt) || firstObservedAt.After(lastObservedAt) ||
 		!validEventIdentifier(projection.LatestEventID) || !validTaskProjectionState(projection.State) ||
@@ -99,39 +104,12 @@ func (store *Store) ListTaskProjections(actor controlauth.Identity, tenantID str
 	if !controlauth.AuthorizedTenant(actor, tenantID) {
 		return nil, ErrNotFound
 	}
-	events := make([]InstanceEvent, 0)
-	for _, event := range store.current.events {
-		if event.Event.TenantID == tenantID && event.Event.TaskID != "" {
-			events = append(events, cloneInstanceEvent(event))
+	result := make([]TaskProjection, 0)
+	for _, retained := range store.current.taskProjections {
+		if retained.TenantID != tenantID {
+			continue
 		}
-	}
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].ReceivedAt != events[j].ReceivedAt {
-			return events[i].ReceivedAt < events[j].ReceivedAt
-		}
-		return events[i].Event.EventID < events[j].Event.EventID
-	})
-
-	byID := make(map[string]*taskProjectionAccumulator)
-	for _, retained := range events {
-		event := retained.Event
-		id := taskProjectionID(event.TenantID, event.TaskID, event.InstanceID, event.Generation)
-		accumulator := byID[id]
-		if accumulator == nil {
-			accumulator = &taskProjectionAccumulator{projection: TaskProjection{
-				ProjectionID: id, TenantID: event.TenantID, TaskID: event.TaskID,
-				InstanceID: event.InstanceID, Generation: event.Generation, NodeID: event.NodeID,
-				RuntimeRef: event.RuntimeRef, State: TaskStateActivity,
-				FirstObservedAt: retained.ReceivedAt,
-			}}
-			byID[id] = accumulator
-		}
-		accumulator.observe(retained)
-	}
-
-	result := make([]TaskProjection, 0, len(byID))
-	for _, accumulator := range byID {
-		projection := accumulator.finish()
+		projection := cloneTaskProjection(retained)
 		if err := projection.Validate(); err != nil {
 			return nil, ErrUnavailable
 		}
@@ -139,11 +117,100 @@ func (store *Store) ListTaskProjections(actor controlauth.Identity, tenantID str
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].LastObservedAt != result[j].LastObservedAt {
-			return result[i].LastObservedAt > result[j].LastObservedAt
+			return timestampBefore(result[j].LastObservedAt, result[i].LastObservedAt)
 		}
 		return result[i].ProjectionID > result[j].ProjectionID
 	})
 	return result, nil
+}
+
+func cloneTaskProjection(value TaskProjection) TaskProjection {
+	value.Conditions = append([]string{}, value.Conditions...)
+	return value
+}
+
+// observeTaskProjection advances the bounded durable read model in the same
+// transaction replay that retains the source event. Event deletion never rolls
+// the projection backward; the projection has its own explicit retention cap.
+func observeTaskProjection(projections map[string]TaskProjection, retained InstanceEvent) {
+	event := retained.Event
+	if event.TaskID == "" {
+		return
+	}
+	id := taskProjectionID(event.TenantID, event.TaskID, event.InstanceID, event.Generation)
+	accumulator := taskProjectionAccumulatorFrom(projections[id])
+	if accumulator.projection.ProjectionID == "" {
+		accumulator.projection = TaskProjection{
+			ProjectionID: id, TenantID: event.TenantID, TaskID: event.TaskID,
+			InstanceID: event.InstanceID, Generation: event.Generation, NodeID: event.NodeID,
+			RuntimeRef: event.RuntimeRef, State: TaskStateActivity,
+			FirstObservedAt: retained.ReceivedAt,
+		}
+	}
+	accumulator.observe(retained)
+	projections[id] = accumulator.finish()
+	for _, evicted := range taskProjectionEvictions(projections) {
+		delete(projections, evicted)
+	}
+}
+
+func rebuildTaskProjections(events map[string]InstanceEvent) map[string]TaskProjection {
+	ordered := make([]InstanceEvent, 0, len(events))
+	for _, event := range events {
+		ordered = append(ordered, cloneInstanceEvent(event))
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].ReceivedAt != ordered[j].ReceivedAt {
+			return timestampBefore(ordered[i].ReceivedAt, ordered[j].ReceivedAt)
+		}
+		return ordered[i].Event.EventID < ordered[j].Event.EventID
+	})
+	result := make(map[string]TaskProjection)
+	for _, event := range ordered {
+		observeTaskProjection(result, event)
+	}
+	return result
+}
+
+func taskProjectionEvictions(projections map[string]TaskProjection) []string {
+	byTenant := make(map[string][]TaskProjection)
+	for _, projection := range projections {
+		byTenant[projection.TenantID] = append(byTenant[projection.TenantID], projection)
+	}
+	evicted := make(map[string]struct{})
+	for _, tenantProjections := range byTenant {
+		sortOldestTaskProjections(tenantProjections)
+		for len(tenantProjections) > MaxTaskProjectionsPerTenant {
+			evicted[tenantProjections[0].ProjectionID] = struct{}{}
+			tenantProjections = tenantProjections[1:]
+		}
+	}
+	remaining := make([]TaskProjection, 0, len(projections)-len(evicted))
+	for id, projection := range projections {
+		if _, removed := evicted[id]; !removed {
+			remaining = append(remaining, projection)
+		}
+	}
+	sortOldestTaskProjections(remaining)
+	for len(remaining) > MaxTaskProjectionsRetained {
+		evicted[remaining[0].ProjectionID] = struct{}{}
+		remaining = remaining[1:]
+	}
+	result := make([]string, 0, len(evicted))
+	for id := range evicted {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func sortOldestTaskProjections(projections []TaskProjection) {
+	sort.Slice(projections, func(i, j int) bool {
+		if projections[i].LastObservedAt != projections[j].LastObservedAt {
+			return timestampBefore(projections[i].LastObservedAt, projections[j].LastObservedAt)
+		}
+		return projections[i].ProjectionID < projections[j].ProjectionID
+	})
 }
 
 type taskProjectionAccumulator struct {
@@ -154,11 +221,31 @@ type taskProjectionAccumulator struct {
 	terminalConflict bool
 }
 
+func taskProjectionAccumulatorFrom(projection TaskProjection) *taskProjectionAccumulator {
+	accumulator := &taskProjectionAccumulator{projection: cloneTaskProjection(projection)}
+	if isTerminalTaskState(projection.State) {
+		accumulator.terminalState = projection.State
+	}
+	for _, condition := range projection.Conditions {
+		switch condition {
+		case TaskConditionRunIdentityConflict:
+			accumulator.runConflict = true
+		case TaskConditionWorkloadIdentityConflict:
+			accumulator.workloadConflict = true
+		case TaskConditionTerminalConflict:
+			accumulator.terminalConflict = true
+		}
+	}
+	return accumulator
+}
+
 func (accumulator *taskProjectionAccumulator) observe(retained InstanceEvent) {
 	event := retained.Event
 	projection := &accumulator.projection
-	projection.EventCount++
-	if event.Kind == "finding" {
+	if projection.EventCount < MaxTaskProjectionEventCount {
+		projection.EventCount++
+	}
+	if event.Kind == "finding" && projection.FindingCount < MaxTaskProjectionEventCount {
 		projection.FindingCount++
 	}
 	if projection.RunID == "" {
