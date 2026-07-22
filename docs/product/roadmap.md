@@ -452,11 +452,14 @@ The roadmap starts from working primitives rather than a blank design:
 - atomic deployment-transition and command enqueue, deterministic command IDs,
   restart-safe progress, and explicit degraded outcomes;
 - health-aware placement that rejects stale nodes, durable bounded blocked reasons,
-  and deliberate refusal to replace an assigned node without fencing proof; and
+  and deliberate refusal to replace an assigned node without fencing proof;
 - public HTTP, client, OpenAPI, and context-aware CLI operations for applying,
   inspecting, listing, waiting for, and removing desired deployments;
 - task-ready desired state that retains the exact verified intent and authenticated
-  admission projection without retaining private keys; and
+  admission projection without retaining private keys;
+- a bounded, durable instance-to-controller event outbox with stable sequence,
+  replay, backpressure, retention, authenticated uplink, Control API, CLI, MCP,
+  and console projections;
 - a recovery-safe `task run` workflow that writes signed authority before dispatch,
   joins deployment wait, task issuance, Gateway submission, terminal observation,
   and result storage, and can derive the qualified Hermes request from
@@ -492,15 +495,19 @@ The roadmap starts from working primitives rather than a blank design:
   with the optimization kept separate from signed admission authority;
 - opt-in image retrieval from one operator-approved OCI registry, with protected
   registry authentication, exact signed-digest pulls, and mandatory post-pull
-  image inspection; and
+  image inspection;
 - a strict, owner-only incident support bundle that joins non-secret controller
   inventory and node evidence checkpoints for offline inspection without exporting
   prompts, bodies, command envelopes, credentials, private keys, result text, or
-  logs; and
+  logs;
 - supported private AWS Auto Scaling Group, Google Cloud regional Managed Instance
   Group, and Azure Virtual Machine Scale Set modules that reuse native fleet
   resources, pin non-secret first boot, keep node enrollment out of Terraform
-  state, and refuse automatic replacement or scale-in before a Steward drain.
+  state, and refuse automatic replacement or scale-in before a Steward drain; and
+- explicit `strict-sovereign` and `bounded-autonomous` Control authority modes;
+  strict mode refuses accessible controller signing-key files, never starts the
+  reconciler, and rejects desired-state mutations, while bounded mode preserves
+  tenant-delegated reconciliation.
 
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and
@@ -527,15 +534,16 @@ and `task run` performs useful work through the enforced boundary.
 - Consolidate common operations behind one `steward` command while retaining
   expert commands and stable JSON output.
 - Add canonical deployment, instance, task, result, and condition models.
-- Make task submission asynchronous and idempotent, with progress, cancellation,
-  deadlines, bounded retention, a durable instance outbox, and content-addressed
-  result metadata.
+- Make Control-level task submission asynchronous and idempotent, with progress,
+  cancellation, deadlines, bounded retention, and content-addressed result
+  metadata. Reuse the shipped instance outbox instead of creating another event
+  channel.
 - Implement a crash-safe, idempotent desired-state loop with generations, bounded
   retry, garbage collection, and explicit degraded states.
 - Join bundle build, placement, signed admission, start, health, task, result,
   egress, secrets, and evidence into one operation.
-- Complete Executor-verifiable, time-bounded controller delegation without placing
-  tenant root keys in Control.
+- Join the implemented Executor-verifiable, time-bounded controller delegation to
+  task and health recovery without placing tenant root keys in Control.
 - Keep one pinned Hermes adapter qualified through the task, health, and result
   contract. Add another runtime only after a concrete user need justifies its
   security and maintenance surface.
@@ -600,8 +608,9 @@ supportable through one coherent operational surface.
   task/result correlation, quotas, and no direct workload-to-workload network.
 - Add an S3-compatible artifact backend plus bounded local storage, tenant
   encryption, quotas, retention, and deletion evidence.
-- Ship strict-sovereign and bounded-autonomous Control profiles and prove their
-  distinct compromise claims through hostile-path tests.
+- Complete the strict-sovereign external proposal/signature workflow and prove
+  both shipped Control profiles' distinct compromise claims through hostile-path
+  tests.
 - Extend the implemented site and tenant freeze, node quarantine, snapshot
   quarantine, retained Control incident timeline, and metadata-only support
   bundle with capability revocation and cross-plane verified evidence.
