@@ -14,6 +14,7 @@ import {
   displayStringList,
   sessionExpired,
 } from "./session.js";
+import {attentionCommand, attentionGuidance} from "./operator-guidance.js";
 
 const idleTimeoutMilliseconds = 15 * 60 * 1000;
 const absoluteTimeoutMilliseconds = 8 * 60 * 60 * 1000;
@@ -976,16 +977,50 @@ function AttentionList({items}) {
   return (
     <div className="attention-list">
       {items.map((item) => (
-        <article key={item.id} className={"attention-item" + (item.severity === "critical" ? " is-critical" : "")}>
-          <span className="attention-marker" />
-          <strong className="attention-reason">{humanize(item.reason)}</strong>
-          <span className="attention-resource">{attentionResource(item)}</span>
-          <time className="attention-since">
-            {item.since ? formatTime(item.since) : humanize(item.status || item.state)}
-          </time>
-        </article>
+        <AttentionCard key={item.id} item={item} />
       ))}
     </div>
+  );
+}
+
+function AttentionCard({item}) {
+  const [copyState, setCopyState] = useState("idle");
+  const guidance = attentionGuidance(item);
+  const command = attentionCommand(item);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 2000);
+    } catch {
+      setCopyState("failed");
+    }
+  };
+  return (
+    <article className={"attention-item" + (item.severity === "critical" ? " is-critical" : "")}>
+      <div className="attention-card-head">
+        <span className="attention-marker" aria-hidden="true" />
+        <div>
+          <span className="attention-code">{item.severity} / {humanize(item.reason)}</span>
+          <h3>{guidance.title}</h3>
+        </div>
+        <time className="attention-since">
+          {item.since ? formatTime(item.since) : humanize(item.status || item.state)}
+        </time>
+      </div>
+      <div className="attention-resource">{attentionResource(item)}</div>
+      <dl className="attention-guidance">
+        <div><dt>What happened</dt><dd>{guidance.explanation}</dd></div>
+        <div><dt>What it affects</dt><dd>{guidance.impact}</dd></div>
+        <div><dt>Safest next step</dt><dd>{guidance.nextStep}</dd></div>
+      </dl>
+      <div className="attention-command">
+        <code>{command}</code>
+        <button className="button button-quiet" type="button" onClick={copy}>
+          {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy diagnostic command"}
+        </button>
+      </div>
+    </article>
   );
 }
 

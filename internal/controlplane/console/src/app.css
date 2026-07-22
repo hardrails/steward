@@ -1268,23 +1268,59 @@ progress::-moz-progress-bar {
 
 .attention-list {
   display: grid;
-  gap: 10px;
+  gap: 14px;
 }
 
 .attention-item {
-  display: grid;
-  min-height: 72px;
-  align-items: center;
+  position: relative;
+  overflow: hidden;
   border: 1px solid var(--line);
-  background: var(--ink-soft);
-  grid-template-columns: 14px minmax(160px, 1fr) minmax(180px, 1.2fr) auto;
+  background:
+    linear-gradient(135deg, rgb(255 194 71 / 0.055), transparent 42%),
+    var(--ink-soft);
+  padding: clamp(18px, 3vw, 28px);
+}
+
+.attention-item::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 58px;
+  height: 4px;
+  background: var(--warning);
+  content: "";
+}
+
+.attention-item.is-critical {
+  background:
+    linear-gradient(135deg, rgb(255 91 55 / 0.08), transparent 46%),
+    var(--ink-soft);
+}
+
+.attention-item.is-critical::after {
+  background: var(--danger);
+}
+
+.attention-card-head {
+  display: grid;
+  align-items: start;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
   gap: 14px;
-  padding: 13px 16px;
+}
+
+.attention-card-head h3 {
+  margin: 3px 0 0;
+  font-family: var(--display);
+  font-size: clamp(22px, 2.4vw, 31px);
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
 }
 
 .attention-marker {
   width: 8px;
   height: 8px;
+  margin-top: 6px;
   background: var(--warning);
 }
 
@@ -1293,16 +1329,26 @@ progress::-moz-progress-bar {
   box-shadow: 0 0 12px rgb(255 91 55 / 0.3);
 }
 
-.attention-reason {
+.attention-code {
+  display: block;
+  color: var(--warning);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 800;
+  letter-spacing: 0.11em;
   overflow-wrap: anywhere;
+  text-transform: uppercase;
+}
+
+.attention-item.is-critical .attention-code {
+  color: var(--danger);
 }
 
 .attention-resource {
+  margin: 14px 0 0 26px;
   color: var(--paper-muted);
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 10px;
   overflow-wrap: anywhere;
 }
 
@@ -1310,6 +1356,58 @@ progress::-moz-progress-bar {
   color: var(--paper-dim);
   font-family: var(--mono);
   font-size: 9px;
+  white-space: nowrap;
+}
+
+.attention-guidance {
+  display: grid;
+  margin: 22px 0 0 26px;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.attention-guidance > div {
+  min-height: 112px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 15px 16px;
+}
+
+.attention-guidance dt {
+  margin-bottom: 8px;
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.attention-guidance dd {
+  margin: 0;
+  color: var(--paper-muted);
+  font-size: 12px;
+}
+
+.attention-guidance > div:last-child dd {
+  color: var(--paper);
+}
+
+.attention-command {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 16px 0 0 26px;
+  gap: 16px;
+}
+
+.attention-command code {
+  overflow-x: auto;
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .incident-summary {
@@ -2110,13 +2208,24 @@ td small {
   }
 
   .attention-item {
-    align-items: start;
-    grid-template-columns: 12px 1fr;
+    padding: 18px;
   }
 
-  .attention-resource,
+  .attention-card-head {
+    grid-template-columns: 12px minmax(0, 1fr);
+  }
+
   .attention-since {
     grid-column: 2;
+  }
+
+  .attention-guidance {
+    grid-template-columns: 1fr;
+  }
+
+  .attention-command {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .incident-summary {
