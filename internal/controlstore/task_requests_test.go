@@ -316,6 +316,9 @@ func TestAsyncTaskReportsDistinguishRetryRunningAndRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(5*time.Second), time.Minute, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var runningDelivery controlprotocol.ExecutorTaskDeliveryV1
 	for _, delivery := range deliveries {
 		if delivery.TaskID == "running-task" {
@@ -344,6 +347,9 @@ func TestAsyncTaskReportsDistinguishRetryRunningAndRejection(t *testing.T) {
 		t.Fatalf("future report error=%v", err)
 	}
 	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(9*time.Second), time.Minute, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, delivery := range deliveries {
 		if delivery.TaskID == "running-task" {
 			runningDelivery = delivery
