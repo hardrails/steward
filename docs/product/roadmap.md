@@ -504,6 +504,10 @@ The roadmap starts from working primitives rather than a blank design:
   Group, and Azure Virtual Machine Scale Set modules that reuse native fleet
   resources, pin non-secret first boot, keep node enrollment out of Terraform
   state, and refuse automatic replacement or scale-in before a Steward drain; and
+- a bounded provider-neutral `NodePool` resource with optimistic revisions,
+  desired/minimum/maximum capacity, exact scale-out deficits, post-drain empty-node
+  scale-in candidates, public API/client/CLI contracts, and an explicit rule that
+  self-reported pool membership never grants workload authority; and
 - explicit `strict-sovereign` and `bounded-autonomous` Control authority modes;
   strict mode refuses accessible controller signing-key files, never starts the
   reconciler, and rejects desired-state mutations, while bounded mode preserves
@@ -580,9 +584,12 @@ supportable through one coherent operational surface.
 - Extend the implemented node leases, resources, reservations, labels, taints and
   tolerations, isolation classes, topology, and image locality with portable state
   locality.
-- Add the `NodePool` resource, provider-neutral capacity signals, short-lived
-  node-specific enrollment, cloud workload identity, exact-node lifecycle notices,
-  and post-drain scale-in approval for elastic fleets.
+- Extend the shipped provider-neutral `NodePool` capacity signal with short-lived,
+  independently verifiable pool membership, node-specific zero-touch enrollment,
+  cloud workload identity adapters, exact-node lifecycle notices, and provider
+  driver conformance. Keep infrastructure reconciliation outside Control and do
+  not enable pool-scoped placement until both Control and Executor verify the same
+  finite membership statement.
 - Make placement an actual controller decision with stale-plan detection and
   Executor revalidation.
 - Extend implemented lease-fenced replacement, rescheduling, topology placement,
@@ -714,7 +721,9 @@ product is:
 4. Executor-verifiable delegated automation and Control-compromise profiles;
 5. tested egress and secret mediation with low-risk and exact-effect tiers;
 6. one real read-only workflow and one protected external action;
-7. elastic `NodePool` enrollment, reconciliation, drain, and failure recovery;
+7. extend shipped `NodePool` capacity and safe scale-in with independently verified
+   elastic enrollment, pool-scoped placement, provider reconciliation, and failure
+   recovery;
 8. quota-capable state plus an authority-scrubbed cold fork;
 9. two backend assurance profiles that pass one conformance suite; and
 10. one incident and offline evidence view.

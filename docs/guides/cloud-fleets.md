@@ -14,6 +14,11 @@ exact Steward release.
 This is the supported path when you want tens or hundreds of Linux agent hosts but
 do not want Kubernetes to become a required part of the Steward trust boundary.
 
+Steward also exposes a provider-neutral [`NodePool` capacity contract]({{ '/guides/node-pools/' | relative_url }}).
+An external driver can use its exact `scale_out_needed` value and post-drain
+`scale_in_candidates` without receiving tenant signing keys or turning a cloud
+label into workload authority.
+
 ## What the modules do
 
 | Cloud | Steward module | Cloud service it creates | Safe update behavior |

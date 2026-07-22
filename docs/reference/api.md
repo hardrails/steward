@@ -53,6 +53,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `POST /v1/nodes/{node_id}/placement` | Site-admin-only cordon, quarantine, uncordon, or unquarantine transition with durable reason and time |
 | `PUT or DELETE /v1/nodes/{node_id}/drain` | Start an idempotent, budgeted stateless evacuation or cancel new moves using its request ID; already-started moves continue |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
+| `GET /v1/node-pools`, `GET or PUT or DELETE /v1/node-pools/{pool_id}` | Site-admin-only provider-neutral capacity intent, exact creation deficit, and post-drain empty-node scale-in candidates; pool labels do not grant workload authority |
 | `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments, including retained task-ready intent and admission projections when present |
 | `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
 | `PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout` | Pause or resume new replacements in an active rollout; in-flight work reaches a safe boundary |

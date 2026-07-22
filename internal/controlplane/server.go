@@ -143,6 +143,8 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/placement", server.nodePlacement)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/drain", server.nodeDrain)
+	server.mux.HandleFunc("/v1/node-pools", server.nodePools)
+	server.mux.HandleFunc("/v1/node-pools/{pool_id}", server.nodePool)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures", server.evidenceCaptures)

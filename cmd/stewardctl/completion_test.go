@@ -44,6 +44,9 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"control", "task", ""}); !slices.Equal(candidates, []string{"list"}) {
 		t.Fatalf("control task candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"control", "node-pool", ""}); !slices.Equal(candidates, []string{"apply", "delete", "list", "status"}) {
+		t.Fatalf("control node-pool candidates=%v", candidates)
+	}
 	supportFlags := stewardctlCompletionCandidates([]string{"control", "support-bundle", "verify", "-expected"})
 	if !slices.Equal(supportFlags, []string{"-expected-sha256"}) {
 		t.Fatalf("support bundle verification flags=%v", supportFlags)

@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,6 +69,14 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeDrain(arguments[2:], stdout, false)
 	case "node cancel-drain":
 		return controlNodeDrain(arguments[2:], stdout, true)
+	case "node-pool list":
+		return controlNodePoolList(arguments[2:], stdout)
+	case "node-pool status":
+		return controlNodePoolStatus(arguments[2:], stdout)
+	case "node-pool apply":
+		return controlNodePoolApply(arguments[2:], stdout)
+	case "node-pool delete":
+		return controlNodePoolDelete(arguments[2:], stdout)
 	case "node-credential revoke":
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
 	case "snapshot status":
@@ -134,7 +143,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 func controlEventList(arguments []string, stdout io.Writer) error {
@@ -187,6 +196,118 @@ func controlTaskList(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, tasks)
+}
+
+func controlNodePoolList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-pool list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	after := flags.String("after", "", "exclusive pool identity cursor")
+	limit := flags.Int("limit", 100, "maximum pools to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *limit <= 0 || *limit > 500 || flags.NArg() != 0 {
+		return errors.New("control node-pool list requires a limit between 1 and 500")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	page, err := client.ListNodePools(ctx, *after, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, page)
+}
+
+func controlNodePoolStatus(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-pool status", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	poolID := flags.String("pool-id", "", "node pool identity")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *poolID == "" || flags.NArg() != 0 {
+		return errors.New("control node-pool status requires -pool-id")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	status, err := client.GetNodePool(ctx, *poolID)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, status)
+}
+
+func controlNodePoolApply(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-pool apply", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	poolID := flags.String("pool-id", "", "node pool identity")
+	tenantList := flags.String("tenant-ids", "", "comma-separated tenant bindings")
+	architecture := flags.String("architecture", "", "optional required architecture")
+	minimum := flags.Int("min-nodes", 0, "minimum infrastructure capacity")
+	desired := flags.Int("desired-nodes", 0, "desired infrastructure capacity")
+	maximum := flags.Int("max-nodes", 0, "maximum infrastructure capacity")
+	revision := flags.Uint64("revision", 0, "expected retained revision; zero creates")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	tenantIDs, err := parseTenantIDs(*tenantList)
+	if err != nil {
+		return err
+	}
+	sort.Strings(tenantIDs)
+	if *poolID == "" || *minimum < 0 || *desired < *minimum || *maximum < *desired || *maximum <= 0 || flags.NArg() != 0 {
+		return errors.New("control node-pool apply requires pool ID, tenants, and 0 <= min <= desired <= max")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	status, err := client.ApplyNodePool(ctx, *poolID, controlclient.NodePoolApply{
+		ExpectedRevision: *revision, TenantIDs: tenantIDs, Architecture: *architecture,
+		MinNodes: *minimum, DesiredNodes: *desired, MaxNodes: *maximum,
+	})
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, status)
+}
+
+func controlNodePoolDelete(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-pool delete", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	poolID := flags.String("pool-id", "", "node pool identity")
+	revision := flags.Uint64("revision", 0, "expected retained revision")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *poolID == "" || *revision == 0 || flags.NArg() != 0 {
+		return errors.New("control node-pool delete requires pool ID and nonzero revision")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := client.DeleteNodePool(ctx, *poolID, *revision); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, *poolID)
+	return err
 }
 
 type controlFlags struct {
