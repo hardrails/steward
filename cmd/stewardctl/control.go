@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/controlauth"
+	"github.com/hardrails/steward/internal/controlbackup"
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
@@ -43,6 +44,12 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 	switch arguments[0] + " " + arguments[1] {
 	case "pki create":
 		return controlPKICreate(arguments[2:], stdout)
+	case "backup create":
+		return controlBackupCreate(arguments[2:], stdout)
+	case "backup verify":
+		return controlBackupVerify(arguments[2:], stdout)
+	case "backup restore":
+		return controlBackupRestore(arguments[2:], stdout)
 	case "tenant create":
 		return controlTenantCreate(arguments[2:], stdout)
 	case "tenant list":
@@ -155,7 +162,75 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|assurance|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete|membership-issue|membership-verify|membership-bind, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, backup create|verify|restore, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|assurance|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete|membership-issue|membership-verify|membership-bind, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+}
+
+const defaultControlStateDirectory = "/var/lib/steward-control"
+
+func controlBackupCreate(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control backup create", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	stateDirectory := flags.String("state-dir", defaultControlStateDirectory, "stopped Steward Control state directory")
+	output := flags.String("out", "", "new owner-only .tar backup")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *stateDirectory == "" || *output == "" || flags.NArg() != 0 {
+		return errors.New("control backup create requires a state directory and new output path")
+	}
+	report, err := controlbackup.Create(*stateDirectory, *output, timeNow().UTC())
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, report)
+}
+
+func controlBackupVerify(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control backup verify", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	input := flags.String("in", "", "owner-only Control backup")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *input == "" || flags.NArg() != 0 {
+		return errors.New("control backup verify requires an input archive")
+	}
+	report, err := controlbackup.Verify(*input)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, report)
+}
+
+type controlBackupRestoreReport struct {
+	controlbackup.Report
+	Destination string `json:"destination"`
+	Applied     bool   `json:"applied"`
+}
+
+func controlBackupRestore(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control backup restore", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	input := flags.String("in", "", "owner-only Control backup")
+	stateDirectory := flags.String("state-dir", defaultControlStateDirectory, "new restore destination")
+	apply := flags.Bool("apply", false, "publish the validated restore; otherwise preview only")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *input == "" || *stateDirectory == "" || flags.NArg() != 0 {
+		return errors.New("control backup restore requires an input archive and new state directory")
+	}
+	var report controlbackup.Report
+	var err error
+	if *apply {
+		report, err = controlbackup.Restore(*input, *stateDirectory)
+	} else {
+		report, err = controlbackup.Verify(*input)
+	}
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, controlBackupRestoreReport{Report: report, Destination: *stateDirectory, Applied: *apply})
 }
 
 func controlEventList(arguments []string, stdout io.Writer) error {
