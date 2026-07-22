@@ -99,6 +99,12 @@ release_files=(
 	steward-relay
 	steward-storage-zfs
 	stewardctl
+	integration/examples/agents/hermes/agent.json
+	integration/examples/agents/developer/agent.json
+	integration/examples/agents/researcher/agent.json
+	integration/examples/agents/nodes.json
+	integration/examples/policy/steward.rego
+	integration/schemas/agent.cue
 	integration/adapters/hermes-agent/Dockerfile
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
@@ -139,9 +145,6 @@ release_files=(
 	integration/workers/research/Dockerfile
 	integration/workers/research/README.md
 	integration/workers/research/research_worker.py
-	integration/examples/agents/developer/agent.json
-	integration/examples/agents/hermes/agent.json
-	integration/examples/agents/researcher/agent.json
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
