@@ -423,11 +423,26 @@ cannot start a rollout; recover it to `Ready` or use an explicit remove, wait, a
 apply sequence. Rollouts do not provide surge capacity or automatic rollback, so
 a single-replica deployment is unavailable while its instance is replaced.
 
-`task run` must execute where its Gateway service endpoint is reachable through a
-literal loopback address, normally on the selected node or through an operator-
-managed authenticated tunnel. Control does not relay prompts, task bodies, result
-bytes, Gateway bearer tokens, or task private keys. Multi-instance deployments
-require an explicit instance selection.
+`task run` is the synchronous path and must execute where its Gateway service
+endpoint is reachable through a literal loopback address, normally on the
+selected node or through an operator-managed authenticated tunnel. `task enqueue`
+is the remote path: Control retains the exact request and short-lived signed
+permit, then the assigned Executor uses its host-local Gateway. Control also
+retains a terminal observation when it is at most 512 KiB and aggregate result
+capacity remains. Request/permit courier material and result bytes each have
+independent 16 MiB per-tenant and 64 MiB site-wide ceilings. Larger or omitted
+results remain metadata-only and require a separately governed artifact store.
+Control validates the node report's result encoding, digest, and byte count, but
+does not independently verify signed Gateway evidence; a compromised node can
+forge lifecycle and result reports for its workloads. Control never receives the
+task private key or Gateway bearer. Multi-instance deployments require an explicit
+instance selection.
+
+Async cancellation is definitive only while a task remains queued. After Gateway
+accepts a run, the generic lifecycle has no cross-runtime cancel operation;
+Steward records `cancel_requested` and `outcome_may_continue` until it observes a
+terminal state. A task permit expires within at most 15 minutes, so this courier
+does not yet support indefinitely queued or renewable work.
 
 ## Forks clone state, not a live agent
 

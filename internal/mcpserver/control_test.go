@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlauth"
@@ -18,13 +20,16 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 type fakeControl struct {
-	calls      []string
-	command    []byte
-	inspection controlprotocol.ExecutorEvidenceInspectionV1
-	err        error
+	calls       []string
+	command     []byte
+	taskPermit  string
+	taskRequest []byte
+	inspection  controlprotocol.ExecutorEvidenceInspectionV1
+	err         error
 }
 
 func (control *fakeControl) ListTenants(_ context.Context, after string, limit int) (controlclient.TenantList, error) {
@@ -50,6 +55,27 @@ func (control *fakeControl) ListInstanceEvents(_ context.Context, tenantID, afte
 func (control *fakeControl) ListTaskProjections(_ context.Context, tenantID, after string, limit int) (controlclient.TaskProjectionList, error) {
 	control.calls = append(control.calls, "task-list:"+tenantID+":"+after+":"+strconv.Itoa(limit))
 	return controlclient.TaskProjectionList{Tasks: []controlstore.TaskProjection{}}, control.err
+}
+
+func (control *fakeControl) ListTaskRequests(_ context.Context, tenantID, after string, limit int) (controlclient.TaskRequestList, error) {
+	control.calls = append(control.calls, "task-request-list:"+tenantID+":"+after+":"+strconv.Itoa(limit))
+	return controlclient.TaskRequestList{Tasks: []controlstore.TaskRequest{}}, control.err
+}
+
+func (control *fakeControl) GetTaskRequest(_ context.Context, tenantID, taskID string) (controlstore.TaskRequest, error) {
+	control.calls = append(control.calls, "task-request-status:"+tenantID+":"+taskID)
+	return controlstore.TaskRequest{TenantID: tenantID, TaskID: taskID}, control.err
+}
+
+func (control *fakeControl) SubmitTaskRequest(_ context.Context, tenantID, permit string, request []byte) (controlstore.TaskRequest, error) {
+	control.calls = append(control.calls, "task-request-submit:"+tenantID)
+	control.taskPermit, control.taskRequest = permit, append([]byte(nil), request...)
+	return controlstore.TaskRequest{TenantID: tenantID, TaskID: "task-a"}, control.err
+}
+
+func (control *fakeControl) CancelTaskRequest(_ context.Context, tenantID, taskID string) (controlstore.TaskRequest, error) {
+	control.calls = append(control.calls, "task-request-cancel:"+tenantID+":"+taskID)
+	return controlstore.TaskRequest{TenantID: tenantID, TaskID: taskID, State: controlstore.TaskRequestCancelRequested}, control.err
 }
 
 func (control *fakeControl) ListNodePools(_ context.Context, after string, limit int) (controlclient.NodePoolList, error) {
@@ -219,7 +245,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 18 {
+	if len(listed) != 22 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
@@ -228,6 +254,8 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_node_status", "steward_control_node_revoke", "steward_control_command_submit",
 		"steward_control_node_pool_list", "steward_control_node_pool_status",
 		"steward_control_event_list", "steward_control_task_list",
+		"steward_control_task_request_list", "steward_control_task_request_status",
+		"steward_control_task_request_submit", "steward_control_task_request_cancel",
 		"steward_control_command_status", "steward_control_operations_summary",
 		"steward_control_attention_list", "steward_control_command_list",
 		"steward_control_incident_timeline",
@@ -243,7 +271,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 			t.Fatalf("control-only tool list exposed %s: %s", forbidden, raw)
 		}
 	}
-	for _, acknowledgment := range []string{"acknowledge_tenant_creation", "acknowledge_node_revocation", "acknowledge_command_submission"} {
+	for _, acknowledgment := range []string{"acknowledge_tenant_creation", "acknowledge_node_revocation", "acknowledge_command_submission", "acknowledge_task_submission", "acknowledge_task_cancellation"} {
 		if !strings.Contains(raw, acknowledgment) {
 			t.Fatalf("control tool list omitted %s", acknowledgment)
 		}
@@ -265,14 +293,20 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_incident_timeline"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_event_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_task_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_task_request_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_task_request_status"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_task_request_submit"], false, true, true, true)
+	requireAnnotations(t, definitions["steward_control_task_request_cancel"], false, true, true, false)
 	requireAnnotations(t, definitions["steward_control_command_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_agent_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_credential_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_evidence_status"], true, false, true, false)
 	for toolName, acknowledgment := range map[string]string{
-		"steward_control_tenant_create":  "acknowledge_tenant_creation",
-		"steward_control_node_revoke":    "acknowledge_node_revocation",
-		"steward_control_command_submit": "acknowledge_command_submission",
+		"steward_control_tenant_create":       "acknowledge_tenant_creation",
+		"steward_control_node_revoke":         "acknowledge_node_revocation",
+		"steward_control_command_submit":      "acknowledge_command_submission",
+		"steward_control_task_request_submit": "acknowledge_task_submission",
+		"steward_control_task_request_cancel": "acknowledge_task_cancellation",
 	} {
 		schema := definitions[toolName]["inputSchema"].(map[string]any)
 		properties := schema["properties"].(map[string]any)
@@ -285,6 +319,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_operations_summary", "steward_control_attention_list",
 		"steward_control_incident_timeline",
 		"steward_control_event_list", "steward_control_task_list",
+		"steward_control_task_request_list", "steward_control_task_request_status",
 		"steward_control_node_pool_list", "steward_control_node_pool_status",
 		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
 	} {
@@ -317,6 +352,8 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := testControlCommand(t)
+	taskRequest := []byte(`{"input":"bounded research"}`)
+	taskPermit := testControlTaskPermit(t, taskRequest)
 	calls := []struct {
 		name      string
 		arguments map[string]any
@@ -333,6 +370,15 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 			"acknowledge_command_submission": true,
 		}},
 		{name: "steward_control_command_status", arguments: map[string]any{"tenant_id": "tenant-a", "node_id": "node-a", "command_id": "command-a"}},
+		{name: "steward_control_task_request_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "task-a", "limit": 25}},
+		{name: "steward_control_task_request_status", arguments: map[string]any{"tenant_id": "tenant-a", "task_id": "task-a"}},
+		{name: "steward_control_task_request_submit", arguments: map[string]any{
+			"tenant_id": "tenant-a", "task_permit": taskPermit,
+			"request_base64": base64.StdEncoding.EncodeToString(taskRequest), "acknowledge_task_submission": true,
+		}},
+		{name: "steward_control_task_request_cancel", arguments: map[string]any{
+			"tenant_id": "tenant-a", "task_id": "task-a", "acknowledge_task_cancellation": true,
+		}},
 		{name: "steward_control_evidence_status", arguments: map[string]any{"node_id": "node-a"}},
 	}
 	for _, call := range calls {
@@ -436,6 +482,10 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		"node-status:tenant-a:node-a", "node-pool-list:pool-0:50", "node-pool-status:pool-a",
 		"node-revoke:node-a", "command-submit:tenant-a:node-a",
 		"command-status:tenant-a:node-a:command-a",
+		"task-request-list:tenant-a:task-a:25",
+		"task-request-status:tenant-a:task-a",
+		"task-request-submit:tenant-a",
+		"task-request-cancel:tenant-a:task-a",
 		"evidence-status:node-a",
 		"operations-summary:tenant-a",
 		"attention-list:tenant-a:node_stale:" + attentionCursor + ":25",
@@ -452,6 +502,45 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 	if !bytes.Equal(control.command, command) {
 		t.Fatal("MCP did not preserve exact signed command bytes")
 	}
+	if control.taskPermit != taskPermit || !bytes.Equal(control.taskRequest, taskRequest) {
+		t.Fatal("MCP did not preserve exact signed task bytes")
+	}
+}
+
+func testControlTaskPermit(t *testing.T, request []byte) string {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	statement := taskpermit.Statement{
+		SchemaVersion: taskpermit.SchemaV1, NodeID: "node-a", TenantID: "tenant-a",
+		InstanceID: "agent-a", RuntimeRef: "executor-" + strings.Repeat("a", 64),
+		GrantID: "grant-" + strings.Repeat("b", 64), Generation: 1,
+		CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+		RoutePolicyDigest: "sha256:" + strings.Repeat("e", 64), ServiceID: "hermes-api",
+		OperationID: "hermes.run", OperationPolicyDigest: "sha256:" + strings.Repeat("f", 64),
+		TaskID: "task-a", RequestDigest: taskpermit.RequestDigest(request), RequestBytes: int64(len(request)),
+		ContentType: "application/json", NotBefore: now.Format(time.RFC3339), ExpiresAt: now.Add(5 * time.Minute).Format(time.RFC3339),
+	}
+	payload, err := json.Marshal(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := dsse.Sign(taskpermit.PayloadType, payload, "tenant-task", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := dsse.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := taskpermit.EncodeHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header
 }
 
 func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
@@ -484,6 +573,11 @@ func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 		{name: "task cursor", tool: "steward_control_task_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "task-invalid"}},
 		{name: "task cursor alphabet", tool: "steward_control_task_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "task-" + strings.Repeat("G", 64)}},
 		{name: "task limit", tool: "steward_control_task_list", arguments: map[string]any{"tenant_id": "tenant-a", "limit": 101}},
+		{name: "task request tenant", tool: "steward_control_task_request_list", arguments: map[string]any{}},
+		{name: "task request limit", tool: "steward_control_task_request_list", arguments: map[string]any{"tenant_id": "tenant-a", "limit": 101}},
+		{name: "task request status", tool: "steward_control_task_request_status", arguments: map[string]any{"tenant_id": "tenant-a"}},
+		{name: "task request submit acknowledgement", tool: "steward_control_task_request_submit", arguments: map[string]any{"tenant_id": "tenant-a"}},
+		{name: "task request cancel acknowledgement", tool: "steward_control_task_request_cancel", arguments: map[string]any{"tenant_id": "tenant-a", "task_id": "task-a"}},
 		{name: "node pool cursor", tool: "steward_control_node_pool_list", arguments: map[string]any{"after": " bad"}},
 		{name: "node pool limit", tool: "steward_control_node_pool_list", arguments: map[string]any{"limit": 501}},
 		{name: "node pool identity", tool: "steward_control_node_pool_status", arguments: map[string]any{"pool_id": "-pool"}},

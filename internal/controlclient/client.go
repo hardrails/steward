@@ -244,6 +244,11 @@ type TaskProjectionList struct {
 	NextAfter string                        `json:"next_after,omitempty"`
 }
 
+type TaskRequestList struct {
+	Tasks     []controlstore.TaskRequest `json:"tasks"`
+	NextAfter string                     `json:"next_after,omitempty"`
+}
+
 type NodePoolList struct {
 	NodePools []controlstore.NodePoolStatus `json:"node_pools"`
 	NextAfter string                        `json:"next_after,omitempty"`
@@ -620,6 +625,126 @@ func (c *Client) ListTaskProjections(
 		return TaskProjectionList{}, errors.New("control task page cursor is inconsistent")
 	}
 	return page, nil
+}
+
+func (c *Client) SubmitTaskRequest(
+	ctx context.Context,
+	tenantID, taskPermit string,
+	requestBody []byte,
+) (controlstore.TaskRequest, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || taskPermit == "" ||
+		len(requestBody) == 0 || int64(len(requestBody)) > 64<<10 {
+		return controlstore.TaskRequest{}, errors.New("async task submission requires a tenant, permit, and request of at most 64 KiB")
+	}
+	var task controlstore.TaskRequest
+	err := c.do(ctx, http.MethodPost, "/v1/tenants/"+url.PathEscape(tenantID)+"/task-requests", struct {
+		TaskPermit    string `json:"task_permit"`
+		RequestBase64 string `json:"request_base64"`
+	}{TaskPermit: taskPermit, RequestBase64: base64.StdEncoding.EncodeToString(requestBody)}, &task, true)
+	if err != nil {
+		return controlstore.TaskRequest{}, err
+	}
+	if task.TenantID != tenantID || task.Validate() != nil {
+		return controlstore.TaskRequest{}, errors.New("control async task response is invalid")
+	}
+	return task, nil
+}
+
+func (c *Client) ListTaskRequests(ctx context.Context, tenantID, after string, limit int) (TaskRequestList, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || limit <= 0 || limit > 100 {
+		return TaskRequestList{}, errors.New("async task list requires a tenant and limit from 1 to 100")
+	}
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/task-requests", after, limit)
+	if err != nil {
+		return TaskRequestList{}, err
+	}
+	var page TaskRequestList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return TaskRequestList{}, err
+	}
+	if page.Tasks == nil || len(page.Tasks) > limit {
+		return TaskRequestList{}, errors.New("control async task page is invalid")
+	}
+	for index, task := range page.Tasks {
+		if task.TenantID != tenantID || task.Validate() != nil {
+			return TaskRequestList{}, errors.New("control async task page contains an invalid task")
+		}
+		if index > 0 {
+			previous := page.Tasks[index-1]
+			previousAt, _ := time.Parse(time.RFC3339Nano, previous.CreatedAt)
+			currentAt, _ := time.Parse(time.RFC3339Nano, task.CreatedAt)
+			if previousAt.Before(currentAt) || previous.CreatedAt == task.CreatedAt && previous.TaskID <= task.TaskID {
+				return TaskRequestList{}, errors.New("control async task page is not canonical")
+			}
+		}
+	}
+	if page.NextAfter != "" && (len(page.Tasks) == 0 || page.NextAfter != page.Tasks[len(page.Tasks)-1].TaskID) {
+		return TaskRequestList{}, errors.New("control async task page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) GetTaskRequest(ctx context.Context, tenantID, taskID string) (controlstore.TaskRequest, error) {
+	path, err := taskRequestPath(tenantID, taskID)
+	if err != nil {
+		return controlstore.TaskRequest{}, err
+	}
+	var task controlstore.TaskRequest
+	if err := c.do(ctx, http.MethodGet, path, nil, &task, true); err != nil {
+		return controlstore.TaskRequest{}, err
+	}
+	if task.TenantID != tenantID || task.TaskID != taskID || task.Validate() != nil {
+		return controlstore.TaskRequest{}, errors.New("control async task response is invalid")
+	}
+	return task, nil
+}
+
+type TaskResult struct {
+	TaskID        string `json:"task_id"`
+	ResultDigest  string `json:"result_digest"`
+	ResponseBytes int64  `json:"response_bytes"`
+	ResultBase64  string `json:"result_base64"`
+}
+
+func (c *Client) GetTaskResult(ctx context.Context, tenantID, taskID string) ([]byte, TaskResult, error) {
+	path, err := taskRequestPath(tenantID, taskID)
+	if err != nil {
+		return nil, TaskResult{}, err
+	}
+	var result TaskResult
+	if err := c.do(ctx, http.MethodGet, path+"/result", nil, &result, true); err != nil {
+		return nil, TaskResult{}, err
+	}
+	raw, err := base64.StdEncoding.DecodeString(result.ResultBase64)
+	if err != nil || result.TaskID != taskID || len(raw) == 0 ||
+		len(raw) > controlprotocol.MaxExecutorTaskResultBytes ||
+		base64.StdEncoding.EncodeToString(raw) != result.ResultBase64 ||
+		int64(len(raw)) != result.ResponseBytes || dsse.Digest(raw) != result.ResultDigest {
+		return nil, TaskResult{}, errors.New("control async task result is invalid")
+	}
+	return raw, result, nil
+}
+
+func (c *Client) CancelTaskRequest(ctx context.Context, tenantID, taskID string) (controlstore.TaskRequest, error) {
+	path, err := taskRequestPath(tenantID, taskID)
+	if err != nil {
+		return controlstore.TaskRequest{}, err
+	}
+	var task controlstore.TaskRequest
+	if err := c.do(ctx, http.MethodDelete, path, nil, &task, true); err != nil {
+		return controlstore.TaskRequest{}, err
+	}
+	if task.TenantID != tenantID || task.TaskID != taskID || task.Validate() != nil || task.CancelRequestedAt == "" {
+		return controlstore.TaskRequest{}, errors.New("control async task cancellation response is invalid")
+	}
+	return task, nil
+}
+
+func taskRequestPath(tenantID, taskID string) (string, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || !validOperationsIdentifier(taskID, 128, false) {
+		return "", errors.New("async task identity is invalid")
+	}
+	return "/v1/tenants/" + url.PathEscape(tenantID) + "/task-requests/" + url.PathEscape(taskID), nil
 }
 
 func (c *Client) ListNodePools(ctx context.Context, after string, limit int) (NodePoolList, error) {

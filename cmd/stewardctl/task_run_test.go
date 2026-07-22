@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/gatewayclient"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
@@ -220,6 +222,115 @@ func TestTaskRunPromptCreatesPrivateRecoverableArtifacts(t *testing.T) {
 	}
 	if bytes.Contains(output.Bytes(), []byte(prompt)) || bytes.Contains(output.Bytes(), terminal) {
 		t.Fatalf("task run exposed private content: %s", output.Bytes())
+	}
+}
+
+func TestTaskEnqueuePromptCreatesSignedPrivateArtifactsAndQueuesMetadata(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	if err := os.Chmod(fixture.directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEWARD_CONTEXT_FILE", filepath.Join(fixture.directory, "contexts.json"))
+	tokenPath := filepath.Join(fixture.directory, "control.token")
+	if err := os.WriteFile(tokenPath, []byte("control-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deployment := taskRunControlDeploymentFixture(fixture)
+	runDirectory := filepath.Join(fixture.directory, "runs", "task.queued")
+	bundlePath := filepath.Join(runDirectory, "task.bundle.json")
+	terminalResult := []byte(`{"run_id":"run_research","status":"completed","result":{"sources":3}}`)
+	controlServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer control-secret" {
+			t.Errorf("authorization=%q", request.Header.Get("Authorization"))
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/tenants/tenant-a/deployments/auditor":
+			_ = json.NewEncoder(writer).Encode(deployment)
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/tenants/tenant-a/task-requests":
+			bundle, err := readCurrentLifecycleTaskBundle(bundlePath)
+			if err != nil {
+				t.Errorf("read queued bundle: %v", err)
+				writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			statement := bundle.Verified.Statement
+			writer.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(writer).Encode(controlstore.TaskRequest{
+				TenantID: statement.TenantID, TaskID: statement.TaskID, NodeID: statement.NodeID,
+				InstanceID: statement.InstanceID, InstanceGeneration: statement.Generation,
+				RuntimeRef: statement.RuntimeRef, ServiceID: statement.ServiceID, OperationID: statement.OperationID,
+				RequestDigest: statement.RequestDigest, RequestBytes: statement.RequestBytes,
+				PermitDigest: bundle.Verified.EnvelopeDigest, PermitKeyID: bundle.Verified.KeyID,
+				Deadline: statement.ExpiresAt, State: controlstore.TaskRequestQueued,
+				CreatedAt: fixture.now.Format(time.RFC3339Nano), UpdatedAt: fixture.now.Format(time.RFC3339Nano),
+			})
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/tenants/tenant-a/task-requests/task.queued/result":
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"task_id": "task.queued", "result_digest": dsse.Digest(terminalResult),
+				"response_bytes": len(terminalResult), "result_base64": base64.StdEncoding.EncodeToString(terminalResult),
+			})
+		default:
+			t.Errorf("unexpected Control request %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer controlServer.Close()
+
+	priorNow := timeNow
+	timeNow = func() time.Time { return fixture.now }
+	t.Cleanup(func() { timeNow = priorNow })
+	prompt := "Research the latest filing and return the supporting sources."
+	var output bytes.Buffer
+	err := run([]string{
+		"task", "enqueue", "auditor", "-no-context", "-tenant-id", "tenant-a",
+		"-control-url", controlServer.URL, "-token-file", tokenPath,
+		"-trust", fixture.trustPath, "-task-id", "task.queued",
+		"-key", fixture.privatePath, "-key-id", fixture.keyID,
+		"-deployment-timeout", "1s", prompt,
+	}, &output, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result taskEnqueueResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.SchemaVersion != taskEnqueueSchema ||
+		result.Deployment != "auditor" || result.RunDirectory != runDirectory || result.BundlePath != bundlePath ||
+		result.Task.State != controlstore.TaskRequestQueued {
+		t.Fatalf("result=%+v err=%v output=%s", result, err, output.Bytes())
+	}
+	requestRaw, err := os.ReadFile(result.RequestPath)
+	if err != nil || !bytes.Contains(requestRaw, []byte(prompt)) {
+		t.Fatalf("request=%q err=%v", requestRaw, err)
+	}
+	for _, path := range []string{runDirectory, result.RequestPath, result.BundlePath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		wantMode := os.FileMode(0o600)
+		if info.IsDir() {
+			wantMode = 0o700
+		}
+		if info.Mode().Perm() != wantMode {
+			t.Fatalf("%s mode=%o want=%o", path, info.Mode().Perm(), wantMode)
+		}
+	}
+	if bytes.Contains(output.Bytes(), []byte(prompt)) || bytes.Contains(output.Bytes(), requestRaw) {
+		t.Fatalf("task enqueue exposed private content: %s", output.Bytes())
+	}
+	resultPath := filepath.Join(fixture.directory, "queued-result.json")
+	output.Reset()
+	if err := run([]string{
+		"task", "result", "task.queued", "-no-context", "-tenant-id", "tenant-a",
+		"-control-url", controlServer.URL, "-token-file", tokenPath, "-out", resultPath,
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(resultPath); err != nil || !bytes.Equal(raw, terminalResult) {
+		t.Fatalf("downloaded result=%q err=%v", raw, err)
+	}
+	if bytes.Contains(output.Bytes(), terminalResult) {
+		t.Fatalf("task result printed private content: %s", output.Bytes())
 	}
 }
 

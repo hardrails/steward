@@ -537,14 +537,12 @@ and `task run` performs useful work through the enforced boundary.
 
 - Consolidate common operations behind one `steward` command while retaining
   expert commands and stable JSON output.
-- Extend the shipped bounded, read-only task projection into canonical submitted
-  task, result, and condition models. The current projection durably summarizes
-  accepted, untrusted instance events by workload lineage under an independent
-  bounded retention window; it is not yet a dispatcher or result authority.
-- Make Control-level task submission asynchronous and idempotent, with progress,
-  cancellation, deadlines, bounded retention, and content-addressed result
-  metadata. Reuse the shipped instance outbox instead of creating another event
-  channel.
+- Extend the shipped canonical asynchronous task courier beyond its current exact
+  tenant-signed request, crash-safe node delivery, honest cancellation/deadline
+  states, and 512 KiB terminal result boundary. Add separately governed bulk
+  artifacts, longer-running renewable authority, and high-availability storage
+  without allowing Control to mint tenant task authority. Keep agent-reported
+  task projections as a separate untrusted read model.
 - Implement a crash-safe, idempotent desired-state loop with generations, bounded
   retry, garbage collection, and explicit degraded states.
 - Join bundle build, placement, signed admission, start, health, task, result,

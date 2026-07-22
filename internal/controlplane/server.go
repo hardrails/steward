@@ -161,6 +161,9 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}/rollout", server.deploymentRollout)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/instance-events", server.instanceEvents)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/tasks", server.tasks)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/task-requests", server.taskRequests)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/task-requests/{task_id}", server.taskRequest)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/task-requests/{task_id}/result", server.taskResult)
 	server.mux.HandleFunc("/v1/operations/summary", server.operationsSummary)
 	server.mux.HandleFunc("/v1/operations/freeze", server.siteOperationalFreeze)
 	server.mux.HandleFunc("/v1/operations/attention", server.operationsAttention)
@@ -172,6 +175,8 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/executor-uplink/report", server.executorReport)
 	server.mux.HandleFunc("/executor-uplink/scheduling", server.executorScheduling)
 	server.mux.HandleFunc("/executor-uplink/events", server.executorEvents)
+	server.mux.HandleFunc("/executor-uplink/tasks/poll", server.executorTaskPoll)
+	server.mux.HandleFunc("/executor-uplink/tasks/report", server.executorTaskReport)
 	server.mux.HandleFunc("/evidence-uplink/poll", server.evidencePoll)
 	server.mux.HandleFunc("/evidence-uplink/report", server.evidenceReport)
 	if server.enableMetrics {
