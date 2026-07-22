@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -131,6 +132,120 @@ func TestRecoverRejectsAmbiguousStateWithoutMutation(t *testing.T) {
 	err := run([]string{"recover", runtimeRef, "--apply"}, &output, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "cannot currently prove") || deletes != 0 || !strings.Contains(output.String(), "Safe:     false") {
 		t.Fatalf("ambiguous recovery deletes=%d output=%s error=%v", deletes, output.String(), err)
+	}
+}
+
+func TestOperatorStatusJSONKeepsSourceFailureMachineReadable(t *testing.T) {
+	status := collectOperatorStatus(operatorConnections{
+		contextName:  "site-a",
+		controlURL:   "https://control.invalid",
+		controlToken: filepath.Join(t.TempDir(), "missing.token"),
+	})
+	if status.State != "unavailable" || len(status.SourceErrors) != 1 {
+		t.Fatalf("unavailable status = %#v", status)
+	}
+	var output bytes.Buffer
+	if err := writeOperatorStatus(&output, status, "json", false); err != nil {
+		t.Fatal(err)
+	}
+	var decoded operatorStatus
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode status JSON: %v", err)
+	}
+	if decoded.SchemaVersion != operatorStatusSchema || decoded.Context != "site-a" || decoded.State != "unavailable" {
+		t.Fatalf("decoded status = %#v", decoded)
+	}
+}
+
+func TestOperatorConnectionValidationFailsClosed(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{name: "duplicate context opt out", arguments: []string{"-no-context", "--no-context"}, want: "only once"},
+		{name: "invalid output", arguments: []string{"-no-context", "-control-url", "https://control.example", "-token-file", "/token", "-output", "yaml"}, want: "output must"},
+		{name: "watch too fast", arguments: []string{"-no-context", "-control-url", "https://control.example", "-token-file", "/token", "-watch", "999ms"}, want: "watch must"},
+		{name: "missing token", arguments: []string{"-no-context", "-control-url", "https://control.example"}, want: "requires both"},
+		{name: "no connection", arguments: []string{"-no-context"}, want: "no Control or node"},
+		{name: "positional status argument", arguments: []string{"-no-context", "-control-url", "https://control.example", "-token-file", "/token", "extra"}, want: "only named flags"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseOperatorConnections("status", test.arguments, true)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+	_, _, err := parseExplainConnections([]string{
+		"-no-context", "-control-url", "https://control.example", "-token-file", "/token", "node-a", "node-b",
+	})
+	if err == nil || !strings.Contains(err.Error(), "at most one") {
+		t.Fatalf("explain positional error = %v", err)
+	}
+}
+
+func TestRecoverArgumentNormalizationAcceptsFlagsOnEitherSide(t *testing.T) {
+	arguments, err := normalizeRecoverArguments([]string{"runtime-a", "--output=json", "--apply", "--node-url", "http://127.0.0.1:8090"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--output=json", "--apply", "--node-url", "http://127.0.0.1:8090", "runtime-a"}
+	if strings.Join(arguments, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("normalized arguments = %q, want %q", arguments, want)
+	}
+	for _, test := range []struct {
+		arguments []string
+		want      string
+	}{
+		{arguments: []string{"runtime-a", "--output"}, want: "requires a value"},
+		{arguments: []string{"runtime-a", "--force"}, want: "unknown recover option"},
+	} {
+		if _, err := normalizeRecoverArguments(test.arguments); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("normalize %q error = %v, want substring %q", test.arguments, err, test.want)
+		}
+	}
+}
+
+func TestNodeFailureGuidanceCoversEveryFailureClass(t *testing.T) {
+	tests := []struct {
+		code     string
+		critical bool
+	}{
+		{code: "workload_missing"},
+		{code: "workload_drift", critical: true},
+		{code: "workload_identity_drift", critical: true},
+		{code: "journal_pending", critical: true},
+		{code: "journal_ambiguous", critical: true},
+		{code: "journal_unavailable", critical: true},
+		{code: "evidence_ambiguous", critical: true},
+		{code: "evidence_unavailable", critical: true},
+		{code: "workload_inspect", critical: true},
+		{code: "verification_ambiguous", critical: true},
+		{code: "repair_ambiguous", critical: true},
+		{code: "lease_cleanup_ambiguous", critical: true},
+		{code: "secure_admission_unavailable", critical: true},
+		{code: "record_limit", critical: true},
+		{code: "operation_identity"},
+		{code: "invalid_context"},
+		{code: "context_done"},
+		{code: "reconciliation_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			title, explanation, impact, nextStep, blocked, critical := nodeFailureGuidance(test.code)
+			if title == "" || explanation == "" || impact == "" || nextStep == "" || len(blocked) == 0 {
+				t.Fatalf("incomplete guidance for %s", test.code)
+			}
+			if critical != test.critical {
+				t.Fatalf("critical = %t, want %t", critical, test.critical)
+			}
+		})
+	}
+	title, explanation, impact, nextStep, blocked, critical := nodeFailureGuidance("future_failure")
+	if title != "" || explanation != "" || impact != "" || nextStep != "" || len(blocked) == 0 || !critical {
+		t.Fatalf("unknown guidance = %q %q %q %q %q %t", title, explanation, impact, nextStep, blocked, critical)
 	}
 }
 
