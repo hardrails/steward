@@ -61,6 +61,24 @@ func TestVerifyDelegatedCommandRequiresBothSignaturesAndExactScope(t *testing.T)
 		IssuedAt:  now.Add(-time.Minute).Format(time.RFC3339Nano),
 		ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
 	}
+	forkDelegation := delegation
+	forkAdmission := *delegation.Admission
+	forkDelegation.Admission = &forkAdmission
+	forkDelegation.Operations = []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"}
+	forkDelegation.NodeIDs = []string{"node-a"}
+	forkDelegation.Instances = forkDelegation.Instances[:1]
+	forkDelegation.Admission.Capabilities.State = true
+	forkDelegation.Admission.StateDisposition = "resume"
+	forkDelegation.IssuedAt = now.Format(time.RFC3339Nano)
+	forkDelegation.ExpiresAt = now.Add(30*24*time.Hour + 4*time.Hour).Format(time.RFC3339Nano)
+	if err := forkDelegation.Validate(now); err != nil {
+		t.Fatalf("finite exact fork delegation rejected: %v", err)
+	}
+	notFork := forkDelegation
+	notFork.Operations = []string{"admit", "destroy", "purge", "renew", "start", "stop"}
+	if err := notFork.Validate(now); err == nil {
+		t.Fatal("ordinary delegation exceeded the 24 hour lifetime")
+	}
 	delegationRaw := signDelegationForTest(t, delegation, "tenant-lifecycle", tenantPrivate)
 	command := delegatedCommandForTest(now, delegationRaw)
 	commandRaw := signDelegatedCommandForTest(t, command, controllerPrivate)

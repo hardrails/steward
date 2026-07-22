@@ -14,6 +14,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -46,26 +47,15 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 	generation := flags.Uint64("generation", 1, "authorized instance generation")
 	claimGeneration := flags.Uint64("claim-generation", 1, "tenant command authority generation")
 	validFor := flags.Duration("valid-for", defaultExecutorDelegationValidity, "finite controller authority lifetime")
+	forkPlanPath := flags.String("fork-plan", "", "fork plan whose fresh identity and cleanup lifecycle to authorize")
 	outputPath := flags.String("out", "delegation.dsse.json", "new tenant-signed controller delegation")
 	pinnedRoot := flags.String("site-root-public-key", "", "independently pinned site-root public key")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if flags.NArg() != 1 || *nodeIDsValue == "" || *controllerPublicPath == "" || *outputPath == "" ||
-		*generation == 0 || *claimGeneration == 0 || *validFor < time.Second || *validFor > 24*time.Hour || *validFor%time.Second != 0 {
-		return errors.New("agent authorize requires one site package, node IDs, controller public key, positive generations, output, and a whole-second lifetime up to 24 hours")
-	}
-	nodeIDs, err := canonicalCommandDelegationList(*nodeIDsValue)
-	if err != nil {
-		return fmt.Errorf("parse authorized node IDs: %w", err)
-	}
-	if len(nodeIDs) > 64 {
-		return errors.New("agent authorization permits at most 64 nodes")
-	}
-	for _, nodeID := range nodeIDs {
-		if !validOptionalControlIdentifier(nodeID, 128) {
-			return errors.New("agent authorization contains an invalid node identity")
-		}
+	if flags.NArg() != 1 || *controllerPublicPath == "" || *outputPath == "" ||
+		*generation == 0 || *claimGeneration == 0 || *validFor < time.Second || *validFor%time.Second != 0 {
+		return errors.New("agent authorize requires one site package, a controller public key, positive generations, output, and a positive whole-second lifetime")
 	}
 	siteDirectory, err := filepath.Abs(flags.Arg(0))
 	if err != nil {
@@ -83,6 +73,52 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	bundleDigest, err := agentapp.DigestJSON(bundle)
+	if err != nil {
+		return err
+	}
+	var forkPlan *agentapp.ForkPlan
+	if *forkPlanPath != "" {
+		raw, readErr := readCLIArtifact(*forkPlanPath)
+		if readErr != nil {
+			return fmt.Errorf("read fork plan: %w", readErr)
+		}
+		plan, decodeErr := agentapp.DecodeForkPlan(raw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if plan.BundleDigest != bundleDigest {
+			return errors.New("fork plan does not bind the selected agent bundle")
+		}
+		forkPlan = &plan
+		if *deploymentID != "" && *deploymentID != plan.DeploymentID ||
+			*instanceID != "" && *instanceID != plan.InstanceID ||
+			*lineageID != "" && *lineageID != plan.LineageID || *generation != plan.Generation {
+			return errors.New("fork plan conflicts with an explicitly selected deployment, instance, lineage, or generation")
+		}
+		*deploymentID, *instanceID, *lineageID = plan.DeploymentID, plan.InstanceID, plan.LineageID
+		if *nodeIDsValue == "" {
+			*nodeIDsValue = plan.SourceNodeID
+		}
+	}
+	if *nodeIDsValue == "" {
+		return errors.New("agent authorize requires node IDs, or a fork plan that binds its source node")
+	}
+	nodeIDs, err := canonicalCommandDelegationList(*nodeIDsValue)
+	if err != nil {
+		return fmt.Errorf("parse authorized node IDs: %w", err)
+	}
+	if len(nodeIDs) > 64 {
+		return errors.New("agent authorization permits at most 64 nodes")
+	}
+	for _, nodeID := range nodeIDs {
+		if !validOptionalControlIdentifier(nodeID, 128) {
+			return errors.New("agent authorization contains an invalid node identity")
+		}
+	}
+	if forkPlan != nil && (len(nodeIDs) != 1 || nodeIDs[0] != forkPlan.SourceNodeID) {
+		return errors.New("fork authorization must name only the source node bound into the fork plan")
+	}
 	if *deploymentID == "" {
 		*deploymentID = bundle.Definition.Name + "-deployment"
 	}
@@ -94,21 +130,46 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 		PolicyPath:   filepath.Join(siteDirectory, "public", "site-policy.dsse.json"),
 		SiteRootPath: filepath.Join(siteDirectory, "public", "site-root.public"), SiteRootKeyID: "site-root-1",
 		TenantID: verifiedSite.inventory.TenantID, NodeID: nodeIDs[0], InstanceID: *instanceID,
-		LineageID: *lineageID, Generation: *generation,
+		LineageID: *lineageID, Generation: *generation, ResumeState: forkPlan != nil,
 	})
 	if err != nil {
 		return err
+	}
+	operations := []string{"admit", "destroy", "renew", "start", "stop"}
+	if forkPlan != nil {
+		operations = []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"}
 	}
 	controllerPublic, err := readPublicKey(*controllerPublicPath)
 	if err != nil {
 		return fmt.Errorf("read Control controller public key: %w", err)
 	}
 	issuedAt := timeNow().UTC()
+	maxValidity := 24 * time.Hour
+	if forkPlan != nil {
+		maxValidity = 31 * 24 * time.Hour
+		if forkPlan.ExpiresAt != "" {
+			expires, parseErr := time.Parse(time.RFC3339Nano, forkPlan.ExpiresAt)
+			if parseErr != nil || !expires.After(issuedAt) {
+				return errors.New("fork plan has already expired")
+			}
+			minimum := expires.Sub(issuedAt) + controlstore.MinDeploymentForkCleanupWindow
+			explicit := false
+			flags.Visit(func(current *flag.Flag) { explicit = explicit || current.Name == "valid-for" })
+			if !explicit {
+				*validFor = minimum
+			} else if *validFor < minimum {
+				return fmt.Errorf("fork authorization must remain valid through cleanup; use -valid-for %s or longer", minimum.Round(time.Second))
+			}
+		}
+	}
+	if *validFor > maxValidity {
+		return fmt.Errorf("agent authorization lifetime exceeds %s", maxValidity)
+	}
 	statement := admission.CommandDelegation{
 		SchemaVersion: admission.CommandDelegationSchemaV1, DelegationID: *deploymentID,
 		TenantID: verifiedSite.inventory.TenantID, ControllerKeyID: *controllerKeyID,
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
-		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: nodeIDs,
+		Operations:          operations, NodeIDs: nodeIDs,
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: prepared.InstanceID, LineageID: prepared.LineageID,
 			MinInstanceGeneration: *generation, MaxInstanceGeneration: *generation,
