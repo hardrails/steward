@@ -408,7 +408,7 @@ configure_docker_target() {
 	fi
 	while IFS= read -r line || [[ -n $line ]]; do
 		[[ -z $line || $line == \#* ]] && continue
-		if (( ${#line} > 1024 )) || [[ ! $line =~ ^([A-Z_]+)=(.*)$ ]]; then
+		if (( ${#line} > 1024 )) || [[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
 			add_check docker.target fail 'Executor environment contains an invalid line'
 			return 1
 		fi

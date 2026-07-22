@@ -201,7 +201,7 @@ connector=$work/state/connector\"receipts.ndjson
 chmod 0600 "$fence" "$journal" "$evidence" "$uplink" "$uplink_delivery" "$connector"
 executor_env=$work/state/executor.env
 docker_socket=$work/state/docker.sock
-printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_OPERATOR_TOKEN_FILE=%s\nEXECUTOR_OBSERVER_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\nEXECUTOR_UPLINK_DELIVERY_STATE_FILE=%s\n' \
+printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_OPERATOR_TOKEN_FILE=%s\nEXECUTOR_OBSERVER_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\nEXECUTOR_UPLINK_DELIVERY_STATE_FILE=%s\nEXECUTOR_NODE_BOOT_IDENTITY_SHA256=\n' \
 	"$docker_socket" "$token" "$operator_token" "$observer_token" "$uplink" "$uplink_delivery" >"$executor_env"
 chmod 0600 "$executor_env"
 : >"$work/curl.log"

@@ -691,7 +691,16 @@ EOF
 }
 
 exercise_packaged_protocol_wiring() {
-	local configure_helper error_file help_output protocol_helper
+	local configure_helper error_file help_output line protocol_helper
+	while IFS= read -r line || [[ -n $line ]]; do
+		[[ -z $line || $line == \#* ]] && continue
+		if [[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+			echo "node-upgrade-smoke: packaged executor environment contains an invalid assignment: ${line%%=*}" >&2
+			return 1
+		fi
+	done <"$root/deploy/config/executor.env"
+	grep -Fq '[[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]' "$root/scripts/node-preflight.sh"
+	grep -Fq '[[ ! $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]' "$root/scripts/node-doctor.sh"
 	grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$root/deploy/config/executor.env"
 	grep -Fxq 'Environment=EXECUTOR_UPLINK_PROTOCOL_VERSION=0' \
 		"$root/deploy/systemd/steward-executor.service"
