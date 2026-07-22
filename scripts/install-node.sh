@@ -718,6 +718,23 @@ validate_managed_symlink_slot() {
 	fi
 }
 
+managed_unit_symlink() {
+	local path=$1 unit=$2 target release_version
+	[[ -L $path ]] || return 1
+	target=$(readlink "$path") || return 1
+	if [[ $target == "/opt/steward/current/integration/deploy/systemd/$unit" ]]; then
+		return 0
+	fi
+	case "$target" in
+		/opt/steward/releases/*/integration/deploy/systemd/"$unit")
+			release_version=${target#/opt/steward/releases/}
+			release_version=${release_version%/integration/deploy/systemd/"$unit"}
+			[[ $release_version != */* ]] && valid_release_version "$release_version"
+			;;
+		*) return 1 ;;
+	esac
+}
+
 ensure_managed_symlink() {
 	local path=$1 target=$2 pending directory
 	validate_managed_symlink_slot "$path" "$target" || return 1
@@ -1408,7 +1425,9 @@ if [[ $reconcile_selected_release == true ]]; then
 		}
 		legacy="/etc/systemd/system/$unit"
 		if [[ -e $legacy || -L $legacy ]]; then
-			if [[ -f $legacy && ! -L $legacy ]] && cmp -s "$legacy" "$release_units/$unit"; then
+			if managed_unit_symlink "$legacy" "$unit"; then
+				:
+			elif [[ -f $legacy && ! -L $legacy ]] && cmp -s "$legacy" "$release_units/$unit"; then
 				:
 			else
 				echo "install-node: refusing modified $legacy because it shadows the packaged vendor unit" >&2

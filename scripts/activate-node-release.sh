@@ -778,6 +778,23 @@ check_managed_symlink() {
 	return 2
 }
 
+managed_unit_symlink() {
+	local path=$1 unit=$2 target release_version
+	[[ -L $path ]] || return 1
+	target=$(readlink "$path") || return 1
+	if [[ $target == "/opt/steward/current/integration/deploy/systemd/$unit" ]]; then
+		return 0
+	fi
+	case "$target" in
+		/opt/steward/releases/*/integration/deploy/systemd/"$unit")
+			release_version=${target#/opt/steward/releases/}
+			release_version=${release_version%/integration/deploy/systemd/"$unit"}
+			[[ $release_version != */* ]] && valid_release_version "$release_version"
+			;;
+		*) return 1 ;;
+	esac
+}
+
 check_legacy_regular() {
 	local path=$1 mode owner
 	[[ -f $path && ! -L $path ]] || return 1
@@ -823,7 +840,9 @@ for unit in steward.service steward-executor.service steward-gateway.service ste
 	legacy="/etc/systemd/system/$unit"
 	if [[ -e $legacy || -L $legacy ]]; then
 		legacy_owned=false
-		if [[ -f $legacy && ! -L $legacy ]]; then
+		if managed_unit_symlink "$legacy" "$unit"; then
+			legacy_owned=true
+		elif [[ -f $legacy && ! -L $legacy ]]; then
 			if [[ -n $previous_current && -f $previous_current/integration/deploy/systemd/$unit ]] &&
 				cmp -s "$legacy" "$previous_current/integration/deploy/systemd/$unit"; then
 				legacy_owned=true
