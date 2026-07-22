@@ -5,6 +5,7 @@ package controlbackup
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -79,6 +80,10 @@ type openedFile struct {
 // owner-only archive. The default identity files must live in the state
 // directory so restoring the archive does not silently create a new authority.
 func Create(stateDirectory, output string, now time.Time) (report Report, err error) {
+	return create(stateDirectory, output, now, nil)
+}
+
+func create(stateDirectory, output string, now time.Time, afterOutputOpen func()) (report Report, err error) {
 	if err := validCleanAbsolute(stateDirectory, false); err != nil {
 		return Report{}, fmt.Errorf("control backup state directory: %w", err)
 	}
@@ -103,6 +108,25 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	}
 	if inside {
 		return Report{}, errors.New("control backup output must be outside the state directory")
+	}
+	outputRoot, err := os.OpenRoot(canonicalOutputParent)
+	if err != nil {
+		return Report{}, fmt.Errorf("open control backup output parent: %w", err)
+	}
+	defer outputRoot.Close()
+	stateInfo, err := os.Stat(canonicalState)
+	if err != nil {
+		return Report{}, fmt.Errorf("inspect control backup state directory: %w", err)
+	}
+	outputInfo, err := outputRoot.Stat(".")
+	if err != nil {
+		return Report{}, fmt.Errorf("inspect control backup output parent: %w", err)
+	}
+	if os.SameFile(stateInfo, outputInfo) {
+		return Report{}, errors.New("control backup output must be outside the state directory")
+	}
+	if afterOutputOpen != nil {
+		afterOutputOpen()
 	}
 
 	store, err := controlstore.Open(stateDirectory, controlstore.DefaultLimits())
@@ -142,7 +166,8 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	if len(manifestRaw) > maxManifestBytes {
 		return Report{}, errors.New("control backup manifest exceeds its limit")
 	}
-	archive, err := createExclusive(canonicalOutput, 0o600)
+	archiveName := filepath.Base(canonicalOutput)
+	archive, err := createExclusiveRoot(outputRoot, archiveName, 0o600)
 	if err != nil {
 		return Report{}, fmt.Errorf("create control backup: %w", err)
 	}
@@ -150,7 +175,7 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	defer func() {
 		_ = archive.Close()
 		if !keep {
-			_ = os.Remove(canonicalOutput)
+			_ = outputRoot.Remove(archiveName)
 		}
 	}()
 	hash := sha256.New()
@@ -187,8 +212,12 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	if err := archive.Close(); err != nil {
 		return Report{}, fmt.Errorf("close Control backup: %w", err)
 	}
-	if err := syncDirectory(canonicalOutputParent); err != nil {
+	if err := syncRoot(outputRoot); err != nil {
 		return Report{}, err
+	}
+	currentOutputInfo, err := os.Lstat(canonicalOutputParent)
+	if err != nil || !os.SameFile(outputInfo, currentOutputInfo) {
+		return Report{}, errors.New("control backup output parent changed during creation")
 	}
 	keep = true
 	return reportFromManifest(manifest, "sha256:"+hex.EncodeToString(hash.Sum(nil))), nil
@@ -203,10 +232,10 @@ func Verify(archivePath string) (Report, error) {
 // and extracts the archive, and removes the reservation on every failed path.
 // Existing destinations are never overwritten.
 func Restore(archivePath, destination string) (Report, error) {
-	return restore(archivePath, destination, syncDirectory)
+	return restore(archivePath, destination, syncRoot)
 }
 
-func restore(archivePath, destination string, syncDir func(string) error) (report Report, err error) {
+func restore(archivePath, destination string, syncRootFn func(*os.Root) error) (report Report, err error) {
 	if err := validCleanAbsolute(destination, false); err != nil {
 		return Report{}, fmt.Errorf("Control restore destination: %w", err)
 	}
@@ -214,30 +243,67 @@ func restore(archivePath, destination string, syncDir func(string) error) (repor
 	if err := validateRestoreParent(parent); err != nil {
 		return Report{}, err
 	}
-	if err := os.Mkdir(destination, 0o700); err != nil {
+	parentRoot, err := os.OpenRoot(parent)
+	if err != nil {
+		return Report{}, fmt.Errorf("open Control restore parent: %w", err)
+	}
+	defer parentRoot.Close()
+	parentInfo, err := parentRoot.Stat(".")
+	if err != nil {
+		return Report{}, fmt.Errorf("inspect opened Control restore parent: %w", err)
+	}
+	namedParentInfo, err := os.Lstat(parent)
+	if err != nil || !os.SameFile(parentInfo, namedParentInfo) {
+		return Report{}, errors.New("Control restore parent changed while opening")
+	}
+	destinationName := filepath.Base(destination)
+	if err := parentRoot.Mkdir(destinationName, 0o700); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return Report{}, errors.New("Control restore destination already exists")
 		}
 		return Report{}, fmt.Errorf("reserve Control restore destination: %w", err)
+	}
+	destinationRoot, err := parentRoot.OpenRoot(destinationName)
+	if err != nil {
+		_ = parentRoot.Remove(destinationName)
+		return Report{}, fmt.Errorf("open reserved Control restore destination: %w", err)
+	}
+	defer destinationRoot.Close()
+	reservedInfo, err := destinationRoot.Stat(".")
+	if err != nil {
+		_ = parentRoot.Remove(destinationName)
+		return Report{}, fmt.Errorf("inspect reserved Control restore destination: %w", err)
+	}
+	namedReservedInfo, err := parentRoot.Lstat(destinationName)
+	if err != nil || !os.SameFile(reservedInfo, namedReservedInfo) {
+		_ = parentRoot.Remove(destinationName)
+		return Report{}, errors.New("Control restore destination changed while opening")
 	}
 	keep := false
 	defer func() {
 		if keep {
 			return
 		}
-		if cleanupErr := os.RemoveAll(destination); cleanupErr != nil {
+		if cleanupErr := removeRootContents(destinationRoot); cleanupErr != nil {
 			err = errors.Join(err, fmt.Errorf("remove failed Control restore destination: %w", cleanupErr))
 		}
-		if syncErr := syncDir(parent); syncErr != nil {
+		current, statErr := parentRoot.Lstat(destinationName)
+		if statErr == nil && os.SameFile(reservedInfo, current) {
+			if cleanupErr := parentRoot.Remove(destinationName); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("remove failed Control restore reservation: %w", cleanupErr))
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			err = errors.Join(err, errors.New("Control restore reservation moved before cleanup"))
+		}
+		if syncErr := syncRootFn(parentRoot); syncErr != nil {
 			err = errors.Join(err, fmt.Errorf("sync Control restore parent after cleanup: %w", syncErr))
 		}
 	}()
-	if err := syncDir(parent); err != nil {
+	if err := syncRootFn(parentRoot); err != nil {
 		return Report{}, fmt.Errorf("sync reserved Control restore destination: %w", err)
 	}
 	report, err = inspect(archivePath, func(file ManifestFile, reader io.Reader) error {
-		path := filepath.Join(destination, file.Name)
-		output, err := createExclusive(path, os.FileMode(file.Mode))
+		output, err := createExclusiveRoot(destinationRoot, file.Name, os.FileMode(file.Mode))
 		if err != nil {
 			return err
 		}
@@ -257,14 +323,22 @@ func restore(archivePath, destination string, syncDir func(string) error) (repor
 	if err != nil {
 		return Report{}, err
 	}
-	if err := syncDir(destination); err != nil {
+	if err := syncRootFn(destinationRoot); err != nil {
 		return Report{}, err
 	}
-	if err := validateRestoredState(destination, report); err != nil {
+	if err := validateRestoredStateRoot(destinationRoot, report); err != nil {
 		return Report{}, err
 	}
-	if err := syncDir(destination); err != nil {
+	if err := syncRootFn(destinationRoot); err != nil {
 		return Report{}, fmt.Errorf("sync validated Control restore destination: %w", err)
+	}
+	current, statErr := parentRoot.Lstat(destinationName)
+	if statErr != nil || !os.SameFile(reservedInfo, current) {
+		return Report{}, errors.New("Control restore destination changed before completion")
+	}
+	currentParent, statErr := os.Lstat(parent)
+	if statErr != nil || !os.SameFile(parentInfo, currentParent) {
+		return Report{}, errors.New("Control restore parent changed before completion")
 	}
 	keep = true
 	return report, nil
@@ -407,23 +481,70 @@ func validateManifest(manifest Manifest) error {
 }
 
 func validateRestoredState(directory string, report Report) error {
-	if err := validateDefaultIdentitySet(directory); err != nil {
+	root, err := os.OpenRoot(directory)
+	if err != nil {
 		return err
 	}
-	store, err := controlstore.Open(directory, controlstore.DefaultLimits())
+	defer root.Close()
+	return validateRestoredStateRoot(root, report)
+}
+
+func validateRestoredStateRoot(root *os.Root, report Report) error {
+	if err := validateDefaultIdentitySetRoot(root); err != nil {
+		return err
+	}
+	status, err := controlstore.InspectFS(root.FS(), controlstore.DefaultLimits())
 	if err != nil {
 		return fmt.Errorf("validate restored Control state: %w", err)
 	}
-	status, statusErr := store.Status()
-	closeErr := store.Close()
-	if statusErr != nil {
-		return statusErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
 	if status.Generation != report.Generation || status.Sequence != report.Sequence {
 		return errors.New("restored Control state does not match the backup checkpoint")
+	}
+	return nil
+}
+
+func validateDefaultIdentitySetRoot(root *os.Root) error {
+	authRaw, err := readRootRegular(root, "auth.key", controlauth.KeyBytes, 0o600)
+	if err != nil {
+		return fmt.Errorf("validate backed-up Control authentication identity: %w", err)
+	}
+	if _, err := controlauth.New(authRaw); err != nil {
+		return fmt.Errorf("validate backed-up Control authentication identity: %w", err)
+	}
+	witnessPrivateRaw, err := readRootRegular(root, "witness.private.pem", 16<<10, 0o600)
+	if err != nil {
+		return fmt.Errorf("validate backed-up witness identity: %w", err)
+	}
+	witnessPublicRaw, err := readRootRegular(root, "witness.public.pem", 16<<10, 0o644)
+	if err != nil {
+		return fmt.Errorf("validate backed-up witness identity: %w", err)
+	}
+	witnessPrivate, err := controlwitness.ParsePrivate(witnessPrivateRaw)
+	if err != nil {
+		return fmt.Errorf("validate backed-up witness identity: %w", err)
+	}
+	witnessPublic, err := controlwitness.ParsePublic(witnessPublicRaw)
+	if err != nil || !bytes.Equal(witnessPrivate.Public().(ed25519.PublicKey), witnessPublic) {
+		return errors.New("validate backed-up witness identity: public key does not match its private key")
+	}
+	controllerPrivateRaw, err := readRootRegular(root, "controller.private.pem", 16<<10, 0o600)
+	if err != nil {
+		return fmt.Errorf("validate backed-up controller identity: %w", err)
+	}
+	controllerPublicRaw, err := readRootRegular(root, "controller.public.pem", 16<<10, 0o644)
+	if err != nil {
+		return fmt.Errorf("validate backed-up controller identity: %w", err)
+	}
+	controllerPrivate, err := controlwitness.ParsePrivate(controllerPrivateRaw)
+	if err != nil {
+		return fmt.Errorf("validate backed-up controller identity: %w", err)
+	}
+	controllerPublic, err := controlwitness.ParsePublic(controllerPublicRaw)
+	if err != nil || !bytes.Equal(controllerPrivate.Public().(ed25519.PublicKey), controllerPublic) {
+		return errors.New("validate backed-up controller identity: public key does not match its private key")
+	}
+	if bytes.Equal(witnessPublic, controllerPublic) {
+		return errors.New("Control backup requires separate controller and witness identities")
 	}
 	return nil
 }
@@ -488,6 +609,87 @@ func createExclusive(path string, mode os.FileMode) (*os.File, error) {
 		return nil, errors.New("create returned an invalid file")
 	}
 	return file, nil
+}
+
+func createExclusiveRoot(root *os.Root, name string, mode os.FileMode) (*os.File, error) {
+	if root == nil || name == "" || filepath.Base(name) != name {
+		return nil, errors.New("rooted file creation requires one base name")
+	}
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode.Perm())
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(mode.Perm()); err != nil {
+		_ = file.Close()
+		_ = root.Remove(name)
+		return nil, err
+	}
+	return file, nil
+}
+
+func readRootRegular(root *os.Root, name string, limit int64, mode os.FileMode) ([]byte, error) {
+	if root == nil || limit <= 0 || !validStateName(name) {
+		return nil, errors.New("rooted file read requires a valid name and positive limit")
+	}
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm() != mode ||
+		opened.Size() < 0 || opened.Size() > limit || linkCount(opened) != 1 {
+		return nil, errors.New("rooted file must be bounded, regular, singly linked, and have its required mode")
+	}
+	stat, ok := opened.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return nil, errors.New("rooted file must be owned by the current user")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(raw)) > limit {
+		return nil, errors.New("rooted file exceeds its read limit")
+	}
+	after, err := file.Stat()
+	if err != nil || !sameFile(opened, after) {
+		return nil, errors.New("rooted file changed while being read")
+	}
+	return raw, nil
+}
+
+func removeRootContents(root *os.Root) error {
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	var result error
+	for _, entry := range entries {
+		if err := root.Remove(entry.Name()); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove %q: %w", entry.Name(), err))
+		}
+	}
+	return result
+}
+
+func syncRoot(root *os.Root) error {
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	return errors.Join(syncErr, closeErr)
 }
 
 func writeTarEntry(writer *tar.Writer, name string, mode os.FileMode, raw []byte) error {

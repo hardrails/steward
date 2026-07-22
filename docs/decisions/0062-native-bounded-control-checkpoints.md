@@ -34,12 +34,14 @@ create, verify, and restore operations.
   inventory. Links, paths, special files, ambiguous JSON, trailing entries, and
   digest mismatches fail closed.
 - Restore previews by default. With explicit `-apply`, it atomically reserves an
-  absent owner-only destination, extracts into that reservation, validates the
-  store and identities with their normal readers, and removes the directory on
-  every failed path. Success is reported only after validation and durable
-  writes.
-- The archive excludes `LOCK`; the validated restored store creates its own lock.
-  It never merges with or overwrites an existing state directory.
+  absent owner-only destination and retains opened parent and destination roots.
+  Extraction, identity reads, and read-only Control recovery validation remain
+  relative to those roots. A pathname substitution cannot redirect writes; a
+  failed restore scrubs the retained root and reports any moved reservation it
+  cannot remove. Success is reported only after validation and durable writes.
+- The archive excludes `LOCK`; Control creates its lock when the restored state
+  is first opened for service. Restore never merges with or overwrites an
+  existing state directory.
 
 Steward does not add compression, encryption, remote storage, scheduling,
 retention, replication, or consensus. Operators use a vetted backup or storage

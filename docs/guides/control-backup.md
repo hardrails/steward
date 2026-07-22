@@ -25,11 +25,12 @@ default packaged layout. It provides three guarantees:
   path traversal, links, unsafe modes, duplicate or non-canonical inventory,
   oversized content, trailing entries, and digest changes.
 - `restore` writes only into a new directory. It verifies every file while
-  extracting, reopens the restored state through Control's normal recovery
-  reader, and validates both signing identities. Apply atomically reserves the
-  absent owner-only destination before extraction, removes it on any failed
-  path, and reports success only after validation and durable writes. Preview is
-  the default; mutation requires `-apply`.
+  extracting, runs Control's state decoding and recovery validation without
+  modifying the checkpoint, and validates both signing identities. Apply keeps
+  open handles to the verified parent and reserved owner-only destination, so a
+  renamed path or substituted symbolic link cannot redirect sensitive writes.
+  It scrubs failed output and reports success only after validation and durable
+  writes. Preview is the default; mutation requires `-apply`.
 
 This is a crash-consistent checkpoint of one controller. It is not high
 availability, replication, or protection against a controller that was already
@@ -113,6 +114,11 @@ sudo -u steward-control stewardctl control backup restore \
 The destination and every restored file are owned by the identity running the
 command. Running as `steward-control` avoids a recursive ownership repair that
 could weaken permissions or cross filesystem boundaries.
+
+Restore retains the filesystem identity of its destination through extraction
+and validation. If another same-user process renames or substitutes that path,
+restore fails, scrubs files through the retained directory handle, and reports
+any reservation it can no longer remove. It never follows the substituted path.
 
 ## Cut over
 

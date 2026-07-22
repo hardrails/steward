@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,6 +106,44 @@ func TestWALRecoveryRepairsOnlyIncompleteTail(t *testing.T) {
 	}
 	if _, err := Open(directory, DefaultLimits()); err == nil {
 		t.Fatal("Open repaired rather than rejected a complete corrupt frame")
+	}
+}
+
+func TestInspectFSRejectsIncompleteTailWithoutRepair(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := Initialize(directory, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	walPath := filepath.Join(directory, generationName("wal", 1))
+	file, err := os.OpenFile(walPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte{0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := InspectFS(root.FS(), DefaultLimits()); err == nil || !strings.Contains(err.Error(), "incomplete final frame") {
+		t.Fatalf("read-only inspection error = %v", err)
+	}
+	after, err := os.Stat(walPath)
+	if err != nil || after.Size() != before.Size() {
+		t.Fatalf("read-only inspection changed WAL: before=%v after=%v err=%v", before.Size(), after.Size(), err)
 	}
 }
 

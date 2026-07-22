@@ -53,7 +53,7 @@ func TestCreateVerifyAndRestoreControlBackup(t *testing.T) {
 	if restoredReport != created {
 		t.Fatalf("restore report=%+v want %+v", restoredReport, created)
 	}
-	for _, name := range append([]string{"CURRENT", "LOCK"}, requiredIdentityFiles...) {
+	for _, name := range append([]string{"CURRENT"}, requiredIdentityFiles...) {
 		if _, err := os.Stat(filepath.Join(restored, name)); err != nil {
 			t.Fatalf("restored %s: %v", name, err)
 		}
@@ -99,6 +99,33 @@ func TestCreateRequiresStoppedCompleteDefaultControlState(t *testing.T) {
 	if _, err := Create(state, filepath.Join(stateAlias, "symlinked.tar"), time.Now()); err == nil ||
 		!strings.Contains(err.Error(), "outside") {
 		t.Fatalf("symlinked inside-state output error = %v", err)
+	}
+}
+
+func TestCreateRetainsVerifiedOutputDirectoryIdentity(t *testing.T) {
+	root := t.TempDir()
+	state := initializeControlState(t, root, false)
+	outputParent := filepath.Join(root, "output")
+	movedParent := filepath.Join(root, "moved-output")
+	if err := os.Mkdir(outputParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(outputParent, "backup.tar")
+	_, err := create(state, archive, time.Now().UTC(), func() {
+		if err := os.Rename(outputParent, movedParent); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(state, outputParent); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "output parent changed") {
+		t.Fatalf("substituted output parent error = %v", err)
+	}
+	for _, path := range []string{filepath.Join(state, "backup.tar"), filepath.Join(movedParent, "backup.tar")} {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("failed backup remains at %s: %v", path, statErr)
+		}
 	}
 }
 
@@ -213,18 +240,57 @@ func TestRestoreRemovesReservedDestinationWhenDurabilityFails(t *testing.T) {
 	}
 	destination := filepath.Join(root, "failed-restore")
 	failDestinationSync := true
-	_, err := restore(archive, destination, func(path string) error {
-		if path == destination && failDestinationSync {
+	_, err := restore(archive, destination, func(root *os.Root) error {
+		if filepath.Base(root.Name()) == filepath.Base(destination) && failDestinationSync {
 			failDestinationSync = false
 			return errors.New("injected destination sync failure")
 		}
-		return syncDirectory(path)
+		return syncRoot(root)
 	})
 	if err == nil || !strings.Contains(err.Error(), "injected destination sync failure") {
 		t.Fatalf("restore error = %v", err)
 	}
 	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("failed restore destination remains: %v", statErr)
+	}
+}
+
+func TestRestoreRetainsReservedDirectoryIdentity(t *testing.T) {
+	root := t.TempDir()
+	state := initializeControlState(t, root, false)
+	archive := filepath.Join(root, "valid.tar")
+	if _, err := Create(state, archive, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "restored")
+	movedDestination := filepath.Join(root, "moved-restored")
+	trap := filepath.Join(root, "trap")
+	if err := os.Mkdir(trap, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	_, err := restore(archive, destination, func(opened *os.Root) error {
+		if !swapped {
+			if renameErr := os.Rename(destination, movedDestination); renameErr != nil {
+				t.Fatal(renameErr)
+			}
+			if symlinkErr := os.Symlink(trap, destination); symlinkErr != nil {
+				t.Fatal(symlinkErr)
+			}
+			swapped = true
+		}
+		return syncRoot(opened)
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed before completion") {
+		t.Fatalf("substituted restore destination error = %v", err)
+	}
+	entries, readErr := os.ReadDir(trap)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("substituted restore wrote outside retained root: entries=%v err=%v", entries, readErr)
+	}
+	entries, readErr = os.ReadDir(movedDestination)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("failed retained restore was not scrubbed: entries=%v err=%v", entries, readErr)
 	}
 }
 
