@@ -29,6 +29,8 @@ type Control interface {
 	ListNodes(context.Context, string, string, int) (controlclient.NodeList, error)
 	ListInstanceEvents(context.Context, string, string, int) (controlclient.InstanceEventList, error)
 	ListTaskProjections(context.Context, string, string, int) (controlclient.TaskProjectionList, error)
+	ListNodePools(context.Context, string, int) (controlclient.NodePoolList, error)
+	GetNodePool(context.Context, string) (controlstore.NodePoolStatus, error)
 	GetNode(context.Context, string, string) (controlclient.Node, error)
 	RevokeNode(context.Context, string) (controlclient.NodeRevocation, error)
 	SubmitCommand(context.Context, string, string, []byte) (controlclient.Command, error)
@@ -73,6 +75,10 @@ type controlTaskListArgs struct {
 type controlNodeStatusArgs struct {
 	TenantID string `json:"tenant_id"`
 	NodeID   string `json:"node_id"`
+}
+
+type controlNodePoolStatusArgs struct {
+	PoolID string `json:"pool_id"`
 }
 
 type controlNodeRevokeArgs struct {
@@ -232,6 +238,30 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 		result, err := s.control.GetNode(ctx, arguments.TenantID, arguments.NodeID)
 		if err != nil {
 			return nil, controlFailure("node status", err)
+		}
+		return result, nil
+	case "steward_control_node_pool_list":
+		var arguments controlListArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlPage(arguments.After, arguments.Limit) {
+			return nil, errors.New("steward_control_node_pool_list accepts only an optional bounded after cursor and limit")
+		}
+		limit := arguments.Limit
+		if limit == 0 {
+			limit = 100
+		}
+		result, err := s.control.ListNodePools(ctx, arguments.After, limit)
+		if err != nil {
+			return nil, controlFailure("node pool list", err)
+		}
+		return result, nil
+	case "steward_control_node_pool_status":
+		var arguments controlNodePoolStatusArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.PoolID, 128) {
+			return nil, errors.New("steward_control_node_pool_status requires pool_id")
+		}
+		result, err := s.control.GetNodePool(ctx, arguments.PoolID)
+		if err != nil {
+			return nil, controlFailure("node pool status", err)
 		}
 		return result, nil
 	case "steward_control_node_revoke":
@@ -631,6 +661,11 @@ func controlTools() []any {
 		tool("steward_control_node_status", "Inspect tenant node", "Read one node's bounded inventory and liveness metadata within a tenant.",
 			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tenant_id", "node_id"},
 				"properties": map[string]any{"tenant_id": id128, "node_id": id128}}, true, false, true, false),
+		tool("steward_control_node_pool_list", "List node-pool capacity", "List site-admin-only provider-neutral capacity observations. Pool membership is operational metadata and never grants workload authority.",
+			map[string]any{"type": "object", "additionalProperties": false, "properties": pageProperties()}, true, false, true, false),
+		tool("steward_control_node_pool_status", "Inspect node-pool capacity", "Read one site-admin-only capacity observation, exact scale-out deficit, and post-drain empty-node scale-in candidates. This tool performs no provider action.",
+			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"pool_id"},
+				"properties": map[string]any{"pool_id": id128}}, true, false, true, false),
 		tool("steward_control_event_list", "List agent events", "List recent untrusted agent status and finding events with Gateway-derived workload identity. Events are telemetry, not command authority or signed evidence.",
 			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tenant_id"},
 				"properties": map[string]any{
