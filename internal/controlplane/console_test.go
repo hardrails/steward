@@ -176,6 +176,8 @@ func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities
 		`/freeze", epoch`,
 		`encodeURIComponent(tenantID) + "/quota"`,
 		`encodeURIComponent(tenantID) + "/tasks?limit=100"`,
+		`/v1/node-pools?limit=500`,
+		`CAPACITY IS NOT PERMISSION.`,
 		`Fleet-wide resource quota`,
 		`REPORTED STATE · NOT VERIFIED OUTCOME`,
 		`Existing work is not evicted when a limit is lowered.`,

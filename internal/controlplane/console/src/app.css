@@ -441,6 +441,7 @@ select:focus {
   display: flex;
   height: calc(100vh - 82px);
   min-height: 650px;
+  overflow-y: auto;
   flex-direction: column;
   border-right: 1px solid var(--line);
   background: var(--ink-soft);
@@ -1143,6 +1144,142 @@ progress::-moz-progress-bar {
   margin-top: 24px;
   gap: 16px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pool-board {
+  display: grid;
+  margin-top: 24px;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pool-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(142deg, rgb(122 200 255 / 0.045), transparent 40%),
+    var(--panel);
+  padding: 22px;
+}
+
+.pool-card::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: var(--blue);
+  content: "";
+}
+
+.pool-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  gap: 18px;
+  padding: 8px 0 17px;
+}
+
+.pool-card h3 {
+  margin: 6px 0 0;
+  font-family: var(--display);
+  font-size: 32px;
+  font-weight: 500;
+}
+
+.pool-capacity {
+  display: grid;
+  border-left: 1px solid var(--line);
+  margin: 18px 0 14px;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.pool-capacity div {
+  display: grid;
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  gap: 5px;
+  padding: 12px;
+}
+
+.pool-capacity span,
+.pool-facts dt {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pool-capacity strong {
+  font-family: var(--display);
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.pool-facts {
+  display: grid;
+  margin: 18px 0 0;
+  grid-template-columns: 1fr 1fr;
+}
+
+.pool-facts div {
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px 10px 0;
+}
+
+.pool-facts div:nth-child(even) {
+  padding-left: 12px;
+}
+
+.pool-facts dd {
+  overflow-wrap: anywhere;
+  margin: 5px 0 0;
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.pool-conditions {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  gap: 7px;
+}
+
+.pool-action,
+.pool-candidates {
+  border-left: 3px solid var(--warning);
+  margin: 16px 0 0;
+  background: rgb(255 194 71 / 0.045);
+  color: var(--paper-muted);
+  padding: 11px 13px;
+  font-size: 11px;
+}
+
+.pool-action strong,
+.pool-candidates strong {
+  margin-right: 8px;
+  color: var(--warning);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.pool-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.pool-candidates code {
+  border: 1px solid var(--line-bright);
+  padding: 3px 6px;
+  font-size: 9px;
 }
 
 .agent-card {
@@ -2257,7 +2394,8 @@ td small {
     grid-template-columns: 1fr;
   }
 
-  .agent-board {
+  .agent-board,
+  .pool-board {
     grid-template-columns: 1fr;
   }
 
@@ -2413,6 +2551,11 @@ td small {
   }
 
   .agent-tally {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .pool-capacity,
+  .pool-facts {
     grid-template-columns: repeat(2, 1fr);
   }
 

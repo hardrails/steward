@@ -217,7 +217,7 @@ export default function App() {
     return payload;
   }, []);
 
-  const loadSnapshot = useCallback(async (epoch, tenantID, prefetchedSummary = null) => {
+  const loadSnapshot = useCallback(async (epoch, tenantID, prefetchedSummary = null, includeSiteResources = false) => {
     const requests = [
       prefetchedSummary || api(projectedPath("/v1/operations/summary", tenantID), epoch),
       api(projectedPath("/v1/operations/attention", tenantID, {limit: 100}), epoch),
@@ -240,10 +240,13 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/tasks?limit=100", epoch)
         : Promise.resolve({tasks: []}),
+      includeSiteResources
+        ? api("/v1/node-pools?limit=500", epoch)
+        : Promise.resolve({node_pools: []}),
     ];
-    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, nodePools] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, nodePools};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -270,6 +273,7 @@ export default function App() {
         activation.epoch,
         projection,
         initialSummary,
+        siteAdmin,
       );
       fenceRef.current.assertCurrent(activation.epoch);
 
@@ -342,7 +346,7 @@ export default function App() {
     }
     setRefreshError("");
     try {
-      const next = await loadSnapshot(epoch, projection);
+      const next = await loadSnapshot(epoch, projection, null, session.siteAdmin);
       fenceRef.current.assertCurrent(epoch);
       snapshotFenceRef.current.assertCurrent(snapshotGeneration);
       setSnapshot(next);
@@ -577,11 +581,12 @@ const views = [
   ["attention", "02", "Needs review"],
   ["incident", "03", "Incident view"],
   ["nodes", "04", "Agent nodes"],
-  ["commands", "05", "Signed activity"],
-  ["credentials", "06", "Access records"],
-  ["agents", "07", "Agents"],
-  ["tasks", "08", "Fleet tasks"],
-  ["events", "09", "Agent signals"],
+  ["pools", "05", "Node pools"],
+  ["commands", "06", "Signed activity"],
+  ["credentials", "07", "Access records"],
+  ["agents", "08", "Agents"],
+  ["tasks", "09", "Fleet tasks"],
+  ["events", "10", "Agent signals"],
 ];
 
 function ControlRoom(props) {
@@ -612,7 +617,7 @@ function ControlRoom(props) {
           </span>
         </div>
         <nav>
-          {views.map(([id, index, label]) => (
+          {views.filter(([id]) => id !== "pools" || session.siteAdmin).map(([id, index, label]) => (
             <button
               key={id}
               className={"nav-item" + (view === id ? " is-active" : "")}
@@ -686,6 +691,7 @@ function ControlRoom(props) {
             {view === "attention" ? <AttentionView page={snapshot.attention} /> : null}
             {view === "incident" ? <IncidentTimelineView page={snapshot.timeline} /> : null}
             {view === "nodes" ? <NodesView page={snapshot.nodes} tenantID={selectedTenant} /> : null}
+            {view === "pools" ? <NodePoolsView page={snapshot.nodePools} /> : null}
             {view === "commands" ? (
               <CommandsView
                 page={snapshot.commands}
@@ -1271,6 +1277,102 @@ function TaskProjectionsView({page, tenantID}) {
         </article>
       )}
       {page?.next_after ? <p className="truncation-note">More task projections are retained. Continue with the HTTP API, MCP tool, or stewardctl task cursor.</p> : null}
+    </section>
+  );
+}
+
+function nodePoolConditionKind(condition) {
+  if (condition === "capacity_shortfall") {
+    return "is-danger";
+  }
+  if (condition === "nodes_not_ready" || condition === "scale_in_available") {
+    return "is-warning";
+  }
+  return "";
+}
+
+function NodePoolsView({page}) {
+  const pools = Array.isArray(page?.node_pools) ? page.node_pools : [];
+  const registered = pools.reduce((total, status) => total + status.registered_nodes, 0);
+  const ready = pools.reduce((total, status) => total + status.ready_nodes, 0);
+  const scaleOut = pools.reduce((total, status) => total + status.scale_out_needed, 0);
+  const scaleIn = pools.reduce((total, status) => total + (status.scale_in_candidates?.length || 0), 0);
+  return (
+    <section className="view node-pool-view" aria-labelledby="node-pools-title">
+      <ViewHeading id="node-pools-title" eyebrow="PROVIDER-NEUTRAL CAPACITY" title="Elastic capacity without ambient authority">
+        Reconcile machines through an external driver while Steward preserves exact-node workload authorization and safe drain boundaries.
+      </ViewHeading>
+      <aside className="signal-boundary">
+        <strong>CAPACITY IS NOT PERMISSION.</strong>
+        <span>A matching pool label cannot enroll a node, expand a tenant delegation, place a workload, or call a cloud API.</span>
+      </aside>
+      <dl className="task-totals" aria-label="Node pool capacity totals">
+        <div><dt>Pools</dt><dd>{pools.length}</dd></div>
+        <div><dt>Registered nodes</dt><dd>{registered}</dd></div>
+        <div><dt>Ready nodes</dt><dd>{ready}</dd></div>
+        <div className={scaleOut ? "has-conflict" : ""}><dt>Scale out needed</dt><dd>{scaleOut}</dd></div>
+      </dl>
+      {pools.length ? (
+        <div className="pool-board">
+          {pools.map((status) => {
+            const pool = status.pool;
+            const conditions = Array.isArray(status.conditions) ? status.conditions : [];
+            const candidates = Array.isArray(status.scale_in_candidates) ? status.scale_in_candidates : [];
+            return (
+              <article className="pool-card" key={pool.id}>
+                <header>
+                  <div>
+                    <span className="panel-index">NODE POOL / REV {pool.revision}</span>
+                    <h3>{pool.id}</h3>
+                  </div>
+                  <Badge kind={conditions.length ? "is-warning" : "is-ok"}>
+                    {conditions.length ? "attention" : "at target"}
+                  </Badge>
+                </header>
+                <div className="pool-capacity">
+                  <div><span>Ready</span><strong>{status.ready_nodes}</strong></div>
+                  <div><span>Registered</span><strong>{status.registered_nodes}</strong></div>
+                  <div><span>Desired</span><strong>{pool.desired_nodes}</strong></div>
+                  <div><span>Maximum</span><strong>{pool.max_nodes}</strong></div>
+                </div>
+                <progress
+                  max={pool.max_nodes}
+                  value={Math.min(status.registered_nodes, pool.max_nodes)}
+                  aria-label={`${pool.id}: ${status.registered_nodes} registered of ${pool.max_nodes} maximum nodes`}
+                />
+                <dl className="pool-facts">
+                  <div><dt>Tenant scopes</dt><dd>{displayStringList(pool.tenant_ids).join(", ")}</dd></div>
+                  <div><dt>Architecture</dt><dd>{pool.architecture || "any reported architecture"}</dd></div>
+                  <div><dt>Capacity range</dt><dd>{pool.min_nodes} minimum · {pool.desired_nodes} desired · {pool.max_nodes} maximum</dd></div>
+                  <div><dt>Observed</dt><dd>{formatTime(status.observed_at)}</dd></div>
+                </dl>
+                <div className="pool-conditions">
+                  {conditions.map((condition) => <Badge key={condition} kind={nodePoolConditionKind(condition)}>{humanize(condition)}</Badge>)}
+                  {!conditions.length ? <Badge kind="is-ok">capacity healthy</Badge> : null}
+                </div>
+                {status.scale_out_needed ? (
+                  <p className="pool-action"><strong>CREATE {status.scale_out_needed}</strong> The provider driver may create exactly this many machines, then complete node-specific enrollment.</p>
+                ) : null}
+                {candidates.length ? (
+                  <div className="pool-candidates">
+                    <strong>{candidates.length} POST-DRAIN SCALE-IN CANDIDATE{candidates.length === 1 ? "" : "S"}</strong>
+                    {candidates.map((nodeID) => <code key={nodeID}>{nodeID}</code>)}
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <article className="incident-empty">
+          <span className="panel-index">NO CAPACITY INTENT RETAINED</span>
+          <h3>Define a provider-neutral node pool from a trusted terminal.</h3>
+          <p>Control will report creation deficits and only post-drain, empty-node scale-in candidates. It will not receive cloud credentials.</p>
+          <pre><code>stewardctl control node-pool apply -pool-id agents -tenant-ids TENANT -min-nodes 1 -desired-nodes 2 -max-nodes 10</code></pre>
+        </article>
+      )}
+      {page?.next_after ? <p className="truncation-note">More node pools exist. Continue with the HTTP API or stewardctl node-pool cursor.</p> : null}
+      {scaleIn ? <p className="truncation-note">{scaleIn} drained, empty node{scaleIn === 1 ? " is" : "s are"} eligible for exact provider removal.</p> : null}
     </section>
   );
 }
