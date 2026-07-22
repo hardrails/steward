@@ -6,13 +6,14 @@ name: Release
 # the artifacts are uploaded to the workflow run only, so the release automation
 # can be dry-fired safely without cutting a release. See docs/releasing.md.
 #
-# Six jobs by design, for source ancestry, frontend provenance, native packaging,
-# and least privilege: `validate` checks tag ancestry before any repository script
+# Seven job executions by design, for source ancestry, frontend provenance, native
+# packaging, shipped-artifact qualification, and least privilege: `validate` checks tag ancestry before any repository script
 # runs; `console` reproduces the committed air-gapped browser bundle; the two
 # `build` matrix copies run the validated commit's code on matching x86/ARM hosts
 # with a read-only token; `combine` checks out no code and creates the complete
-# checksum manifest; `publish` holds the only contents:write token, checks out no
-# code, and only attaches already-built artifacts.
+# checksum manifest; `qualify` exercises extracted release binaries; `publish`
+# holds the only contents:write token, checks out no code, and only attaches
+# already-qualified artifacts.
 #
 # scripts/release.sh stamps the release tag into all binaries with the standard Go
 # linker and independently executes every binary to assert the result before publishing.
@@ -319,9 +320,9 @@ jobs:
           grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/node-doctor.sh' "$rpm_contents"
 
-      - name: Keep one installer copy
+      - name: Keep one architecture-independent asset copy
         if: matrix.goarch == 'arm64'
-        run: rm dist/install-steward.sh dist/install-control.sh dist/install-macos.sh
+        run: rm dist/install-steward.sh dist/install-control.sh dist/install-macos.sh dist/steward-support_${STEWARD_RELEASE_VERSION}.json
 
       # Hand this architecture's packages to the combine job. The per-runner
       # checksums are deliberately excluded: combine writes one manifest over
@@ -339,6 +340,7 @@ jobs:
             dist/install-steward.sh
             dist/install-control.sh
             dist/install-macos.sh
+            dist/steward-support_*.json
           retention-days: 7
           if-no-files-found: error
 
@@ -378,6 +380,7 @@ jobs:
             "install-steward.sh"
             "install-control.sh"
             "install-macos.sh"
+            "steward-support_${STEWARD_RELEASE_VERSION}.json"
           )
           for artifact in "${expected[@]}"; do
             test -f "dist/$artifact" || {
@@ -396,13 +399,48 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  qualify:
+    name: qualify shipped release
+    needs: combine
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # This job executes the tagged acceptance script and extracted binaries with
+    # a read-only token. It has no authority to publish or mutate a release.
+    steps:
+      - name: Checkout qualification harness
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download complete release set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: steward-dist
+          path: dist
+
+      - name: Verify and exercise shipped binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c checksums.txt)
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          tar -xzf "dist/steward_${STEWARD_RELEASE_VERSION}_linux_amd64.tar.gz" -C "$extracted"
+          for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
+            test "$("$extracted/$binary" -version | awk '{print $2}')" = "$STEWARD_RELEASE_VERSION"
+          done
+          "$extracted/stewardctl" support matrix -output json >"$extracted/support.json"
+          cmp "$extracted/support.json" "dist/steward-support_${STEWARD_RELEASE_VERSION}.json"
+          STEWARD_CONTROL_BIN="$extracted/steward-control" \
+            STEWARDCTL_BIN="$extracted/stewardctl" \
+            STEWARD_MCP_BIN="$extracted/steward-mcp" \
+            /bin/bash -p scripts/control-acceptance.sh
+
   publish:
     name: publish GitHub Release
-    needs: combine
+    needs: qualify
     # Publish ONLY on a real semver tag push. A workflow_dispatch run (any branch)
     # never reaches this job, so the dry-run path can neither create nor mutate a
-    # release. `needs: combine` also means any failed build, version assertion,
-    # or incomplete artifact matrix aborts the publish.
+    # release. `needs: qualify` also means any failed build, version assertion,
+    # incomplete artifact matrix, checksum, support-contract comparison, or
+    # shipped-binary Control acceptance aborts publication.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
@@ -441,4 +479,5 @@ jobs:
             dist/install-steward.sh \
             dist/install-control.sh \
             dist/install-macos.sh \
+            dist/steward-support_*.json \
             dist/checksums.txt

@@ -94,6 +94,19 @@ completion with:
 stewardctl completion install
 ```
 
+Ask the installed binary what it actually supports instead of guessing from a
+release name or a marketing page:
+
+<!-- cli-flags: support matrix | -output -->
+```console
+stewardctl support matrix
+stewardctl support matrix -output json
+```
+
+The JSON form is also published as a checksummed release asset. It states the
+production host roles, qualified agent runtime, isolation prerequisites,
+compatibility boundary, and known limits for that exact build.
+
 Before enrolling a production node, create the site's authority package on a
 trusted operator workstation:
 

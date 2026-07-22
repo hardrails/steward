@@ -80,6 +80,7 @@ Documentation: https://hardrails.github.io/steward/
 ## Reference
 
 - [Platform support](https://hardrails.github.io/steward/reference/platform-support/): Supported hosts and artifacts
+- [Installed support contract](https://hardrails.github.io/steward/reference/support-contract/): Offline human and machine-readable platform, runtime, isolation, compatibility, and known-limit contract emitted by the exact installed binary
 - [Configuration](https://hardrails.github.io/steward/reference/configuration/): Flags, defaults, paths, and validation
 - [Runtime profiles](https://hardrails.github.io/steward/reference/runtime-profiles/): Exact command, Linux identity, writable state, and service contracts checked before capsule signing and admission
 - [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts

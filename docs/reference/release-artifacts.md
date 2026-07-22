@@ -26,6 +26,8 @@ installer, and a SHA-256 manifest.
 | `steward-buzz_<version>_<os>_<arch>.tar.gz` | Optional Buzz integration recipe, target-native bridge and CLI, exact source lock, reviewed patch, and service/configuration examples |
 | `install-steward.sh` | Interactive and unattended top-level installer |
 | `install-control.sh` | Interactive and unattended controller installer for systemd Linux |
+| `install-macos.sh` | Native macOS operator and development installer |
+| `steward-support_<version>.json` | Supported platforms, runtime, isolation requirements, compatibility boundary, and known limits emitted by the stamped binary |
 | `checksums.txt` | SHA-256 values for every other release asset |
 
 Linux archives and packages include hardened systemd units, configuration templates,
@@ -119,6 +121,17 @@ sha256sum -c checksums.txt
 ```
 
 On stock macOS, use `shasum -a 256 -c checksums.txt` instead of `sha256sum`.
+
+After checksum verification, compare the published support contract with the
+installed CLI:
+
+```console
+stewardctl support matrix -output json > installed-support.json
+cmp installed-support.json steward-support_<version>.json
+```
+
+The release workflow performs the same byte comparison before publication. See
+the [installed support contract]({{ '/reference/support-contract/' | relative_url }}).
 
 A checksum proves only that files match the downloaded manifest. For high-assurance
 imports, authenticate the manifest with a trusted signature or verify it as part of
