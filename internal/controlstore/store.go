@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -237,19 +236,20 @@ func Open(directory string, limits Limits) (*Store, error) {
 	}, nil
 }
 
-// InspectFS validates a read-only Control state filesystem and returns its
+// InspectRoot validates read-only Control state beneath a retained directory
+// root and returns its
 // recovered status without acquiring a pathname-based lock or repairing data.
-// It is intended for callers that retain a confined directory handle, such as
-// backup restoration. An incomplete WAL tail is rejected rather than changed.
-func InspectFS(filesystem fs.FS, limits Limits) (Status, error) {
-	if filesystem == nil {
-		return Status{}, errors.New("control state filesystem is required")
+// It is intended for backup restoration. An incomplete WAL tail is rejected
+// rather than changed, and every artifact open rejects final-component links.
+func InspectRoot(root *os.Root, limits Limits) (Status, error) {
+	if root == nil {
+		return Status{}, errors.New("control state root is required")
 	}
 	if err := limits.Validate(); err != nil {
 		return Status{}, err
 	}
-	manifestRaw, err := readFSArtifact(filesystem, currentName, manifestBytes)
-	if errors.Is(err, fs.ErrNotExist) {
+	manifestRaw, err := readRootArtifact(root, currentName, manifestBytes)
+	if errors.Is(err, os.ErrNotExist) {
 		return Status{}, ErrNotInitialized
 	}
 	if err != nil {
@@ -259,7 +259,7 @@ func InspectFS(filesystem fs.FS, limits Limits) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	snapshotRaw, err := readFSArtifact(filesystem, generationName("snapshot", selected.Generation), snapshotHeaderBytes+limits.MaxStateBytes)
+	snapshotRaw, err := readRootArtifact(root, generationName("snapshot", selected.Generation), snapshotHeaderBytes+limits.MaxStateBytes)
 	if err != nil {
 		return Status{}, fmt.Errorf("read control snapshot: %w", err)
 	}
@@ -281,7 +281,7 @@ func InspectFS(filesystem fs.FS, limits Limits) (Status, error) {
 		return Status{}, formatStateError(err)
 	}
 
-	wal, size, err := openFSArtifact(filesystem, generationName("wal", selected.Generation), limits.MaxWALBytes)
+	wal, size, err := openRootArtifact(root, generationName("wal", selected.Generation), limits.MaxWALBytes)
 	if err != nil {
 		return Status{}, err
 	}
@@ -587,34 +587,28 @@ func recoverWALReader(file io.ReaderAt, size int64, current state, sequence uint
 	return current, sequence, lastHash, nil
 }
 
-type fsArtifact interface {
-	fs.File
-	io.ReaderAt
-}
-
-func openFSArtifact(filesystem fs.FS, name string, limit int64) (fsArtifact, int64, error) {
-	file, err := filesystem.Open(name)
+func openRootArtifact(root *os.Root, name string, limit int64) (*os.File, int64, error) {
+	before, err := root.Lstat(name)
 	if err != nil {
 		return nil, 0, err
 	}
-	artifact, ok := file.(fsArtifact)
-	if !ok {
-		_ = file.Close()
-		return nil, 0, errors.New("control state filesystem does not provide bounded random-access files")
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, 0, err
 	}
-	info, err := artifact.Stat()
-	if err != nil || validateArtifactInfo(info, limit) != nil {
-		_ = artifact.Close()
+	info, err := file.Stat()
+	if err != nil || !os.SameFile(before, info) || validateArtifactInfo(info, limit) != nil {
+		_ = file.Close()
 		return nil, 0, errors.New("control artifact must be a bounded owner-only regular file with one link")
 	}
-	return artifact, info.Size(), nil
+	return file, info.Size(), nil
 }
 
-func readFSArtifact(filesystem fs.FS, name string, limit int) ([]byte, error) {
+func readRootArtifact(root *os.Root, name string, limit int) ([]byte, error) {
 	if limit <= 0 {
 		return nil, errors.New("control artifact read limit must be positive")
 	}
-	file, _, err := openFSArtifact(filesystem, name, int64(limit))
+	file, _, err := openRootArtifact(root, name, int64(limit))
 	if err != nil {
 		return nil, err
 	}

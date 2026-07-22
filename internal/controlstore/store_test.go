@@ -109,7 +109,7 @@ func TestWALRecoveryRepairsOnlyIncompleteTail(t *testing.T) {
 	}
 }
 
-func TestInspectFSRejectsIncompleteTailWithoutRepair(t *testing.T) {
+func TestInspectRootRejectsIncompleteTailWithoutRepair(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "control")
 	store, err := Initialize(directory, DefaultLimits())
 	if err != nil {
@@ -138,7 +138,7 @@ func TestInspectFSRejectsIncompleteTailWithoutRepair(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if _, err := InspectFS(root.FS(), DefaultLimits()); err == nil || !strings.Contains(err.Error(), "incomplete final frame") {
+	if _, err := InspectRoot(root, DefaultLimits()); err == nil || !strings.Contains(err.Error(), "incomplete final frame") {
 		t.Fatalf("read-only inspection error = %v", err)
 	}
 	after, err := os.Stat(walPath)

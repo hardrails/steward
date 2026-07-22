@@ -493,7 +493,7 @@ func validateRestoredStateRoot(root *os.Root, report Report) error {
 	if err := validateDefaultIdentitySetRoot(root); err != nil {
 		return err
 	}
-	status, err := controlstore.InspectFS(root.FS(), controlstore.DefaultLimits())
+	status, err := controlstore.InspectRoot(root, controlstore.DefaultLimits())
 	if err != nil {
 		return fmt.Errorf("validate restored Control state: %w", err)
 	}
