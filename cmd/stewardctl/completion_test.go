@@ -35,6 +35,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"control", "command", ""}); !slices.Equal(candidates, []string{"list", "status", "submit"}) {
 		t.Fatalf("control command candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"control", "backup", ""}); !slices.Equal(candidates, []string{"create", "restore", "verify"}) {
+		t.Fatalf("control backup candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"control", "backup", "-"}); slices.Contains(candidates, "create") {
+		t.Fatalf("control backup flag candidates unexpectedly contain subcommands: %v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"control", "freeze", ""}); !slices.Equal(candidates, []string{"clear", "set", "status"}) {
 		t.Fatalf("control freeze candidates=%v", candidates)
 	}
