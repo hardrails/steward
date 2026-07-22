@@ -162,6 +162,17 @@ jobs:
           go build -o "$stage/steward-gateway" ./cmd/steward-gateway
           go build -o "$stage/steward-relay" ./cmd/steward-relay
           go build -o "$stage/steward-storage-zfs" ./cmd/steward-storage-zfs
+          for command in status explain recover; do
+            "$stage/stewardctl" help "$command" >/dev/null
+          done
+          status_completion=$("$stage/stewardctl" __complete status -)
+          grep -Fxq -- '-output' <<<"$status_completion"
+          grep -Fxq -- '-watch' <<<"$status_completion"
+          explain_completion=$("$stage/stewardctl" __complete explain -)
+          grep -Fxq -- '-output' <<<"$explain_completion"
+          recover_completion=$("$stage/stewardctl" __complete recover -)
+          grep -Fxq -- '-apply' <<<"$recover_completion"
+          grep -Fxq -- '-output' <<<"$recover_completion"
           cp -R adapters/hermes-agent "$stage/adapters/"
           cp -R workers/coding workers/research "$stage/workers/"
           cp -R examples schemas "$stage/"

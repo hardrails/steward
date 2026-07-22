@@ -203,6 +203,20 @@ jobs:
           tar -tzf "$archive" scripts/node-doctor.sh >/dev/null
           tar -tzf "$archive" examples/agents/hermes/agent.json >/dev/null
           tar -tzf "$archive" schemas/agent.cue >/dev/null
+          cli_verify=$(mktemp -d)
+          tar -xzf "$archive" -C "$cli_verify" stewardctl
+          for command in status explain recover; do
+            "$cli_verify/stewardctl" help "$command" >/dev/null
+          done
+          status_completion=$("$cli_verify/stewardctl" __complete status -)
+          grep -Fxq -- '-output' <<<"$status_completion"
+          grep -Fxq -- '-watch' <<<"$status_completion"
+          explain_completion=$("$cli_verify/stewardctl" __complete explain -)
+          grep -Fxq -- '-output' <<<"$explain_completion"
+          recover_completion=$("$cli_verify/stewardctl" __complete recover -)
+          grep -Fxq -- '-apply' <<<"$recover_completion"
+          grep -Fxq -- '-output' <<<"$recover_completion"
+          rm -rf "$cli_verify"
           darwin_archive="dist/steward_${STEWARD_RELEASE_VERSION}_darwin_${{ matrix.goarch }}.tar.gz"
           tar -tzf "$darwin_archive" steward-control >/dev/null
           tar -tzf "$darwin_archive" examples/agents/hermes/agent.json >/dev/null
