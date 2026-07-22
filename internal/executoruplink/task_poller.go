@@ -71,12 +71,15 @@ func (p *Poller) pollTasksOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	responseRaw, err := p.taskWireCall(ctx, p.taskPollURL, credential.Credential, raw, "task poll")
+	responseRaw, err := p.taskWireCall(
+		ctx, p.taskPollURL, credential.Credential, raw, "task poll",
+		controlprotocol.MaxExecutorTaskPollResponseBytes,
+	)
 	if err != nil {
 		return err
 	}
 	var response controlprotocol.ExecutorTaskPollResponseV1
-	if dsse.DecodeStrictInto(responseRaw, controlprotocol.MaxExecutorTaskDeliveryBytes, &response) != nil ||
+	if dsse.DecodeStrictInto(responseRaw, controlprotocol.MaxExecutorTaskPollResponseBytes, &response) != nil ||
 		response.SchemaVersion != controlprotocol.ExecutorTaskPollSchemaV1 || response.Deliveries == nil ||
 		len(response.Deliveries) > taskPollBatch {
 		return errors.New("controller task poll response is invalid")
@@ -93,18 +96,22 @@ func (p *Poller) pollTasksOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		ackRaw, err := p.taskWireCall(ctx, p.taskReportURL, credential.Credential, reportRaw, "task report")
+		ackRaw, err := p.taskWireCall(ctx, p.taskReportURL, credential.Credential, reportRaw, "task report", maxWireBytes)
 		if err != nil {
 			return err
 		}
-		var acknowledgement struct {
-			Applied bool `json:"applied"`
-		}
-		if dsse.DecodeStrictInto(ackRaw, maxWireBytes, &acknowledgement) != nil {
+		if !taskReportAcknowledged(ackRaw) {
 			return errors.New("controller task report acknowledgement is invalid")
 		}
 	}
 	return nil
+}
+
+func taskReportAcknowledged(raw []byte) bool {
+	var acknowledgement struct {
+		Applied bool `json:"applied"`
+	}
+	return dsse.DecodeStrictInto(raw, maxWireBytes, &acknowledgement) == nil && acknowledgement.Applied
 }
 
 func (p *Poller) executeTaskDelivery(ctx context.Context, delivery controlprotocol.ExecutorTaskDeliveryV1) controlprotocol.ExecutorTaskReportV1 {
@@ -170,7 +177,7 @@ func taskDeliveryError(err error, submitting bool) (string, string) {
 	return controlprotocol.ExecutorTaskReportUncertain, code
 }
 
-func (p *Poller) taskWireCall(ctx context.Context, target, credential string, body []byte, operation string) ([]byte, error) {
+func (p *Poller) taskWireCall(ctx context.Context, target, credential string, body []byte, operation string, maximum int64) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -185,7 +192,7 @@ func (p *Poller) taskWireCall(ctx context.Context, target, credential string, bo
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, wireError(operation, response)
 	}
-	raw, err := readBounded(response.Body, controlprotocol.MaxExecutorTaskDeliveryBytes)
+	raw, err := readBounded(response.Body, maximum)
 	if err != nil {
 		return nil, fmt.Errorf("read %s response: %w", operation, err)
 	}

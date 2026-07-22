@@ -12,21 +12,23 @@ import (
 )
 
 const (
-	ExecutorTaskProtocolV1        = 1
-	ExecutorTaskPollSchemaV1      = "steward.executor-task-poll.v1"
-	ExecutorTaskDeliverySchemaV1  = "steward.executor-task-delivery.v1"
-	ExecutorTaskReportSchemaV1    = "steward.executor-task-report.v1"
-	ExecutorTaskActionSubmit      = "submit"
-	ExecutorTaskActionObserve     = "observe"
-	ExecutorTaskReportAccepted    = "accepted"
-	ExecutorTaskReportObserved    = "observed"
-	ExecutorTaskReportRetryable   = "retryable_error"
-	ExecutorTaskReportRejected    = "rejected"
-	ExecutorTaskReportUncertain   = "outcome_unknown"
-	MaxExecutorTaskDeliveries     = 32
-	MaxExecutorTaskDeliveryBytes  = 128 << 10
-	MaxExecutorTaskResultBytes    = 512 << 10
-	MaxExecutorTaskErrorCodeBytes = 128
+	ExecutorTaskProtocolV1           = 1
+	ExecutorTaskPollSchemaV1         = "steward.executor-task-poll.v1"
+	ExecutorTaskDeliverySchemaV1     = "steward.executor-task-delivery.v1"
+	ExecutorTaskReportSchemaV1       = "steward.executor-task-report.v1"
+	ExecutorTaskActionSubmit         = "submit"
+	ExecutorTaskActionObserve        = "observe"
+	ExecutorTaskReportAccepted       = "accepted"
+	ExecutorTaskReportObserved       = "observed"
+	ExecutorTaskReportRetryable      = "retryable_error"
+	ExecutorTaskReportRejected       = "rejected"
+	ExecutorTaskReportUncertain      = "outcome_unknown"
+	MaxExecutorTaskDeliveries        = 32
+	MaxExecutorTaskDeliveryBytes     = 128 << 10
+	MaxExecutorTaskPollResponseBytes = 1 << 20
+	MaxExecutorTaskReportBytes       = 768 << 10
+	MaxExecutorTaskResultBytes       = 512 << 10
+	MaxExecutorTaskErrorCodeBytes    = 128
 )
 
 var taskDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)

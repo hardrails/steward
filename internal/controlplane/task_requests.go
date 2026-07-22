@@ -205,8 +205,8 @@ func (server *Server) executorTaskReport(writer http.ResponseWriter, request *ht
 		return
 	}
 	var report controlprotocol.ExecutorTaskReportV1
-	if len(raw) > controlprotocol.MaxExecutorTaskDeliveryBytes ||
-		dsse.DecodeStrictInto(raw, controlprotocol.MaxExecutorTaskDeliveryBytes, &report) != nil ||
+	if len(raw) > controlprotocol.MaxExecutorTaskReportBytes ||
+		dsse.DecodeStrictInto(raw, controlprotocol.MaxExecutorTaskReportBytes, &report) != nil ||
 		report.Validate() != nil || report.NodeID != identity.NodeID {
 		writeError(writer, http.StatusBadRequest, "invalid_request", "executor task report is invalid")
 		return

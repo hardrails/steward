@@ -79,7 +79,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
 | `GET /metrics` | Optional authenticated Prometheus exposition with fixed bounded labels |
 | `POST /executor-uplink/poll`, `POST /executor-uplink/report` | Lease signed commands to an enrolled Executor and settle fenced reports |
-| `POST /executor-uplink/tasks/poll`, `POST /executor-uplink/tasks/report` | Lease exact signed task requests to the assigned node and return Gateway-backed lifecycle state and bounded terminal results |
+| `POST /executor-uplink/tasks/poll`, `POST /executor-uplink/tasks/report` | Lease exact signed task requests to the assigned node and return authenticated-node reports of Gateway lifecycle state and bounded terminal results |
 | `POST /evidence-uplink/poll`, `POST /evidence-uplink/report` | Return a credential-bound challenge, then verify and retain a receipt-key-signed evidence batch |
 
 Every request body and response is bounded. Tenant and node inventory uses the

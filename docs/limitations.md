@@ -428,10 +428,15 @@ endpoint is reachable through a literal loopback address, normally on the
 selected node or through an operator-managed authenticated tunnel. `task enqueue`
 is the remote path: Control retains the exact request and short-lived signed
 permit, then the assigned Executor uses its host-local Gateway. Control also
-retains a terminal observation when it is at most 512 KiB. Larger results remain
-metadata-only and require a separately governed artifact store. Control never
-receives the task private key or Gateway bearer. Multi-instance deployments
-require an explicit instance selection.
+retains a terminal observation when it is at most 512 KiB and aggregate result
+capacity remains. Request/permit courier material and result bytes each have
+independent 16 MiB per-tenant and 64 MiB site-wide ceilings. Larger or omitted
+results remain metadata-only and require a separately governed artifact store.
+Control validates the node report's result encoding, digest, and byte count, but
+does not independently verify signed Gateway evidence; a compromised node can
+forge lifecycle and result reports for its workloads. Control never receives the
+task private key or Gateway bearer. Multi-instance deployments require an explicit
+instance selection.
 
 Async cancellation is definitive only while a task remains queued. After Gateway
 accepts a run, the generic lifecycle has no cross-runtime cancel operation;

@@ -37,17 +37,22 @@ dispatch fence.
 
 Retain public lifecycle metadata separately from private payloads. List and get
 responses expose identities, state, digests, byte counts, and uncertainty. An
-explicit operator-scoped result endpoint returns a Gateway-verified terminal
-observation only when it is at most 512 KiB. Requests, permits, and results remain
+explicit operator-scoped result endpoint returns the bounded terminal observation
+reported by the authenticated node only when it is at most 512 KiB. Control checks
+its canonical encoding, digest, and byte count but does not independently verify
+signed Gateway evidence for it. Requests, permits, and results remain
 in the owner-only Control store and are excluded from ordinary inventory, metrics,
 logs, and support bundles.
 
 **Tradeoff:** the first implementation provides crash-safe remote work without a
 new service, but it inherits Control's single-writer scale and stores sensitive
-task content. Task permits remain short-lived, bounded to 15 minutes. Large
-results require a future artifact backend. Control compromise can disclose or
-withhold retained content and replay exact permits until expiry, but cannot mint
-new tenant authority or alter a signed request successfully.
+task content. Task permits remain short-lived, bounded to 15 minutes. Individual
+results are limited to 512 KiB; courier material and results each have independent
+16 MiB per-tenant and 64 MiB site-wide ceilings. Large results require a future
+artifact backend. A compromised node can forge lifecycle or result reports for
+its workloads. Control compromise can disclose or withhold retained content and
+replay exact permits until expiry, but cannot mint new tenant authority or alter a
+signed request successfully.
 
 **Rejected:** a task table that stores metadata only, because remote work is not
 useful if the owner cannot retrieve the result. A model-facing general workflow

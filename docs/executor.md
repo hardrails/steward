@@ -520,7 +520,9 @@ observes through Gateway, then reports generation-fenced lifecycle metadata and 
 terminal observation only when it is at most 512 KiB. This courier has no tenant
 signing key and cannot bypass Gateway permit verification. Its delivery state is
 held durably by Control; Gateway's one-use permit ledger makes exact redelivery
-safe after a lost acknowledgement.
+safe after a lost acknowledgement. Control validates the reported result encoding,
+digest, and size, but does not independently verify signed Gateway evidence. Node
+compromise can therefore forge lifecycle and result reports for that node.
 
 Protocol 4 always advertises `rollout-authorization-context-v1`, showing that its
 strict signed-command decoder accepts the optional rollout authorization digest.

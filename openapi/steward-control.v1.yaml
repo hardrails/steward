@@ -1906,7 +1906,9 @@ paths:
         envelope for routing and tenant isolation but does not authenticate it;
         Gateway verifies the signature and every admitted workload binding
         before dispatch. An exact retry is idempotent. Reusing the same tenant
-        task ID with different bytes returns a conflict.
+        task ID with different bytes returns a conflict. Courier material is
+        bounded independently to 16 MiB per tenant and 64 MiB site-wide; when it
+        cannot fit after terminal-record eviction, submission fails closed.
       requestBody:
         required: true
         content:
@@ -2024,13 +2026,16 @@ paths:
       operationId: getTaskRequestResult
       summary: Retrieve one retained terminal task result
       description: |
-        Returns the exact bounded terminal observation that Gateway verified
-        against its durable result digest and byte count. This explicit endpoint
-        can contain agent-authored sensitive content and sets `Cache-Control:
-        no-store`; ordinary task list and get responses remain metadata-only.
-        A task whose result is pending, missing, or larger than 512 KiB returns
-        `task_result_unavailable` rather than pretending that metadata is the
-        result.
+        Returns the exact bounded terminal observation reported by the
+        authenticated node. Control checks its canonical encoding, digest, and
+        byte count, but does not independently verify signed Gateway evidence;
+        a compromised node can forge results for its workloads. This explicit
+        endpoint can contain agent-authored sensitive content and sets
+        `Cache-Control: no-store`; ordinary task list and get responses remain
+        metadata-only. A task whose result is pending, omitted by the independent
+        16 MiB per-tenant or 64 MiB site-wide result ceiling, or larger than 512
+        KiB returns `task_result_unavailable` rather than pretending that metadata
+        is the result.
       responses:
         "200":
           description: Exact retained terminal task result and its content identity.
@@ -2681,7 +2686,8 @@ paths:
         permit and request. An observe delivery contains only the Gateway task
         and permit digests. Redelivery is safe because Gateway spends and replays
         the same exact permit identity instead of creating another external
-        effect.
+        effect. The complete JSON response is limited to 1 MiB and may therefore
+        contain fewer tasks than the requested limit.
       requestBody:
         required: true
         content:
@@ -2721,7 +2727,10 @@ paths:
         Gateway task, permit, run, status, digest, and byte-count metadata. A
         terminal observation of at most 512 KiB may also carry its canonical
         base64 bytes so Control can serve it through the explicit owner-scoped
-        result endpoint. Larger results remain metadata-only.
+        result endpoint. Control validates the encoding, digest, and byte count,
+        but the authenticated node remains the source of this report. Larger
+        results and results omitted by aggregate retention ceilings remain
+        metadata-only. The complete report request is limited to 768 KiB.
       requestBody:
         required: true
         content:

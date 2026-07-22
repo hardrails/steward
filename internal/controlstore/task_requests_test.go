@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +141,112 @@ func TestAsyncTaskCancellationDistinguishesQueuedFromDispatched(t *testing.T) {
 	if err != nil || !changed || requested.State != TaskRequestCancelRequested || !requested.OutcomeMayContinue ||
 		requested.PermitDigest != created.PermitDigest {
 		t.Fatalf("in-flight cancellation = (%+v, %v, %v)", requested, changed, err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(2*time.Minute), time.Minute, 2)
+	if err != nil || len(deliveries) != 0 {
+		t.Fatalf("cancelled ambiguous submit was redelivered = (%+v, %v)", deliveries, err)
+	}
+	uncertain, found, err := fixture.store.GetTaskRequest(fixture.admin, "tenant-a", "dispatched-task")
+	if err != nil || !found || uncertain.State != TaskRequestOutcomeUnknown || !uncertain.OutcomeMayContinue {
+		t.Fatalf("expired cancelled delivery = (%+v, %v, %v)", uncertain, found, err)
+	}
+}
+
+func TestAsyncTaskUncertainObservationIsTerminalAndQuarantineStopsNewLeases(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	deployment, instance := taskReadyDeployment(t, &fixture)
+	now := fixture.now.Add(2 * time.Minute)
+	input := signedTaskRequestInput(t, now, deployment, instance, "uncertain-task", []byte(`{"input":"observe"}`))
+	created, _, err := fixture.store.SubmitTaskRequest(fixture.admin, input, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := fixture.store.PollTaskRequests(node, now.Add(time.Second), time.Minute, 1)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("submit poll = (%+v, %v)", deliveries, err)
+	}
+	taskDigest := taskpermit.TaskDigest("tenant-a", instance.InstanceID, "uncertain-task")
+	accepted := controlprotocol.ExecutorTaskReportV1{
+		SchemaVersion: controlprotocol.ExecutorTaskReportSchemaV1,
+		DeliveryID:    deliveries[0].DeliveryID, DeliveryGeneration: deliveries[0].DeliveryGeneration,
+		TenantID: "tenant-a", NodeID: "node-1", TaskID: "uncertain-task",
+		Status: controlprotocol.ExecutorTaskReportAccepted, TaskDigest: taskDigest,
+		PermitDigest: created.PermitDigest, RunID: "run_uncertain",
+	}
+	if applied, err := fixture.store.ApplyTaskReport(node, accepted, now.Add(2*time.Second)); err != nil || !applied {
+		t.Fatalf("accepted report = (%v, %v)", applied, err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(5*time.Second), time.Minute, 1)
+	if err != nil || len(deliveries) != 1 || deliveries[0].Action != controlprotocol.ExecutorTaskActionObserve {
+		t.Fatalf("observation poll = (%+v, %v)", deliveries, err)
+	}
+	uncertainReport := controlprotocol.ExecutorTaskReportV1{
+		SchemaVersion: controlprotocol.ExecutorTaskReportSchemaV1,
+		DeliveryID:    deliveries[0].DeliveryID, DeliveryGeneration: deliveries[0].DeliveryGeneration,
+		TenantID: "tenant-a", NodeID: "node-1", TaskID: "uncertain-task",
+		Status: controlprotocol.ExecutorTaskReportUncertain, TaskDigest: taskDigest,
+		PermitDigest: created.PermitDigest, ErrorCode: "task_not_found",
+	}
+	if applied, err := fixture.store.ApplyTaskReport(node, uncertainReport, now.Add(6*time.Second)); err != nil || !applied {
+		t.Fatalf("uncertain report = (%v, %v)", applied, err)
+	}
+	status, found, err := fixture.store.GetTaskRequest(fixture.admin, "tenant-a", "uncertain-task")
+	if err != nil || !found || status.State != TaskRequestOutcomeUnknown || !status.OutcomeMayContinue || status.TerminalAt == "" {
+		t.Fatalf("uncertain task = (%+v, %v, %v)", status, found, err)
+	}
+
+	second := signedTaskRequestInput(t, now, deployment, instance, "quarantined-task", []byte(`{"input":"blocked"}`))
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, second, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.ChangeNodePlacement(
+		fixture.admin, "node-1", NodePlacementQuarantine, "investigate node integrity", now.Add(7*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(8*time.Second), time.Minute, 1)
+	if err != nil || len(deliveries) != 0 {
+		t.Fatalf("quarantined node received task = (%+v, %v)", deliveries, err)
+	}
+}
+
+func TestAsyncTaskCourierBoundsAggregateBytesAndPollResponse(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	deployment, instance := taskReadyDeployment(t, &fixture)
+	now := fixture.now.Add(2 * time.Minute)
+	body := make([]byte, taskpermit.MaxRequestBytes)
+	for index := range 16 {
+		input := signedTaskRequestInput(t, now, deployment, instance, fmt.Sprintf("large-%02d", index), body)
+		if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, input, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deliveries, err := fixture.store.PollTaskRequests(node, now.Add(time.Second), time.Minute, 32)
+	if err != nil || len(deliveries) == 0 || len(deliveries) >= 16 {
+		t.Fatalf("bounded poll deliveries=%d err=%v", len(deliveries), err)
+	}
+	raw, err := json.Marshal(controlprotocol.ExecutorTaskPollResponseV1{
+		SchemaVersion: controlprotocol.ExecutorTaskPollSchemaV1, Deliveries: deliveries,
+	})
+	if err != nil || len(raw)+1 > controlprotocol.MaxExecutorTaskPollResponseBytes {
+		t.Fatalf("poll response bytes=%d err=%v", len(raw)+1, err)
+	}
+	if _, err := fixture.store.taskCapacityMutationsLocked("tenant-a", MaxTaskCourierBytesPerTenant+1); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("oversized courier admission error=%v", err)
+	}
+	fixture.store.current.taskRequests = make(map[string]storedTaskRequest)
+	for index := range MaxTaskResultBytesPerTenant / controlprotocol.MaxExecutorTaskResultBytes {
+		key := fmt.Sprintf("retained-%03d", index)
+		fixture.store.current.taskRequests[key] = storedTaskRequest{TaskRequest: TaskRequest{
+			TenantID: "tenant-a", ResponseBytes: controlprotocol.MaxExecutorTaskResultBytes, ResultAvailable: true,
+		}}
+	}
+	if fixture.store.taskResultCapacityAvailableLocked("tenant-a", "new", 1) {
+		t.Fatal("result byte cap accepted another byte")
 	}
 }
 

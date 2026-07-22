@@ -86,7 +86,7 @@ The main states are:
 | `leased` | The assigned node holds a short delivery lease. A crash can safely cause redelivery. |
 | `dispatched` | Gateway accepted the exact signed request and returned a run identity. |
 | `running` | Gateway observed a nonterminal Hermes status. |
-| `completed`, `failed`, `cancelled` | Gateway recorded and re-observed a terminal agent status. |
+| `completed`, `failed`, `cancelled` | The authenticated node reported the terminal status returned by its host-local Gateway. |
 | `cancel_requested` | Work may already be running; Steward has recorded intent but cannot claim it stopped. |
 | `deadline_exceeded` | The signed authority expired. `outcome_may_continue` tells you if dispatch may already have occurred. |
 | `outcome_unknown` | Steward cannot prove a final outcome. Do not blindly issue different authority for the same external effect. |
@@ -108,13 +108,20 @@ stewardctl task result TASK_ID -out ./result.json
 Ordinary list and get operations return only the result digest and byte count.
 The explicit result operation can return sensitive agent-authored content, so its
 HTTP response uses `Cache-Control: no-store` and the CLI never prints the body.
-Steward retains results up to 512 KiB. For a larger result, metadata remains
-available but the result endpoint returns `task_result_unavailable`. Use a
+Steward retains individual results up to 512 KiB, with separate 16 MiB per-tenant
+and 64 MiB site-wide result ceilings. It retains task request and permit courier
+material under separate 16 MiB per-tenant and 64 MiB site-wide ceilings. When a
+result cannot fit, metadata remains available but the result endpoint returns
+`task_result_unavailable`. When new courier material cannot fit after terminal
+record eviction, submission fails closed with `capacity_exceeded`. Use a
 separately governed artifact service for large files.
 
 Treat agent output as untrusted data. A matching digest proves that the downloaded
-bytes are the bytes Gateway observed; it does not prove that the agent's claims
-are correct or that retrieved web content was safe.
+bytes match the digest and byte count reported through the authenticated node
+channel. Control does not receive or independently verify signed Gateway evidence
+for this result. A compromised node can forge results for workloads on that node,
+and an honest result does not prove that the agent's claims are correct or that
+retrieved web content was safe.
 
 ## Cancel without making false promises
 
@@ -148,9 +155,12 @@ Control structurally inspects a permit only to enforce bounds and route it to th
 named tenant and node. Those fields are attacker-controlled until Gateway verifies
 the signature against the task-authority key bound during admission. Executor
 calls only its host-local Gateway control socket; it does not dispatch directly
-to the agent. A compromised Control can withhold, delay, or replay exact retained
-bytes, but it cannot create a valid new tenant signature or change the request
-without Gateway rejecting it.
+to the agent. Control treats an authenticated node report as lifecycle input, not
+as proof of correct work. A compromised node can forge lifecycle and result
+reports for that node, but cannot use this channel to bypass Gateway on an
+uncompromised node. A compromised Control can withhold, delay, or replay exact
+retained bytes, but it cannot create a valid new tenant signature or change the
+request without Gateway rejecting it.
 
 This boundary works in `strict-sovereign` mode because Control transports existing
 tenant authority rather than holding a controller signing key. Availability still

@@ -2,6 +2,7 @@ package controlstore
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"sort"
 	"time"
@@ -13,10 +14,14 @@ import (
 )
 
 const (
-	MaxTaskRequestsRetained  = 4096
-	MaxTaskRequestsPerTenant = 1024
-	MaxTaskDeliveryLease     = 2 * time.Minute
-	TaskObservationDelay     = 2 * time.Second
+	MaxTaskRequestsRetained      = 4096
+	MaxTaskRequestsPerTenant     = 1024
+	MaxTaskCourierBytesRetained  = 64 << 20
+	MaxTaskCourierBytesPerTenant = 16 << 20
+	MaxTaskResultBytesRetained   = 64 << 20
+	MaxTaskResultBytesPerTenant  = 16 << 20
+	MaxTaskDeliveryLease         = 2 * time.Minute
+	TaskObservationDelay         = 2 * time.Second
 
 	TaskRequestQueued           = "queued"
 	TaskRequestLeased           = "leased"
@@ -165,7 +170,7 @@ func (store *Store) SubmitTaskRequest(actor controlauth.Identity, input TaskRequ
 		}
 		return TaskRequest{}, false, ErrConflict
 	}
-	mutations, err := store.taskCapacityMutationsLocked(input.TenantID)
+	mutations, err := store.taskCapacityMutationsLocked(input.TenantID, taskCourierBytes(stored))
 	if err != nil {
 		return TaskRequest{}, false, err
 	}
@@ -337,6 +342,9 @@ func (store *Store) PollTaskRequests(identity controlauth.NodeIdentity, now time
 	if err := store.revalidateNodeLocked(identity); err != nil {
 		return nil, err
 	}
+	if node, ok := store.current.nodes[identity.NodeID]; !ok || EffectiveNodePlacement(node).Mode == NodeQuarantined {
+		return []controlprotocol.ExecutorTaskDeliveryV1{}, nil
+	}
 	mutations := make([]mutation, 0, limit)
 	candidates := make([]storedTaskRequest, 0)
 	for _, retained := range store.current.taskRequests {
@@ -387,8 +395,22 @@ func (store *Store) PollTaskRequests(identity controlauth.NodeIdentity, now time
 		} else {
 			task.ObservationAttempts++
 		}
+		delivery := taskDelivery(task)
+		candidate := append(append([]controlprotocol.ExecutorTaskDeliveryV1(nil), deliveries...), delivery)
+		raw, err := json.Marshal(controlprotocol.ExecutorTaskPollResponseV1{
+			SchemaVersion: controlprotocol.ExecutorTaskPollSchemaV1, Deliveries: candidate,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(raw)+1 > controlprotocol.MaxExecutorTaskPollResponseBytes {
+			if len(deliveries) == 0 {
+				return nil, ErrCapacityExceeded
+			}
+			break
+		}
 		mutations = append(mutations, taskRequestMutation(task))
-		deliveries = append(deliveries, taskDelivery(task))
+		deliveries = candidate
 	}
 	if len(mutations) > 0 {
 		if err := store.applyMutationsLocked(mutations...); err != nil {
@@ -448,7 +470,7 @@ func (store *Store) ApplyTaskReport(identity controlauth.NodeIdentity, report co
 	case controlprotocol.ExecutorTaskReportObserved:
 		task.TaskDigest, task.RunID = report.TaskDigest, report.RunID
 		task.TaskStatus, task.ResultDigest, task.ResponseBytes = report.TaskStatus, report.ResultDigest, report.ResponseBytes
-		if report.ResultBase64 != "" {
+		if report.ResultBase64 != "" && store.taskResultCapacityAvailableLocked(task.TenantID, key, report.ResponseBytes) {
 			task.ResultBase64, task.ResultAvailable = report.ResultBase64, true
 		}
 		task.LastErrorCode = report.ErrorCode
@@ -470,7 +492,7 @@ func (store *Store) ApplyTaskReport(identity controlauth.NodeIdentity, report co
 		if taskTerminal(task.State) {
 			task.TerminalAt, task.NextObservation = task.UpdatedAt, ""
 		}
-	case controlprotocol.ExecutorTaskReportRetryable, controlprotocol.ExecutorTaskReportUncertain:
+	case controlprotocol.ExecutorTaskReportRetryable:
 		task.LastErrorCode = report.ErrorCode
 		task.State = task.ResumeState
 		if task.State == TaskRequestLeased || task.State == "" {
@@ -478,6 +500,11 @@ func (store *Store) ApplyTaskReport(identity controlauth.NodeIdentity, report co
 			task.TerminalAt = task.UpdatedAt
 		}
 		task.NextObservation = canonicalTimestamp(now.Add(TaskObservationDelay))
+	case controlprotocol.ExecutorTaskReportUncertain:
+		task.LastErrorCode = report.ErrorCode
+		task.State, task.TerminalAt = TaskRequestOutcomeUnknown, task.UpdatedAt
+		task.OutcomeMayContinue = true
+		task.NextObservation = ""
 	case controlprotocol.ExecutorTaskReportRejected:
 		task.LastErrorCode = report.ErrorCode
 		task.State, task.TerminalAt = TaskRequestFailed, task.UpdatedAt
@@ -498,10 +525,16 @@ func (store *Store) ApplyTaskReport(identity controlauth.NodeIdentity, report co
 func normalizeTaskForPoll(task *storedTaskRequest, now time.Time) bool {
 	changed := false
 	if task.LeaseUntil != "" && !timestampAfter(task.LeaseUntil, now) {
-		task.State = task.ResumeState
-		if task.State == "" || task.State == TaskRequestLeased {
+		if task.ResumeState == TaskRequestCancelRequested && task.DeliveryAction == controlprotocol.ExecutorTaskActionSubmit {
 			task.State = TaskRequestOutcomeUnknown
 			task.TerminalAt = canonicalTimestamp(now)
+			task.OutcomeMayContinue = true
+		} else {
+			task.State = task.ResumeState
+			if task.State == "" || task.State == TaskRequestLeased {
+				task.State = TaskRequestOutcomeUnknown
+				task.TerminalAt = canonicalTimestamp(now)
+			}
 		}
 		task.LeaseUntil, task.DeliveryID, task.DeliveryAction, task.ResumeState = "", "", "", ""
 		task.UpdatedAt = canonicalTimestamp(now)
@@ -517,12 +550,16 @@ func normalizeTaskForPoll(task *storedTaskRequest, now time.Time) bool {
 	return changed
 }
 
-func (store *Store) taskCapacityMutationsLocked(tenantID string) ([]mutation, error) {
+func (store *Store) taskCapacityMutationsLocked(tenantID string, incomingBytes int64) ([]mutation, error) {
 	total, tenantTotal := len(store.current.taskRequests), 0
+	var totalBytes, tenantBytes int64
 	terminal := make([]storedTaskRequest, 0)
 	for _, task := range store.current.taskRequests {
+		bytes := taskCourierBytes(task)
+		totalBytes += bytes
 		if task.TenantID == tenantID {
 			tenantTotal++
+			tenantBytes += bytes
 		}
 		if taskTerminal(task.State) {
 			terminal = append(terminal, task)
@@ -536,11 +573,18 @@ func (store *Store) taskCapacityMutationsLocked(tenantID string) ([]mutation, er
 	})
 	mutations := make([]mutation, 0)
 	removed := make(map[string]struct{})
-	for total >= MaxTaskRequestsRetained || tenantTotal >= MaxTaskRequestsPerTenant {
+	if incomingBytes <= 0 || incomingBytes > MaxTaskCourierBytesPerTenant || incomingBytes > MaxTaskCourierBytesRetained {
+		return nil, ErrCapacityExceeded
+	}
+	for total >= MaxTaskRequestsRetained || tenantTotal >= MaxTaskRequestsPerTenant ||
+		totalBytes+incomingBytes > MaxTaskCourierBytesRetained || tenantBytes+incomingBytes > MaxTaskCourierBytesPerTenant {
 		index := -1
 		for candidateIndex, candidate := range terminal {
 			_, already := removed[taskRequestKey(candidate.TenantID, candidate.TaskID)]
-			if !already && (total >= MaxTaskRequestsRetained || candidate.TenantID == tenantID) {
+			if !already && (total >= MaxTaskRequestsRetained ||
+				totalBytes+incomingBytes > MaxTaskCourierBytesRetained ||
+				candidate.TenantID == tenantID && (tenantTotal >= MaxTaskRequestsPerTenant ||
+					tenantBytes+incomingBytes > MaxTaskCourierBytesPerTenant)) {
 				index = candidateIndex
 				break
 			}
@@ -553,11 +597,35 @@ func (store *Store) taskCapacityMutationsLocked(tenantID string) ([]mutation, er
 		removed[key] = struct{}{}
 		mutations = append(mutations, taskRequestDeleteMutation(candidate.TenantID, candidate.TaskID))
 		total--
+		totalBytes -= taskCourierBytes(candidate)
 		if candidate.TenantID == tenantID {
 			tenantTotal--
+			tenantBytes -= taskCourierBytes(candidate)
 		}
 	}
 	return mutations, nil
+}
+
+func taskCourierBytes(task storedTaskRequest) int64 {
+	return int64(len(task.TaskPermit) + len(task.RequestBase64))
+}
+
+func (store *Store) taskResultCapacityAvailableLocked(tenantID, replacingKey string, incomingBytes int64) bool {
+	if incomingBytes <= 0 || incomingBytes > MaxTaskResultBytesPerTenant || incomingBytes > MaxTaskResultBytesRetained {
+		return false
+	}
+	var total, tenant int64
+	for key, task := range store.current.taskRequests {
+		if key == replacingKey || !task.ResultAvailable {
+			continue
+		}
+		total += task.ResponseBytes
+		if task.TenantID == tenantID {
+			tenant += task.ResponseBytes
+		}
+	}
+	return total+incomingBytes <= MaxTaskResultBytesRetained &&
+		tenant+incomingBytes <= MaxTaskResultBytesPerTenant
 }
 
 func taskRequestInputEqual(left, right storedTaskRequest) bool {

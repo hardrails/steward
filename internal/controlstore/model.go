@@ -1908,6 +1908,9 @@ func validateState(current state, limits Limits) error {
 		}
 	}
 	taskRequestsByTenant := make(map[string]int)
+	taskCourierBytesByTenant := make(map[string]int64)
+	taskResultBytesByTenant := make(map[string]int64)
+	var taskCourierBytesTotal, taskResultBytesTotal int64
 	for key, task := range current.taskRequests {
 		if key != taskRequestKey(task.TenantID, task.TaskID) || !validStoredTaskRequest(task) {
 			return errors.New("control state contains an invalid task request")
@@ -1918,7 +1921,20 @@ func validateState(current state, limits Limits) error {
 			return errors.New("task request references an unknown tenant node")
 		}
 		taskRequestsByTenant[task.TenantID]++
+		courierBytes := taskCourierBytes(task)
+		taskCourierBytesTotal += courierBytes
+		taskCourierBytesByTenant[task.TenantID] += courierBytes
+		if task.ResultAvailable {
+			taskResultBytesTotal += task.ResponseBytes
+			taskResultBytesByTenant[task.TenantID] += task.ResponseBytes
+		}
 		if taskRequestsByTenant[task.TenantID] > MaxTaskRequestsPerTenant {
+			return ErrCapacityExceeded
+		}
+		if taskCourierBytesTotal > MaxTaskCourierBytesRetained ||
+			taskCourierBytesByTenant[task.TenantID] > MaxTaskCourierBytesPerTenant ||
+			taskResultBytesTotal > MaxTaskResultBytesRetained ||
+			taskResultBytesByTenant[task.TenantID] > MaxTaskResultBytesPerTenant {
 			return ErrCapacityExceeded
 		}
 	}

@@ -105,3 +105,22 @@ func TestAsyncTaskCourierClassifiesSafeReplayAndPermanentRejection(t *testing.T)
 		})
 	}
 }
+
+func TestTaskReportAcknowledgementRequiresApplied(t *testing.T) {
+	for name, test := range map[string]struct {
+		raw  string
+		want bool
+	}{
+		"applied":       {raw: `{"applied":true}`, want: true},
+		"rejected":      {raw: `{"applied":false}`},
+		"missing":       {raw: `{}`},
+		"malformed":     {raw: `{"applied":`},
+		"unknown field": {raw: `{"applied":true,"unexpected":true}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := taskReportAcknowledged([]byte(test.raw)); got != test.want {
+				t.Fatalf("taskReportAcknowledged() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
