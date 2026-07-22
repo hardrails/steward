@@ -139,6 +139,40 @@ func TestNodePoolScaleInCandidatesRequireCompletedDrainAndEmptyNode(t *testing.T
 	}
 }
 
+func TestNodePoolNodeStateValidationRejectsContradictoryDrainFacts(t *testing.T) {
+	valid := []NodePoolNode{
+		{NodeID: "ready", Ready: true},
+		{NodeID: "cancelled", Ready: true, DrainState: NodeDrainCancelled},
+		{NodeID: "unavailable", Reason: "scheduling_unavailable"},
+		{NodeID: "stale-active", Reason: "scheduling_stale", DrainState: NodeDrainActive},
+		{NodeID: "blocked", Reason: "placement_blocked"},
+		{NodeID: "draining", Reason: "draining", DrainState: NodeDrainActive},
+		{NodeID: "drained", Reason: "drained", DrainState: NodeDrainCompleted},
+		{NodeID: "failed", Reason: "drain_failed", DrainState: NodeDrainFailed},
+	}
+	for _, node := range valid {
+		if !validNodePoolNodeState(node) {
+			t.Fatalf("valid node-pool state rejected: %+v", node)
+		}
+	}
+
+	invalid := []NodePoolNode{
+		{NodeID: "missing-reason"},
+		{NodeID: "ready-with-reason", Ready: true, Reason: "scheduling_stale"},
+		{NodeID: "unknown-reason", Reason: "unknown"},
+		{NodeID: "unknown-drain", Ready: true, DrainState: "unknown"},
+		{NodeID: "ready-active", Ready: true, DrainState: NodeDrainActive},
+		{NodeID: "wrong-active", Reason: "draining", DrainState: NodeDrainCompleted},
+		{NodeID: "wrong-completed", Reason: "drained", DrainState: NodeDrainFailed},
+		{NodeID: "wrong-failed", Reason: "drain_failed", DrainState: NodeDrainActive},
+	}
+	for _, node := range invalid {
+		if validNodePoolNodeState(node) {
+			t.Fatalf("contradictory node-pool state accepted: %+v", node)
+		}
+	}
+}
+
 func TestNodePoolRejectsInvalidCapacityAndFailsClosed(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")

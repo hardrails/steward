@@ -103,12 +103,29 @@ func validNodePoolNodeState(node NodePoolNode) bool {
 		return false
 	}
 	switch node.Reason {
-	case "", "scheduling_unavailable", "scheduling_stale", "placement_blocked", "draining", "drained", "drain_failed":
+	case "", "scheduling_unavailable", "scheduling_stale", "placement_blocked":
+	case "draining":
+		if node.DrainState != NodeDrainActive {
+			return false
+		}
+	case "drained":
+		if node.DrainState != NodeDrainCompleted {
+			return false
+		}
+	case "drain_failed":
+		if node.DrainState != NodeDrainFailed {
+			return false
+		}
 	default:
 		return false
 	}
 	switch node.DrainState {
-	case "", NodeDrainActive, NodeDrainCompleted, NodeDrainCancelled, NodeDrainFailed:
+	case "", NodeDrainCancelled:
+		return true
+	case NodeDrainActive, NodeDrainCompleted, NodeDrainFailed:
+		if node.Ready {
+			return false
+		}
 		return true
 	default:
 		return false
