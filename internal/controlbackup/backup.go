@@ -88,7 +88,16 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	if now.IsZero() {
 		return Report{}, errors.New("control backup creation time is required")
 	}
-	inside, err := pathInside(stateDirectory, output)
+	canonicalState, err := filepath.EvalSymlinks(stateDirectory)
+	if err != nil {
+		return Report{}, fmt.Errorf("resolve control backup state directory: %w", err)
+	}
+	canonicalOutputParent, err := filepath.EvalSymlinks(filepath.Dir(output))
+	if err != nil {
+		return Report{}, fmt.Errorf("resolve control backup output parent: %w", err)
+	}
+	canonicalOutput := filepath.Join(canonicalOutputParent, filepath.Base(output))
+	inside, err := pathInside(canonicalState, canonicalOutput)
 	if err != nil {
 		return Report{}, err
 	}
@@ -133,7 +142,7 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	if len(manifestRaw) > maxManifestBytes {
 		return Report{}, errors.New("control backup manifest exceeds its limit")
 	}
-	archive, err := createExclusive(output, 0o600)
+	archive, err := createExclusive(canonicalOutput, 0o600)
 	if err != nil {
 		return Report{}, fmt.Errorf("create control backup: %w", err)
 	}
@@ -141,7 +150,7 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	defer func() {
 		_ = archive.Close()
 		if !keep {
-			_ = os.Remove(output)
+			_ = os.Remove(canonicalOutput)
 		}
 	}()
 	hash := sha256.New()
@@ -178,7 +187,7 @@ func Create(stateDirectory, output string, now time.Time) (report Report, err er
 	if err := archive.Close(); err != nil {
 		return Report{}, fmt.Errorf("close Control backup: %w", err)
 	}
-	if err := syncDirectory(filepath.Dir(output)); err != nil {
+	if err := syncDirectory(canonicalOutputParent); err != nil {
 		return Report{}, err
 	}
 	keep = true
@@ -190,39 +199,44 @@ func Verify(archivePath string) (Report, error) {
 	return inspect(archivePath, nil)
 }
 
-// Restore verifies and extracts an archive into a new state directory. The
-// destination is published only after the restored store and identities pass
-// their normal readers. Existing destinations are never overwritten.
-func Restore(archivePath, destination string) (report Report, err error) {
+// Restore atomically reserves an absent owner-only state directory, verifies
+// and extracts the archive, and removes the reservation on every failed path.
+// Existing destinations are never overwritten.
+func Restore(archivePath, destination string) (Report, error) {
+	return restore(archivePath, destination, syncDirectory)
+}
+
+func restore(archivePath, destination string, syncDir func(string) error) (report Report, err error) {
 	if err := validCleanAbsolute(destination, false); err != nil {
 		return Report{}, fmt.Errorf("Control restore destination: %w", err)
-	}
-	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
-		if err == nil {
-			return Report{}, errors.New("Control restore destination already exists")
-		}
-		return Report{}, fmt.Errorf("inspect Control restore destination: %w", err)
 	}
 	parent := filepath.Dir(destination)
 	if err := validateRestoreParent(parent); err != nil {
 		return Report{}, err
 	}
-	temporary, err := os.MkdirTemp(parent, "."+filepath.Base(destination)+".restore-")
-	if err != nil {
-		return Report{}, fmt.Errorf("create Control restore staging directory: %w", err)
-	}
-	if err := os.Chmod(temporary, 0o700); err != nil {
-		_ = os.RemoveAll(temporary)
-		return Report{}, err
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return Report{}, errors.New("Control restore destination already exists")
+		}
+		return Report{}, fmt.Errorf("reserve Control restore destination: %w", err)
 	}
 	keep := false
 	defer func() {
-		if !keep {
-			_ = os.RemoveAll(temporary)
+		if keep {
+			return
+		}
+		if cleanupErr := os.RemoveAll(destination); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove failed Control restore destination: %w", cleanupErr))
+		}
+		if syncErr := syncDir(parent); syncErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync Control restore parent after cleanup: %w", syncErr))
 		}
 	}()
+	if err := syncDir(parent); err != nil {
+		return Report{}, fmt.Errorf("sync reserved Control restore destination: %w", err)
+	}
 	report, err = inspect(archivePath, func(file ManifestFile, reader io.Reader) error {
-		path := filepath.Join(temporary, file.Name)
+		path := filepath.Join(destination, file.Name)
 		output, err := createExclusive(path, os.FileMode(file.Mode))
 		if err != nil {
 			return err
@@ -243,19 +257,16 @@ func Restore(archivePath, destination string) (report Report, err error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if err := syncDirectory(temporary); err != nil {
+	if err := syncDir(destination); err != nil {
 		return Report{}, err
 	}
-	if err := validateRestoredState(temporary, report); err != nil {
+	if err := validateRestoredState(destination, report); err != nil {
 		return Report{}, err
 	}
-	if err := os.Rename(temporary, destination); err != nil {
-		return Report{}, fmt.Errorf("publish restored Control state: %w", err)
+	if err := syncDir(destination); err != nil {
+		return Report{}, fmt.Errorf("sync validated Control restore destination: %w", err)
 	}
 	keep = true
-	if err := syncDirectory(parent); err != nil {
-		return Report{}, err
-	}
 	return report, nil
 }
 

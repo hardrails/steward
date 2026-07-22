@@ -26,8 +26,10 @@ default packaged layout. It provides three guarantees:
   oversized content, trailing entries, and digest changes.
 - `restore` writes only into a new directory. It verifies every file while
   extracting, reopens the restored state through Control's normal recovery
-  reader, validates both signing identities, and publishes the directory only
-  after those checks pass. Preview is the default; mutation requires `-apply`.
+  reader, and validates both signing identities. Apply atomically reserves the
+  absent owner-only destination before extraction, removes it on any failed
+  path, and reports success only after validation and durable writes. Preview is
+  the default; mutation requires `-apply`.
 
 This is a crash-consistent checkpoint of one controller. It is not high
 availability, replication, or protection against a controller that was already
@@ -81,7 +83,7 @@ digest under separate operator-controlled integrity protection.
 
 ## Preview and apply a restore
 
-Never restore over the live directory. Create an owner-only staging parent on the
+Never restore over the live directory. Create an owner-only recovery parent on the
 destination host and make the service identity its owner:
 
 ```console

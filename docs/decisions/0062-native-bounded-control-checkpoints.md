@@ -33,9 +33,11 @@ create, verify, and restore operations.
 - Verification streams bounded content and accepts only the exact canonical
   inventory. Links, paths, special files, ambiguous JSON, trailing entries, and
   digest mismatches fail closed.
-- Restore previews by default, extracts into an owner-only sibling staging
-  directory, validates the store and identities with their normal readers, and
-  atomically renames only into an absent destination when `-apply` is explicit.
+- Restore previews by default. With explicit `-apply`, it atomically reserves an
+  absent owner-only destination, extracts into that reservation, validates the
+  store and identities with their normal readers, and removes the directory on
+  every failed path. Success is reported only after validation and durable
+  writes.
 - The archive excludes `LOCK`; the validated restored store creates its own lock.
   It never merges with or overwrites an existing state directory.
 

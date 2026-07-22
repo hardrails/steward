@@ -92,6 +92,14 @@ func TestCreateRequiresStoppedCompleteDefaultControlState(t *testing.T) {
 		!strings.Contains(err.Error(), "outside") {
 		t.Fatalf("inside-state output error = %v", err)
 	}
+	stateAlias := filepath.Join(root, "state-alias")
+	if err := os.Symlink(state, stateAlias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(state, filepath.Join(stateAlias, "symlinked.tar"), time.Now()); err == nil ||
+		!strings.Contains(err.Error(), "outside") {
+		t.Fatalf("symlinked inside-state output error = %v", err)
+	}
 }
 
 func TestVerifyRejectsHostileControlBackupEntries(t *testing.T) {
@@ -193,6 +201,30 @@ func TestRestoreIsPreviewSafeByConstruction(t *testing.T) {
 	if _, err := Restore(archive, filepath.Join(unsafeParent, "state")); err == nil ||
 		!strings.Contains(err.Error(), "not writable") {
 		t.Fatalf("unsafe parent error = %v", err)
+	}
+}
+
+func TestRestoreRemovesReservedDestinationWhenDurabilityFails(t *testing.T) {
+	root := t.TempDir()
+	state := initializeControlState(t, root, false)
+	archive := filepath.Join(root, "valid.tar")
+	if _, err := Create(state, archive, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "failed-restore")
+	failDestinationSync := true
+	_, err := restore(archive, destination, func(path string) error {
+		if path == destination && failDestinationSync {
+			failDestinationSync = false
+			return errors.New("injected destination sync failure")
+		}
+		return syncDirectory(path)
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected destination sync failure") {
+		t.Fatalf("restore error = %v", err)
+	}
+	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed restore destination remains: %v", statErr)
 	}
 }
 

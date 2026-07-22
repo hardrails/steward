@@ -213,7 +213,7 @@ func controlBackupRestore(arguments []string, stdout io.Writer) error {
 	flags.SetOutput(io.Discard)
 	input := flags.String("in", "", "owner-only Control backup")
 	stateDirectory := flags.String("state-dir", "", "new restore destination")
-	apply := flags.Bool("apply", false, "publish the validated restore; otherwise preview only")
+	apply := flags.Bool("apply", false, "apply into a new validated state directory; otherwise preview only")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
