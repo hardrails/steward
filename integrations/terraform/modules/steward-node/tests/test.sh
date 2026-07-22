@@ -36,6 +36,9 @@ module "node" {
   release_mirror   = var.release_mirror
 }
 output "bootstrap" { value = module.node.cloud_init }
+output "bootstrap_sha256" { value = module.node.cloud_init_sha256 }
+output "completion_marker" { value = module.node.bootstrap_completion_marker }
+output "readiness_command" { value = module.node.node_readiness_command }
 EOF
 terraform -chdir="$work" init -backend=false -input=false >/dev/null
 terraform -chdir="$work" apply -auto-approve -input=false >/dev/null
@@ -59,6 +62,10 @@ reject_plan 'an installer URL longer than 512 bytes' -var "installer_url=$long_u
 reject_plan 'mirror credentials persisted in Terraform state' \
 	-var 'release_mirror={artifact_url="https://operator:secret@mirror.invalid/steward_v1.2.3_linux_amd64.tar.gz",artifact_sha256="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",manifest_url="https://mirror.invalid/checksums.txt",manifest_sha256="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}'
 terraform -chdir="$work" output -raw bootstrap >"$work/cloud-init"
+[[ $(wc -c <"$work/cloud-init" | tr -d ' ') -le 16384 ]]
+[[ $(terraform -chdir="$work" output -raw bootstrap_sha256) =~ ^[a-f0-9]{64}$ ]]
+[[ $(terraform -chdir="$work" output -raw completion_marker) == /var/lib/steward-bootstrap/complete ]]
+[[ $(terraform -chdir="$work" output -raw readiness_command) == 'sudo /usr/local/libexec/steward/node-doctor --json' ]]
 encoded=$(sed -n 's/^[[:space:]]*content: //p' "$work/cloud-init")
 [[ -n $encoded ]]
 printf '%s' "$encoded" | base64 -d >"$work/bootstrap"

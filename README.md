@@ -158,7 +158,8 @@ sensitive production workloads until the report identifies a hardened execution
 profile.
 
 Start with the [installation tutorial](https://hardrails.github.io/steward/getting-started/)
-or use the [unattended and Terraform paths](https://hardrails.github.io/steward/guides/terraform/)
+or use the [private cloud node-pool path](https://hardrails.github.io/steward/guides/cloud-fleets/)
+and its [lower-level Terraform bootstrap](https://hardrails.github.io/steward/guides/terraform/)
 for repeatable infrastructure.
 
 ## Run an agent

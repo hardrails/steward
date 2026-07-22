@@ -305,6 +305,30 @@ suspected node, revoke compromised credentials or delegations, and preserve
 evidence as the incident requires. Heartbeats, reports, and evidence remain open
 during a freeze so containment does not erase visibility.
 
+## Cloud node pools do not provide zero-touch enrollment or controller HA
+
+The AWS, Google Cloud, and Azure Terraform modules create private VM pools and
+stage an exact Steward release. A new VM remains ineligible for Steward placement
+until a node-specific enrollment is delivered and the complete node doctor passes.
+The modules do not put a reusable join token in Terraform state or instance
+metadata. Secure zero-touch scale-out needs the planned SPIFFE/SPIRE attestation
+profile; it is not available today.
+
+Cloud VM health does not cover Steward policy continuity, authenticated Executor
+readiness, or Gateway state. The modules therefore do not claim application-aware
+autohealing. Terraform creates initial pool capacity but ignores later live size
+changes; AWS instance refresh is absent, Google updates are opportunistic, and
+Azure updates remain manual. Cordon and drain a chosen node, decide how to handle
+persistent state, then use an instance-specific cloud operation. A generic scale-in
+can still select an active node and is unsupported until the lifecycle integration
+is qualified.
+
+The bundled controller remains one bounded active writer even when its node pool
+spans zones. Keep its store on encrypted persistent storage and test backup and
+restore. A cloud scale group does not make the controller highly available.
+Cloud administrators, host root, and the hypervisor also remain trusted; these
+modules do not add confidential-computing attestation.
+
 ## Desired-state reconciliation is intentionally narrow
 
 `stewardctl agent plan` performs deterministic filtering and scoring over a bounded

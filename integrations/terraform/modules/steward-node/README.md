@@ -6,6 +6,9 @@ stages Steward or creates a loopback-only node. Pass `module.steward.cloud_init`
 your cloud server's user-data field. A completion marker prevents accidental
 bootstrap replay. The marker records the version read from the installed
 `release.json`; bootstrap fails if that manifest does not match `release_version`.
+The rendered document is capped at 16 KiB so the same output fits the smallest
+major-cloud user-data limit. `cloud_init_sha256` gives a non-secret rollout and
+audit identity.
 
 For an operator-controlled mirror, set `release_mirror` with the exact package URL,
 checksum-manifest URL, and independent SHA-256 pins for both files. Cloud-init
@@ -45,3 +48,13 @@ a resource action while reconciling desired and observed state. It cannot safely
 choose a new signed instance generation or determine the outcome of a partially
 applied runtime mutation. Steward therefore retains agent lifecycle, replay fences,
 receipts, and runtime reconciliation.
+
+For a node pool, treat the two readiness stages separately:
+
+1. `/var/lib/steward-bootstrap/complete` means the pinned release was staged.
+2. `sudo /usr/local/libexec/steward/node-doctor --json` must exit zero after a
+   node-specific enrollment before Steward may schedule work there.
+
+Cloud VM health is not proof of the second condition. The AWS, Google Cloud, and
+Azure pool modules preserve that distinction and do not put enrollment authority
+in Terraform state.
