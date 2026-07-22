@@ -37,6 +37,7 @@ they can verify without a vendor service.
 | Signed collaboration requests | An optional, tenant-specific Buzz bridge durably queues allowed signed mentions, runs bounded concurrent Hermes tasks, and verifies correctly threaded replies without putting either signing key inside the agent. |
 | Remote task delivery | Control durably couriers an exact tenant-signed request to its assigned node, reports honest cancellation and uncertainty, and retains bounded terminal results without gaining task-signing authority. |
 | Disconnected and sovereign sites | Uses local keys, static Go binaries, local state, offline OCI archives, and customer-operated control services. No hosted service is required after transfer. |
+| Controller disaster recovery | Creates one bounded state-and-identity checkpoint under the stopped controller's writer lock, verifies it without extraction, and applies a restore only after the normal state and key readers accept it. |
 | Incident review and audit | Writes signed, hash-linked Executor and Gateway receipts. Receipt exports can be verified offline and omit prompt, request, response, and secret plaintext. |
 
 Steward cannot make model output trustworthy and does not claim to detect every
@@ -358,6 +359,7 @@ credentials are privileged and must never be given to the untrusted agent whose
 authority Steward is meant to constrain.
 
 - [Operate Steward Control](https://hardrails.github.io/steward/guides/control-plane/)
+- [Back up and restore Steward Control](https://hardrails.github.io/steward/guides/control-backup/)
 - [Use the operator console](https://hardrails.github.io/steward/guides/operator-console/)
 - [Configure MCP](https://hardrails.github.io/steward/guides/mcp/)
 - [Verify and export evidence](https://hardrails.github.io/steward/reference/offline-tools/)

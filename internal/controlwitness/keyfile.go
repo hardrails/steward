@@ -111,6 +111,12 @@ func LoadPrivate(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read controller witness private key: %w", err)
 	}
+	return ParsePrivate(raw)
+}
+
+// ParsePrivate validates the exact bytes of one canonical owner-only PKCS#8
+// PEM Ed25519 key after a caller has securely retained the file snapshot.
+func ParsePrivate(raw []byte) (ed25519.PrivateKey, error) {
 	block, rest := pem.Decode(raw)
 	if block == nil || block.Type != "PRIVATE KEY" || len(rest) != 0 || !bytes.Equal(raw, pem.EncodeToMemory(block)) {
 		return nil, errors.New("controller witness private key must contain one canonical PKCS#8 PEM block")

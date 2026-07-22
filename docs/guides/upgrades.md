@@ -161,11 +161,13 @@ local TCP connection because a wildcard address is not a certificate identity.
 Pass `--probe-url` with the real HTTPS origin and `--ca-file` with its private CA to
 verify certificate identity and HTTP readiness after an upgrade.
 
-Stop the controller before taking a backup; its exclusive writer lock and
-hash-chained state require copying the complete state directory as one unit. Keep
-the prior release and a tested backup until enrollment, node polling, and command
-status have succeeded under the new release. Do not run the old and new controller
-over one state directory or restore one state file independently.
+Stop the controller and use `stewardctl control backup create`; the command takes
+the exclusive writer lock, validates the hash-chained state and default identity
+set, and writes one new owner-only archive. Verify and test that checkpoint before
+the upgrade. Keep the prior release and backup until enrollment, node polling, and
+command status succeed under the new release. Do not run old and new controllers
+over one state directory or restore one file independently. See
+[Control backup and restore]({{ '/guides/control-backup/' | relative_url }}).
 
 An `admit` command already in flight when upgrading from a controller that did
 not retain task-ready admission state can still complete its normal lifecycle.

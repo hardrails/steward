@@ -2032,6 +2032,50 @@ if value.get("error") != "not_found" or not value.get("message"):
     raise SystemExit("control-acceptance: deleted node pool remained observable")
 PY
 stop_control
+
+# Prove that the stopped controller can be checkpointed, verified without
+# extraction, previewed without mutation, restored into a new directory, and
+# accepted by the real Control configuration reader.
+control_backup=$work/control-backup.tar
+restored_state=$work/restored-control
+run_bounded 30 "$work" "$work/control-backup-create.stdout" "$work/control-backup-create.stderr" \
+	"$ctl_bin" control backup create -state-dir "$state_dir" -out "$control_backup" -no-context
+assert_owner_file "$control_backup"
+run_bounded 30 "$work" "$work/control-backup-verify.stdout" "$work/control-backup-verify.stderr" \
+	"$ctl_bin" control backup verify -in "$control_backup" -no-context
+run_bounded 30 "$work" "$work/control-backup-preview.stdout" "$work/control-backup-preview.stderr" \
+	"$ctl_bin" control backup restore -in "$control_backup" -state-dir "$restored_state" -no-context
+[[ ! -e $restored_state ]] || {
+	echo "control-acceptance: restore preview mutated the destination" >&2
+	exit 1
+}
+run_bounded 30 "$work" "$work/control-backup-restore.stdout" "$work/control-backup-restore.stderr" \
+	"$ctl_bin" control backup restore -in "$control_backup" -state-dir "$restored_state" -apply -no-context
+run_bounded 30 "$work" "$work/control-backup-check.stdout" "$work/control-backup-check.stderr" \
+	"$control_bin" -check-config -state-dir "$restored_state" -addr 127.0.0.1:0
+python3 -I - "$work/control-backup-create.stdout" "$work/control-backup-verify.stdout" \
+	"$work/control-backup-preview.stdout" "$work/control-backup-restore.stdout" "$restored_state" <<'PY'
+import json
+import pathlib
+import stat
+import sys
+
+created, verified, preview, restored = [
+    json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:5]
+]
+identity = ("schema_version", "status", "archive_sha256", "created_at", "generation", "sequence", "files", "payload_bytes")
+if any(created.get(field) != candidate.get(field) for candidate in (verified, preview, restored) for field in identity):
+    raise SystemExit("control-acceptance: backup reports changed across create, verify, preview, or restore")
+if created.get("status") != "verified" or preview.get("applied") is not False or restored.get("applied") is not True:
+    raise SystemExit("control-acceptance: backup restore preview/apply state is invalid")
+destination = pathlib.Path(sys.argv[5])
+if preview.get("destination") != str(destination) or restored.get("destination") != str(destination):
+    raise SystemExit("control-acceptance: backup restore changed its destination")
+metadata = destination.lstat()
+if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700:
+    raise SystemExit("control-acceptance: restored state directory is not owner-only")
+PY
+
 for log in "$work/control-first.stdout" "$work/control-first.stderr" \
 	"$work/control-recovered.stdout" "$work/control-recovered.stderr" \
 	"$work/control-metrics.stdout" "$work/control-metrics.stderr"; do
@@ -2051,4 +2095,4 @@ assert_secret_absent raw "$wrong_admin" "${process_outputs[@]}"
 assert_secret_absent raw "$wrong_witness_private" "${process_outputs[@]}"
 assert_secret_absent raw "$work/command.private" "${process_outputs[@]}"
 
-echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, independently signed NodePool eligibility, retained incident chronology, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
+echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, independently signed NodePool eligibility, retained incident chronology, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, bounded backup and restore, fencing, and terminal retention verified."

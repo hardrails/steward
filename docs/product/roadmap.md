@@ -665,8 +665,9 @@ contracts are reproducible and independently verifiable as one supported system.
   keys, offline roots, mirrors, and removable-media import and export.
 - Enforce image signatures, provenance, SBOM intake, revocation, and site approval
   using Cosign/Sigstore and in-toto/SLSA-compatible evidence.
-- Add backup, restore, and disaster-recovery drills for Control, identities,
-  evidence checkpoints, policy, application bundles, state catalogs, and state.
+- Extend the shipped bounded Control state-and-identity checkpoint into full-site
+  disaster-recovery drills covering evidence checkpoints, policy, application
+  bundles, state catalogs, and workload state.
 - Add an optional external PostgreSQL control-store process and leader election for
   sites that require control-plane high availability. Do not implement consensus.
 - Add OIDC/SSO and group mapping while preserving local break-glass and fully

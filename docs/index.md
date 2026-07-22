@@ -35,7 +35,7 @@ home: true
   <div>
     <h3>Operate a fleet</h3>
     <p>Run the customer-owned control plane, enroll nodes through outbound polling, keep exact delegated agent instances converged, recover stateless agents through generation-bound leases, and inspect tenant-scoped state in the React console.</p>
-    <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/async-tasks/' | relative_url }}">Run remote tasks →</a> · <a href="{{ '/guides/operator-console/' | relative_url }}">Open the console →</a></p>
+    <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/async-tasks/' | relative_url }}">Run remote tasks →</a> · <a href="{{ '/guides/control-backup/' | relative_url }}">Test recovery →</a> · <a href="{{ '/guides/operator-console/' | relative_url }}">Open the console →</a></p>
   </div>
 </div>
 

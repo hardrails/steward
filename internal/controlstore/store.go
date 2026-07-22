@@ -236,6 +236,91 @@ func Open(directory string, limits Limits) (*Store, error) {
 	}, nil
 }
 
+// InspectRoot validates read-only Control state beneath a retained directory
+// root and returns its
+// recovered status without acquiring a pathname-based lock or repairing data.
+// It is intended for backup restoration. An incomplete WAL tail is rejected
+// rather than changed, and every artifact open rejects final-component links.
+func InspectRoot(root *os.Root, limits Limits) (Status, error) {
+	if root == nil {
+		return Status{}, errors.New("control state root is required")
+	}
+	if err := limits.Validate(); err != nil {
+		return Status{}, err
+	}
+	manifestRaw, err := readRootArtifact(root, currentName, manifestBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return Status{}, ErrNotInitialized
+	}
+	if err != nil {
+		return Status{}, fmt.Errorf("read control manifest: %w", err)
+	}
+	selected, err := unmarshalManifest(manifestRaw)
+	if err != nil {
+		return Status{}, err
+	}
+	snapshotRaw, err := readRootArtifact(root, generationName("snapshot", selected.Generation), snapshotHeaderBytes+limits.MaxStateBytes)
+	if err != nil {
+		return Status{}, fmt.Errorf("read control snapshot: %w", err)
+	}
+	if digest := hashBytes(snapshotRaw); !bytes.Equal(digest[:], selected.SnapshotHash[:]) {
+		return Status{}, errors.New("control snapshot does not match CURRENT")
+	}
+	snapshot, err := unmarshalSnapshot(snapshotRaw, limits.MaxStateBytes)
+	if err != nil {
+		return Status{}, err
+	}
+	if snapshot.Generation != selected.Generation {
+		return Status{}, errors.New("control snapshot generation does not match CURRENT")
+	}
+	current, err := decodeState(snapshot.Payload, limits.MaxStateBytes)
+	if err != nil {
+		return Status{}, fmt.Errorf("decode control snapshot: %w", err)
+	}
+	if err := validateState(current, limits); err != nil {
+		return Status{}, formatStateError(err)
+	}
+
+	wal, size, err := openRootArtifact(root, generationName("wal", selected.Generation), limits.MaxWALBytes)
+	if err != nil {
+		return Status{}, err
+	}
+	defer wal.Close()
+	if size < walHeaderBytes {
+		return Status{}, errors.New("control WAL is shorter than its header")
+	}
+	headerRaw := make([]byte, walHeaderBytes)
+	if _, err := wal.ReadAt(headerRaw, 0); err != nil {
+		return Status{}, fmt.Errorf("read control WAL header: %w", err)
+	}
+	if digest := hashBytes(headerRaw); !bytes.Equal(digest[:], selected.WALHeaderHash[:]) {
+		return Status{}, errors.New("control WAL header does not match CURRENT")
+	}
+	header, err := unmarshalWALHeader(headerRaw)
+	if err != nil {
+		return Status{}, err
+	}
+	if header.Generation != snapshot.Generation || header.Sequence != snapshot.Sequence ||
+		!bytes.Equal(header.LastHash[:], snapshot.LastHash[:]) {
+		return Status{}, errors.New("control WAL header does not continue its snapshot")
+	}
+	current, sequence, _, err := recoverWALReader(wal, size, current, header.Sequence, header.LastHash, limits, nil)
+	if err != nil {
+		return Status{}, err
+	}
+	if err := validateRecoveredExecutorReportV4Bindings(current); err != nil {
+		return Status{}, formatStateError(err)
+	}
+	if err := validateRecoveredEvidenceCaptures(current); err != nil {
+		return Status{}, formatStateError(err)
+	}
+	return Status{
+		Generation: selected.Generation, Sequence: sequence, Tenants: len(current.tenants),
+		Nodes: len(current.nodes), Credentials: len(current.credentials), Enrollments: len(current.enrollments),
+		Commands: len(current.commands), Deployments: len(current.deployments), Events: len(current.events),
+	}, nil
+}
+
 // validateRecoveredExecutorReportV4Bindings authenticates each retained
 // successful canary exactly once after the snapshot and WAL have converged on
 // their final state. Hash-chain validation plus the cheap per-mutation binding
@@ -424,11 +509,20 @@ func (store *Store) compactLocked() error {
 }
 
 func recoverWAL(file *os.File, size int64, current state, sequence uint64, lastHash [sha256.Size]byte, limits Limits) (state, uint64, [sha256.Size]byte, error) {
+	return recoverWALReader(file, size, current, sequence, lastHash, limits, func(offset int64) error {
+		return repairIncompleteTail(file, offset)
+	})
+}
+
+func recoverWALReader(file io.ReaderAt, size int64, current state, sequence uint64, lastHash [sha256.Size]byte, limits Limits, repair func(int64) error) (state, uint64, [sha256.Size]byte, error) {
 	offset := int64(walHeaderBytes)
 	for offset < size {
 		start := offset
 		if size-offset < 4 {
-			if err := repairIncompleteTail(file, start); err != nil {
+			if repair == nil {
+				return state{}, 0, [sha256.Size]byte{}, errors.New("control WAL has an incomplete final frame")
+			}
+			if err := repair(start); err != nil {
 				return state{}, 0, [sha256.Size]byte{}, err
 			}
 			break
@@ -457,7 +551,10 @@ func recoverWAL(file *os.File, size int64, current state, sequence uint64, lastH
 			if err := validateIncompleteWALFramePrefix(prefix, length); err != nil {
 				return state{}, 0, [sha256.Size]byte{}, err
 			}
-			if err := repairIncompleteTail(file, start); err != nil {
+			if repair == nil {
+				return state{}, 0, [sha256.Size]byte{}, errors.New("control WAL has an incomplete final frame")
+			}
+			if err := repair(start); err != nil {
 				return state{}, 0, [sha256.Size]byte{}, err
 			}
 			break
@@ -488,6 +585,50 @@ func recoverWAL(file *os.File, size int64, current state, sequence uint64, lastH
 		offset += length
 	}
 	return current, sequence, lastHash, nil
+}
+
+func openRootArtifact(root *os.Root, name string, limit int64) (*os.File, int64, error) {
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := file.Stat()
+	if err != nil || !os.SameFile(before, info) || validateArtifactInfo(info, limit) != nil {
+		_ = file.Close()
+		return nil, 0, errors.New("control artifact must be a bounded owner-only regular file with one link")
+	}
+	return file, info.Size(), nil
+}
+
+func readRootArtifact(root *os.Root, name string, limit int) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("control artifact read limit must be positive")
+	}
+	file, _, err := openRootArtifact(root, name, int64(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > limit {
+		return nil, ErrCapacityExceeded
+	}
+	after, err := file.Stat()
+	if err != nil || !sameArtifactSnapshot(before, after) {
+		return nil, errors.New("control artifact changed while being read")
+	}
+	return raw, nil
 }
 
 func repairIncompleteTail(file *os.File, offset int64) error {
