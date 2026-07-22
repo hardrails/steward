@@ -3,10 +3,13 @@ package controlbackup
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -300,5 +303,115 @@ func TestManifestDecoderRejectsUnknownAndNonCanonicalFields(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
+	}
+}
+
+func TestBackupHelpersRejectHostileFilesystemAndManifestState(t *testing.T) {
+	t.Run("regular file boundary", func(t *testing.T) {
+		root := t.TempDir()
+		missing := filepath.Join(root, "missing")
+		if file, _, err := openRegular(missing, 1, 0o600); err == nil || file != nil {
+			t.Fatal("missing file was opened")
+		}
+		wrongMode := filepath.Join(root, "wrong-mode")
+		if err := os.WriteFile(wrongMode, []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if file, _, err := openRegular(wrongMode, 1, 0o600); err == nil || file != nil {
+			t.Fatal("wrong-mode file was opened")
+		}
+		oversized := filepath.Join(root, "oversized")
+		if err := os.WriteFile(oversized, []byte("xx"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if file, _, err := openRegular(oversized, 1, 0o600); err == nil || file != nil {
+			t.Fatal("oversized file was opened")
+		}
+		hardlink := filepath.Join(root, "hardlink")
+		if err := os.Link(oversized, hardlink); err != nil {
+			t.Fatal(err)
+		}
+		if file, _, err := openRegular(oversized, 2, 0o600); err == nil || file != nil {
+			t.Fatal("multiply linked file was opened")
+		}
+		if file, _, err := openRegular(root, 1, 0o700); err == nil || file != nil {
+			t.Fatal("directory was opened as a regular file")
+		}
+		if _, err := createExclusive(wrongMode, 0o600); err == nil {
+			t.Fatal("existing output was overwritten")
+		}
+	})
+
+	t.Run("state inventory", func(t *testing.T) {
+		unsafe := t.TempDir()
+		if err := os.WriteFile(filepath.Join(unsafe, "bad name"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if files, err := openStateFiles(unsafe); err == nil || files != nil {
+			t.Fatal("unsafe state filename was accepted")
+		}
+		crowded := t.TempDir()
+		for index := 0; index < maxFiles+2; index++ {
+			if err := os.WriteFile(filepath.Join(crowded, fmt.Sprintf("file-%03d", index)), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if files, err := openStateFiles(crowded); err == nil || files != nil {
+			t.Fatal("oversized state inventory was accepted")
+		}
+	})
+
+	t.Run("manifest boundary", func(t *testing.T) {
+		valid := validManifestFixture()
+		if err := validateManifest(valid); err != nil {
+			t.Fatal(err)
+		}
+		for _, mutate := range []func(*Manifest){
+			func(value *Manifest) { value.SchemaVersion = "unknown" },
+			func(value *Manifest) { value.CreatedAt = "not-a-time" },
+			func(value *Manifest) { value.Files = nil },
+			func(value *Manifest) { value.Files[0].Mode = 0o777 },
+			func(value *Manifest) { value.Files[0].SHA256 = "sha256:bad" },
+			func(value *Manifest) { value.Files[0].Size = maxFileBytes + 1 },
+			func(value *Manifest) { value.Files[1].Name = value.Files[0].Name },
+			func(value *Manifest) { value.Files = value.Files[1:] },
+		} {
+			candidate := valid
+			candidate.Files = append([]ManifestFile(nil), valid.Files...)
+			mutate(&candidate)
+			if err := validateManifest(candidate); err == nil {
+				t.Fatal("invalid manifest was accepted")
+			}
+		}
+	})
+
+	t.Run("restored checkpoint identity", func(t *testing.T) {
+		root := t.TempDir()
+		state := initializeControlState(t, root, false)
+		if err := validateRestoredState(state, Report{Generation: 2}); err == nil ||
+			!strings.Contains(err.Error(), "checkpoint") {
+			t.Fatalf("mismatched checkpoint error = %v", err)
+		}
+		missingIdentity := t.TempDir()
+		if err := validateDefaultIdentitySet(missingIdentity); err == nil ||
+			!strings.Contains(err.Error(), "authentication identity") {
+			t.Fatalf("missing identity error = %v", err)
+		}
+	})
+}
+
+func validManifestFixture() Manifest {
+	names := append([]string{"CURRENT"}, requiredIdentityFiles...)
+	slices.Sort(names)
+	files := make([]ManifestFile, len(names))
+	for index, name := range names {
+		files[index] = ManifestFile{
+			Name: name, Size: 1, Mode: 0o600,
+			SHA256: "sha256:" + strings.Repeat("a", sha256.Size*2),
+		}
+	}
+	return Manifest{
+		SchemaVersion: SchemaV1, CreatedAt: "2026-07-22T12:00:00Z", Generation: 1,
+		Files: files,
 	}
 }
