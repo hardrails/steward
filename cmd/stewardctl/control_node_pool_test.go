@@ -189,6 +189,59 @@ func TestNodeAssuranceReportFeedsOfflineMembershipIssue(t *testing.T) {
 	}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
+
+	// A report is useful even when assurance fails: operators get bounded,
+	// machine-readable reasons instead of a generic command error.
+	node.Scheduling = nil
+	var missing bytes.Buffer
+	if err := run([]string{
+		"control", "node", "assurance", "-tenant-id", "tenant-a", "-node-id", "node-a",
+		"-control-url", server.URL, "-token-file", tokenPath, "-no-context",
+	}, &missing, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var failed nodeAssuranceReport
+	if err := json.Unmarshal(missing.Bytes(), &failed); err != nil || failed.Status != "fail" ||
+		strings.Join(failed.Reasons, ",") != "scheduling observation is unavailable" {
+		t.Fatalf("missing assurance report=%s err=%v", missing.String(), err)
+	}
+
+	invalidScheduling := decodedSchedulingFromReport(t, decoded, policy)
+	invalidScheduling.ObservedAt = now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	invalidScheduling.Observation.BootIdentitySHA256 = ""
+	invalidScheduling.Observation.RuntimeAssurance = nil
+	node.Scheduling = &invalidScheduling
+	var invalid bytes.Buffer
+	if err := run([]string{
+		"control", "node", "assurance", "-tenant-id", "tenant-a", "-node-id", "node-a",
+		"-required-profile", controlprotocol.RuntimeAssuranceDedicatedHost, "-max-age", "1m",
+		"-control-url", server.URL, "-token-file", tokenPath, "-no-context",
+	}, &invalid, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(invalid.Bytes(), &failed); err != nil || failed.Status != "fail" || len(failed.Reasons) != 4 {
+		t.Fatalf("invalid assurance report=%s err=%v", invalid.String(), err)
+	}
+}
+
+func decodedSchedulingFromReport(
+	t *testing.T,
+	report nodeAssuranceReport,
+	policy controlprotocol.ExecutorSchedulingPolicyV1,
+) controlstore.NodeScheduling {
+	t.Helper()
+	return controlstore.NodeScheduling{
+		ObservedAt: report.ObservedAt,
+		Observation: controlprotocol.ExecutorSchedulingObservationV1{
+			SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+			NodeID:        report.NodeID, CredentialScope: "node", OS: "linux", Architecture: report.Architecture,
+			Isolation:          controlprotocol.ExecutorSchedulingIsolationGVisor,
+			BootIdentitySHA256: report.BootIdentitySHA256, SchedulingPolicySHA256: report.SchedulingPolicySHA256,
+			RuntimeAssurance: report.RuntimeAssurance, RuntimeAssuranceSHA256: report.RuntimeAssuranceSHA256,
+			Labels: []controlprotocol.ExecutorSchedulingLabelV1{}, Taints: []string{},
+			CachedImageConfigDigests: []string{}, Policy: policy,
+		},
+	}
 }
 
 func stewardctlNodePoolStatus(poolID string) controlstore.NodePoolStatus {
