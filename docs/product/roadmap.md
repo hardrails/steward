@@ -304,13 +304,12 @@ an enforcement requirement through a narrow external contract.
 
 ## Delivery roadmap
 
-Complete the remaining roadmap as one integrated product release. Development may
-use small, reviewable commits, but the public pull request and release must prove
-the complete operate, contain, recover, and verify workflow together. This avoids
-publishing another sequence of individually impressive primitives that still leave
-the operator to assemble the system. A release is not complete because a schema,
-plan command, integration example, or UI page exists; the stated outcome must pass
-end-to-end acceptance and hostile-path tests.
+Treat the following sections as outcome horizons, not a promise that every item
+lands in one release. Development should use small, reviewable changes, while each
+published capability must prove its complete operate, contain, recover, and verify
+workflow. A schema, plan command, integration example, or UI page alone does not
+complete an outcome; its failure behavior, documentation, upgrade path, and
+hostile-path tests must ship with it.
 
 ### Implemented foundation
 
@@ -383,13 +382,12 @@ machines. The controller also
 does not yet join continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 
-### Consolidated production release
+### Remaining product outcomes
 
-This release makes Steward a complete product on one host, extends the same
-contract across a small fleet, and makes disconnected operation repeatable. The
-work is organized below as implementation lanes, not separate pull requests or
-release trains. A capability crosses the release boundary only when its user
-workflow, failure behavior, documentation, upgrade path, and evidence are joined.
+The outcomes below extend the working foundation without implying that unshipped
+items are present. Work may move between horizons as operator evidence changes.
+A capability becomes supported only when its user workflow, failure behavior,
+documentation, upgrade path, and evidence are joined.
 
 #### Working runtime foundation
 

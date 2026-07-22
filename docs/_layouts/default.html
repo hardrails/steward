@@ -45,7 +45,8 @@
         </a>
         <nav class="top-nav" aria-label="Primary navigation">
           <a href="{{ '/getting-started/' | relative_url }}">Start</a>
-          <a href="{{ '/guides/workload-lifecycle/' | relative_url }}">Guides</a>
+          <a href="{{ '/getting-started/first-task/' | relative_url }}">First task</a>
+          <a href="{{ '/guides/troubleshooting/' | relative_url }}">Operate</a>
           <a href="{{ '/concepts/security-model/' | relative_url }}">Security</a>
           <a href="{{ '/reference/api/' | relative_url }}">Reference</a>
           <a class="github-link" href="{{ site.github_url }}">GitHub ↗</a>
@@ -56,17 +57,28 @@
     <div class="site-shell">
       <aside class="side-nav" aria-label="Documentation navigation">
         <p class="nav-label">Start here</p>
+        <a href="{{ '/product/positioning/' | relative_url }}">What Steward solves</a>
         <a href="{{ '/getting-started/' | relative_url }}">Install Steward</a>
         <a href="{{ '/getting-started/site-authority/' | relative_url }}">Create site authority</a>
         <a href="{{ '/getting-started/enroll/' | relative_url }}">Enroll a node</a>
+        <a href="{{ '/getting-started/first-task/' | relative_url }}">Run the first task</a>
+
+        <p class="nav-label">Operate</p>
+        <a href="{{ '/guides/troubleshooting/' | relative_url }}">Diagnose and recover</a>
         <a href="{{ '/guides/control-plane/' | relative_url }}">Operate control plane</a>
         <a href="{{ '/guides/operator-console/' | relative_url }}">Operator console</a>
-        <a href="{{ '/product/positioning/' | relative_url }}">Why Steward exists</a>
+        <a href="{{ '/guides/workload-lifecycle/' | relative_url }}">Workload lifecycle</a>
+        <a href="{{ '/guides/upgrades/' | relative_url }}">Upgrade and rollback</a>
         <a href="{{ '/limitations/' | relative_url }}">Capability boundaries</a>
 
-        <p class="nav-label">How-to guides</p>
+        <p class="nav-label">Build agents</p>
         <a href="{{ '/guides/build-agents/' | relative_url }}">Build and run agents</a>
-        <a href="{{ '/guides/workload-lifecycle/' | relative_url }}">Workload lifecycle</a>
+        <a href="{{ '/guides/hermes-agent/' | relative_url }}">Hermes Agent</a>
+        <a href="{{ '/guides/research-agents/' | relative_url }}">Web research agents</a>
+        <a href="{{ '/guides/coding-workers/' | relative_url }}">Codex and Claude Code</a>
+        <a href="{{ '/guides/controller-events/' | relative_url }}">Agent events</a>
+
+        <p class="nav-label">Secure capabilities</p>
         <a href="{{ '/guides/signed-admission/' | relative_url }}">Signed admission</a>
         <a href="{{ '/guides/authorized-effects/' | relative_url }}">Authorized Effects</a>
         <a href="{{ '/guides/context-locked-effects/' | relative_url }}">Context-locked effects</a>
@@ -78,13 +90,8 @@
         <a href="{{ '/guides/egress/' | relative_url }}">Signed HTTP(S) egress</a>
         <a href="{{ '/guides/terraform/' | relative_url }}">Terraform and cloud</a>
         <a href="{{ '/guides/mcp/' | relative_url }}">MCP operations</a>
-        <a href="{{ '/guides/hermes-agent/' | relative_url }}">Hermes Agent</a>
-        <a href="{{ '/guides/research-agents/' | relative_url }}">Web research agents</a>
-        <a href="{{ '/guides/coding-workers/' | relative_url }}">Codex and Claude Code</a>
         <a href="{{ '/guides/buzz/' | relative_url }}">Buzz integration</a>
-        <a href="{{ '/guides/controller-events/' | relative_url }}">Agent events</a>
         <a href="{{ '/guides/air-gapped/' | relative_url }}">Air-gapped install</a>
-        <a href="{{ '/guides/upgrades/' | relative_url }}">Upgrade and rollback</a>
 
         <p class="nav-label">Understand</p>
         <a href="{{ '/concepts/architecture/' | relative_url }}">Architecture</a>

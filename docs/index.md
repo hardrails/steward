@@ -29,8 +29,8 @@ home: true
 <div class="split">
   <div>
     <h3>Try one agent</h3>
-    <p>Install a Linux node, verify the hardened services, then run a bounded Hermes Agent behind Steward.</p>
-    <p><a href="{{ '/getting-started/' | relative_url }}">Install a node →</a> · <a href="{{ '/guides/hermes-agent/' | relative_url }}">Run Hermes →</a></p>
+    <p>Install a Linux node, verify the hardened services, then follow one complete path to a useful, recoverable Hermes result.</p>
+    <p><a href="{{ '/getting-started/' | relative_url }}">Install a node →</a> · <a href="{{ '/getting-started/first-task/' | relative_url }}">Run the first task →</a></p>
   </div>
   <div>
     <h3>Operate a fleet</h3>
@@ -38,6 +38,11 @@ home: true
     <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/operator-console/' | relative_url }}">Open the console →</a></p>
   </div>
 </div>
+
+Already operating Steward? Start with <code>stewardctl status</code>. The
+<a href="{{ '/guides/troubleshooting/' | relative_url }}">diagnosis and recovery guide</a>
+turns current findings into safe next steps without asking you to decode raw API
+responses.
 
 ## Build once, choose the agent engine
 

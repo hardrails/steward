@@ -14,6 +14,39 @@ to the task.
 The context stores **paths** to token and key files, not their values. Private
 signing keys and bearer values are never copied into the context file.
 
+## Check health before changing anything
+
+Once a context contains a Control or local node connection, start with:
+
+<!-- cli-flags: status | -output -watch -->
+```console
+stewardctl status
+```
+
+This combines bounded Control attention findings and Executor reconciliation
+readiness. It prints a short human summary by default. Use `-output json` for
+automation or `-watch 5s` for repeated terminal updates.
+
+If Steward needs attention, ask for the cause, impact, and safest next step:
+
+<!-- cli-flags: explain | -output -->
+```console
+stewardctl explain
+stewardctl explain node-a
+```
+
+Executor can automatically recover only a reconciliation-proven missing workload.
+The command previews the cleanup unless `--apply` is explicit:
+
+<!-- cli-flags: recover | -apply -output -->
+```console
+sudo -H stewardctl recover executor-DIGEST
+sudo -H stewardctl recover executor-DIGEST --apply
+```
+
+See [Diagnose and recover Steward safely]({{ '/guides/troubleshooting/' |
+relative_url }}) before manual container, journal, or evidence changes.
+
 ## Set up a context once
 
 Choose a short name such as `production`:
@@ -218,7 +251,8 @@ owner-only, serializes concurrent writers through an owner-only lock, writes
 updates atomically, bounds the file to 64 KiB, accepts at most
 32 contexts, and rejects unknown or duplicate fields.
 
-Contexts affect `stewardctl control`, `stewardctl node`, `stewardctl agent apply`,
+Contexts affect `stewardctl status`, `stewardctl explain`, `stewardctl recover`,
+`stewardctl control`, `stewardctl node`, `stewardctl agent apply`,
 `stewardctl agent deploy`, `stewardctl agent deployment`, and `stewardctl task run`.
 For `task run`, a context may supply paths to the Gateway token, service-trust
 inventory, and task private key plus its public key ID. It never stores the secret
