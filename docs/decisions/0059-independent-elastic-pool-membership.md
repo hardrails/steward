@@ -29,7 +29,10 @@ membership generation and creation identity, node, canonical tenant set,
 architecture, boot identity digest, scheduling-policy digest, and validity
 window. The node presents the exact statement with its own enrolled credential.
 Control retains the envelope and rejects signature failure, scope changes,
-expiry, and renewal rollback.
+expiry, renewal rollback within one pool lineage, and disagreement with the
+node's current authenticated boot and scheduling-policy observation. Executor
+derives the scheduling-policy digest from its effective limits; a provisioning
+or measured-boot integration supplies the boot identity.
 
 When a pool configures this authority, `scale_out_needed` counts only eligible
 members. Label-only nodes remain visible as `membership_unverified`, but they do
@@ -44,8 +47,10 @@ against the same statement before it can replace that finite set.
 - Control and provider labels cannot independently make a node eligible.
 - There is no reusable pool secret to steal from a machine image or node.
 - Operators can verify the retained envelope without trusting Control's status.
-- A separate signer or workload-identity adapter must verify boot and policy
-  claims. Steward binds those claims but does not measure the machine.
+- A separate signer or workload-identity adapter must verify boot claims.
+  Steward compares the signed value with Executor's current authenticated
+  report and recomputes the scheduling-policy digest, but it does not measure
+  the machine or turn a self-report into hardware attestation.
 - Tenant, architecture, or authority changes increment a separate membership
   generation and require new node statements. Capacity-only updates do not
   invalidate otherwise valid membership.

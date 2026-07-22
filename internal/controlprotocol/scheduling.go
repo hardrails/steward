@@ -1,7 +1,10 @@
 package controlprotocol
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -45,14 +48,20 @@ type ExecutorSchedulingLabelV1 struct {
 // ExecutorSchedulingObservationV1 is posted with the node-scoped Executor
 // credential. Control supplies observed_at from its own clock.
 type ExecutorSchedulingObservationV1 struct {
-	SchemaVersion   string                      `json:"schema_version"`
-	NodeID          string                      `json:"node_id"`
-	CredentialScope string                      `json:"credential_scope"`
-	OS              string                      `json:"os"`
-	Architecture    string                      `json:"architecture"`
-	Isolation       string                      `json:"isolation"`
-	Labels          []ExecutorSchedulingLabelV1 `json:"labels"`
-	Taints          []string                    `json:"taints"`
+	SchemaVersion   string `json:"schema_version"`
+	NodeID          string `json:"node_id"`
+	CredentialScope string `json:"credential_scope"`
+	OS              string `json:"os"`
+	Architecture    string `json:"architecture"`
+	Isolation       string `json:"isolation"`
+	// BootIdentitySHA256 is supplied by the node's provisioning or measured-boot
+	// integration. A configured pool membership must bind this exact value.
+	BootIdentitySHA256 string `json:"boot_identity_sha256,omitempty"`
+	// SchedulingPolicySHA256 is derived from Policy by Executor and independently
+	// recomputed by Control before the observation is retained.
+	SchedulingPolicySHA256 string                      `json:"scheduling_policy_sha256,omitempty"`
+	Labels                 []ExecutorSchedulingLabelV1 `json:"labels"`
+	Taints                 []string                    `json:"taints"`
 	// CachedImageConfigDigests is a soft placement observation. Executor still
 	// inspects the exact signed image during admission; Control may use this
 	// canonical inventory only to avoid an unnecessary image transfer.
@@ -71,6 +80,15 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 		observation.Taints == nil || len(observation.Taints) > MaxExecutorSchedulingTaints ||
 		len(observation.CachedImageConfigDigests) > MaxExecutorSchedulingImages {
 		return errors.New("executor scheduling attributes exceed their limits")
+	}
+	if observation.BootIdentitySHA256 != "" && !ValidSHA256Digest(observation.BootIdentitySHA256) {
+		return errors.New("executor boot identity digest is invalid")
+	}
+	if observation.SchedulingPolicySHA256 != "" {
+		digest, err := SchedulingPolicyDigest(observation.Policy)
+		if err != nil || observation.SchedulingPolicySHA256 != digest {
+			return errors.New("executor scheduling policy digest is invalid")
+		}
 	}
 	for index, label := range observation.Labels {
 		if !ValidSchedulingAttribute(label.Key) || !ValidSchedulingAttribute(label.Value) ||
@@ -96,6 +114,19 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// SchedulingPolicyDigest commits to the exact fixed-schema resource policy.
+// JSON field order is defined by ExecutorSchedulingPolicyV1's struct layout,
+// so every Steward component derives the same bytes without a third-party
+// canonicalization dependency.
+func SchedulingPolicyDigest(policy ExecutorSchedulingPolicyV1) (string, error) {
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + fmt.Sprintf("%x", sum[:]), nil
 }
 
 func (policy ExecutorSchedulingPolicyV1) Validate() error {

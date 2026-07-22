@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/poolmembership"
 )
@@ -74,13 +76,17 @@ func TestExecutorBindsIndependentlySignedPoolMembership(t *testing.T) {
 		"membership_public_key_base64": base64.StdEncoding.EncodeToString(public),
 	})
 	requireStatus(t, fixture.request(t, http.MethodPut, "/v1/node-pools/pool-a", fixture.adminToken, poolBody), http.StatusCreated)
+	observation := controlplanePoolSchedulingObservation(t, "node-a", "pool-a")
+	requireStatus(t, fixture.request(
+		t, http.MethodPost, "/executor-uplink/scheduling", credential.Credential, mustJSON(t, observation),
+	), http.StatusOK)
 	now := fixture.now
 	raw, err := poolmembership.Sign(poolmembership.Statement{
 		SchemaVersion: 1, ControllerInstanceID: fixture.server.auth.InstanceID(), PoolID: "pool-a", PoolMembershipGeneration: 1,
 		PoolCreatedAt: now.Format(time.RFC3339Nano),
 		NodeID:        "node-a", TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
-		BootIdentitySHA256:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		SchedulingPolicySHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		BootIdentitySHA256:     observation.BootIdentitySHA256,
+		SchedulingPolicySHA256: observation.SchedulingPolicySHA256,
 		IssuedAt:               now.Format(time.RFC3339Nano), NotAfter: now.Add(time.Hour).Format(time.RFC3339Nano),
 	}, "pool-authority-1", private)
 	if err != nil {
@@ -101,6 +107,30 @@ func TestExecutorBindsIndependentlySignedPoolMembership(t *testing.T) {
 	}
 	requireError(t, fixture.request(t, http.MethodPost, "/executor-uplink/pool-membership", credential.Credential, body),
 		http.StatusMethodNotAllowed, "method_not_allowed")
+}
+
+func controlplanePoolSchedulingObservation(t *testing.T, nodeID, poolID string) controlprotocol.ExecutorSchedulingObservationV1 {
+	t.Helper()
+	observation := controlprotocol.ExecutorSchedulingObservationV1{
+		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+		NodeID:        nodeID, CredentialScope: "node", OS: "linux", Architecture: "amd64",
+		Isolation:          controlprotocol.ExecutorSchedulingIsolationGVisor,
+		BootIdentitySHA256: "sha256:" + strings.Repeat("a", 64),
+		Labels:             []controlprotocol.ExecutorSchedulingLabelV1{{Key: controlstore.NodePoolLabelKey, Value: poolID}},
+		Taints:             []string{}, CachedImageConfigDigests: []string{},
+		Policy: controlprotocol.ExecutorSchedulingPolicyV1{
+			PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 512 << 20, CPUMillis: 1000, PIDs: 128, Workloads: 1},
+			Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 8 << 30, CPUMillis: 8000, PIDs: 2048, Workloads: 32},
+			Tenant:          controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2 << 30, CPUMillis: 2000, PIDs: 512, Workloads: 4},
+			RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32},
+		},
+	}
+	digest, err := controlprotocol.SchedulingPolicyDigest(observation.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.SchedulingPolicySHA256 = digest
+	return observation
 }
 
 func TestNodePoolAPIRejectsUnsafeMethodsQueriesAndBodies(t *testing.T) {

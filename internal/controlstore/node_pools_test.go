@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,7 +124,7 @@ func TestSignedPoolMembershipControlsElasticEligibilityAndSurvivesRestart(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	observation := storeSchedulingObservation(identity.NodeID)
+	observation := withMembershipMeasurements(t, storeSchedulingObservation(identity.NodeID))
 	observation.Labels = append(observation.Labels, controlprotocol.ExecutorSchedulingLabelV1{Key: NodePoolLabelKey, Value: pool.ID})
 	sort.Slice(observation.Labels, func(i, j int) bool { return observation.Labels[i].Key < observation.Labels[j].Key })
 	observedAt := fixture.now.Add(2 * time.Minute)
@@ -132,15 +133,16 @@ func TestSignedPoolMembershipControlsElasticEligibilityAndSurvivesRestart(t *tes
 	}
 	status, err := fixture.store.GetNodePoolStatus(fixture.admin, pool.ID, observedAt, time.Minute)
 	if err != nil || status.RegisteredNodes != 1 || status.EligibleNodes != 0 || status.ScaleOutNeeded != 1 ||
-		status.Nodes[0].Reason != "membership_missing" || !slices.Contains(status.Conditions, NodePoolConditionMembershipUnverified) {
+		status.Nodes[0].Reason != "membership_missing" || !slices.Contains(status.Conditions, NodePoolConditionMembershipUnverified) ||
+		slices.Contains(status.Conditions, NodePoolConditionNodesNotReady) {
 		t.Fatalf("unverified status=%+v err=%v", status, err)
 	}
 	statement := poolmembership.Statement{
 		SchemaVersion: 1, ControllerInstanceID: fixture.auth.InstanceID(), PoolID: pool.ID, PoolMembershipGeneration: pool.MembershipGeneration,
 		PoolCreatedAt: pool.CreatedAt,
 		NodeID:        identity.NodeID, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
-		BootIdentitySHA256:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		SchedulingPolicySHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		BootIdentitySHA256:     observation.BootIdentitySHA256,
+		SchedulingPolicySHA256: observation.SchedulingPolicySHA256,
 		IssuedAt:               observedAt.Format(time.RFC3339Nano), NotAfter: observedAt.Add(time.Hour).Format(time.RFC3339Nano),
 	}
 	raw, err := poolmembership.Sign(statement, pool.MembershipKeyID, private)
@@ -228,6 +230,81 @@ func TestSignedPoolMembershipControlsElasticEligibilityAndSurvivesRestart(t *tes
 	}
 }
 
+func TestPoolMembershipFollowsCurrentMeasurementsAcrossPoolTransitions(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, identity := fixture.createNode(t, "tenant-a")
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createPool := func(id string, at time.Time) NodePool {
+		t.Helper()
+		pool, _, err := fixture.store.ApplyNodePool(fixture.admin, NodePool{
+			ID: id, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+			MinNodes: 0, DesiredNodes: 1, MaxNodes: 2, MembershipKeyID: "authority-a",
+			MembershipPublicKeyBase64: base64.StdEncoding.EncodeToString(public),
+		}, 0, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pool
+	}
+	poolA := createPool("pool-a", fixture.now.Add(time.Minute))
+	poolB := createPool("pool-b", fixture.now.Add(2*time.Minute))
+	observation := withMembershipMeasurements(t, storeSchedulingObservation(identity.NodeID))
+	observation.Labels = append(observation.Labels, controlprotocol.ExecutorSchedulingLabelV1{Key: NodePoolLabelKey, Value: poolA.ID})
+	sort.Slice(observation.Labels, func(i, j int) bool { return observation.Labels[i].Key < observation.Labels[j].Key })
+	observedAt := fixture.now.Add(3 * time.Minute)
+	if _, applied, err := fixture.store.ObserveNodeScheduling(identity, observation, observedAt); err != nil || !applied {
+		t.Fatalf("observe pool A=(%v,%v)", applied, err)
+	}
+	sign := func(pool NodePool, issued time.Time) []byte {
+		t.Helper()
+		raw, err := poolmembership.Sign(poolmembership.Statement{
+			SchemaVersion: 1, ControllerInstanceID: fixture.auth.InstanceID(), PoolID: pool.ID,
+			PoolMembershipGeneration: pool.MembershipGeneration, PoolCreatedAt: pool.CreatedAt,
+			NodeID: identity.NodeID, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+			BootIdentitySHA256: observation.BootIdentitySHA256, SchedulingPolicySHA256: observation.SchedulingPolicySHA256,
+			IssuedAt: issued.Format(time.RFC3339Nano), NotAfter: issued.Add(2 * time.Hour).Format(time.RFC3339Nano),
+		}, pool.MembershipKeyID, private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	first := sign(poolA, observedAt)
+	if _, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, first, observedAt.Add(time.Minute)); err != nil {
+		t.Fatalf("bind pool A: %v", err)
+	}
+	// Pool B's independently valid statement deliberately predates pool A's
+	// retained membership. Timestamps fence renewal rollback within one pool,
+	// not transitions between unrelated pool lineages.
+	second := sign(poolB, observedAt.Add(-time.Minute))
+	if node, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, second, observedAt.Add(time.Minute)); err != nil ||
+		node.PoolMembership == nil || node.PoolMembership.PoolID != poolB.ID {
+		t.Fatalf("cross-pool bind node=%+v err=%v", node, err)
+	}
+
+	observation.Labels = []controlprotocol.ExecutorSchedulingLabelV1{
+		{Key: "region", Value: "west"},
+		{Key: NodePoolLabelKey, Value: poolB.ID},
+	}
+	observation.BootIdentitySHA256 = "sha256:" + strings.Repeat("c", 64)
+	changedAt := observedAt.Add(2 * time.Minute)
+	if _, applied, err := fixture.store.ObserveNodeScheduling(identity, observation, changedAt); err != nil || !applied {
+		t.Fatalf("changed measurement observation=(%v,%v)", applied, err)
+	}
+	status, err := fixture.store.GetNodePoolStatus(fixture.admin, poolB.ID, changedAt.Add(time.Second), time.Minute)
+	if err != nil || status.EligibleNodes != 0 || status.ReadyNodes != 0 || status.Nodes[0].Reason != "membership_mismatch" ||
+		!slices.Equal(status.Conditions, []string{NodePoolConditionCapacityShortfall, NodePoolConditionMembershipUnverified}) {
+		t.Fatalf("changed measurement status=%+v err=%v", status, err)
+	}
+	if _, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, second, changedAt.Add(time.Second)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale measured membership bind error=%v", err)
+	}
+}
+
 func statementNotAfter(t *testing.T, statement poolmembership.Statement) time.Time {
 	t.Helper()
 	value, err := time.Parse(time.RFC3339Nano, statement.NotAfter)
@@ -235,6 +312,20 @@ func statementNotAfter(t *testing.T, statement poolmembership.Statement) time.Ti
 		t.Fatal(err)
 	}
 	return value
+}
+
+func withMembershipMeasurements(
+	t *testing.T,
+	observation controlprotocol.ExecutorSchedulingObservationV1,
+) controlprotocol.ExecutorSchedulingObservationV1 {
+	t.Helper()
+	digest, err := controlprotocol.SchedulingPolicyDigest(observation.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.BootIdentitySHA256 = "sha256:" + strings.Repeat("a", 64)
+	observation.SchedulingPolicySHA256 = digest
+	return observation
 }
 
 func TestNodePoolStatusReportsCapacityWithoutGrantingPlacementAuthority(t *testing.T) {

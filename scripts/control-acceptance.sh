@@ -1383,6 +1383,7 @@ if pool.get("id") != sys.argv[2] or pool.get("revision") != 2 or pool.get("membe
 PY
 
 python3 -I - "$work/scheduling-observation.json" "$node_id" "$pool_id" <<'PY'
+import hashlib
 import json
 import pathlib
 import sys
@@ -1390,6 +1391,13 @@ import sys
 resources = lambda memory, cpu, pids, workloads: {
     "memory_bytes": memory, "cpu_millis": cpu, "pids": pids, "workloads": workloads,
 }
+policy = {
+    "per_workload": resources(268435456, 1000, 128, 1),
+    "host": resources(2147483648, 4000, 1024, 4),
+    "tenant": resources(2147483648, 4000, 1024, 4),
+    "runtime_overhead": resources(67108864, 100, 32, 0),
+}
+policy_digest = "sha256:" + hashlib.sha256(json.dumps(policy, separators=(",", ":")).encode()).hexdigest()
 observation = {
     "schema_version": "steward.executor-scheduling.v1",
     "node_id": sys.argv[2],
@@ -1397,15 +1405,12 @@ observation = {
     "os": "linux",
     "architecture": "amd64",
     "isolation": "gvisor",
+    "boot_identity_sha256": "sha256:" + "a" * 64,
+    "scheduling_policy_sha256": policy_digest,
     "labels": [{"key": "steward.io/node-pool", "value": sys.argv[3]}],
     "taints": [],
     "cached_image_config_digests": [],
-    "policy": {
-        "per_workload": resources(268435456, 1000, 128, 1),
-        "host": resources(2147483648, 4000, 1024, 4),
-        "tenant": resources(2147483648, 4000, 1024, 4),
-        "runtime_overhead": resources(67108864, 100, 32, 0),
-    },
+    "policy": policy,
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(observation, separators=(",", ":")) + "\n")
 PY
@@ -1428,7 +1433,7 @@ if observed.get("applied") is not True or not observed.get("observed_at"):
 if status.get("pool", {}).get("id") != sys.argv[3] or status.get("registered_nodes") != 1 or \
         status.get("eligible_nodes") != 0 or status.get("ready_nodes") != 0 or \
         status.get("scale_out_needed") != 3 or status.get("scale_in_candidates") != [] or \
-        status.get("conditions") != ["capacity_shortfall", "nodes_not_ready", "membership_unverified"]:
+        status.get("conditions") != ["capacity_shortfall", "membership_unverified"]:
     raise SystemExit("control-acceptance: an unsigned pool label satisfied verified capacity")
 if len(nodes) != 1 or nodes[0].get("node_id") != sys.argv[4] or nodes[0].get("ready") is not False or \
         nodes[0].get("eligible") is not False or nodes[0].get("reason") != "membership_missing":
@@ -1456,13 +1461,22 @@ print(controller, created, generation)
 PY
 )
 pool_membership=$work/pool-membership.dsse.json
+scheduling_policy_sha256=$(python3 -I - "$work/scheduling-observation.json" <<'PY'
+import json
+import pathlib
+import sys
+
+observation = json.loads(pathlib.Path(sys.argv[1]).read_text())
+print(observation["scheduling_policy_sha256"])
+PY
+)
 run_bounded 30 "$work" "$work/pool-membership-issue.stdout" "$work/pool-membership-issue.stderr" \
 	"$ctl_bin" control node-pool membership-issue -private-key "$pool_membership_private" \
 	-key-id acceptance-pool-authority -controller-id "$controller_id" -pool-id "$pool_id" \
 	-pool-membership-generation "$pool_membership_generation" -pool-created-at "$pool_created_at" \
 	-node-id "$node_id" -tenant-ids "$tenant_id" -architecture amd64 \
 	-boot-identity-sha256 sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-	-scheduling-policy-sha256 sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+	-scheduling-policy-sha256 "$scheduling_policy_sha256" \
 	-valid-for 1h -out "$pool_membership" -no-context
 assert_owner_file "$pool_membership"
 run_bounded 30 "$work" "$work/pool-membership-verify.stdout" "$work/pool-membership-verify.stderr" \

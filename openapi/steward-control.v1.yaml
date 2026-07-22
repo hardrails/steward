@@ -4618,6 +4618,19 @@ components:
         isolation:
           type: string
           enum: [gvisor]
+        boot_identity_sha256:
+          allOf:
+            - $ref: "#/components/schemas/SHA256Digest"
+          description: >-
+            Optional measured or immutable boot identity supplied by the node's
+            provisioning integration. Verified pool membership requires an
+            exact match with this current node-authenticated observation.
+        scheduling_policy_sha256:
+          allOf:
+            - $ref: "#/components/schemas/SHA256Digest"
+          description: >-
+            Digest of the fixed-schema policy below. Control recomputes this
+            digest before retaining the node-authenticated observation.
         labels:
           type: array
           maxItems: 32

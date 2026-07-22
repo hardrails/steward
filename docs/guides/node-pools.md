@@ -38,6 +38,7 @@ labels separate:
 ```console
 steward-executor \
   -node-labels steward.io/node-pool=research-amd64,region=us-west \
+  -node-boot-identity-sha256 sha256:BOOT_IDENTITY_HEX \
   ...
 ```
 
@@ -121,9 +122,15 @@ stewardctl control node-pool membership-issue \
 The pool status supplies `pool.created_at`; binding it prevents an old statement
 from being replayed after a pool is deleted and recreated. `CONTROL_INSTANCE_ID`
 appears in every finite enrollment package and response.
-The digests must come from your image pipeline, measured-boot verifier, or
-another trusted process. Steward binds those claims; it does not independently
-measure the host.
+Configure Executor with `-node-boot-identity-sha256` using a digest from your
+image pipeline, measured-boot verifier, or another trusted provisioning process.
+Executor derives `scheduling_policy_sha256` from its effective scheduling limits;
+Control recomputes that digest before retaining the authenticated observation.
+Read both current values from the node's `scheduling.observation` projection and
+give those exact values to the protected membership signer. Steward checks them
+again when the statement is bound and whenever it calculates pool eligibility.
+It does not independently measure the host, so the strength of the boot claim
+still depends on the process that supplies the boot identity to Executor.
 
 Verify the file before transfer:
 
@@ -145,7 +152,9 @@ stewardctl control node-pool membership-bind \
 ```
 
 Control accepts an exact retry. A renewal must have a later `issued_at` and
-match the current pool membership generation. Capacity-only changes preserve
+match the current pool membership generation. Renewal ordering is scoped to one
+pool lineage, so a valid statement for a different pool can move the node even
+when the two validity windows overlap. Capacity-only changes preserve
 that generation. Changing tenant scope, architecture, or the membership key
 increments it and invalidates prior statements. Expired, wrong-controller,
 wrong-node, wrong-tenant, wrong-architecture, stale-generation, rollback, and

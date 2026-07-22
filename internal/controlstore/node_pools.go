@@ -96,7 +96,7 @@ func (status NodePoolStatus) Validate() error {
 	if status.ScaleOutNeeded > 0 {
 		wantConditions = append(wantConditions, NodePoolConditionCapacityShortfall)
 	}
-	if status.ReadyNodes < status.RegisteredNodes {
+	if status.ReadyNodes < status.EligibleNodes {
 		wantConditions = append(wantConditions, NodePoolConditionNodesNotReady)
 	}
 	if status.EligibleNodes < status.RegisteredNodes {
@@ -399,7 +399,7 @@ func nodePoolStatusLocked(current state, pool NodePool, now time.Time, staleAfte
 		status.ScaleOutNeeded = pool.DesiredNodes - status.EligibleNodes
 		status.Conditions = append(status.Conditions, NodePoolConditionCapacityShortfall)
 	}
-	if status.ReadyNodes < status.RegisteredNodes {
+	if status.ReadyNodes < status.EligibleNodes {
 		status.Conditions = append(status.Conditions, NodePoolConditionNodesNotReady)
 	}
 	if status.EligibleNodes < status.RegisteredNodes {
@@ -441,7 +441,20 @@ func nodePoolMembershipEligible(node Node, pool NodePool, now time.Time) (bool, 
 	if err != nil || !now.Before(notAfter) {
 		return false, "membership_expired"
 	}
+	if !nodeMeasurementsMatchMembership(node, membership) {
+		return false, "membership_mismatch"
+	}
 	return true, ""
+}
+
+func nodeMeasurementsMatchMembership(node Node, membership *NodePoolMembership) bool {
+	if node.Scheduling == nil || membership == nil {
+		return false
+	}
+	observation := node.Scheduling.Observation
+	return observation.BootIdentitySHA256 != "" && observation.SchedulingPolicySHA256 != "" &&
+		observation.BootIdentitySHA256 == membership.BootIdentitySHA256 &&
+		observation.SchedulingPolicySHA256 == membership.SchedulingPolicySHA256
 }
 
 func nodePoolNodeReady(node Node, now time.Time, staleAfter time.Duration) (bool, string) {
@@ -608,14 +621,19 @@ func (store *Store) BindNodePoolMembership(identity controlauth.NodeIdentity, au
 		BootIdentitySHA256: claim.BootIdentitySHA256, SchedulingPolicySHA256: claim.SchedulingPolicySHA256,
 		IssuedAt: claim.IssuedAt, NotAfter: claim.NotAfter,
 	}
+	if !nodeMeasurementsMatchMembership(node, membership) {
+		return Node{}, ErrConflict
+	}
 	if node.PoolMembership != nil {
 		if node.PoolMembership.Digest == membership.Digest {
 			return cloneNode(node), nil
 		}
-		previous, _ := time.Parse(time.RFC3339Nano, node.PoolMembership.IssuedAt)
-		issued, _ := time.Parse(time.RFC3339Nano, membership.IssuedAt)
-		if !issued.After(previous) {
-			return Node{}, ErrConflict
+		if sameNodePoolMembershipLineage(node.PoolMembership, membership) {
+			previous, _ := time.Parse(time.RFC3339Nano, node.PoolMembership.IssuedAt)
+			issued, _ := time.Parse(time.RFC3339Nano, membership.IssuedAt)
+			if !issued.After(previous) {
+				return Node{}, ErrConflict
+			}
 		}
 	}
 	node.PoolMembership = membership
@@ -623,6 +641,12 @@ func (store *Store) BindNodePoolMembership(identity controlauth.NodeIdentity, au
 		return Node{}, err
 	}
 	return cloneNode(node), nil
+}
+
+func sameNodePoolMembershipLineage(left, right *NodePoolMembership) bool {
+	return left != nil && right != nil && left.PoolID == right.PoolID &&
+		left.PoolMembershipGeneration == right.PoolMembershipGeneration &&
+		left.PoolCreatedAt == right.PoolCreatedAt && left.KeyID == right.KeyID
 }
 
 func cloneNodePool(pool NodePool) NodePool {

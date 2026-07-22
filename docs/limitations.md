@@ -316,8 +316,11 @@ that binds one enrolled node, exact pool membership generation, tenant set, boot
 identity, and scheduling policy. Steward verifies and retains that statement
 before counting the node as eligible. The bundled modules do not yet obtain
 cloud workload identity, verify measured boot, or request that statement
-automatically. A SPIFFE/SPIRE or platform-attestation adapter remains external
-follow-on work.
+automatically. Executor can report a provisioning-supplied boot identity and
+Control rejects membership when that current authenticated report or the
+recomputed scheduling-policy digest changes. A SPIFFE/SPIRE or
+platform-attestation adapter is still needed to make the boot claim stronger
+than the process that configures Executor.
 
 Cloud VM health does not cover Steward policy continuity, authenticated Executor
 readiness, or Gateway state. The modules therefore do not claim application-aware
