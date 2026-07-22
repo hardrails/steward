@@ -14,8 +14,8 @@ import (
 )
 
 var completionTree = map[string][]string{
-	"":                            {"help", "status", "explain", "recover", "site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
-	"help":                        {"status", "explain", "recover", "site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
+	"":                            {"help", "status", "explain", "recover", "site", "agent", "context", "completion", "support", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
+	"help":                        {"status", "explain", "recover", "site", "agent", "context", "completion", "support", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
 	"status":                      {},
 	"explain":                     {},
 	"recover":                     {},
@@ -27,6 +27,7 @@ var completionTree = map[string][]string{
 	"agent deployment":            {"apply", "wait", "status", "list", "pause", "resume", "remove"},
 	"context":                     {"set", "use", "show", "list", "delete"},
 	"completion":                  {"install", "bash", "zsh", "fish"},
+	"support":                     {"matrix"},
 	"key":                         {"match"},
 	"capsule":                     {"check-profile", "sign", "verify"},
 	"policy":                      {"sign", "verify"},
@@ -80,6 +81,7 @@ var completionFlags = map[string][]string{
 	"status":                              {"-output", "-watch", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-url", "-node-token-file", "-no-context"},
 	"explain":                             {"-output", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-url", "-node-token-file", "-no-context"},
 	"recover":                             {"-apply", "-output", "-node-url", "-token-file", "-no-context"},
+	"support matrix":                      {"-output"},
 	"site init":                           {"-site-id", "-tenant-id", "-repository", "-service-id", "-service-ids", "-connector-id", "-connector-ids", "-control-server-names", "-authorized-effects", "-dry-run"},
 	"site verify":                         {"-site-root-public-key"},
 	"site connect":                        {"-context", "-operator-token-out", "-request-id", "-node-id", "-site-root-public-key", "-control-url", "-token-file", "-ca-file", "-no-context"},

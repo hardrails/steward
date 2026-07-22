@@ -68,6 +68,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return recoverCommand(arguments[1:], stdout)
 	case "completion":
 		return completionCommand(arguments[1:], stdout)
+	case "support":
+		return supportCommand(arguments[1:], stdout)
 	case "keygen":
 		return keygen(arguments[1:], stdout)
 	case "key":
@@ -129,6 +131,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Utilities")
 	fmt.Fprintln(writer, "  completion    Install Bash, Zsh, or Fish completion")
+	fmt.Fprintln(writer, "  support       Show the exact supported platform and runtime contract")
 	fmt.Fprintln(writer, "  upgrade       Inspect upgrade safety")
 	fmt.Fprintln(writer, "  version       Print the installed version")
 	fmt.Fprintln(writer)
@@ -171,6 +174,7 @@ var commandHelp = map[string]string{
 	"keygen":           "Create an Ed25519 signing key pair in owner-only files.\n\nUsage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]\n",
 	"key":              "Check that one private key matches one public key.\n\nUsage: stewardctl key match -private-key FILE -public-key FILE\n",
 	"completion":       "Install or print local shell completion.\n\nUsage: stewardctl completion install|bash|zsh|fish\n",
+	"support":          "Show the installed release's supported hosts, agent runtimes, isolation requirements, compatibility boundary, and known limits. JSON output is a stable offline contract for automation.\n\nUsage: stewardctl support matrix [-output human|json]\n",
 	"upgrade":          "Inspect whether a node is drained and whether retained formats are compatible with an upgrade.\n\nUsage: stewardctl upgrade check-drained|inspect-formats ...\n",
 	"executor-command": "Issue or verify a signed command or bounded controller delegation delivered to Executor. This is an advanced transport tool; routine fleet operations use stewardctl control.\n\nUsage: stewardctl executor-command issue|verify|delegation ...\n",
 }
