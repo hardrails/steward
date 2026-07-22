@@ -311,8 +311,11 @@ func (store *Store) CancelTaskRequest(actor controlauth.Identity, tenantID, task
 	}
 	task.CancelRequestedAt = canonicalTimestamp(now)
 	task.UpdatedAt = task.CancelRequestedAt
-	if task.State == TaskRequestQueued {
+	if task.State == TaskRequestQueued && task.DispatchAttempts == 0 {
 		task.State, task.TerminalAt = TaskRequestCancelled, task.UpdatedAt
+	} else if task.State == TaskRequestQueued {
+		task.State, task.TerminalAt = TaskRequestOutcomeUnknown, task.UpdatedAt
+		task.OutcomeMayContinue = true
 	} else {
 		task.State = TaskRequestCancelRequested
 		if task.LeaseUntil != "" {
@@ -513,7 +516,7 @@ func (store *Store) ApplyTaskReport(identity controlauth.NodeIdentity, report co
 	task.ResumeState = ""
 	if deadline, _ := time.Parse(time.RFC3339, task.Deadline); !now.Before(deadline) && !taskTerminal(task.State) {
 		task.State, task.TerminalAt = TaskRequestDeadlineExceeded, task.UpdatedAt
-		task.OutcomeMayContinue = task.TaskDigest != ""
+		task.OutcomeMayContinue = task.OutcomeMayContinue || task.TaskDigest != "" || task.DispatchAttempts > 0
 		task.NextObservation = ""
 	}
 	if err := store.applyMutationsLocked(taskRequestMutation(task)); err != nil {
@@ -543,7 +546,8 @@ func normalizeTaskForPoll(task *storedTaskRequest, now time.Time) bool {
 	deadline, _ := time.Parse(time.RFC3339, task.Deadline)
 	if !taskTerminal(task.State) && !now.Before(deadline) {
 		task.State, task.TerminalAt, task.UpdatedAt = TaskRequestDeadlineExceeded, canonicalTimestamp(now), canonicalTimestamp(now)
-		task.OutcomeMayContinue = task.TaskDigest != "" || task.DeliveryAction == controlprotocol.ExecutorTaskActionSubmit
+		task.OutcomeMayContinue = task.OutcomeMayContinue || task.TaskDigest != "" || task.DispatchAttempts > 0 ||
+			task.DeliveryAction == controlprotocol.ExecutorTaskActionSubmit
 		task.LeaseUntil, task.DeliveryID, task.DeliveryAction, task.ResumeState, task.NextObservation = "", "", "", "", ""
 		changed = true
 	}

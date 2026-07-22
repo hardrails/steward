@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executor"
@@ -247,6 +248,325 @@ func TestAsyncTaskCourierBoundsAggregateBytesAndPollResponse(t *testing.T) {
 	}
 	if fixture.store.taskResultCapacityAvailableLocked("tenant-a", "new", 1) {
 		t.Fatal("result byte cap accepted another byte")
+	}
+}
+
+func TestAsyncTaskReportsDistinguishRetryRunningAndRejection(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	deployment, instance := taskReadyDeployment(t, &fixture)
+	now := fixture.now.Add(2 * time.Minute)
+
+	retryInput := signedTaskRequestInput(t, now, deployment, instance, "retry-task", []byte(`{"input":"retry"}`))
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, retryInput, now); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := fixture.store.PollTaskRequests(node, now.Add(time.Second), time.Minute, 1)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("retry delivery=(%+v, %v)", deliveries, err)
+	}
+	retry := controlprotocol.ExecutorTaskReportV1{
+		SchemaVersion: controlprotocol.ExecutorTaskReportSchemaV1,
+		DeliveryID:    deliveries[0].DeliveryID, DeliveryGeneration: deliveries[0].DeliveryGeneration,
+		TenantID: "tenant-a", NodeID: "node-1", TaskID: "retry-task",
+		Status: controlprotocol.ExecutorTaskReportRetryable, PermitDigest: deliveries[0].PermitDigest,
+		ErrorCode: "gateway_transport_unavailable",
+	}
+	if applied, err := fixture.store.ApplyTaskReport(node, retry, now.Add(2*time.Second)); err != nil || !applied {
+		t.Fatalf("retry report=(%v, %v)", applied, err)
+	}
+	retried, found, err := fixture.store.GetTaskRequest(fixture.admin, "tenant-a", "retry-task")
+	if err != nil || !found || retried.State != TaskRequestQueued || retried.LastErrorCode != retry.ErrorCode {
+		t.Fatalf("retried task=(%+v, %v, %v)", retried, found, err)
+	}
+
+	rejectedInput := signedTaskRequestInput(t, now, deployment, instance, "rejected-task", []byte(`{"input":"reject"}`))
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, rejectedInput, now); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(3*time.Second), time.Minute, 2)
+	var rejectedDelivery controlprotocol.ExecutorTaskDeliveryV1
+	for _, delivery := range deliveries {
+		if delivery.TaskID == "rejected-task" {
+			rejectedDelivery = delivery
+		}
+	}
+	if rejectedDelivery.TaskID == "" {
+		t.Fatalf("rejected task was not leased: %+v (%v)", deliveries, err)
+	}
+	rejected := controlprotocol.ExecutorTaskReportV1{
+		SchemaVersion: controlprotocol.ExecutorTaskReportSchemaV1,
+		DeliveryID:    rejectedDelivery.DeliveryID, DeliveryGeneration: rejectedDelivery.DeliveryGeneration,
+		TenantID: "tenant-a", NodeID: "node-1", TaskID: "rejected-task",
+		Status: controlprotocol.ExecutorTaskReportRejected, PermitDigest: rejectedDelivery.PermitDigest,
+		ErrorCode: "permit_rejected",
+	}
+	if applied, err := fixture.store.ApplyTaskReport(node, rejected, now.Add(4*time.Second)); err != nil || !applied {
+		t.Fatalf("rejected report=(%v, %v)", applied, err)
+	}
+	failed, found, err := fixture.store.GetTaskRequest(fixture.admin, "tenant-a", "rejected-task")
+	if err != nil || !found || failed.State != TaskRequestFailed || failed.TerminalAt == "" {
+		t.Fatalf("rejected task=(%+v, %v, %v)", failed, found, err)
+	}
+
+	runningInput := signedTaskRequestInput(t, now, deployment, instance, "running-task", []byte(`{"input":"run"}`))
+	created, _, err := fixture.store.SubmitTaskRequest(fixture.admin, runningInput, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(5*time.Second), time.Minute, 4)
+	var runningDelivery controlprotocol.ExecutorTaskDeliveryV1
+	for _, delivery := range deliveries {
+		if delivery.TaskID == "running-task" {
+			runningDelivery = delivery
+		}
+	}
+	taskDigest := taskpermit.TaskDigest("tenant-a", instance.InstanceID, "running-task")
+	accepted := controlprotocol.ExecutorTaskReportV1{
+		SchemaVersion: controlprotocol.ExecutorTaskReportSchemaV1,
+		DeliveryID:    runningDelivery.DeliveryID, DeliveryGeneration: runningDelivery.DeliveryGeneration,
+		TenantID: "tenant-a", NodeID: "node-1", TaskID: "running-task",
+		Status: controlprotocol.ExecutorTaskReportAccepted, PermitDigest: created.PermitDigest,
+		TaskDigest: taskDigest, RunID: "run-active",
+	}
+	if applied, err := fixture.store.ApplyTaskReport(node, accepted, now.Add(6*time.Second)); err != nil || !applied {
+		t.Fatalf("accepted report=(%v, %v)", applied, err)
+	}
+	wrongPermit := accepted
+	wrongPermit.PermitDigest = "sha256:" + strings.Repeat("f", 64)
+	if _, err := fixture.store.ApplyTaskReport(node, wrongPermit, now.Add(7*time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong permit report error=%v", err)
+	}
+	future := accepted
+	future.DeliveryGeneration++
+	if _, err := fixture.store.ApplyTaskReport(node, future, now.Add(7*time.Second)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("future report error=%v", err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(9*time.Second), time.Minute, 4)
+	for _, delivery := range deliveries {
+		if delivery.TaskID == "running-task" {
+			runningDelivery = delivery
+		}
+	}
+	observed := controlprotocol.ExecutorTaskReportV1{
+		SchemaVersion: controlprotocol.ExecutorTaskReportSchemaV1,
+		DeliveryID:    runningDelivery.DeliveryID, DeliveryGeneration: runningDelivery.DeliveryGeneration,
+		TenantID: "tenant-a", NodeID: "node-1", TaskID: "running-task",
+		Status: controlprotocol.ExecutorTaskReportObserved, PermitDigest: created.PermitDigest,
+		TaskDigest: taskDigest, RunID: "run-active", LifecycleState: "running", TaskStatus: "agent_running",
+	}
+	if applied, err := fixture.store.ApplyTaskReport(node, observed, now.Add(10*time.Second)); err != nil || !applied {
+		t.Fatalf("running report=(%v, %v)", applied, err)
+	}
+	running, found, err := fixture.store.GetTaskRequest(fixture.admin, "tenant-a", "running-task")
+	if err != nil || !found || running.State != TaskRequestRunning || running.ObservationAttempts != 1 {
+		t.Fatalf("running task=(%+v, %v, %v)", running, found, err)
+	}
+}
+
+func TestAsyncTaskCapacityEvictsOldestTerminalRecord(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.store.current.taskRequests = make(map[string]storedTaskRequest, MaxTaskRequestsPerTenant)
+	for index := range MaxTaskRequestsPerTenant {
+		taskID := fmt.Sprintf("terminal-%04d", index)
+		terminalAt := fixture.now.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano)
+		fixture.store.current.taskRequests[taskRequestKey("tenant-a", taskID)] = storedTaskRequest{
+			TaskRequest: TaskRequest{TenantID: "tenant-a", TaskID: taskID, State: TaskRequestCompleted, TerminalAt: terminalAt},
+			TaskPermit:  "p", RequestBase64: "cg==",
+		}
+	}
+	mutations, err := fixture.store.taskCapacityMutationsLocked("tenant-a", 2)
+	if err != nil || len(mutations) != 1 || mutations[0].Kind != mutationTaskRequestDelete ||
+		mutations[0].TaskRequestRef == nil || mutations[0].TaskRequestRef.TaskID != "terminal-0000" {
+		t.Fatalf("capacity eviction=(%+v, %v)", mutations, err)
+	}
+}
+
+func TestAsyncTaskStoreFailsClosedForNilInvalidAndClosedState(t *testing.T) {
+	var unavailable *Store
+	actor := controlauth.Identity{Role: controlauth.RoleSiteAdmin}
+	node := controlauth.NodeIdentity{NodeID: "node-1", TenantIDs: []string{"tenant-a"}}
+	report := controlprotocol.ExecutorTaskReportV1{}
+	if _, _, err := unavailable.SubmitTaskRequest(actor, TaskRequestInput{}, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil submit error=%v", err)
+	}
+	if _, err := unavailable.ListTaskRequests(actor, "tenant-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil list error=%v", err)
+	}
+	if _, _, err := unavailable.GetTaskRequest(actor, "tenant-a", "task-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil get error=%v", err)
+	}
+	if _, _, err := unavailable.GetTaskResult(actor, "tenant-a", "task-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil result error=%v", err)
+	}
+	if _, _, err := unavailable.CancelTaskRequest(actor, "tenant-a", "task-a", time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil cancel error=%v", err)
+	}
+	if _, err := unavailable.PollTaskRequests(node, time.Now(), time.Minute, 1); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil poll error=%v", err)
+	}
+	if _, err := unavailable.ApplyTaskReport(node, report, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil report error=%v", err)
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	if _, _, err := fixture.store.SubmitTaskRequest(actor, TaskRequestInput{}, time.Time{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid submit error=%v", err)
+	}
+	if _, _, err := fixture.store.CancelTaskRequest(actor, "tenant-a", "task-a", time.Time{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalid cancel error=%v", err)
+	}
+	if _, err := fixture.store.PollTaskRequests(node, time.Time{}, 0, 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid poll error=%v", err)
+	}
+	if _, err := fixture.store.ApplyTaskReport(node, report, time.Time{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid report error=%v", err)
+	}
+	if _, err := fixture.store.ListTaskRequests(controlauth.Identity{}, "tenant-a"); err == nil {
+		t.Fatalf("unauthenticated list error=%v", err)
+	}
+	if _, _, err := fixture.store.GetTaskRequest(controlauth.Identity{}, "tenant-a", "task-a"); err == nil {
+		t.Fatalf("unauthenticated get error=%v", err)
+	}
+	if _, _, err := fixture.store.GetTaskResult(controlauth.Identity{}, "tenant-a", "task-a"); err == nil {
+		t.Fatalf("unauthenticated result error=%v", err)
+	}
+	validNode := controlauth.NodeIdentity{CredentialID: "missing", NodeID: "node-1", TenantIDs: []string{"tenant-a"}}
+	if _, err := fixture.store.PollTaskRequests(validNode, time.Now(), time.Minute, 1); err == nil {
+		t.Fatalf("unauthenticated poll error=%v", err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.ListTaskRequests(actor, "tenant-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed list error=%v", err)
+	}
+	if _, _, err := fixture.store.GetTaskRequest(actor, "tenant-a", "task-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed get error=%v", err)
+	}
+	if _, _, err := fixture.store.GetTaskResult(actor, "tenant-a", "task-a"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed result error=%v", err)
+	}
+	if _, _, err := fixture.store.CancelTaskRequest(actor, "tenant-a", "task-a", time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed cancel error=%v", err)
+	}
+	if _, err := fixture.store.PollTaskRequests(node, time.Now(), time.Minute, 1); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed poll error=%v", err)
+	}
+	validReport := controlprotocol.ExecutorTaskReportV1{
+		SchemaVersion: controlprotocol.ExecutorTaskReportSchemaV1,
+		DeliveryID:    "delivery", DeliveryGeneration: 1, TenantID: "tenant-a", NodeID: "node-1", TaskID: "task-a",
+		Status:       controlprotocol.ExecutorTaskReportUncertain,
+		PermitDigest: "sha256:" + strings.Repeat("a", 64), ErrorCode: "unknown",
+	}
+	if _, err := fixture.store.ApplyTaskReport(node, validReport, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed report error=%v", err)
+	}
+	if (TaskRequest{}).Validate() == nil || validTaskRequestState("not-a-state") {
+		t.Fatal("invalid task projection state was accepted")
+	}
+}
+
+func TestAsyncTaskLeaseExpiryAndDeadlinePreserveUncertainty(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	deployment, instance := taskReadyDeployment(t, &fixture)
+	now := fixture.now.Add(2 * time.Minute)
+	input := signedTaskRequestInput(t, now, deployment, instance, "lease-task", []byte(`{"input":"lease"}`))
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, input, now); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := fixture.store.PollTaskRequests(node, now.Add(time.Second), time.Second, 1)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("initial lease=(%+v, %v)", deliveries, err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(3*time.Second), time.Minute, 1)
+	if err != nil || len(deliveries) != 1 || deliveries[0].DeliveryGeneration != 2 {
+		t.Fatalf("expired lease redelivery=(%+v, %v)", deliveries, err)
+	}
+	deliveries, err = fixture.store.PollTaskRequests(node, now.Add(11*time.Minute), time.Minute, 1)
+	if err != nil || len(deliveries) != 0 {
+		t.Fatalf("expired permit poll=(%+v, %v)", deliveries, err)
+	}
+	expired, found, err := fixture.store.GetTaskRequest(fixture.admin, "tenant-a", "lease-task")
+	if err != nil || !found || expired.State != TaskRequestDeadlineExceeded || !expired.OutcomeMayContinue {
+		t.Fatalf("expired task=(%+v, %v, %v)", expired, found, err)
+	}
+}
+
+func TestAsyncTaskSubmissionRejectsMalformedConflictAndMissingTarget(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, _ = fixture.createNode(t, "tenant-a")
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, TaskRequestInput{
+		TenantID: "tenant-a", TaskPermit: "malformed", Request: []byte("request"),
+	}, fixture.now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("malformed permit error=%v", err)
+	}
+	structurallyInvalid, err := taskpermit.EncodeHeader([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, TaskRequestInput{
+		TenantID: "tenant-a", TaskPermit: structurallyInvalid, Request: []byte("request"),
+	}, fixture.now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid permit structure error=%v", err)
+	}
+	deployment, instance := taskReadyDeployment(t, &fixture)
+	now := fixture.now.Add(2 * time.Minute)
+	input := signedTaskRequestInput(t, now, deployment, instance, "conflict-task", []byte(`{"input":"one"}`))
+	if _, _, err := fixture.store.SubmitTaskRequest(controlauth.Identity{}, input, now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unauthorized submission error=%v", err)
+	}
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, input, now.Add(11*time.Minute)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expired submission error=%v", err)
+	}
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, input, now); err != nil {
+		t.Fatal(err)
+	}
+	conflict := signedTaskRequestInput(t, now, deployment, instance, "conflict-task", []byte(`{"input":"two"}`))
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, conflict, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting submission error=%v", err)
+	}
+	second := signedTaskRequestInput(t, now, deployment, instance, "delivered-task", []byte(`{"input":"delivered"}`))
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, second, now); err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.mu.Lock()
+	deliveredKey := taskRequestKey("tenant-a", "delivered-task")
+	delivered := fixture.store.current.taskRequests[deliveredKey]
+	delivered.DispatchAttempts = 1
+	fixture.store.current.taskRequests[deliveredKey] = delivered
+	fixture.store.mu.Unlock()
+	ambiguous, changed, err := fixture.store.CancelTaskRequest(fixture.admin, "tenant-a", "delivered-task", now.Add(time.Second))
+	if err != nil || !changed || ambiguous.State != TaskRequestOutcomeUnknown || !ambiguous.OutcomeMayContinue {
+		t.Fatalf("previously delivered cancellation=(%+v, %v, %v)", ambiguous, changed, err)
+	}
+	if replayed, changed, err := fixture.store.CancelTaskRequest(fixture.admin, "tenant-a", "delivered-task", now.Add(2*time.Second)); err != nil || changed || replayed.State != TaskRequestOutcomeUnknown {
+		t.Fatalf("terminal cancellation retry=(%+v, %v, %v)", replayed, changed, err)
+	}
+	fixture.store.mu.Lock()
+	corrupt := fixture.store.current.taskRequests[deliveredKey]
+	corrupt.ResultBase64, corrupt.ResultAvailable = "!!!!", true
+	fixture.store.current.taskRequests[deliveredKey] = corrupt
+	fixture.store.mu.Unlock()
+	if _, _, err := fixture.store.GetTaskResult(fixture.admin, "tenant-a", "delivered-task"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("corrupt retained result error=%v", err)
+	}
+	fixture.store.mu.Lock()
+	corrupt.ResultBase64, corrupt.ResultAvailable = "", false
+	fixture.store.current.taskRequests[deliveredKey] = corrupt
+	fixture.store.mu.Unlock()
+	missing := signedTaskRequestInput(t, now, deployment, instance, "missing-task", []byte(`{"input":"missing"}`))
+	missing.TenantID = "missing-tenant"
+	if _, _, err := fixture.store.SubmitTaskRequest(fixture.admin, missing, now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("mismatched tenant error=%v", err)
+	}
+	tasks, err := fixture.store.ListTaskRequests(fixture.admin, "tenant-a")
+	if err != nil || len(tasks) != 2 || tasks[0].TaskID != "delivered-task" || tasks[1].TaskID != "conflict-task" {
+		t.Fatalf("task list=(%+v, %v)", tasks, err)
 	}
 }
 
