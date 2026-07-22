@@ -210,6 +210,7 @@ type NodePoolMembership struct {
 	Architecture             string `json:"architecture,omitempty"`
 	BootIdentitySHA256       string `json:"boot_identity_sha256"`
 	SchedulingPolicySHA256   string `json:"scheduling_policy_sha256"`
+	RuntimeAssuranceSHA256   string `json:"runtime_assurance_sha256,omitempty"`
 	IssuedAt                 string `json:"issued_at"`
 	NotAfter                 string `json:"not_after"`
 }

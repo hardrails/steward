@@ -119,7 +119,7 @@ var completionFlags = map[string][]string{
 	"control node-pool status":            {"-pool-id", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"control node-pool apply":             {"-pool-id", "-tenant-ids", "-architecture", "-min-nodes", "-desired-nodes", "-max-nodes", "-membership-key-id", "-membership-public-key", "-revision", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"control node-pool delete":            {"-pool-id", "-revision", "-control-url", "-token-file", "-ca-file", "-no-context"},
-	"control node-pool membership-issue":  {"-private-key", "-key-id", "-controller-id", "-pool-id", "-pool-membership-generation", "-pool-created-at", "-node-id", "-tenant-ids", "-architecture", "-boot-identity-sha256", "-scheduling-policy-sha256", "-valid-for", "-out", "-no-context"},
+	"control node-pool membership-issue":  {"-private-key", "-key-id", "-controller-id", "-pool-id", "-pool-membership-generation", "-pool-created-at", "-node-id", "-tenant-ids", "-architecture", "-boot-identity-sha256", "-scheduling-policy-sha256", "-runtime-assurance-sha256", "-valid-for", "-out", "-no-context"},
 	"control node-pool membership-verify": {"-in", "-public-key", "-key-id", "-no-context"},
 	"control node-pool membership-bind":   {"-in", "-credential", "-control-url", "-ca-file", "-no-context"},
 	"control snapshot":                    {"-tenant-id", "-node-id", "-snapshot-id", "-reason", "-revision"},

@@ -122,6 +122,7 @@ func TestMembershipValidationRejectsNonCanonicalClaims(t *testing.T) {
 		"too many tenants":   func(value *Statement) { value.TenantIDs = make([]string, 65) },
 		"architecture":       func(value *Statement) { value.Architecture = " bad" },
 		"boot digest":        func(value *Statement) { value.BootIdentitySHA256 = "sha256:ABC" },
+		"assurance digest":   func(value *Statement) { value.RuntimeAssuranceSHA256 = "sha256:ABC" },
 		"tenant identity":    func(value *Statement) { value.TenantIDs = []string{"bad/tenant"} },
 		"tenant order":       func(value *Statement) { value.TenantIDs = []string{"tenant-b", "tenant-a"} },
 		"issued time":        func(value *Statement) { value.IssuedAt = "yesterday" },
@@ -131,6 +132,11 @@ func TestMembershipValidationRejectsNonCanonicalClaims(t *testing.T) {
 		"not after":          func(value *Statement) { value.NotAfter = "tomorrow" },
 		"empty window":       func(value *Statement) { value.NotAfter = value.IssuedAt },
 		"overlong window":    func(value *Statement) { value.NotAfter = now.Add(MaxLifetime + time.Second).Format(time.RFC3339Nano) },
+	}
+	legacy := base
+	legacy.RuntimeAssuranceSHA256 = ""
+	if err := Validate(legacy); err != nil {
+		t.Fatalf("rolling-upgrade membership was rejected: %v", err)
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -162,6 +168,7 @@ func validStatement(now time.Time) Statement {
 		NodeID:        "node-a", TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
 		BootIdentitySHA256:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		SchedulingPolicySHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		RuntimeAssuranceSHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		IssuedAt:               now.Format(time.RFC3339Nano), NotAfter: now.Add(time.Hour).Format(time.RFC3339Nano),
 	}
 }

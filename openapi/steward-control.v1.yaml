@@ -4631,6 +4631,15 @@ components:
           description: >-
             Digest of the fixed-schema policy below. Control recomputes this
             digest before retaining the node-authenticated observation.
+        runtime_assurance:
+          $ref: "#/components/schemas/RuntimeAssurance"
+        runtime_assurance_sha256:
+          allOf:
+            - $ref: "#/components/schemas/SHA256Digest"
+          description: >-
+            Digest of runtime_assurance. Both fields are absent only for an
+            older Executor during a rolling upgrade; such an observation
+            cannot satisfy a signed required-assurance constraint.
         labels:
           type: array
           maxItems: 32
@@ -4657,6 +4666,37 @@ components:
             image locality; an empty array means it reported an empty cache.
         policy:
           $ref: "#/components/schemas/ExecutorSchedulingPolicy"
+    RuntimeAssurance:
+      type: object
+      additionalProperties: false
+      required: [schema_version, profile, runtime, isolation, network, state_isolation, credential_boundary, host_admin_intent]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.runtime-assurance.v1]
+        profile:
+          type: string
+          enum: [shared-host-hardened, dedicated-host-hardened]
+        runtime:
+          type: string
+          enum: [docker]
+        isolation:
+          type: string
+          enum: [gvisor]
+        network:
+          type: string
+          enum: [isolated-bridge]
+        state_isolation:
+          type: string
+          enum: [ephemeral-only, quota-enforced, unquotaed-dedicated]
+        credential_boundary:
+          type: string
+          enum: [gateway-only, not-configured]
+        host_admin_intent:
+          type: boolean
+      description: >-
+        Security-relevant Executor configuration. This is authenticated node
+        evidence, not remote attestation or proof that the host is uncompromised.
     ExecutorSchedulingLabel:
       type: object
       additionalProperties: false
@@ -5341,6 +5381,8 @@ components:
         boot_identity_sha256:
           $ref: "#/components/schemas/SHA256Digest"
         scheduling_policy_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        runtime_assurance_sha256:
           $ref: "#/components/schemas/SHA256Digest"
         issued_at:
           type: string

@@ -87,6 +87,7 @@ func TestControlNodePoolMembershipIssueAndVerify(t *testing.T) {
 		"-tenant-ids", "tenant-b,tenant-a", "-architecture", "amd64",
 		"-boot-identity-sha256", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"-scheduling-policy-sha256", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"-runtime-assurance-sha256", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		"-valid-for", "1h", "-out", output, "-no-context",
 	}, &digest, &bytes.Buffer{})
 	if err != nil || !strings.HasPrefix(strings.TrimSpace(digest.String()), "sha256:") {
@@ -165,6 +166,7 @@ func TestControlNodePoolMembershipCommandsReportArtifactFailures(t *testing.T) {
 		"-node-id", "node-a", "-tenant-ids", "tenant-a",
 		"-boot-identity-sha256", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"-scheduling-policy-sha256", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"-runtime-assurance-sha256", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		"-valid-for", "1h", "-out", output,
 	}
 	badKey := append([]string(nil), issue...)

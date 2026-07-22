@@ -323,6 +323,7 @@ func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error 
 	architecture := flags.String("architecture", "", "node architecture")
 	bootDigest := flags.String("boot-identity-sha256", "", "measured or immutable boot identity digest")
 	policyDigest := flags.String("scheduling-policy-sha256", "", "node scheduling policy digest")
+	assuranceDigest := flags.String("runtime-assurance-sha256", "", "node runtime assurance digest")
 	validFor := flags.Duration("valid-for", time.Hour, "membership lifetime, at most 24 hours")
 	output := flags.String("out", "", "new signed membership envelope")
 	if err := flags.Parse(arguments); err != nil {
@@ -334,9 +335,9 @@ func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error 
 	}
 	slices.Sort(tenants)
 	if *privateKeyPath == "" || *keyID == "" || *controllerID == "" || *poolID == "" || *membershipGeneration == 0 || *poolCreatedAt == "" ||
-		*nodeID == "" || *bootDigest == "" || *policyDigest == "" || *validFor <= 0 || *validFor > poolmembership.MaxLifetime ||
+		*nodeID == "" || *bootDigest == "" || *policyDigest == "" || *assuranceDigest == "" || *validFor <= 0 || *validFor > poolmembership.MaxLifetime ||
 		*output == "" || flags.NArg() != 0 {
-		return errors.New("membership issue requires a key, controller, exact pool membership generation, node, tenants, boot and policy digests, bounded validity, and output")
+		return errors.New("membership issue requires a key, controller, exact pool membership generation, node, tenants, boot, policy, and runtime assurance digests, bounded validity, and output")
 	}
 	privateKey, err := readPrivateKey(*privateKeyPath)
 	if err != nil {
@@ -348,7 +349,8 @@ func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error 
 		PoolCreatedAt: *poolCreatedAt,
 		NodeID:        *nodeID, TenantIDs: tenants, Architecture: *architecture,
 		BootIdentitySHA256: *bootDigest, SchedulingPolicySHA256: *policyDigest,
-		IssuedAt: now.Format(time.RFC3339Nano), NotAfter: now.Add(*validFor).Format(time.RFC3339Nano),
+		RuntimeAssuranceSHA256: *assuranceDigest,
+		IssuedAt:               now.Format(time.RFC3339Nano), NotAfter: now.Add(*validFor).Format(time.RFC3339Nano),
 	}, *keyID, privateKey)
 	if err != nil {
 		return err

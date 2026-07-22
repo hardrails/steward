@@ -23,6 +23,13 @@ func TestExecutorSchedulingObservationV1ValidatesCanonicalBoundedProfile(t *test
 		{"policy digest", func(value *ExecutorSchedulingObservationV1) {
 			value.SchedulingPolicySHA256 = "sha256:" + strings.Repeat("a", 64)
 		}},
+		{"assurance without digest", func(value *ExecutorSchedulingObservationV1) { value.RuntimeAssuranceSHA256 = "" }},
+		{"assurance digest", func(value *ExecutorSchedulingObservationV1) {
+			value.RuntimeAssuranceSHA256 = "sha256:" + strings.Repeat("a", 64)
+		}},
+		{"weakened shared host", func(value *ExecutorSchedulingObservationV1) {
+			value.RuntimeAssurance.StateIsolation = RuntimeAssuranceStateDedicated
+		}},
 		{"nil labels", func(value *ExecutorSchedulingObservationV1) { value.Labels = nil }},
 		{"unsorted labels", func(value *ExecutorSchedulingObservationV1) {
 			value.Labels = []ExecutorSchedulingLabelV1{{Key: "zone", Value: "b"}, {Key: "region", Value: "a"}}
@@ -103,5 +110,15 @@ func schedulingObservationFixture() ExecutorSchedulingObservationV1 {
 	}
 	observation.BootIdentitySHA256 = "sha256:" + strings.Repeat("b", 64)
 	observation.SchedulingPolicySHA256 = digest
+	assurance := RuntimeAssuranceV1{
+		SchemaVersion: RuntimeAssuranceSchemaV1, Profile: RuntimeAssuranceSharedHost,
+		Runtime: "docker", Isolation: ExecutorSchedulingIsolationGVisor, Network: "isolated-bridge",
+		StateIsolation: RuntimeAssuranceStateQuota, CredentialBoundary: "gateway-only",
+	}
+	observation.RuntimeAssurance = &assurance
+	observation.RuntimeAssuranceSHA256, err = RuntimeAssuranceDigest(assurance)
+	if err != nil {
+		panic(err)
+	}
 	return observation
 }

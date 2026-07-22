@@ -33,6 +33,7 @@ type Statement struct {
 	Architecture             string   `json:"architecture,omitempty"`
 	BootIdentitySHA256       string   `json:"boot_identity_sha256"`
 	SchedulingPolicySHA256   string   `json:"scheduling_policy_sha256"`
+	RuntimeAssuranceSHA256   string   `json:"runtime_assurance_sha256,omitempty"`
 	IssuedAt                 string   `json:"issued_at"`
 	NotAfter                 string   `json:"not_after"`
 }
@@ -111,6 +112,9 @@ func Validate(statement Statement) error {
 		statement.Architecture != "" && !validIdentity(statement.Architecture, 64) ||
 		!validDigest(statement.BootIdentitySHA256) || !validDigest(statement.SchedulingPolicySHA256) {
 		return errors.New("node-pool membership statement is invalid")
+	}
+	if statement.RuntimeAssuranceSHA256 != "" && !validDigest(statement.RuntimeAssuranceSHA256) {
+		return errors.New("node-pool membership runtime assurance digest is invalid")
 	}
 	for index, tenantID := range statement.TenantIDs {
 		if !validIdentity(tenantID, 128) || index > 0 && statement.TenantIDs[index-1] >= tenantID {

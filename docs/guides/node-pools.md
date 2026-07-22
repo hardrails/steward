@@ -115,6 +115,7 @@ stewardctl control node-pool membership-issue \
   -architecture amd64 \
   -boot-identity-sha256 sha256:BOOT_IDENTITY_HEX \
   -scheduling-policy-sha256 sha256:POLICY_HEX \
+  -runtime-assurance-sha256 sha256:ASSURANCE_HEX \
   -valid-for 1h \
   -out research-0042.membership.dsse.json
 ```
@@ -124,13 +125,21 @@ from being replayed after a pool is deleted and recreated. `CONTROL_INSTANCE_ID`
 appears in every finite enrollment package and response.
 Configure Executor with `-node-boot-identity-sha256` using a digest from your
 image pipeline, measured-boot verifier, or another trusted provisioning process.
-Executor derives `scheduling_policy_sha256` from its effective scheduling limits;
-Control recomputes that digest before retaining the authenticated observation.
-Read both current values from the node's `scheduling.observation` projection and
+Executor derives `scheduling_policy_sha256` from its effective scheduling limits
+and `runtime_assurance_sha256` from its security-relevant startup configuration.
+Control recomputes both digests before retaining the authenticated observation.
+Read all three current values from the node's `scheduling.observation` projection and
 give those exact values to the protected membership signer. Steward checks them
 again when the statement is bound and whenever it calculates pool eligibility.
-It does not independently measure the host, so the strength of the boot claim
-still depends on the process that supplies the boot identity to Executor.
+The assurance claim records Docker and gVisor use, isolated-bridge networking,
+state isolation, the Gateway credential boundary, and whether host-admin intent
+is enabled. It does not independently measure the host. The boot claim still
+depends on the process that supplies the boot identity to Executor, and a valid
+node signature does not prove that the node was uncompromised.
+
+Memberships issued before runtime assurance was added remain valid only until
+their existing expiry, which is at most 24 hours. Renew them with the assurance
+digest; new CLI-issued memberships require it.
 
 Verify the file before transfer:
 

@@ -143,6 +143,7 @@ func TestSignedPoolMembershipControlsElasticEligibilityAndSurvivesRestart(t *tes
 		NodeID:        identity.NodeID, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
 		BootIdentitySHA256:     observation.BootIdentitySHA256,
 		SchedulingPolicySHA256: observation.SchedulingPolicySHA256,
+		RuntimeAssuranceSHA256: observation.RuntimeAssuranceSHA256,
 		IssuedAt:               observedAt.Format(time.RFC3339Nano), NotAfter: observedAt.Add(time.Hour).Format(time.RFC3339Nano),
 	}
 	raw, err := poolmembership.Sign(statement, pool.MembershipKeyID, private)
@@ -155,6 +156,9 @@ func TestSignedPoolMembershipControlsElasticEligibilityAndSurvivesRestart(t *tes
 	}
 	if _, err := fixture.store.BindNodePoolMembership(identity, fixture.auth, raw, observedAt.Add(20*time.Second)); err != nil {
 		t.Fatalf("idempotent bind: %v", err)
+	}
+	if node.PoolMembership.RuntimeAssuranceSHA256 != observation.RuntimeAssuranceSHA256 {
+		t.Fatalf("runtime assurance was not retained: %+v", node.PoolMembership)
 	}
 	encoded, err := encodeState(fixture.store.current, fixture.limits.MaxStateBytes)
 	if err != nil {

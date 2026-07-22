@@ -19,6 +19,12 @@ const (
 	MaxExecutorSchedulingImages       = 128
 	MaxExecutorSchedulingAttribute    = 128
 	ExecutorSchedulingIsolationGVisor = "gvisor"
+	RuntimeAssuranceSchemaV1          = "steward.runtime-assurance.v1"
+	RuntimeAssuranceSharedHost        = "shared-host-hardened"
+	RuntimeAssuranceDedicatedHost     = "dedicated-host-hardened"
+	RuntimeAssuranceStateEphemeral    = "ephemeral-only"
+	RuntimeAssuranceStateQuota        = "quota-enforced"
+	RuntimeAssuranceStateDedicated    = "unquotaed-dedicated"
 )
 
 // ExecutorSchedulingResourcesV1 is one finite CPU, memory, process, and
@@ -45,6 +51,22 @@ type ExecutorSchedulingLabelV1 struct {
 	Value string `json:"value"`
 }
 
+// RuntimeAssuranceV1 is a digestible statement of the security-relevant
+// Executor configuration that produced a scheduling observation. It is not
+// remote attestation: the node remains an authenticated but untrusted reporter.
+// Independently signed pool membership can bind the digest so Control cannot
+// silently substitute a weaker configuration for elastic placement.
+type RuntimeAssuranceV1 struct {
+	SchemaVersion      string `json:"schema_version"`
+	Profile            string `json:"profile"`
+	Runtime            string `json:"runtime"`
+	Isolation          string `json:"isolation"`
+	Network            string `json:"network"`
+	StateIsolation     string `json:"state_isolation"`
+	CredentialBoundary string `json:"credential_boundary"`
+	HostAdminIntent    bool   `json:"host_admin_intent"`
+}
+
 // ExecutorSchedulingObservationV1 is posted with the node-scoped Executor
 // credential. Control supplies observed_at from its own clock.
 type ExecutorSchedulingObservationV1 struct {
@@ -59,7 +81,12 @@ type ExecutorSchedulingObservationV1 struct {
 	BootIdentitySHA256 string `json:"boot_identity_sha256,omitempty"`
 	// SchedulingPolicySHA256 is derived from Policy by Executor and independently
 	// recomputed by Control before the observation is retained.
-	SchedulingPolicySHA256 string                      `json:"scheduling_policy_sha256,omitempty"`
+	SchedulingPolicySHA256 string `json:"scheduling_policy_sha256,omitempty"`
+	// RuntimeAssuranceSHA256 commits to RuntimeAssurance. Older observations may
+	// omit both fields during rolling upgrades, but cannot satisfy a signed
+	// required_assurance placement constraint.
+	RuntimeAssurance       *RuntimeAssuranceV1         `json:"runtime_assurance,omitempty"`
+	RuntimeAssuranceSHA256 string                      `json:"runtime_assurance_sha256,omitempty"`
 	Labels                 []ExecutorSchedulingLabelV1 `json:"labels"`
 	Taints                 []string                    `json:"taints"`
 	// CachedImageConfigDigests is a soft placement observation. Executor still
@@ -90,6 +117,15 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 			return errors.New("executor scheduling policy digest is invalid")
 		}
 	}
+	if (observation.RuntimeAssurance == nil) != (observation.RuntimeAssuranceSHA256 == "") {
+		return errors.New("executor runtime assurance and digest must be present together")
+	}
+	if observation.RuntimeAssurance != nil {
+		digest, err := RuntimeAssuranceDigest(*observation.RuntimeAssurance)
+		if err != nil || observation.RuntimeAssuranceSHA256 != digest {
+			return errors.New("executor runtime assurance digest is invalid")
+		}
+	}
 	for index, label := range observation.Labels {
 		if !ValidSchedulingAttribute(label.Key) || !ValidSchedulingAttribute(label.Value) ||
 			index > 0 && observation.Labels[index-1].Key >= label.Key {
@@ -114,6 +150,39 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// RuntimeAssuranceDigest commits to the exact, fixed-schema assurance claim.
+func RuntimeAssuranceDigest(assurance RuntimeAssuranceV1) (string, error) {
+	if err := assurance.Validate(); err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(assurance)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + fmt.Sprintf("%x", sum[:]), nil
+}
+
+func (assurance RuntimeAssuranceV1) Validate() error {
+	if assurance.SchemaVersion != RuntimeAssuranceSchemaV1 || assurance.Runtime != "docker" ||
+		assurance.Isolation != ExecutorSchedulingIsolationGVisor || assurance.Network != "isolated-bridge" ||
+		(assurance.CredentialBoundary != "gateway-only" && assurance.CredentialBoundary != "not-configured") {
+		return errors.New("runtime assurance boundary is invalid")
+	}
+	switch assurance.StateIsolation {
+	case RuntimeAssuranceStateEphemeral, RuntimeAssuranceStateQuota:
+		if assurance.Profile == RuntimeAssuranceSharedHost && !assurance.HostAdminIntent {
+			return nil
+		}
+	case RuntimeAssuranceStateDedicated:
+		// Unquotaed state is never a shared-host assurance.
+	}
+	if assurance.Profile == RuntimeAssuranceDedicatedHost {
+		return nil
+	}
+	return errors.New("runtime assurance profile is inconsistent with its controls")
 }
 
 // SchedulingPolicyDigest commits to the exact fixed-schema resource policy.
