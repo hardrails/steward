@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -81,6 +82,40 @@ func TestExplainFiltersOneExactResource(t *testing.T) {
 	}
 }
 
+func TestExplainFindsResourceAfterFirstAttentionPage(t *testing.T) {
+	nextCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-page-two"))
+	control := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/operations/summary":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"generated_at":"2026-07-22T00:00:00Z","tenant_id":"tenant-a","capacity":[],"commands":{},"evidence":{},"attention":{"total":2,"warnings":2,"critical":0,"counts":[]}}`))
+		case "/v1/operations/attention":
+			writer.Header().Set("Content-Type", "application/json")
+			if request.URL.Query().Get("cursor") == "" {
+				_, _ = writer.Write([]byte(`{"items":[{"id":"a","reason":"node_stale","severity":"warning","resource":"node","node_id":"node-a","title":"A","explanation":"A cause","impact":"A impact","next_step":"A next"}],"next_cursor":"` + nextCursor + `"}`))
+				return
+			}
+			if request.URL.Query().Get("cursor") != nextCursor {
+				t.Fatalf("attention cursor = %q", request.URL.Query().Get("cursor"))
+			}
+			_, _ = writer.Write([]byte(`{"items":[{"id":"b","reason":"node_stale","severity":"warning","resource":"node","node_id":"node-b","title":"B","explanation":"B cause","impact":"B impact","next_step":"B next"}]}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer control.Close()
+	writeOperationsControlContext(t, control.URL)
+
+	var output bytes.Buffer
+	if err := run([]string{"explain", "node-b"}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatalf("explain later finding: %v", err)
+	}
+	if !strings.Contains(output.String(), "B cause") || strings.Contains(output.String(), "A cause") ||
+		strings.Contains(output.String(), "more attention findings") {
+		t.Fatalf("paged explain output = %s", output.String())
+	}
+}
+
 func TestRecoverRequiresPreviewAndExecutorRechecksApply(t *testing.T) {
 	runtimeRef := "executor-" + strings.Repeat("a", 64)
 	deletes := 0
@@ -140,7 +175,7 @@ func TestOperatorStatusJSONKeepsSourceFailureMachineReadable(t *testing.T) {
 		contextName:  "site-a",
 		controlURL:   "https://control.invalid",
 		controlToken: filepath.Join(t.TempDir(), "missing.token"),
-	})
+	}, "")
 	if status.State != "unavailable" || len(status.SourceErrors) != 1 {
 		t.Fatalf("unavailable status = %#v", status)
 	}

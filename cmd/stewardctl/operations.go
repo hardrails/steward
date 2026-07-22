@@ -17,7 +17,10 @@ import (
 	"github.com/hardrails/steward/internal/nodeclient"
 )
 
-const operatorStatusSchema = "steward.operator-status.v1"
+const (
+	operatorStatusSchema         = "steward.operator-status.v1"
+	maxOperatorAttentionFindings = 32768
+)
 
 type operatorFinding struct {
 	Code        string   `json:"code"`
@@ -60,7 +63,7 @@ func statusCommand(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	if connections.watchInterval == 0 {
-		status := collectOperatorStatus(connections)
+		status := collectOperatorStatus(connections, "")
 		return writeOperatorStatus(stdout, status, connections.output, false)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -68,7 +71,7 @@ func statusCommand(arguments []string, stdout io.Writer) error {
 	ticker := time.NewTicker(connections.watchInterval)
 	defer ticker.Stop()
 	for {
-		status := collectOperatorStatus(connections)
+		status := collectOperatorStatus(connections, "")
 		if err := writeOperatorStatus(stdout, status, connections.output, true); err != nil {
 			return err
 		}
@@ -85,7 +88,11 @@ func explainCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	status := collectOperatorStatus(connections)
+	target := ""
+	if len(positionals) == 1 {
+		target = positionals[0]
+	}
+	status := collectOperatorStatus(connections, target)
 	if len(positionals) == 1 {
 		target := positionals[0]
 		filtered := status.Findings[:0]
@@ -128,9 +135,9 @@ func recoverCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	readiness, err := client.Readiness(ctx)
+	previewCtx, previewCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	readiness, err := client.Readiness(previewCtx)
+	previewCancel()
 	if err != nil {
 		return fmt.Errorf("inspect node recovery state: %w", err)
 	}
@@ -144,7 +151,9 @@ func recoverCommand(arguments []string, stdout io.Writer) error {
 	if !*apply {
 		return writeRecoveryPlan(stdout, plan, *output)
 	}
-	if err := client.Destroy(ctx, runtimeRef); err != nil {
+	mutationCtx, mutationCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer mutationCancel()
+	if err := client.Destroy(mutationCtx, runtimeRef); err != nil {
 		return fmt.Errorf("apply bounded missing-workload recovery: %w", err)
 	}
 	plan.Applied = true
@@ -305,37 +314,35 @@ func parseOperatorConnectionFlags(command string, arguments []string, allowWatch
 	}, flags.Args(), nil
 }
 
-func collectOperatorStatus(connections operatorConnections) operatorStatus {
+func collectOperatorStatus(connections operatorConnections, target string) operatorStatus {
 	status := operatorStatus{
 		SchemaVersion: operatorStatusSchema, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Context: connections.contextName, State: "healthy", Findings: []operatorFinding{},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if connections.controlURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		client, err := controlclient.NewFromFiles(connections.controlURL, connections.controlToken, connections.caFile)
 		if err == nil {
 			var summary controlstore.OperationsSummary
 			summary, err = client.GetOperationsSummary(ctx, connections.tenantID)
 			if err == nil {
 				status.Control = &summary
-				var page controlstore.AttentionPage
-				page, err = client.ListAttention(ctx, connections.tenantID, "", "", controlstore.DefaultInventoryPageLimit)
-				if err == nil {
-					for _, item := range page.Items {
-						status.Findings = append(status.Findings, controlAttentionFinding(item))
-					}
-					if page.NextCursor != "" {
-						status.SourceErrors = append(status.SourceErrors, "Control has more attention findings; use 'stewardctl control attention list' to page the complete bounded inventory.")
-					}
+				var findings []operatorFinding
+				var truncated bool
+				findings, truncated, err = collectControlAttention(ctx, client, connections.tenantID, target)
+				status.Findings = append(status.Findings, findings...)
+				if truncated {
+					status.SourceErrors = append(status.SourceErrors, "Control has more attention findings; use 'stewardctl control attention list' to page the complete bounded inventory.")
 				}
 			}
 		}
 		if err != nil {
 			status.SourceErrors = append(status.SourceErrors, "Control: "+err.Error())
 		}
+		cancel()
 	}
 	if connections.nodeURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		client, err := nodeclient.NewFromTokenFile(connections.nodeURL, connections.nodeToken)
 		if err == nil {
 			var readiness nodeclient.Readiness
@@ -353,6 +360,7 @@ func collectOperatorStatus(connections operatorConnections) operatorStatus {
 		if err != nil {
 			status.SourceErrors = append(status.SourceErrors, "Executor: "+err.Error())
 		}
+		cancel()
 	}
 	for _, finding := range status.Findings {
 		if finding.Severity == "critical" {
@@ -365,6 +373,47 @@ func collectOperatorStatus(connections operatorConnections) operatorStatus {
 		status.State = "unavailable"
 	}
 	return status
+}
+
+func collectControlAttention(
+	ctx context.Context,
+	client *controlclient.Client,
+	tenantID string,
+	target string,
+) ([]operatorFinding, bool, error) {
+	limit := controlstore.DefaultInventoryPageLimit
+	if target != "" {
+		limit = controlstore.MaxInventoryPageLimit
+	}
+	findings := make([]operatorFinding, 0)
+	cursor := ""
+	seen := 0
+	for {
+		page, err := client.ListAttention(ctx, tenantID, "", cursor, limit)
+		if err != nil {
+			return findings, false, err
+		}
+		seen += len(page.Items)
+		if seen > maxOperatorAttentionFindings {
+			return findings, false, errors.New("Control attention inventory exceeds the bounded diagnostic scan limit")
+		}
+		for _, item := range page.Items {
+			finding := controlAttentionFinding(item)
+			if target == "" || finding.ResourceID == target {
+				findings = append(findings, finding)
+			}
+		}
+		if page.NextCursor == "" {
+			return findings, false, nil
+		}
+		if target == "" {
+			return findings, true, nil
+		}
+		if len(page.Items) == 0 || page.NextCursor == cursor {
+			return findings, false, errors.New("Control attention pagination did not make progress")
+		}
+		cursor = page.NextCursor
+	}
 }
 
 func controlAttentionFinding(item controlstore.AttentionItem) operatorFinding {
