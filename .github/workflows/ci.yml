@@ -93,6 +93,8 @@ jobs:
         run: bash integrations/terraform/modules/steward-control/tests/test.sh
       - name: Steward node Terraform module
         run: bash integrations/terraform/modules/steward-node/tests/test.sh
+      - name: Steward cloud node-pool modules
+        run: bash integrations/terraform/tests/cloud-node-pools.sh
       - name: Documentation consistency
         run: |
           bash scripts/check-docs-consistency.sh
