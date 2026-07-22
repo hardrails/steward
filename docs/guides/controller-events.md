@@ -33,7 +33,9 @@ operator attention—not full prompts, page bodies, binary artifacts, or secrets
 
 ## Read events
 
-The React control room has an **Agent signals** view. From a trusted terminal:
+The React control room has **Fleet tasks** and **Agent signals** views. The task
+view groups correlated progress; the signal view preserves each retained event.
+From a trusted terminal:
 
 ```console
 stewardctl control event list \

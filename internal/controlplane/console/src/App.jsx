@@ -237,10 +237,13 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/instance-events?limit=100", epoch)
         : Promise.resolve({events: []}),
+      tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/tasks?limit=100", epoch)
+        : Promise.resolve({tasks: []}),
     ];
-    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -577,7 +580,8 @@ const views = [
   ["commands", "05", "Signed activity"],
   ["credentials", "06", "Access records"],
   ["agents", "07", "Agents"],
-  ["events", "08", "Agent signals"],
+  ["tasks", "08", "Fleet tasks"],
+  ["events", "09", "Agent signals"],
 ];
 
 function ControlRoom(props) {
@@ -691,6 +695,7 @@ function ControlRoom(props) {
             ) : null}
             {view === "credentials" ? <CredentialsView page={snapshot.credentials} /> : null}
             {view === "agents" ? <AgentApplicationsView page={snapshot.agents} tenantID={selectedTenant} /> : null}
+            {view === "tasks" ? <TaskProjectionsView page={snapshot.tasks} tenantID={selectedTenant} /> : null}
             {view === "events" ? <InstanceEventsView page={snapshot.events} tenantID={selectedTenant} /> : null}
           </>
         )}
@@ -941,10 +946,10 @@ stewardctl agent build -file my-agent/Stewardfile.cue`}</code></pre>
   );
 }
 
-function ViewHeading({eyebrow, title, children}) {
+function ViewHeading({id, eyebrow, title, children}) {
   return (
     <div className="view-heading">
-      <div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div>
+      <div><p className="eyebrow">{eyebrow}</p><h2 id={id}>{title}</h2></div>
       <p>{children}</p>
     </div>
   );
@@ -1112,7 +1117,7 @@ function InstanceEventsView({page, tenantID}) {
   const events = Array.isArray(page?.events) ? page.events : [];
   return (
     <section className="view agent-signal-view" aria-labelledby="agent-signals-title">
-      <ViewHeading eyebrow="AGENT-REPORTED · IDENTITY-STAMPED" title="Signals from inside the sandbox">
+      <ViewHeading id="agent-signals-title" eyebrow="AGENT-REPORTED · IDENTITY-STAMPED" title="Signals from inside the sandbox">
         Status updates and research findings emitted by running agents. Steward binds each signal to its node, runtime, policy, and capsule before it leaves the host.
       </ViewHeading>
       <aside className="signal-boundary">
@@ -1171,6 +1176,101 @@ function InstanceEventsView({page, tenantID}) {
         </article>
       )}
       {page?.next_after ? <p className="truncation-note">More signals are retained. Continue with the HTTP API, MCP tool, or stewardctl event cursor.</p> : null}
+    </section>
+  );
+}
+
+const terminalTaskStates = new Set([
+  "agent_reported_completed",
+  "agent_reported_failed",
+  "agent_reported_cancelled",
+]);
+
+function TaskProjectionsView({page, tenantID}) {
+  const tasks = Array.isArray(page?.tasks) ? page.tasks : [];
+  const running = tasks.filter((task) => task.state === "agent_reported_running").length;
+  const terminal = tasks.filter((task) => terminalTaskStates.has(task.state)).length;
+  const conflicts = tasks.filter((task) => Array.isArray(task.conditions) && task.conditions.length).length;
+  return (
+    <section className="view fleet-task-view" aria-labelledby="fleet-tasks-title">
+      <ViewHeading id="fleet-tasks-title" eyebrow="BOUNDED TASK PROJECTION" title="Work reported across the fleet">
+        Follow task-correlated progress and findings without turning agent output into authority.
+      </ViewHeading>
+      <aside className="signal-boundary">
+        <strong>REPORTED STATE · NOT VERIFIED OUTCOME</strong>
+        <span>Steward binds every projection to one workload lineage and preserves conflicts. The agent still authored the lifecycle claims and summary.</span>
+      </aside>
+      {!tenantID ? (
+        <article className="incident-empty">
+          <span className="panel-index">TENANT PROJECTION REQUIRED</span>
+          <h3>Select one tenant to inspect fleet tasks.</h3>
+          <p>Task-correlated agent output never crosses tenant projections in this console.</p>
+        </article>
+      ) : tasks.length ? (
+        <>
+          <dl className="task-totals" aria-label="Retained task projection totals">
+            <div><dt>Retained</dt><dd>{tasks.length}</dd></div>
+            <div><dt>Reported running</dt><dd>{running}</dd></div>
+            <div><dt>Reported terminal</dt><dd>{terminal}</dd></div>
+            <div className={conflicts ? "has-conflict" : ""}><dt>With conflicts</dt><dd>{conflicts}</dd></div>
+          </dl>
+          <ol className="fleet-task-list">
+            {tasks.map((task) => {
+              const conditions = Array.isArray(task.conditions) ? task.conditions : [];
+              const failed = task.state === "agent_reported_failed";
+              const completed = task.state === "agent_reported_completed";
+              return (
+                <li key={task.projection_id}>
+                  <article className={"fleet-task-card" + (conditions.length ? " has-conflict" : "")}>
+                    <div className="fleet-task-state">
+                      <span>AGENT REPORTED</span>
+                      <strong>{humanize(task.state.replace("agent_reported_", ""))}</strong>
+                      <div className="task-state-track" aria-hidden="true">
+                        <i className={failed ? "is-failed" : completed ? "is-complete" : "is-active"} />
+                      </div>
+                      <time dateTime={task.last_observed_at}>{formatTime(task.last_observed_at)}</time>
+                    </div>
+                    <div className="fleet-task-body">
+                      <header>
+                        <div>
+                          <Badge kind={task.highest_severity === "critical" ? "is-danger" : task.highest_severity === "warning" ? "is-warning" : "is-ok"}>
+                            peak {task.highest_severity}
+                          </Badge>
+                          <code>{task.latest_code}</code>
+                        </div>
+                        <span>{task.instance_id} · gen {task.generation}</span>
+                      </header>
+                      <p className="fleet-task-id">{task.task_id}</p>
+                      <h3>{task.latest_summary}</h3>
+                      {conditions.length ? (
+                        <aside className="task-conflicts">
+                          <strong>CONFLICT PRESERVED</strong>
+                          <span>{conditions.map(humanize).join(" · ")}</span>
+                        </aside>
+                      ) : null}
+                      <dl className="fleet-task-facts">
+                        <div><dt>Events</dt><dd>{task.event_count}</dd></div>
+                        <div><dt>Findings</dt><dd>{task.finding_count}</dd></div>
+                        <div><dt>Node</dt><dd>{task.node_id}</dd></div>
+                        <div><dt>Run</dt><dd>{task.run_id || "not reported"}</dd></div>
+                        <div><dt>Runtime</dt><dd><code>{task.runtime_ref.slice(0, 22)}…</code></dd></div>
+                        <div><dt>First seen</dt><dd>{formatTime(task.first_observed_at)}</dd></div>
+                      </dl>
+                    </div>
+                  </article>
+                </li>
+              );
+            })}
+          </ol>
+        </>
+      ) : (
+        <article className="incident-empty">
+          <span className="panel-index">NO TASK-CORRELATED SIGNALS</span>
+          <h3>No retained event includes a task ID.</h3>
+          <p>Agents can report bounded progress and findings through the controller-events capability.</p>
+        </article>
+      )}
+      {page?.next_after ? <p className="truncation-note">More task projections are retained. Continue with the HTTP API, MCP tool, or stewardctl task cursor.</p> : null}
     </section>
   );
 }
