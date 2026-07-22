@@ -147,6 +147,290 @@ func TestInspectRootRejectsIncompleteTailWithoutRepair(t *testing.T) {
 	}
 }
 
+func TestInspectRootRejectsInvalidAndTamperedState(t *testing.T) {
+	if _, err := InspectRoot(nil, DefaultLimits()); err == nil || !strings.Contains(err.Error(), "root is required") {
+		t.Fatalf("nil root error = %v", err)
+	}
+
+	openRoot := func(t *testing.T, directory string) *os.Root {
+		t.Helper()
+		root, err := os.OpenRoot(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = root.Close() })
+		return root
+	}
+	initialized := func(t *testing.T) string {
+		t.Helper()
+		directory := filepath.Join(t.TempDir(), "control")
+		store, err := Initialize(directory, DefaultLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return directory
+	}
+
+	t.Run("valid state", func(t *testing.T) {
+		directory := initialized(t)
+		status, err := InspectRoot(openRoot(t, directory), DefaultLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Generation != 1 || status.Sequence != 0 {
+			t.Fatalf("status = %+v", status)
+		}
+	})
+
+	t.Run("invalid limits", func(t *testing.T) {
+		directory := initialized(t)
+		limits := DefaultLimits()
+		limits.MaxWALBytes = 0
+		if _, err := InspectRoot(openRoot(t, directory), limits); err == nil || !strings.Contains(err.Error(), "limit") {
+			t.Fatalf("invalid limits error = %v", err)
+		}
+	})
+
+	t.Run("missing current", func(t *testing.T) {
+		directory := t.TempDir()
+		if _, err := InspectRoot(openRoot(t, directory), DefaultLimits()); !errors.Is(err, ErrNotInitialized) {
+			t.Fatalf("missing CURRENT error = %v", err)
+		}
+	})
+
+	t.Run("unsafe current mode", func(t *testing.T) {
+		directory := initialized(t)
+		if err := os.Chmod(filepath.Join(directory, currentName), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InspectRoot(openRoot(t, directory), DefaultLimits()); err == nil || !strings.Contains(err.Error(), "owner-only") {
+			t.Fatalf("unsafe CURRENT error = %v", err)
+		}
+	})
+
+	t.Run("snapshot digest mismatch", func(t *testing.T) {
+		directory := initialized(t)
+		path := filepath.Join(directory, generationName("snapshot", 1))
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw[len(raw)-1] ^= 0xff
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InspectRoot(openRoot(t, directory), DefaultLimits()); err == nil || !strings.Contains(err.Error(), "snapshot does not match") {
+			t.Fatalf("snapshot digest error = %v", err)
+		}
+	})
+
+	t.Run("short WAL", func(t *testing.T) {
+		directory := initialized(t)
+		path := filepath.Join(directory, generationName("wal", 1))
+		if err := os.Truncate(path, walHeaderBytes-1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InspectRoot(openRoot(t, directory), DefaultLimits()); err == nil || !strings.Contains(err.Error(), "shorter than its header") {
+			t.Fatalf("short WAL error = %v", err)
+		}
+	})
+
+	t.Run("WAL header digest mismatch", func(t *testing.T) {
+		directory := initialized(t)
+		path := filepath.Join(directory, generationName("wal", 1))
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw[0] ^= 0xff
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InspectRoot(openRoot(t, directory), DefaultLimits()); err == nil || !strings.Contains(err.Error(), "header does not match") {
+			t.Fatalf("WAL header digest error = %v", err)
+		}
+	})
+}
+
+func TestInspectRootRejectsArtifactAndFormatSubstitution(t *testing.T) {
+	initialized := func(t *testing.T) string {
+		t.Helper()
+		directory := filepath.Join(t.TempDir(), "control")
+		store, err := Initialize(directory, DefaultLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return directory
+	}
+	updateCurrent := func(t *testing.T, directory string, update func(*manifest)) {
+		t.Helper()
+		path := filepath.Join(directory, currentName)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		current, err := unmarshalManifest(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		update(&current)
+		if err := os.WriteFile(path, marshalManifest(current), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, directory string)
+	}{
+		{
+			name: "malformed CURRENT",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(directory, currentName), []byte("invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "linked CURRENT",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				path := filepath.Join(directory, currentName)
+				if err := os.Link(path, filepath.Join(directory, "CURRENT.link")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing snapshot",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(directory, generationName("snapshot", 1))); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unsafe snapshot mode",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				if err := os.Chmod(filepath.Join(directory, generationName("snapshot", 1)), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed authenticated snapshot",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				raw := make([]byte, snapshotHeaderBytes)
+				if err := os.WriteFile(filepath.Join(directory, generationName("snapshot", 1)), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				updateCurrent(t, directory, func(current *manifest) { current.SnapshotHash = hashBytes(raw) })
+			},
+		},
+		{
+			name: "snapshot generation mismatch",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				path := filepath.Join(directory, generationName("snapshot", 1))
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := unmarshalSnapshot(raw, DefaultLimits().MaxStateBytes)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot.Generation = 2
+				raw, err = marshalSnapshot(snapshot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				updateCurrent(t, directory, func(current *manifest) { current.SnapshotHash = hashBytes(raw) })
+			},
+		},
+		{
+			name: "missing WAL",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(directory, generationName("wal", 1))); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unsafe WAL mode",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				if err := os.Chmod(filepath.Join(directory, generationName("wal", 1)), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed authenticated WAL header",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				path := filepath.Join(directory, generationName("wal", 1))
+				raw := make([]byte, walHeaderBytes)
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				updateCurrent(t, directory, func(current *manifest) { current.WALHeaderHash = hashBytes(raw) })
+			},
+		},
+		{
+			name: "WAL continuation mismatch",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				path := filepath.Join(directory, generationName("wal", 1))
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				header, err := unmarshalWALHeader(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				header.Generation = 2
+				raw, err = marshalWALHeader(header)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				updateCurrent(t, directory, func(current *manifest) { current.WALHeaderHash = hashBytes(raw) })
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := initialized(t)
+			test.mutate(t, directory)
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			if _, err := InspectRoot(root, DefaultLimits()); err == nil {
+				t.Fatal("substituted Control state was accepted")
+			}
+		})
+	}
+}
+
 func TestMutationPublishesOnlyAfterSync(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "control")
 	store, err := Initialize(directory, DefaultLimits())

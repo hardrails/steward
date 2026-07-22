@@ -416,15 +416,6 @@ func inspect(archivePath string, consume func(ManifestFile, io.Reader) error) (R
 	return reportFromManifest(manifest, digest(hash.Sum(nil))), nil
 }
 
-func openStateFiles(directory string) ([]openedFile, error) {
-	root, err := os.OpenRoot(directory)
-	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
-	return openStateFilesRoot(root)
-}
-
 func openStateFilesRoot(root *os.Root) ([]openedFile, error) {
 	directory, err := root.Open(".")
 	if err != nil {
@@ -510,15 +501,6 @@ func validateManifest(manifest Manifest) error {
 	return nil
 }
 
-func validateRestoredState(directory string, report Report) error {
-	root, err := os.OpenRoot(directory)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	return validateRestoredStateRoot(root, report)
-}
-
 func validateRestoredStateRoot(root *os.Root, report Report) error {
 	if err := validateDefaultIdentitySetRoot(root); err != nil {
 		return err
@@ -579,28 +561,6 @@ func validateDefaultIdentitySetRoot(root *os.Root) error {
 	return nil
 }
 
-func validateDefaultIdentitySet(directory string) error {
-	if _, err := controlauth.LoadKey(filepath.Join(directory, "auth.key")); err != nil {
-		return fmt.Errorf("validate backed-up Control authentication identity: %w", err)
-	}
-	witnessPrivate, witnessPublic, err := controlwitness.LoadPair(
-		filepath.Join(directory, "witness.private.pem"), filepath.Join(directory, "witness.public.pem"),
-	)
-	if err != nil {
-		return fmt.Errorf("validate backed-up witness identity: %w", err)
-	}
-	_, controllerPublic, err := controlwitness.LoadPair(
-		filepath.Join(directory, "controller.private.pem"), filepath.Join(directory, "controller.public.pem"),
-	)
-	if err != nil {
-		return fmt.Errorf("validate backed-up controller identity: %w", err)
-	}
-	if bytes.Equal(witnessPublic, controllerPublic) || len(witnessPrivate) == 0 {
-		return errors.New("Control backup requires separate controller and witness identities")
-	}
-	return nil
-}
-
 func openRegular(path string, limit int64, allowedModes ...os.FileMode) (*os.File, os.FileInfo, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -626,19 +586,6 @@ func openRegular(path string, limit int64, allowedModes ...os.FileMode) (*os.Fil
 		return nil, nil, errors.New("file must be owned by the current user")
 	}
 	return file, info, nil
-}
-
-func createExclusive(path string, mode os.FileMode) (*os.File, error) {
-	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, uint32(mode.Perm()))
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = syscall.Close(fd)
-		return nil, errors.New("create returned an invalid file")
-	}
-	return file, nil
 }
 
 func createExclusiveRoot(root *os.Root, name string, mode os.FileMode) (*os.File, error) {
@@ -847,13 +794,4 @@ func linkCount(info os.FileInfo) uint64 {
 		return 0
 	}
 	return uint64(stat.Nlink)
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
 }

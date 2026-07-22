@@ -102,6 +102,37 @@ func TestCreateRequiresStoppedCompleteDefaultControlState(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsInvalidPathAndTimeBoundaries(t *testing.T) {
+	root := t.TempDir()
+	state := initializeControlState(t, root, false)
+	validOutput := filepath.Join(root, "backup.tar")
+	validTime := time.Now().UTC()
+	for _, test := range []struct {
+		name   string
+		state  string
+		output string
+		now    time.Time
+	}{
+		{name: "relative state", state: "relative", output: validOutput, now: validTime},
+		{name: "relative output", state: state, output: "relative.tar", now: validTime},
+		{name: "zero creation time", state: state, output: validOutput},
+		{name: "missing state", state: filepath.Join(root, "missing-state"), output: validOutput, now: validTime},
+		{name: "missing output parent", state: state, output: filepath.Join(root, "missing-parent", "backup.tar"), now: validTime},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Create(test.state, test.output, test.now); err == nil {
+				t.Fatal("invalid backup boundary was accepted")
+			}
+		})
+	}
+	if err := os.WriteFile(validOutput, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(state, validOutput, validTime); err == nil || !strings.Contains(err.Error(), "exist") {
+		t.Fatalf("existing output error = %v", err)
+	}
+}
+
 func TestCreateRetainsVerifiedOutputDirectoryIdentity(t *testing.T) {
 	root := t.TempDir()
 	state := initializeControlState(t, root, false)
@@ -220,6 +251,71 @@ func TestVerifyRejectsHostileControlBackupEntries(t *testing.T) {
 			t.Fatalf("appended bytes error = %v", err)
 		}
 	})
+}
+
+func TestVerifyRejectsMalformedArchiveBoundaries(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Verify("relative.tar"); err == nil {
+		t.Fatal("relative archive was accepted")
+	}
+	if _, err := Verify(filepath.Join(root, "missing.tar")); err == nil {
+		t.Fatal("missing archive was accepted")
+	}
+
+	empty := filepath.Join(root, "empty.tar")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(empty); err == nil || !strings.Contains(err.Error(), "manifest entry") {
+		t.Fatalf("empty archive error = %v", err)
+	}
+
+	writeManifest := func(t *testing.T, path string, declared int64, raw []byte) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer := tar.NewWriter(file)
+		if err := writer.WriteHeader(&tar.Header{
+			Name: manifestName, Mode: 0o600, Size: declared, Typeflag: tar.TypeReg, Format: tar.FormatUSTAR,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = writer.Write(raw)
+		_ = writer.Close()
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	truncated := filepath.Join(root, "truncated.tar")
+	writeManifest(t, truncated, 8, []byte("{}"))
+	if _, err := Verify(truncated); err == nil || !strings.Contains(err.Error(), "manifest body") {
+		t.Fatalf("truncated manifest error = %v", err)
+	}
+
+	malformed := filepath.Join(root, "malformed.tar")
+	writeManifest(t, malformed, 1, []byte("{"))
+	if _, err := Verify(malformed); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("malformed manifest error = %v", err)
+	}
+
+	invalid := filepath.Join(root, "invalid.tar")
+	writeManifest(t, invalid, 3, []byte("{}\n"))
+	if _, err := Verify(invalid); err == nil {
+		t.Fatal("invalid manifest was accepted")
+	}
+
+	state := initializeControlState(t, root, false)
+	valid := filepath.Join(root, "valid-for-consumer.tar")
+	if _, err := Create(state, valid, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspect(valid, func(ManifestFile, io.Reader) error { return errors.New("injected consumer failure") }); err == nil ||
+		!strings.Contains(err.Error(), "injected consumer failure") {
+		t.Fatalf("consumer error = %v", err)
+	}
 }
 
 func TestRestoreIsPreviewSafeByConstruction(t *testing.T) {
@@ -456,8 +552,25 @@ func TestBackupHelpersRejectHostileFilesystemAndManifestState(t *testing.T) {
 		if file, _, err := openRegular(root, 1, 0o700); err == nil || file != nil {
 			t.Fatal("directory was opened as a regular file")
 		}
-		if _, err := createExclusive(wrongMode, 0o600); err == nil {
+		openedRoot, err := os.OpenRoot(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer openedRoot.Close()
+		if _, err := createExclusiveRoot(openedRoot, filepath.Base(wrongMode), 0o600); err == nil {
 			t.Fatal("existing output was overwritten")
+		}
+		if _, err := createExclusiveRoot(nil, "new", 0o600); err == nil {
+			t.Fatal("nil output root was accepted")
+		}
+		if _, err := createExclusiveRoot(openedRoot, "nested/new", 0o600); err == nil {
+			t.Fatal("nested output name was accepted")
+		}
+		if _, err := readRootRegular(nil, "file", 1, 0o600); err == nil {
+			t.Fatal("nil read root was accepted")
+		}
+		if file, _, err := openRootRegular(openedRoot, "file", 1); err == nil || file != nil {
+			t.Fatal("empty allowed mode set was accepted")
 		}
 	})
 
@@ -466,7 +579,12 @@ func TestBackupHelpersRejectHostileFilesystemAndManifestState(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(unsafe, "bad name"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if files, err := openStateFiles(unsafe); err == nil || files != nil {
+		unsafeRoot, err := os.OpenRoot(unsafe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unsafeRoot.Close()
+		if files, err := openStateFilesRoot(unsafeRoot); err == nil || files != nil {
 			t.Fatal("unsafe state filename was accepted")
 		}
 		crowded := t.TempDir()
@@ -475,7 +593,12 @@ func TestBackupHelpersRejectHostileFilesystemAndManifestState(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if files, err := openStateFiles(crowded); err == nil || files != nil {
+		crowdedRoot, err := os.OpenRoot(crowded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer crowdedRoot.Close()
+		if files, err := openStateFilesRoot(crowdedRoot); err == nil || files != nil {
 			t.Fatal("oversized state inventory was accepted")
 		}
 	})
@@ -507,16 +630,146 @@ func TestBackupHelpersRejectHostileFilesystemAndManifestState(t *testing.T) {
 	t.Run("restored checkpoint identity", func(t *testing.T) {
 		root := t.TempDir()
 		state := initializeControlState(t, root, false)
-		if err := validateRestoredState(state, Report{Generation: 2}); err == nil ||
+		stateRoot, err := os.OpenRoot(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stateRoot.Close()
+		if err := validateRestoredStateRoot(stateRoot, Report{Generation: 2}); err == nil ||
 			!strings.Contains(err.Error(), "checkpoint") {
 			t.Fatalf("mismatched checkpoint error = %v", err)
 		}
 		missingIdentity := t.TempDir()
-		if err := validateDefaultIdentitySet(missingIdentity); err == nil ||
+		missingRoot, err := os.OpenRoot(missingIdentity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer missingRoot.Close()
+		if err := validateDefaultIdentitySetRoot(missingRoot); err == nil ||
 			!strings.Contains(err.Error(), "authentication identity") {
 			t.Fatalf("missing identity error = %v", err)
 		}
 	})
+
+	t.Run("identity material", func(t *testing.T) {
+		for _, test := range []struct {
+			name   string
+			mutate func(t *testing.T, state string)
+		}{
+			{
+				name: "invalid authentication key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.WriteFile(filepath.Join(state, "auth.key"), []byte("invalid"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "missing witness private key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.Remove(filepath.Join(state, "witness.private.pem")); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "missing witness public key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.Remove(filepath.Join(state, "witness.public.pem")); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "invalid witness private key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.WriteFile(filepath.Join(state, "witness.private.pem"), []byte("invalid"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "invalid witness public key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.WriteFile(filepath.Join(state, "witness.public.pem"), []byte("invalid"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "mismatched witness pair",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					copyTestFile(t, filepath.Join(state, "controller.public.pem"), filepath.Join(state, "witness.public.pem"), 0o644)
+				},
+			},
+			{
+				name: "invalid controller private key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.WriteFile(filepath.Join(state, "controller.private.pem"), []byte("invalid"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "missing controller public key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.Remove(filepath.Join(state, "controller.public.pem")); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "invalid controller public key",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					if err := os.WriteFile(filepath.Join(state, "controller.public.pem"), []byte("invalid"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "shared controller and witness identity",
+				mutate: func(t *testing.T, state string) {
+					t.Helper()
+					copyTestFile(t, filepath.Join(state, "witness.private.pem"), filepath.Join(state, "controller.private.pem"), 0o600)
+					copyTestFile(t, filepath.Join(state, "witness.public.pem"), filepath.Join(state, "controller.public.pem"), 0o644)
+				},
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				root := t.TempDir()
+				state := initializeControlState(t, root, false)
+				test.mutate(t, state)
+				stateRoot, err := os.OpenRoot(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer stateRoot.Close()
+				if err := validateDefaultIdentitySetRoot(stateRoot); err == nil {
+					t.Fatal("invalid identity material was accepted")
+				}
+			})
+		}
+	})
+}
+
+func copyTestFile(t *testing.T, source, destination string, mode os.FileMode) {
+	t.Helper()
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, raw, mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func validManifestFixture() Manifest {
