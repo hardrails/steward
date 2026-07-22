@@ -14,8 +14,9 @@ func TestMembershipRoundTripAndBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	statement := Statement{
-		SchemaVersion: 1, ControllerInstanceID: "control-a", PoolID: "pool-a", PoolRevision: 3,
-		NodeID: "node-a", TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		SchemaVersion: 1, ControllerInstanceID: "control-a", PoolID: "pool-a", PoolMembershipGeneration: 3,
+		PoolCreatedAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
+		NodeID:        "node-a", TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
 		BootIdentitySHA256:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		SchedulingPolicySHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		IssuedAt:               now.Format(time.RFC3339Nano), NotAfter: now.Add(time.Hour).Format(time.RFC3339Nano),

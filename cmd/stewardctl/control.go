@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -20,7 +22,9 @@ import (
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/nodeclient"
+	"github.com/hardrails/steward/internal/poolmembership"
 	"github.com/hardrails/steward/internal/securefile"
 )
 
@@ -77,6 +81,12 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodePoolApply(arguments[2:], stdout)
 	case "node-pool delete":
 		return controlNodePoolDelete(arguments[2:], stdout)
+	case "node-pool membership-issue":
+		return controlNodePoolMembershipIssue(arguments[2:], stdout)
+	case "node-pool membership-verify":
+		return controlNodePoolMembershipVerify(arguments[2:], stdout)
+	case "node-pool membership-bind":
+		return controlNodePoolMembershipBind(arguments[2:], stdout)
 	case "node-credential revoke":
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
 	case "snapshot status":
@@ -143,7 +153,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete|membership-issue|membership-verify|membership-bind, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 func controlEventList(arguments []string, stdout io.Writer) error {
@@ -257,6 +267,8 @@ func controlNodePoolApply(arguments []string, stdout io.Writer) error {
 	minimum := flags.Int("min-nodes", 0, "minimum infrastructure capacity")
 	desired := flags.Int("desired-nodes", 0, "desired infrastructure capacity")
 	maximum := flags.Int("max-nodes", 0, "maximum infrastructure capacity")
+	membershipKeyID := flags.String("membership-key-id", "", "independent pool membership signing key ID")
+	membershipPublicKeyPath := flags.String("membership-public-key", "", "independent pool membership Ed25519 public key")
 	revision := flags.Uint64("revision", 0, "expected retained revision; zero creates")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -266,6 +278,17 @@ func controlNodePoolApply(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	sort.Strings(tenantIDs)
+	membershipPublicKey := ""
+	if (*membershipKeyID == "") != (*membershipPublicKeyPath == "") {
+		return errors.New("control node-pool apply requires both membership key ID and public key, or neither")
+	}
+	if *membershipPublicKeyPath != "" {
+		public, err := readPublicKey(*membershipPublicKeyPath)
+		if err != nil {
+			return fmt.Errorf("read node-pool membership public key: %w", err)
+		}
+		membershipPublicKey = base64.StdEncoding.EncodeToString(public)
+	}
 	if *poolID == "" || *minimum < 0 || *desired < *minimum || *maximum < *desired || *maximum <= 0 || flags.NArg() != 0 {
 		return errors.New("control node-pool apply requires pool ID, tenants, and 0 <= min <= desired <= max")
 	}
@@ -278,11 +301,136 @@ func controlNodePoolApply(arguments []string, stdout io.Writer) error {
 	status, err := client.ApplyNodePool(ctx, *poolID, controlclient.NodePoolApply{
 		ExpectedRevision: *revision, TenantIDs: tenantIDs, Architecture: *architecture,
 		MinNodes: *minimum, DesiredNodes: *desired, MaxNodes: *maximum,
+		MembershipKeyID: *membershipKeyID, MembershipPublicKeyBase64: membershipPublicKey,
 	})
 	if err != nil {
 		return err
 	}
 	return writeControlJSON(stdout, status)
+}
+
+func controlNodePoolMembershipIssue(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-pool membership-issue", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	privateKeyPath := flags.String("private-key", "", "owner-only independent membership signing key")
+	keyID := flags.String("key-id", "", "membership signing key ID configured on the pool")
+	controllerID := flags.String("controller-id", "", "exact Steward Control instance identity")
+	poolID := flags.String("pool-id", "", "node pool identity")
+	membershipGeneration := flags.Uint64("pool-membership-generation", 0, "exact node pool membership generation")
+	poolCreatedAt := flags.String("pool-created-at", "", "exact node pool creation timestamp")
+	nodeID := flags.String("node-id", "", "exact node identity")
+	tenantList := flags.String("tenant-ids", "", "comma-separated tenant bindings")
+	architecture := flags.String("architecture", "", "node architecture")
+	bootDigest := flags.String("boot-identity-sha256", "", "measured or immutable boot identity digest")
+	policyDigest := flags.String("scheduling-policy-sha256", "", "node scheduling policy digest")
+	validFor := flags.Duration("valid-for", time.Hour, "membership lifetime, at most 24 hours")
+	output := flags.String("out", "", "new signed membership envelope")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	tenants, err := parseTenantIDs(*tenantList)
+	if err != nil {
+		return err
+	}
+	slices.Sort(tenants)
+	if *privateKeyPath == "" || *keyID == "" || *controllerID == "" || *poolID == "" || *membershipGeneration == 0 || *poolCreatedAt == "" ||
+		*nodeID == "" || *bootDigest == "" || *policyDigest == "" || *validFor <= 0 || *validFor > poolmembership.MaxLifetime ||
+		*output == "" || flags.NArg() != 0 {
+		return errors.New("membership issue requires a key, controller, exact pool membership generation, node, tenants, boot and policy digests, bounded validity, and output")
+	}
+	privateKey, err := readPrivateKey(*privateKeyPath)
+	if err != nil {
+		return err
+	}
+	now := timeNow().UTC()
+	raw, err := poolmembership.Sign(poolmembership.Statement{
+		SchemaVersion: 1, ControllerInstanceID: *controllerID, PoolID: *poolID, PoolMembershipGeneration: *membershipGeneration,
+		PoolCreatedAt: *poolCreatedAt,
+		NodeID:        *nodeID, TenantIDs: tenants, Architecture: *architecture,
+		BootIdentitySHA256: *bootDigest, SchedulingPolicySHA256: *policyDigest,
+		IssuedAt: now.Format(time.RFC3339Nano), NotAfter: now.Add(*validFor).Format(time.RFC3339Nano),
+	}, *keyID, privateKey)
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if err := writeNewFile(*output, raw, 0o600); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, strings.TrimSpace(dsse.Digest(raw[:len(raw)-1])))
+	return err
+}
+
+func controlNodePoolMembershipVerify(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-pool membership-verify", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	input := flags.String("in", "", "signed membership envelope")
+	publicKeyPath := flags.String("public-key", "", "membership authority public key")
+	keyID := flags.String("key-id", "", "membership authority key ID")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *input == "" || *publicKeyPath == "" || *keyID == "" || flags.NArg() != 0 {
+		return errors.New("membership verify requires input, public key, and key ID")
+	}
+	raw, err := securefile.Read(*input, 64<<10, securefile.Regular)
+	if err != nil {
+		return err
+	}
+	public, err := readPublicKey(*publicKeyPath)
+	if err != nil {
+		return err
+	}
+	verified, err := poolmembership.Verify(bytes.TrimSpace(raw), *keyID, public, timeNow())
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, verified.Statement)
+}
+
+func controlNodePoolMembershipBind(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-pool membership-bind", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, false)
+	input := flags.String("in", "", "signed membership envelope")
+	credentialPath := flags.String("credential", "", "owner-only enrolled Control node credential JSON")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *input == "" || *credentialPath == "" || flags.NArg() != 0 {
+		return errors.New("membership bind requires an enrolled node credential and membership input")
+	}
+	raw, err := securefile.Read(*input, 64<<10, securefile.Regular)
+	if err != nil {
+		return err
+	}
+	credentialRaw, err := securefile.Read(*credentialPath, 64<<10, securefile.OwnerOnly)
+	if err != nil {
+		return err
+	}
+	var credential controlauth.NodeCredentialFile
+	if err := dsse.DecodeStrictInto(credentialRaw, 64<<10, &credential); err != nil || credential.Version != 2 ||
+		credential.Scope != "node" || credential.NodeID == "" || credential.Credential == "" {
+		return errors.New("membership bind credential is not an enrolled Control node credential")
+	}
+	var caPEM []byte
+	if *common.caFile != "" {
+		caPEM, err = securefile.Read(*common.caFile, maxArtifactBytes, securefile.TrustFile)
+		if err != nil {
+			return err
+		}
+	}
+	client, err := controlclient.New(*common.url, credential.Credential, caPEM)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	binding, err := client.BindNodePoolMembership(ctx, bytes.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, binding)
 }
 
 func controlNodePoolDelete(arguments []string, stdout io.Writer) error {

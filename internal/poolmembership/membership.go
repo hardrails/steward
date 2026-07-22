@@ -4,6 +4,7 @@ package poolmembership
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -18,21 +19,22 @@ const (
 	MaxLifetime = 24 * time.Hour
 )
 
-// Statement binds a short-lived node identity to one exact pool revision. The
-// boot and scheduling-policy digests prevent a valid statement from being
-// replayed by a differently configured machine.
+// Statement binds a short-lived node identity to one exact pool membership
+// generation. The boot and scheduling-policy digests prevent a valid statement
+// from being replayed by a differently configured machine.
 type Statement struct {
-	SchemaVersion          int      `json:"schema_version"`
-	ControllerInstanceID   string   `json:"controller_instance_id"`
-	PoolID                 string   `json:"pool_id"`
-	PoolRevision           uint64   `json:"pool_revision"`
-	NodeID                 string   `json:"node_id"`
-	TenantIDs              []string `json:"tenant_ids"`
-	Architecture           string   `json:"architecture,omitempty"`
-	BootIdentitySHA256     string   `json:"boot_identity_sha256"`
-	SchedulingPolicySHA256 string   `json:"scheduling_policy_sha256"`
-	IssuedAt               string   `json:"issued_at"`
-	NotAfter               string   `json:"not_after"`
+	SchemaVersion            int      `json:"schema_version"`
+	ControllerInstanceID     string   `json:"controller_instance_id"`
+	PoolID                   string   `json:"pool_id"`
+	PoolMembershipGeneration uint64   `json:"pool_membership_generation"`
+	PoolCreatedAt            string   `json:"pool_created_at"`
+	NodeID                   string   `json:"node_id"`
+	TenantIDs                []string `json:"tenant_ids"`
+	Architecture             string   `json:"architecture,omitempty"`
+	BootIdentitySHA256       string   `json:"boot_identity_sha256"`
+	SchedulingPolicySHA256   string   `json:"scheduling_policy_sha256"`
+	IssuedAt                 string   `json:"issued_at"`
+	NotAfter                 string   `json:"not_after"`
 }
 
 type Verified struct {
@@ -81,9 +83,30 @@ func Verify(raw []byte, keyID string, publicKey ed25519.PublicKey, now time.Time
 	return Verified{Statement: statement, Envelope: slices.Clone(raw), Digest: dsse.Digest(raw), KeyID: verifiedKeyID}, nil
 }
 
+// Inspect returns the validated payload without trusting its signature. It is
+// only for selecting the public pool configuration needed by Verify.
+func Inspect(raw []byte) (Statement, error) {
+	if len(raw) == 0 || len(raw) > 64<<10 {
+		return Statement{}, errors.New("node-pool membership envelope is invalid")
+	}
+	envelope, err := dsse.Parse(raw)
+	if err != nil || envelope.PayloadType != PayloadType {
+		return Statement{}, errors.New("node-pool membership envelope is invalid")
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return Statement{}, errors.New("node-pool membership payload encoding is invalid")
+	}
+	var statement Statement
+	if err := dsse.DecodeStrictInto(payload, 32<<10, &statement); err != nil || Validate(statement) != nil {
+		return Statement{}, errors.New("node-pool membership payload is invalid")
+	}
+	return statement, nil
+}
+
 func Validate(statement Statement) error {
 	if statement.SchemaVersion != 1 || !validIdentity(statement.ControllerInstanceID, 160) ||
-		!validIdentity(statement.PoolID, 128) || statement.PoolRevision == 0 ||
+		!validIdentity(statement.PoolID, 128) || statement.PoolMembershipGeneration == 0 ||
 		!validIdentity(statement.NodeID, 128) || len(statement.TenantIDs) == 0 || len(statement.TenantIDs) > 64 ||
 		statement.Architecture != "" && !validIdentity(statement.Architecture, 64) ||
 		!validDigest(statement.BootIdentitySHA256) || !validDigest(statement.SchedulingPolicySHA256) {
@@ -96,7 +119,9 @@ func Validate(statement Statement) error {
 	}
 	issued, issuedErr := time.Parse(time.RFC3339Nano, statement.IssuedAt)
 	notAfter, notAfterErr := time.Parse(time.RFC3339Nano, statement.NotAfter)
-	if issuedErr != nil || notAfterErr != nil || statement.IssuedAt != issued.UTC().Format(time.RFC3339Nano) ||
+	created, createdErr := time.Parse(time.RFC3339Nano, statement.PoolCreatedAt)
+	if issuedErr != nil || notAfterErr != nil || createdErr != nil || statement.PoolCreatedAt != created.UTC().Format(time.RFC3339Nano) ||
+		statement.IssuedAt != issued.UTC().Format(time.RFC3339Nano) || issued.Before(created) ||
 		statement.NotAfter != notAfter.UTC().Format(time.RFC3339Nano) || !notAfter.After(issued) || notAfter.Sub(issued) > MaxLifetime {
 		return errors.New("node-pool membership validity window is invalid")
 	}

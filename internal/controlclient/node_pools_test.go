@@ -117,7 +117,7 @@ func TestNodePoolClientRejectsInvalidRequestsAndResponses(t *testing.T) {
 func controlClientNodePoolStatus(poolID string) controlstore.NodePoolStatus {
 	return controlstore.NodePoolStatus{
 		Pool: controlstore.NodePool{
-			ID: poolID, Revision: 1, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+			ID: poolID, Revision: 1, MembershipGeneration: 1, TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
 			MinNodes: 1, DesiredNodes: 2, MaxNodes: 4,
 			CreatedAt: "2026-07-21T01:00:00Z", UpdatedAt: "2026-07-21T01:00:00Z",
 		},

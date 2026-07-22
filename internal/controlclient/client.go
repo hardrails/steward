@@ -255,12 +255,19 @@ type NodePoolList struct {
 }
 
 type NodePoolApply struct {
-	ExpectedRevision uint64
-	TenantIDs        []string
-	Architecture     string
-	MinNodes         int
-	DesiredNodes     int
-	MaxNodes         int
+	ExpectedRevision          uint64
+	TenantIDs                 []string
+	Architecture              string
+	MinNodes                  int
+	DesiredNodes              int
+	MaxNodes                  int
+	MembershipKeyID           string
+	MembershipPublicKeyBase64 string
+}
+
+type NodePoolMembershipBinding struct {
+	NodeID     string                           `json:"node_id"`
+	Membership *controlstore.NodePoolMembership `json:"membership"`
 }
 
 type NodeRevocation struct {
@@ -799,16 +806,19 @@ func (c *Client) ApplyNodePool(
 	}
 	var status controlstore.NodePoolStatus
 	err := c.do(ctx, http.MethodPut, "/v1/node-pools/"+url.PathEscape(poolID), struct {
-		ExpectedRevision uint64   `json:"expected_revision"`
-		TenantIDs        []string `json:"tenant_ids"`
-		Architecture     string   `json:"architecture,omitempty"`
-		MinNodes         int      `json:"min_nodes"`
-		DesiredNodes     int      `json:"desired_nodes"`
-		MaxNodes         int      `json:"max_nodes"`
+		ExpectedRevision          uint64   `json:"expected_revision"`
+		TenantIDs                 []string `json:"tenant_ids"`
+		Architecture              string   `json:"architecture,omitempty"`
+		MinNodes                  int      `json:"min_nodes"`
+		DesiredNodes              int      `json:"desired_nodes"`
+		MaxNodes                  int      `json:"max_nodes"`
+		MembershipKeyID           string   `json:"membership_key_id,omitempty"`
+		MembershipPublicKeyBase64 string   `json:"membership_public_key_base64,omitempty"`
 	}{
 		ExpectedRevision: input.ExpectedRevision, TenantIDs: input.TenantIDs,
 		Architecture: input.Architecture, MinNodes: input.MinNodes,
 		DesiredNodes: input.DesiredNodes, MaxNodes: input.MaxNodes,
+		MembershipKeyID: input.MembershipKeyID, MembershipPublicKeyBase64: input.MembershipPublicKeyBase64,
 	}, &status, true)
 	if err != nil {
 		return controlstore.NodePoolStatus{}, err
@@ -817,6 +827,22 @@ func (c *Client) ApplyNodePool(
 		return controlstore.NodePoolStatus{}, errors.New("control node pool response is invalid")
 	}
 	return status, nil
+}
+
+func (c *Client) BindNodePoolMembership(ctx context.Context, envelope json.RawMessage) (NodePoolMembershipBinding, error) {
+	if len(envelope) == 0 || len(envelope) > 64<<10 {
+		return NodePoolMembershipBinding{}, errors.New("node-pool membership envelope is invalid")
+	}
+	var binding NodePoolMembershipBinding
+	if err := c.do(ctx, http.MethodPut, "/executor-uplink/pool-membership", struct {
+		Membership json.RawMessage `json:"membership"`
+	}{Membership: envelope}, &binding, true); err != nil {
+		return NodePoolMembershipBinding{}, err
+	}
+	if binding.NodeID == "" || binding.Membership == nil {
+		return NodePoolMembershipBinding{}, errors.New("control node-pool membership response is invalid")
+	}
+	return binding, nil
 }
 
 func (c *Client) DeleteNodePool(ctx context.Context, poolID string, expectedRevision uint64) error {

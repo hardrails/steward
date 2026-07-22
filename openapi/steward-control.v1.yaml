@@ -2541,6 +2541,48 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /executor-uplink/pool-membership:
+    put:
+      tags: [executor-uplink, node-pools]
+      operationId: bindExecutorNodePoolMembership
+      summary: Bind independently signed elastic-pool membership
+      description: |
+        Requires the bearer of the exact enrolled node named by the signed
+        statement. Control verifies the configured pool authority, exact pool
+        membership generation and creation identity, controller identity,
+        tenant set, architecture, validity window, and monotonic renewal before
+        retaining the envelope. A pool label alone never satisfies this contract.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodePoolMembershipBindRequest"
+      responses:
+        "200":
+          description: Exact retained membership binding.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodePoolMembershipBinding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /executor-uplink/report:
     post:
       tags: [executor-uplink]
@@ -4438,6 +4480,8 @@ components:
           $ref: "#/components/schemas/NodePlacement"
         drain:
           $ref: "#/components/schemas/NodeDrain"
+        pool_membership:
+          $ref: "#/components/schemas/NodePoolMembership"
     NodePlacement:
       type: object
       additionalProperties: false
@@ -5070,7 +5114,7 @@ components:
     NodePool:
       type: object
       additionalProperties: false
-      required: [id, revision, tenant_ids, min_nodes, desired_nodes, max_nodes, created_at, updated_at]
+      required: [id, revision, membership_generation, tenant_ids, min_nodes, desired_nodes, max_nodes, created_at, updated_at]
       properties:
         id:
           $ref: "#/components/schemas/Identifier128"
@@ -5078,6 +5122,11 @@ components:
           type: integer
           format: int64
           minimum: 1
+        membership_generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Changes only when membership security scope changes; capacity-only updates preserve it.
         tenant_ids:
           type: array
           minItems: 1
@@ -5103,6 +5152,14 @@ components:
           type: integer
           minimum: 1
           maximum: 4096
+        membership_key_id:
+          $ref: "#/components/schemas/Identifier128"
+        membership_public_key_base64:
+          type: string
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+          description: Canonical base64 encoding of the independent Ed25519 pool-membership public key.
         created_at:
           type: string
           format: date-time
@@ -5116,26 +5173,34 @@ components:
     NodePoolNode:
       type: object
       additionalProperties: false
-      required: [node_id, ready]
+      required: [node_id, ready, eligible]
       properties:
         node_id:
           $ref: "#/components/schemas/Identifier128"
         ready:
           type: boolean
+        eligible:
+          type: boolean
         reason:
           type: string
-          enum: [scheduling_unavailable, scheduling_stale, placement_blocked, draining, drained, drain_failed]
+          enum: [scheduling_unavailable, scheduling_stale, placement_blocked, membership_missing, membership_expired, membership_mismatch, draining, drained, drain_failed]
         drain_state:
           type: string
           enum: [active, completed, cancelled, failed]
+        membership_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        membership_not_after:
+          type: string
+          format: date-time
       description: |
         Operational projection for one exact registered node. A ready node has
-        no `reason`. Pool membership derives from authenticated but
-        self-reported scheduling data and is not execution authority.
+        no `reason`. A configured pool counts a node only after independently
+        signed membership and authenticated scheduling data both match. This
+        eligibility is capacity evidence, not execution authority.
     NodePoolStatus:
       type: object
       additionalProperties: false
-      required: [pool, nodes, registered_nodes, ready_nodes, scale_out_needed, scale_in_candidates, conditions, observed_at]
+      required: [pool, nodes, registered_nodes, eligible_nodes, ready_nodes, scale_out_needed, scale_in_candidates, conditions, observed_at]
       properties:
         pool:
           $ref: "#/components/schemas/NodePool"
@@ -5152,11 +5217,15 @@ components:
           type: integer
           minimum: 0
           maximum: 4096
+        eligible_nodes:
+          type: integer
+          minimum: 0
+          maximum: 4096
         scale_out_needed:
           type: integer
           minimum: 0
           maximum: 4096
-          description: Exact positive difference between desired and registered nodes.
+          description: Exact positive difference between desired and independently eligible nodes.
         scale_in_candidates:
           type: array
           maxItems: 4096
@@ -5166,11 +5235,11 @@ components:
           description: At most the current surplus of exact drained, empty nodes eligible for a provider driver to remove.
         conditions:
           type: array
-          maxItems: 3
+          maxItems: 4
           uniqueItems: true
           items:
             type: string
-            enum: [capacity_shortfall, nodes_not_ready, scale_in_available]
+            enum: [capacity_shortfall, nodes_not_ready, membership_unverified, scale_in_available]
         observed_at:
           type: string
           format: date-time
@@ -5221,7 +5290,99 @@ components:
           type: integer
           minimum: 1
           maximum: 4096
+        membership_key_id:
+          $ref: "#/components/schemas/Identifier128"
+        membership_public_key_base64:
+          type: string
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
       description: Counts must satisfy `0 <= min_nodes <= desired_nodes <= max_nodes`.
+    NodePoolMembership:
+      type: object
+      additionalProperties: false
+      required: [pool_id, pool_membership_generation, pool_created_at, digest, key_id, envelope_base64, boot_identity_sha256, scheduling_policy_sha256, issued_at, not_after]
+      properties:
+        pool_id:
+          $ref: "#/components/schemas/Identifier128"
+        pool_membership_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        pool_created_at:
+          type: string
+          format: date-time
+        digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        key_id:
+          $ref: "#/components/schemas/Identifier128"
+        envelope_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 87384
+        architecture:
+          type: string
+          minLength: 1
+          maxLength: 64
+        boot_identity_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        scheduling_policy_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        issued_at:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+      description: Exact independently signed pool-membership artifact retained for offline verification.
+    NodePoolMembershipEnvelope:
+      type: object
+      additionalProperties: false
+      required: [payloadType, payload, signatures]
+      properties:
+        payloadType:
+          type: string
+          enum: [application/vnd.steward.node-pool-membership.v1+json]
+        payload:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 43692
+        signatures:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [keyid, sig]
+            properties:
+              keyid:
+                type: string
+                minLength: 1
+                maxLength: 256
+              sig:
+                type: string
+                format: byte
+                minLength: 88
+                maxLength: 88
+    NodePoolMembershipBindRequest:
+      type: object
+      additionalProperties: false
+      required: [membership]
+      properties:
+        membership:
+          $ref: "#/components/schemas/NodePoolMembershipEnvelope"
+    NodePoolMembershipBinding:
+      type: object
+      additionalProperties: false
+      required: [node_id, membership]
+      properties:
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        membership:
+          $ref: "#/components/schemas/NodePoolMembership"
     NodePoolDeleteRequest:
       type: object
       additionalProperties: false

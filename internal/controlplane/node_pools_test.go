@@ -1,10 +1,16 @@
 package controlplane
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/poolmembership"
 )
 
 func TestNodePoolAPIExposesProviderNeutralCapacityAndOptimisticChanges(t *testing.T) {
@@ -52,6 +58,49 @@ func TestNodePoolAPIExposesProviderNeutralCapacityAndOptimisticChanges(t *testin
 	requireStatus(t, response, http.StatusNoContent)
 	requireError(t, fixture.request(t, http.MethodGet, "/v1/node-pools/research-amd64", fixture.adminToken, ""),
 		http.StatusNotFound, "not_found")
+}
+
+func TestExecutorBindsIndependentlySignedPoolMembership(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken, `{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(t, fixture, fixture.adminToken, "pool-node-enrollment", "node-a", []string{"tenant-a"})
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolBody := mustJSON(t, map[string]any{
+		"expected_revision": 0, "tenant_ids": []string{"tenant-a"}, "architecture": "amd64",
+		"min_nodes": 0, "desired_nodes": 1, "max_nodes": 2, "membership_key_id": "pool-authority-1",
+		"membership_public_key_base64": base64.StdEncoding.EncodeToString(public),
+	})
+	requireStatus(t, fixture.request(t, http.MethodPut, "/v1/node-pools/pool-a", fixture.adminToken, poolBody), http.StatusCreated)
+	now := fixture.now
+	raw, err := poolmembership.Sign(poolmembership.Statement{
+		SchemaVersion: 1, ControllerInstanceID: fixture.server.auth.InstanceID(), PoolID: "pool-a", PoolMembershipGeneration: 1,
+		PoolCreatedAt: now.Format(time.RFC3339Nano),
+		NodeID:        "node-a", TenantIDs: []string{"tenant-a"}, Architecture: "amd64",
+		BootIdentitySHA256:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		SchedulingPolicySHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		IssuedAt:               now.Format(time.RFC3339Nano), NotAfter: now.Add(time.Hour).Format(time.RFC3339Nano),
+	}, "pool-authority-1", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := mustJSON(t, struct {
+		Membership json.RawMessage `json:"membership"`
+	}{Membership: raw})
+	response := fixture.request(t, http.MethodPut, "/executor-uplink/pool-membership", credential.Credential, body)
+	requireStatus(t, response, http.StatusOK)
+	var binding struct {
+		NodeID     string                           `json:"node_id"`
+		Membership *controlstore.NodePoolMembership `json:"membership"`
+	}
+	decodeResponse(t, response, &binding)
+	if binding.NodeID != "node-a" || binding.Membership == nil || binding.Membership.PoolID != "pool-a" {
+		t.Fatalf("binding=%+v", binding)
+	}
+	requireError(t, fixture.request(t, http.MethodPost, "/executor-uplink/pool-membership", credential.Credential, body),
+		http.StatusMethodNotAllowed, "method_not_allowed")
 }
 
 func TestNodePoolAPIRejectsUnsafeMethodsQueriesAndBodies(t *testing.T) {
