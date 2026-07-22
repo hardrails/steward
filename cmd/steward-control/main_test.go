@@ -624,7 +624,10 @@ func TestControlAcceptanceWithInstrumentedBinary(t *testing.T) {
 		args   []string
 	}{
 		{output: controlBinary, args: []string{"build", "-cover", "-coverpkg=./...", "-o", controlBinary, "./cmd/steward-control"}},
-		{output: ctlBinary, args: []string{"build", "-o", ctlBinary, "./cmd/stewardctl"}},
+		// The black-box ceremony exercises stewardctl as heavily as Control. Keep
+		// both real binaries instrumented so the aggregate gate measures that
+		// behavior instead of discarding the CLI half of the acceptance proof.
+		{output: ctlBinary, args: []string{"build", "-cover", "-coverpkg=./...", "-o", ctlBinary, "./cmd/stewardctl"}},
 	} {
 		command := exec.Command("go", build.args...)
 		command.Dir = root
