@@ -455,12 +455,20 @@ does not yet support indefinitely queued or renewable work.
 ## Forks clone state, not a live agent
 
 An agent fork plan binds a new instance and lineage to immutable snapshot
-metadata. A forked deployment invokes the qualified OpenZFS worker through signed
+metadata and its exact source node. `agent authorize -fork-plan` creates the
+otherwise easy-to-miss resume, clone, and cleanup authority without copying a
+tenant key into Control. A forked deployment invokes the qualified OpenZFS worker through signed
 Executor commands, admits the cloned state, and runs the normal agent lifecycle.
 Temporary forks automatically stop, destroy, and purge at expiry. Steward does not
 clone process memory or replicate snapshots between nodes. The source node must
 remain available until every fork clone has been purged; Steward blocks rather than
 moving node-local state without proof.
+
+Control bounds live descendants per tenant/node/snapshot tuple. This limits clone
+fanout, not retained bytes: the storage backend's byte and object quotas remain the
+authoritative capacity boundary. Steward does not yet catalog snapshots in Control,
+create snapshots from a running deployment, archive them, restore them on another
+node, expire idle forks, or maintain a warm pool.
 
 Never place credentials, task permits, receipt keys, live tokens, runtime IDs,
 network sessions, or random-number-generator state in a snapshot. A fork receives

@@ -486,36 +486,71 @@ for its supported request shape and qualification limits.
 ## Fork persistent state
 
 A snapshot is immutable metadata produced by a trusted storage provider. It binds
-the state digest to one agent bundle and runtime. Create a fork plan with:
+the state digest to one agent bundle, runtime, source node, and source lineage.
+The metadata file contains no storage path or credential:
+
+```json
+{
+  "schema": "steward.agent.snapshot.v1",
+  "id": "research-base-20260722",
+  "bundle_digest": "sha256:...",
+  "runtime_engine": "hermes",
+  "state_digest": "sha256:...",
+  "source_node_id": "node-1",
+  "source_lineage": "research-base-lineage",
+  "created_at": "2026-07-22T12:00:00Z"
+}
+```
+
+Create a fork plan. Give the target deployment a name or let Steward use
+`<agent-name>-fork`:
 
 ```console
-stewardctl agent fork \
+stewardctl agent fork forked-auditor \
   -bundle agent.bundle.json \
   -snapshot snapshot.json \
   -ttl 2h
 ```
 
 Steward generates a new instance ID and lineage ID. The default expiry action is
-`destroy`; it is the only supported expiry action. A fork never copies credentials, permits, runtime identity, receipt
-keys, active network connections, or process memory. The qualified Linux storage
+`destroy`; it is the only supported expiry action. The plan binds the new deployment,
+instance, lineage, and source node so later commands cannot accidentally combine
+parts from different forks. A fork never copies credentials, permits, runtime identity,
+receipt keys, active network connections, or process memory. The qualified Linux storage
 worker performs the actual immutable snapshot and copy-on-write clone through
 Executor's signed `snapshot-state` and `clone-state` commands. Create the snapshot
-after destroying the source workload. Then apply the fork as durable desired state:
+after destroying the source workload.
+
+Authorize the exact fork on the trusted signing station:
 
 ```console
-stewardctl agent deployment apply forked-auditor \
+stewardctl agent authorize SITE_DIRECTORY \
+  -bundle agent.bundle.json \
+  -capsule capsule.dsse.json \
+  -controller-public-key controller.public.pem \
+  -fork-plan fork.json \
+  -out fork.delegation.dsse.json
+```
+
+Steward takes the node, deployment, instance, lineage, and generation from the
+plan. It grants only the normal lifecycle plus `clone-state` and `purge`, changes
+state admission to `resume`, and extends a temporary fork's default authorization
+through its four-hour cleanup window. An explicit shorter `-valid-for` is rejected.
+Then apply the fork as durable desired state:
+
+```console
+stewardctl agent deployment apply \
   -tenant acme \
   -bundle agent.bundle.json \
   -capsule capsule.dsse.json \
-  -delegation delegation.dsse.json \
-  -fork-plan fork.json \
-  -source-node node-1
+  -delegation fork.delegation.dsse.json \
+  -fork-plan fork.json
 ```
 
-The delegation must name the fork plan's single instance and lineage, grant
-`clone-state`, `admit`, `renew`, `start`, `stop`, `destroy`, and `purge`, and use
-`state_disposition: resume`. It must remain valid for at least four hours after a
-temporary fork expires so cleanup retains authority.
+`agent deployment apply` verifies every binding again before sending desired state
+to Control. Expert operators may still create the delegation independently; it
+must satisfy the same exact identity, operation, state-disposition, and cleanup
+window checks.
 
 Control pins the fork to the node that holds the snapshot, clones before admission,
 and starts the agent through the normal signed lifecycle. At expiry it changes the
@@ -526,9 +561,12 @@ expires. The snapshot remains until every dependent clone is purged; then use
 snapshots between nodes, so an unavailable source node blocks start and cleanup
 instead of silently placing the fork elsewhere.
 
-The snapshot JSON consumed by `agent fork` is the portable compatibility record:
-it binds the backend's returned `content_digest` to the exact agent bundle and
-runtime engine. It contains no storage path or credential. See
+Control admits at most 32 live descendants from one tenant, node, and snapshot by
+default. Configure `-max-forks-per-snapshot` to lower that ceiling. Removed forks
+release a slot only after their clone reaches the removed state.
+
+The snapshot JSON consumed by `agent fork` is the portable compatibility record.
+Its `state_digest` is the backend's returned `content_digest`. See
 [Persistent state]({{ '/guides/persistent-state/' | relative_url }}) for the
 enforced node workflow and failure behavior.
 
