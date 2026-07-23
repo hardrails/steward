@@ -3,6 +3,7 @@ package interactionpermit
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -202,6 +203,22 @@ func TestInteractionPermitRejectsInvalidSigningInputsAndNodeTime(t *testing.T) {
 	}
 	if _, err := Verify(raw, nil, now, 0); err == nil {
 		t.Fatal("zero maximum validity was accepted")
+	}
+}
+
+func TestLowerHexRequiresOneExactSHA256Value(t *testing.T) {
+	if !lowerHex(strings.Repeat("a", sha256.Size*2)) {
+		t.Fatal("canonical lowercase SHA-256 value was rejected")
+	}
+	for _, value := range []string{
+		"",
+		strings.Repeat("a", sha256.Size*2-1),
+		strings.Repeat("a", sha256.Size*2+1),
+		strings.Repeat("A", sha256.Size*2),
+	} {
+		if lowerHex(value) {
+			t.Fatalf("invalid lowercase SHA-256 value was accepted: %q", value)
+		}
 	}
 }
 

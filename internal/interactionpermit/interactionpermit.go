@@ -334,7 +334,7 @@ func interactionID(value string) bool {
 }
 
 func lowerHex(value string) bool {
-	if value == "" {
+	if len(value) != sha256.Size*2 {
 		return false
 	}
 	for _, character := range value {

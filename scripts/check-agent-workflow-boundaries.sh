@@ -31,13 +31,26 @@ fi
 # The browser is an observation and exact-envelope transfer surface. A new
 # schedule or interaction mutation here would bypass the deliberate trusted-CLI
 # signing step even if the server later rejected malformed authority.
-console=internal/controlplane/console/src/App.jsx
+console=${STEWARD_CONSOLE_SOURCE:-internal/controlplane/console/src/App.jsx}
 matches=$(grep -En \
 	'method:[[:space:]]*"(POST|PUT|PATCH|DELETE)".*(schedules|interactions)|/(schedules|interactions).*method:[[:space:]]*"(POST|PUT|PATCH|DELETE)"' \
 	"$console" || true)
 if [[ -n $matches ]]; then
 	printf '%s\n%s\n' \
 		'agent workflow boundary: React console gained a schedule or interaction mutation' \
+		"$matches" >&2
+	failed=true
+fi
+
+# Schedule and interaction endpoints are observation-only in the console. Keep
+# their only accepted spelling bound to the paginated GET projection. This
+# endpoint allowlist is deliberately independent of method placement, so a
+# multiline fetch or api call cannot evade the mutation check above.
+matches=$(grep -En '/(schedules|interactions)' "$console" |
+	grep -Ev '/(schedules|interactions)[?]limit=100' || true)
+if [[ -n $matches ]]; then
+	printf '%s\n%s\n' \
+		'agent workflow boundary: React console gained a non-observation schedule or interaction endpoint' \
 		"$matches" >&2
 	failed=true
 fi
