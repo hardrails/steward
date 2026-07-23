@@ -28,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion            = 1
-	stateFormatWriteVersion              = 21
+	stateFormatWriteVersion              = 22
 	stateFormatMaxReadVersion            = stateFormatWriteVersion
 	stateFormatEvidenceVersion           = 2
 	stateFormatExecutorV4Version         = 3
@@ -50,8 +50,9 @@ const (
 	stateFormatTaskRequestVersion        = 19
 	stateFormatPoolMembershipVersion     = 20
 	stateFormatWorkroomVersion           = 21
+	stateFormatInteractionVersion        = 22
 	transactionFormatMinReadVersion      = 1
-	transactionFormatWriteVersion        = 21
+	transactionFormatWriteVersion        = 22
 	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
 	transactionEvidenceVersion           = 2
 	transactionExecutorV4Version         = 3
@@ -73,6 +74,7 @@ const (
 	transactionTaskRequestVersion        = 19
 	transactionPoolMembershipVersion     = 20
 	transactionWorkroomVersion           = 21
+	transactionInteractionVersion        = 22
 	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -652,6 +654,7 @@ type snapshotState struct {
 	Tasks        []TaskProjection        `json:"task_projections"`
 	TaskRequests []storedTaskRequest     `json:"task_requests"`
 	Projects     []WorkroomProject       `json:"workroom_projects"`
+	Interactions []storedInteraction     `json:"interactions"`
 }
 
 type storedCredential struct {
@@ -747,6 +750,7 @@ type state struct {
 	taskProjections  map[string]TaskProjection
 	taskRequests     map[string]storedTaskRequest
 	workroomProjects map[string]WorkroomProject
+	interactions     map[string]storedInteraction
 }
 
 type transaction struct {
@@ -777,6 +781,8 @@ type mutation struct {
 	TaskRequestRef     *taskRequestReference     `json:"task_request_ref,omitempty"`
 	WorkroomProject    *WorkroomProject          `json:"workroom_project,omitempty"`
 	WorkroomProjectRef *workroomProjectReference `json:"workroom_project_ref,omitempty"`
+	Interaction        *storedInteraction        `json:"interaction,omitempty"`
+	InteractionRef     *interactionReference     `json:"interaction_ref,omitempty"`
 }
 
 type taskRequestReference struct {
@@ -822,6 +828,8 @@ const (
 	mutationTaskRequestDelete     = "task_request_delete"
 	mutationWorkroomProject       = "workroom_project_upsert"
 	mutationWorkroomProjectDelete = "workroom_project_delete"
+	mutationInteraction           = "interaction_upsert"
+	mutationInteractionDelete     = "interaction_delete"
 )
 
 func emptyState() state {
@@ -833,6 +841,7 @@ func emptyState() state {
 		deployments: make(map[string]Deployment), events: make(map[string]InstanceEvent),
 		nodePools: make(map[string]NodePool), taskProjections: make(map[string]TaskProjection),
 		taskRequests: make(map[string]storedTaskRequest), workroomProjects: make(map[string]WorkroomProject),
+		interactions: make(map[string]storedInteraction),
 	}
 }
 
@@ -890,6 +899,9 @@ func (current state) clone() state {
 	}
 	for key, project := range current.workroomProjects {
 		next.workroomProjects[key] = cloneWorkroomProject(project)
+	}
+	for key, interaction := range current.interactions {
+		next.interactions[key] = cloneStoredInteraction(interaction)
 	}
 	return next
 }
@@ -1224,7 +1236,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Freezes: []OperationalFreeze{}, Quarantines: []SnapshotQuarantine{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
 		Deployments: []storedDeployment{}, Events: []InstanceEvent{}, NodePools: []NodePool{}, Tasks: []TaskProjection{},
-		TaskRequests: []storedTaskRequest{}, Projects: []WorkroomProject{},
+		TaskRequests: []storedTaskRequest{}, Projects: []WorkroomProject{}, Interactions: []storedInteraction{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
@@ -1274,6 +1286,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, project := range current.workroomProjects {
 		snapshot.Projects = append(snapshot.Projects, cloneWorkroomProject(project))
 	}
+	for _, interaction := range current.interactions {
+		snapshot.Interactions = append(snapshot.Interactions, cloneStoredInteraction(interaction))
+	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Freezes, func(i, j int) bool {
 		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
@@ -1317,6 +1332,10 @@ func encodeState(current state, limit int) ([]byte, error) {
 		return workroomProjectKey(snapshot.Projects[i].TenantID, snapshot.Projects[i].ID) <
 			workroomProjectKey(snapshot.Projects[j].TenantID, snapshot.Projects[j].ID)
 	})
+	sort.Slice(snapshot.Interactions, func(i, j int) bool {
+		return interactionKey(snapshot.Interactions[i].TenantID, snapshot.Interactions[i].InteractionID) <
+			interactionKey(snapshot.Interactions[j].TenantID, snapshot.Interactions[j].InteractionID)
+	})
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, err
@@ -1352,7 +1371,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		snapshot.Version >= stateFormatTaskRequestVersion && snapshot.TaskRequests == nil ||
 		snapshot.Version < stateFormatTaskRequestVersion && len(snapshot.TaskRequests) != 0 ||
 		snapshot.Version >= stateFormatWorkroomVersion && snapshot.Projects == nil ||
-		snapshot.Version < stateFormatWorkroomVersion && len(snapshot.Projects) != 0 {
+		snapshot.Version < stateFormatWorkroomVersion && len(snapshot.Projects) != 0 ||
+		snapshot.Version >= stateFormatInteractionVersion && snapshot.Interactions == nil ||
+		snapshot.Version < stateFormatInteractionVersion && len(snapshot.Interactions) != 0 {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
 	current := emptyState()
@@ -1548,6 +1569,16 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		current.workroomProjects[key] = cloneWorkroomProject(project)
 	}
+	for _, interaction := range snapshot.Interactions {
+		if !validStoredInteraction(interaction) {
+			return state{}, errors.New("control snapshot contains an invalid interaction")
+		}
+		key := interactionKey(interaction.TenantID, interaction.InteractionID)
+		if _, duplicate := current.interactions[key]; duplicate {
+			return state{}, errors.New("control snapshot contains a duplicate interaction")
+		}
+		current.interactions[key] = cloneStoredInteraction(interaction)
+	}
 	return current, nil
 }
 
@@ -1635,6 +1666,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 			present++
 		}
 		if change.WorkroomProjectRef != nil {
+			present++
+		}
+		if change.Interaction != nil {
+			present++
+		}
+		if change.InteractionRef != nil {
 			present++
 		}
 		if present != 1 {
@@ -1900,6 +1937,24 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("workroom project deletion references missing state")
 			}
 			delete(next.workroomProjects, key)
+		case mutationInteraction:
+			if value.Version < transactionInteractionVersion || change.Interaction == nil ||
+				!validStoredInteraction(*change.Interaction) {
+				return state{}, errors.New("interaction mutation is invalid for this transaction version")
+			}
+			interaction := cloneStoredInteraction(*change.Interaction)
+			next.interactions[interactionKey(interaction.TenantID, interaction.InteractionID)] = interaction
+		case mutationInteractionDelete:
+			if value.Version < transactionInteractionVersion || change.InteractionRef == nil ||
+				!validRecordID(change.InteractionRef.TenantID, 128) ||
+				!validRecordID(change.InteractionRef.InteractionID, 128) {
+				return state{}, errors.New("interaction deletion is invalid for this transaction version")
+			}
+			key := interactionKey(change.InteractionRef.TenantID, change.InteractionRef.InteractionID)
+			if _, exists := next.interactions[key]; !exists {
+				return state{}, errors.New("interaction deletion references missing state")
+			}
+			delete(next.interactions, key)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -1966,7 +2021,8 @@ func validateState(current state, limits Limits) error {
 		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained ||
 		len(current.deployments) > limits.MaxDeployments || len(current.events) > MaxInstanceEventsRetained ||
 		len(current.nodePools) > limits.MaxNodePools || len(current.taskProjections) > MaxTaskProjectionsRetained ||
-		len(current.taskRequests) > MaxTaskRequestsRetained || len(current.workroomProjects) > MaxWorkroomProjects {
+		len(current.taskRequests) > MaxTaskRequestsRetained || len(current.workroomProjects) > MaxWorkroomProjects ||
+		len(current.interactions) > MaxInteractionsRetained {
 		return ErrCapacityExceeded
 	}
 	for key, tenant := range current.tenants {
@@ -2005,6 +2061,35 @@ func validateState(current state, limits Limits) error {
 		}
 		projectsByTenant[project.TenantID]++
 		if projectsByTenant[project.TenantID] > MaxWorkroomProjectsPerTenant {
+			return ErrCapacityExceeded
+		}
+	}
+	interactionsByTenant := make(map[string]int)
+	interactionBytesByTenant := make(map[string]int64)
+	var interactionBytesTotal int64
+	for key, interaction := range current.interactions {
+		if key != interactionKey(interaction.TenantID, interaction.InteractionID) ||
+			!validStoredInteraction(interaction) {
+			return errors.New("control state contains an invalid interaction")
+		}
+		tenant, tenantOK := current.tenants[interaction.TenantID]
+		node, nodeOK := current.nodes[interaction.NodeID]
+		if !tenantOK || !tenant.Active || !nodeOK || !tenantMember(node.TenantIDs, interaction.TenantID) {
+			return errors.New("interaction references an unknown tenant node")
+		}
+		if interaction.ProjectID != "" {
+			project, found := current.workroomProjects[workroomProjectKey(interaction.TenantID, interaction.ProjectID)]
+			if !found || !workroomSessionContainsTask(project, interaction.SessionID, interaction.TaskID) {
+				return errors.New("interaction references an unknown workroom task")
+			}
+		}
+		interactionsByTenant[interaction.TenantID]++
+		bytes := interactionCourierBytes(interaction)
+		interactionBytesTotal += bytes
+		interactionBytesByTenant[interaction.TenantID] += bytes
+		if interactionsByTenant[interaction.TenantID] > MaxInteractionsPerTenant ||
+			interactionBytesTotal > MaxInteractionBytesRetained ||
+			interactionBytesByTenant[interaction.TenantID] > MaxInteractionBytesPerTenant {
 			return ErrCapacityExceeded
 		}
 	}

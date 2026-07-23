@@ -38,6 +38,7 @@ func TestSnapshotDecoderRejectsAmbiguousOrCorruptDurableRecords(t *testing.T) {
 		{"missing node pools", func(value *snapshotState) { value.NodePools = nil }},
 		{"missing task projections", func(value *snapshotState) { value.Tasks = nil }},
 		{"missing workroom projects", func(value *snapshotState) { value.Projects = nil }},
+		{"missing interactions", func(value *snapshotState) { value.Interactions = nil }},
 		{"duplicate tenant", func(value *snapshotState) { value.Tenants = append(value.Tenants, value.Tenants[0]) }},
 		{"duplicate node", func(value *snapshotState) { value.Nodes = append(value.Nodes, value.Nodes[0]) }},
 		{"duplicate credential", func(value *snapshotState) { value.Credentials = append(value.Credentials, value.Credentials[0]) }},
@@ -81,7 +82,7 @@ func TestWALDecoderRejectsStructurallyAmbiguousMutations(t *testing.T) {
 		t.Fatal("oversized WAL transaction was accepted")
 	}
 	for _, raw := range [][]byte{
-		[]byte(`{"version":22,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
+		[]byte(`{"version":23,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
 		[]byte(`{"version":1,"mutations":[]}`),
 		[]byte(`{"version":1,"mutations":[{"kind":"unknown"}],"extra":true}`),
 	} {

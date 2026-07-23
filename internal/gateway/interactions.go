@@ -1,11 +1,9 @@
 package gateway
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,12 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/interactionpermit"
 )
 
 const (
-	interactionRequestSchemaV1      = "steward.interaction-request.v1"
+	interactionRequestSchemaV1      = controlprotocol.InteractionRequestSchemaV1
 	interactionResponseBodySchemaV1 = "steward.interaction-response-body.v1"
 	maxInteractionRequestBytes      = 8 << 10
 	maxInteractionCourierBytes      = 32 << 10
@@ -175,28 +174,7 @@ func validInteractionID(value string) bool {
 }
 
 func interactionRequestDigest(value Interaction) string {
-	document := struct {
-		SchemaVersion string   `json:"schema_version"`
-		InteractionID string   `json:"interaction_id"`
-		TenantID      string   `json:"tenant_id"`
-		NodeID        string   `json:"node_id"`
-		InstanceID    string   `json:"instance_id"`
-		Generation    uint64   `json:"generation"`
-		RuntimeRef    string   `json:"runtime_ref"`
-		GrantID       string   `json:"grant_id"`
-		CapsuleDigest string   `json:"capsule_digest"`
-		PolicyDigest  string   `json:"policy_digest"`
-		Kind          string   `json:"kind"`
-		Title         string   `json:"title"`
-		Prompt        string   `json:"prompt"`
-		Options       []string `json:"options"`
-		AllowText     bool     `json:"allow_text"`
-		TaskID        string   `json:"task_id,omitempty"`
-		RunID         string   `json:"run_id,omitempty"`
-		ObservedAt    string   `json:"observed_at"`
-		AcceptedAt    string   `json:"accepted_at"`
-		ExpiresAt     string   `json:"expires_at"`
-	}{
+	return controlprotocol.InteractionRequestDigest(controlprotocol.InteractionRequestV1{
 		SchemaVersion: value.SchemaVersion, InteractionID: value.InteractionID,
 		TenantID: value.TenantID, NodeID: value.NodeID, InstanceID: value.InstanceID,
 		Generation: value.Generation, RuntimeRef: value.RuntimeRef, GrantID: value.GrantID,
@@ -205,9 +183,7 @@ func interactionRequestDigest(value Interaction) string {
 		Options: append([]string(nil), value.Options...), AllowText: value.AllowText,
 		TaskID: value.TaskID, RunID: value.RunID, ObservedAt: value.ObservedAt,
 		AcceptedAt: value.AcceptedAt, ExpiresAt: value.ExpiresAt,
-	}
-	raw, _ := json.Marshal(document)
-	return interactionpermit.ResponseDigest(raw)
+	})
 }
 
 func cloneInteraction(value Interaction) Interaction {
@@ -587,5 +563,3 @@ func interactionCourier(interactionID string, permit, response []byte) interacti
 		ResponseBase64: base64.StdEncoding.EncodeToString(response),
 	}
 }
-
-func interactionResponseEqual(left, right []byte) bool { return bytes.Equal(left, right) }
