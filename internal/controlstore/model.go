@@ -28,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion            = 1
-	stateFormatWriteVersion              = 20
+	stateFormatWriteVersion              = 21
 	stateFormatMaxReadVersion            = stateFormatWriteVersion
 	stateFormatEvidenceVersion           = 2
 	stateFormatExecutorV4Version         = 3
@@ -49,8 +49,9 @@ const (
 	stateFormatTaskProjectionVersion     = 18
 	stateFormatTaskRequestVersion        = 19
 	stateFormatPoolMembershipVersion     = 20
+	stateFormatWorkroomVersion           = 21
 	transactionFormatMinReadVersion      = 1
-	transactionFormatWriteVersion        = 20
+	transactionFormatWriteVersion        = 21
 	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
 	transactionEvidenceVersion           = 2
 	transactionExecutorV4Version         = 3
@@ -71,6 +72,7 @@ const (
 	transactionTaskProjectionVersion     = 18
 	transactionTaskRequestVersion        = 19
 	transactionPoolMembershipVersion     = 20
+	transactionWorkroomVersion           = 21
 	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -649,6 +651,7 @@ type snapshotState struct {
 	NodePools    []NodePool              `json:"node_pools"`
 	Tasks        []TaskProjection        `json:"task_projections"`
 	TaskRequests []storedTaskRequest     `json:"task_requests"`
+	Projects     []WorkroomProject       `json:"workroom_projects"`
 }
 
 type storedCredential struct {
@@ -730,19 +733,20 @@ type storedDeploymentRollout struct {
 }
 
 type state struct {
-	tenants         map[string]Tenant
-	freezes         map[string]OperationalFreeze
-	quarantines     map[string]SnapshotQuarantine
-	nodes           map[string]Node
-	credentials     map[string]controlauth.Credential
-	enrollments     map[string]controlauth.Enrollment
-	commands        map[string]Command
-	captures        map[string]storedEvidenceCapture
-	deployments     map[string]Deployment
-	events          map[string]InstanceEvent
-	nodePools       map[string]NodePool
-	taskProjections map[string]TaskProjection
-	taskRequests    map[string]storedTaskRequest
+	tenants          map[string]Tenant
+	freezes          map[string]OperationalFreeze
+	quarantines      map[string]SnapshotQuarantine
+	nodes            map[string]Node
+	credentials      map[string]controlauth.Credential
+	enrollments      map[string]controlauth.Enrollment
+	commands         map[string]Command
+	captures         map[string]storedEvidenceCapture
+	deployments      map[string]Deployment
+	events           map[string]InstanceEvent
+	nodePools        map[string]NodePool
+	taskProjections  map[string]TaskProjection
+	taskRequests     map[string]storedTaskRequest
+	workroomProjects map[string]WorkroomProject
 }
 
 type transaction struct {
@@ -751,31 +755,38 @@ type transaction struct {
 }
 
 type mutation struct {
-	Kind           string                 `json:"kind"`
-	Tenant         *Tenant                `json:"tenant,omitempty"`
-	Freeze         *OperationalFreeze     `json:"freeze,omitempty"`
-	Quarantine     *SnapshotQuarantine    `json:"snapshot_quarantine,omitempty"`
-	Node           *Node                  `json:"node,omitempty"`
-	Credential     *storedCredential      `json:"credential,omitempty"`
-	Enrollment     *storedEnrollment      `json:"enrollment,omitempty"`
-	Command        *storedCommand         `json:"command,omitempty"`
-	EnrollmentID   string                 `json:"enrollment_id,omitempty"`
-	CommandRef     *commandReference      `json:"command_ref,omitempty"`
-	NodeRevoke     *nodeRevocation        `json:"node_revoke,omitempty"`
-	Capture        *storedEvidenceCapture `json:"capture,omitempty"`
-	CaptureID      string                 `json:"capture_id,omitempty"`
-	Deployment     *storedDeployment      `json:"deployment,omitempty"`
-	Event          *InstanceEvent         `json:"instance_event,omitempty"`
-	EventID        string                 `json:"instance_event_id,omitempty"`
-	NodePool       *NodePool              `json:"node_pool,omitempty"`
-	NodePoolID     string                 `json:"node_pool_id,omitempty"`
-	TaskRequest    *storedTaskRequest     `json:"task_request,omitempty"`
-	TaskRequestRef *taskRequestReference  `json:"task_request_ref,omitempty"`
+	Kind               string                    `json:"kind"`
+	Tenant             *Tenant                   `json:"tenant,omitempty"`
+	Freeze             *OperationalFreeze        `json:"freeze,omitempty"`
+	Quarantine         *SnapshotQuarantine       `json:"snapshot_quarantine,omitempty"`
+	Node               *Node                     `json:"node,omitempty"`
+	Credential         *storedCredential         `json:"credential,omitempty"`
+	Enrollment         *storedEnrollment         `json:"enrollment,omitempty"`
+	Command            *storedCommand            `json:"command,omitempty"`
+	EnrollmentID       string                    `json:"enrollment_id,omitempty"`
+	CommandRef         *commandReference         `json:"command_ref,omitempty"`
+	NodeRevoke         *nodeRevocation           `json:"node_revoke,omitempty"`
+	Capture            *storedEvidenceCapture    `json:"capture,omitempty"`
+	CaptureID          string                    `json:"capture_id,omitempty"`
+	Deployment         *storedDeployment         `json:"deployment,omitempty"`
+	Event              *InstanceEvent            `json:"instance_event,omitempty"`
+	EventID            string                    `json:"instance_event_id,omitempty"`
+	NodePool           *NodePool                 `json:"node_pool,omitempty"`
+	NodePoolID         string                    `json:"node_pool_id,omitempty"`
+	TaskRequest        *storedTaskRequest        `json:"task_request,omitempty"`
+	TaskRequestRef     *taskRequestReference     `json:"task_request_ref,omitempty"`
+	WorkroomProject    *WorkroomProject          `json:"workroom_project,omitempty"`
+	WorkroomProjectRef *workroomProjectReference `json:"workroom_project_ref,omitempty"`
 }
 
 type taskRequestReference struct {
 	TenantID string `json:"tenant_id"`
 	TaskID   string `json:"task_id"`
+}
+
+type workroomProjectReference struct {
+	TenantID  string `json:"tenant_id"`
+	ProjectID string `json:"project_id"`
 }
 
 type commandReference struct {
@@ -790,25 +801,27 @@ type nodeRevocation struct {
 }
 
 const (
-	mutationTenant              = "tenant_upsert"
-	mutationOperationalFreeze   = "operational_freeze_upsert"
-	mutationSnapshotQuarantine  = "snapshot_quarantine_upsert"
-	mutationNode                = "node_upsert"
-	mutationCredential          = "credential_upsert"
-	mutationEnrollment          = "enrollment_upsert"
-	mutationCommand             = "command_upsert"
-	mutationEnrollmentDelete    = "enrollment_delete"
-	mutationCommandDelete       = "command_delete"
-	mutationNodeRevoke          = "node_revoke"
-	mutationCapture             = "evidence_capture_upsert"
-	mutationCaptureDelete       = "evidence_capture_delete"
-	mutationDeployment          = "deployment_upsert"
-	mutationInstanceEvent       = "instance_event_upsert"
-	mutationInstanceEventDelete = "instance_event_delete"
-	mutationNodePool            = "node_pool_upsert"
-	mutationNodePoolDelete      = "node_pool_delete"
-	mutationTaskRequest         = "task_request_upsert"
-	mutationTaskRequestDelete   = "task_request_delete"
+	mutationTenant                = "tenant_upsert"
+	mutationOperationalFreeze     = "operational_freeze_upsert"
+	mutationSnapshotQuarantine    = "snapshot_quarantine_upsert"
+	mutationNode                  = "node_upsert"
+	mutationCredential            = "credential_upsert"
+	mutationEnrollment            = "enrollment_upsert"
+	mutationCommand               = "command_upsert"
+	mutationEnrollmentDelete      = "enrollment_delete"
+	mutationCommandDelete         = "command_delete"
+	mutationNodeRevoke            = "node_revoke"
+	mutationCapture               = "evidence_capture_upsert"
+	mutationCaptureDelete         = "evidence_capture_delete"
+	mutationDeployment            = "deployment_upsert"
+	mutationInstanceEvent         = "instance_event_upsert"
+	mutationInstanceEventDelete   = "instance_event_delete"
+	mutationNodePool              = "node_pool_upsert"
+	mutationNodePoolDelete        = "node_pool_delete"
+	mutationTaskRequest           = "task_request_upsert"
+	mutationTaskRequestDelete     = "task_request_delete"
+	mutationWorkroomProject       = "workroom_project_upsert"
+	mutationWorkroomProjectDelete = "workroom_project_delete"
 )
 
 func emptyState() state {
@@ -819,7 +832,7 @@ func emptyState() state {
 		commands: make(map[string]Command), captures: make(map[string]storedEvidenceCapture),
 		deployments: make(map[string]Deployment), events: make(map[string]InstanceEvent),
 		nodePools: make(map[string]NodePool), taskProjections: make(map[string]TaskProjection),
-		taskRequests: make(map[string]storedTaskRequest),
+		taskRequests: make(map[string]storedTaskRequest), workroomProjects: make(map[string]WorkroomProject),
 	}
 }
 
@@ -874,6 +887,9 @@ func (current state) clone() state {
 	}
 	for key, task := range current.taskRequests {
 		next.taskRequests[key] = cloneStoredTaskRequest(task)
+	}
+	for key, project := range current.workroomProjects {
+		next.workroomProjects[key] = cloneWorkroomProject(project)
 	}
 	return next
 }
@@ -1208,7 +1224,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Freezes: []OperationalFreeze{}, Quarantines: []SnapshotQuarantine{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
 		Deployments: []storedDeployment{}, Events: []InstanceEvent{}, NodePools: []NodePool{}, Tasks: []TaskProjection{},
-		TaskRequests: []storedTaskRequest{},
+		TaskRequests: []storedTaskRequest{}, Projects: []WorkroomProject{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
@@ -1255,6 +1271,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, pool := range current.nodePools {
 		snapshot.NodePools = append(snapshot.NodePools, cloneNodePool(pool))
 	}
+	for _, project := range current.workroomProjects {
+		snapshot.Projects = append(snapshot.Projects, cloneWorkroomProject(project))
+	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Freezes, func(i, j int) bool {
 		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
@@ -1294,6 +1313,10 @@ func encodeState(current state, limit int) ([]byte, error) {
 		return taskRequestKey(snapshot.TaskRequests[i].TenantID, snapshot.TaskRequests[i].TaskID) <
 			taskRequestKey(snapshot.TaskRequests[j].TenantID, snapshot.TaskRequests[j].TaskID)
 	})
+	sort.Slice(snapshot.Projects, func(i, j int) bool {
+		return workroomProjectKey(snapshot.Projects[i].TenantID, snapshot.Projects[i].ID) <
+			workroomProjectKey(snapshot.Projects[j].TenantID, snapshot.Projects[j].ID)
+	})
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, err
@@ -1327,7 +1350,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		snapshot.Version >= stateFormatTaskProjectionVersion && snapshot.Tasks == nil ||
 		snapshot.Version < stateFormatTaskProjectionVersion && len(snapshot.Tasks) != 0 ||
 		snapshot.Version >= stateFormatTaskRequestVersion && snapshot.TaskRequests == nil ||
-		snapshot.Version < stateFormatTaskRequestVersion && len(snapshot.TaskRequests) != 0 {
+		snapshot.Version < stateFormatTaskRequestVersion && len(snapshot.TaskRequests) != 0 ||
+		snapshot.Version >= stateFormatWorkroomVersion && snapshot.Projects == nil ||
+		snapshot.Version < stateFormatWorkroomVersion && len(snapshot.Projects) != 0 {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
 	current := emptyState()
@@ -1513,6 +1538,16 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		current.taskRequests[key] = cloneStoredTaskRequest(task)
 	}
+	for _, project := range snapshot.Projects {
+		if !validWorkroomProject(project) {
+			return state{}, errors.New("control snapshot contains an invalid workroom project")
+		}
+		key := workroomProjectKey(project.TenantID, project.ID)
+		if _, duplicate := current.workroomProjects[key]; duplicate {
+			return state{}, errors.New("control snapshot contains a duplicate workroom project")
+		}
+		current.workroomProjects[key] = cloneWorkroomProject(project)
+	}
 	return current, nil
 }
 
@@ -1594,6 +1629,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 			present++
 		}
 		if change.TaskRequestRef != nil {
+			present++
+		}
+		if change.WorkroomProject != nil {
+			present++
+		}
+		if change.WorkroomProjectRef != nil {
 			present++
 		}
 		if present != 1 {
@@ -1841,6 +1882,24 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("task request deletion references missing state")
 			}
 			delete(next.taskRequests, key)
+		case mutationWorkroomProject:
+			if value.Version < transactionWorkroomVersion || change.WorkroomProject == nil ||
+				!validWorkroomProject(*change.WorkroomProject) {
+				return state{}, errors.New("workroom project mutation is invalid for this transaction version")
+			}
+			project := cloneWorkroomProject(*change.WorkroomProject)
+			next.workroomProjects[workroomProjectKey(project.TenantID, project.ID)] = project
+		case mutationWorkroomProjectDelete:
+			if value.Version < transactionWorkroomVersion || change.WorkroomProjectRef == nil ||
+				!validRecordID(change.WorkroomProjectRef.TenantID, 128) ||
+				!validRecordID(change.WorkroomProjectRef.ProjectID, 128) {
+				return state{}, errors.New("workroom project deletion is invalid for this transaction version")
+			}
+			key := workroomProjectKey(change.WorkroomProjectRef.TenantID, change.WorkroomProjectRef.ProjectID)
+			if _, exists := next.workroomProjects[key]; !exists {
+				return state{}, errors.New("workroom project deletion references missing state")
+			}
+			delete(next.workroomProjects, key)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -1907,7 +1966,7 @@ func validateState(current state, limits Limits) error {
 		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained ||
 		len(current.deployments) > limits.MaxDeployments || len(current.events) > MaxInstanceEventsRetained ||
 		len(current.nodePools) > limits.MaxNodePools || len(current.taskProjections) > MaxTaskProjectionsRetained ||
-		len(current.taskRequests) > MaxTaskRequestsRetained {
+		len(current.taskRequests) > MaxTaskRequestsRetained || len(current.workroomProjects) > MaxWorkroomProjects {
 		return ErrCapacityExceeded
 	}
 	for key, tenant := range current.tenants {
@@ -1933,6 +1992,20 @@ func validateState(current state, limits Limits) error {
 			if tenant, ok := current.tenants[tenantID]; !ok || !tenant.Active {
 				return errors.New("control node pool references an unknown tenant")
 			}
+		}
+	}
+	projectsByTenant := make(map[string]int)
+	for key, project := range current.workroomProjects {
+		if key != workroomProjectKey(project.TenantID, project.ID) || !validWorkroomProject(project) {
+			return errors.New("control state contains an invalid workroom project")
+		}
+		tenant, found := current.tenants[project.TenantID]
+		if !found || !tenant.Active {
+			return errors.New("workroom project references an unknown tenant")
+		}
+		projectsByTenant[project.TenantID]++
+		if projectsByTenant[project.TenantID] > MaxWorkroomProjectsPerTenant {
+			return ErrCapacityExceeded
 		}
 	}
 	eventsByTenant := make(map[string]int)
@@ -1976,6 +2049,12 @@ func validateState(current state, limits Limits) error {
 		node, nodeOK := current.nodes[task.NodeID]
 		if !tenantOK || !tenant.Active || !nodeOK || !tenantMember(node.TenantIDs, task.TenantID) {
 			return errors.New("task request references an unknown tenant node")
+		}
+		if task.ProjectID != "" {
+			project, found := current.workroomProjects[workroomProjectKey(task.TenantID, task.ProjectID)]
+			if !found || !workroomSessionContainsTask(project, task.SessionID, task.TaskID) {
+				return errors.New("task request references an unknown workroom session")
+			}
 		}
 		taskRequestsByTenant[task.TenantID]++
 		courierBytes := taskCourierBytes(task)

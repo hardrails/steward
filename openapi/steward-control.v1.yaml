@@ -59,6 +59,8 @@ tags:
     description: Bounded desired agent state reconciled under tenant-signed controller delegation.
   - name: tasks
     description: Durable exact-task submission metadata plus bounded read-only projections derived from untrusted agent events.
+  - name: workrooms
+    description: Metadata-only projects, sessions, external artifact handles, and explicit operator-selected memory references.
   - name: evidence
     description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
@@ -2060,6 +2062,159 @@ paths:
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
           $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/projects:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [workrooms]
+      operationId: listWorkroomProjects
+      summary: List Workroom projects
+      description: |
+        Returns bounded project and session metadata for one tenant. Control
+        stores no prompt, transcript, artifact body, credential, or signing
+        key in a Workroom project.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Projects sorted by project ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkroomProjectPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/projects/{project_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: project_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Identifier128"
+    get:
+      tags: [workrooms]
+      operationId: getWorkroomProject
+      summary: Get one Workroom project
+      description: Returns current bounded project, session, artifact-handle, and explicit memory-reference metadata.
+      responses:
+        "200":
+          description: Current metadata-only project.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkroomProject"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [workrooms]
+      operationId: applyWorkroomProject
+      summary: Create or replace one Workroom project's metadata
+      description: |
+        Uses optimistic revision fencing. Project metadata is not execution
+        authority. A task can join an active session only when its exact signed
+        permit and request are separately submitted through the task courier.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkroomProjectApply"
+      responses:
+        "200":
+          description: Existing project replaced or exact retry returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkroomProject"
+        "201":
+          description: Project created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkroomProject"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [workrooms]
+      operationId: deleteWorkroomProject
+      summary: Delete one unreferenced Workroom project
+      description: |
+        Requires the current revision and fails while any retained task still
+        references the project. Artifact bodies at external storage locations
+        are never deleted by this metadata operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkroomProjectDelete"
+      responses:
+        "204":
+          description: Project metadata deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -5009,6 +5164,13 @@ components:
           minLength: 4
           maxLength: 87384
           description: Canonical base64 encoding of the exact JSON request bytes bound by the permit.
+        project_id:
+          $ref: "#/components/schemas/Identifier128"
+        session_id:
+          $ref: "#/components/schemas/Identifier128"
+      description: >-
+        `project_id` and `session_id` must be supplied together. They add
+        metadata organization only and do not change or extend task authority.
     TaskRequest:
       type: object
       additionalProperties: false
@@ -5034,6 +5196,10 @@ components:
         - updated_at
       properties:
         tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        project_id:
+          $ref: "#/components/schemas/Identifier128"
+        session_id:
           $ref: "#/components/schemas/Identifier128"
         task_id:
           $ref: "#/components/schemas/Identifier128"
@@ -5150,6 +5316,193 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/TaskRequest"
+        next_after:
+          $ref: "#/components/schemas/Identifier128"
+    WorkroomSession:
+      type: object
+      additionalProperties: false
+      required: [id, title, state, task_ids]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier128"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        state:
+          type: string
+          enum: [active, archived]
+        task_ids:
+          type: array
+          maxItems: 256
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    WorkroomArtifact:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, name, media_type, bytes, sha256, external_ref]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier128"
+        session_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_id:
+          $ref: "#/components/schemas/Identifier128"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        media_type:
+          type: string
+          minLength: 1
+          maxLength: 128
+        bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        external_ref:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: Opaque, non-secret handle in operator-managed storage.
+        created_at:
+          type: string
+          format: date-time
+    WorkroomMemoryReference:
+      type: object
+      additionalProperties: false
+      required: [id, title, artifact_id]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier128"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        artifact_id:
+          $ref: "#/components/schemas/Identifier128"
+        created_at:
+          type: string
+          format: date-time
+    WorkroomProject:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, id, name, sessions, artifacts, memory_refs, revision, created_at, updated_at]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        id:
+          $ref: "#/components/schemas/Identifier128"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 2048
+        agent_ref:
+          $ref: "#/components/schemas/Identifier256"
+        skills:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        sessions:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/WorkroomSession"
+        artifacts:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/WorkroomArtifact"
+        memory_refs:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/WorkroomMemoryReference"
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      description: >-
+        Bounded project metadata. External references are non-secret opaque
+        handles; Control does not dereference them or store artifact bytes.
+    WorkroomProjectApply:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, name, sessions, artifacts, memory_refs]
+      properties:
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 0
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 2048
+        agent_ref:
+          $ref: "#/components/schemas/Identifier256"
+        skills:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        sessions:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/WorkroomSession"
+        artifacts:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/WorkroomArtifact"
+        memory_refs:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/WorkroomMemoryReference"
+    WorkroomProjectDelete:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      properties:
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 1
+    WorkroomProjectPage:
+      type: object
+      additionalProperties: false
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/WorkroomProject"
         next_after:
           $ref: "#/components/schemas/Identifier128"
     NodeList:

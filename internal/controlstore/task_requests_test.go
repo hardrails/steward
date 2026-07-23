@@ -24,8 +24,17 @@ func TestAsyncTaskCourierIsIdempotentDurableAndMetadataOnly(t *testing.T) {
 	fixture.createTenant(t, "tenant-a")
 	_, node := fixture.createNode(t, "tenant-a")
 	deployment, instance := taskReadyDeployment(t, &fixture)
+	project, changed, err := fixture.store.ApplyWorkroomProject(fixture.admin, WorkroomProject{
+		TenantID: "tenant-a", ID: "primary-research", Name: "Primary research",
+		Sessions:  []WorkroomSession{{ID: "session-1", Title: "Source review", TaskIDs: []string{}}},
+		Artifacts: []WorkroomArtifact{}, MemoryRefs: []WorkroomMemoryReference{},
+	}, 0, fixture.now.Add(time.Minute))
+	if err != nil || !changed || project.Revision != 1 {
+		t.Fatalf("create workroom project = (%+v, %v, %v)", project, changed, err)
+	}
 	body := []byte(`{"input":"find the current primary source"}`)
 	input := signedTaskRequestInput(t, fixture.now.Add(2*time.Minute), deployment, instance, "research-1", body)
+	input.ProjectID, input.SessionID = "primary-research", "session-1"
 
 	created, changed, err := fixture.store.SubmitTaskRequest(fixture.admin, input, fixture.now.Add(2*time.Minute))
 	if err != nil || !changed || created.State != TaskRequestQueued || created.Validate() != nil {
@@ -34,6 +43,11 @@ func TestAsyncTaskCourierIsIdempotentDurableAndMetadataOnly(t *testing.T) {
 	replayed, changed, err := fixture.store.SubmitTaskRequest(fixture.admin, input, fixture.now.Add(3*time.Minute))
 	if err != nil || changed || replayed != created {
 		t.Fatalf("idempotent submit = (%+v, %v, %v)", replayed, changed, err)
+	}
+	project, err = fixture.store.GetWorkroomProject(fixture.admin, "tenant-a", "primary-research")
+	if err != nil || project.Revision != 2 || len(project.Sessions[0].TaskIDs) != 1 ||
+		project.Sessions[0].TaskIDs[0] != "research-1" {
+		t.Fatalf("project task link = (%+v, %v)", project, err)
 	}
 	rawView, err := json.Marshal(created)
 	if err != nil || strings.Contains(string(rawView), "find the current") || strings.Contains(string(rawView), "task_permit") ||

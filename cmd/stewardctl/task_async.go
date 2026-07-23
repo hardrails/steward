@@ -35,6 +35,8 @@ func enqueueTask(arguments []string, stdout io.Writer) error {
 	flags.SetOutput(io.Discard)
 	common := addControlFlags(flags, true)
 	tenantID := flags.String("tenant-id", "", "tenant scope")
+	projectID := flags.String("project", "", "optional Workroom project")
+	sessionID := flags.String("session", "", "optional Workroom session")
 	bundlePath := flags.String("bundle", "", "owner-only lifecycle task bundle")
 	instanceID := flags.String("instance-id", "", "exact durable deployment instance")
 	trustPath := flags.String("trust", "", "exported Gateway service-trust inventory")
@@ -50,7 +52,8 @@ func enqueueTask(arguments []string, stdout io.Writer) error {
 	}
 	promptMode := leadingDeployment != "" && flags.NArg() == 1
 	bundleMode := leadingDeployment == "" && flags.NArg() == 0 && *bundlePath != ""
-	if *tenantID == "" || promptMode == bundleMode || *deploymentTimeout <= 0 || *deploymentTimeout > 30*time.Minute {
+	if *tenantID == "" || promptMode == bundleMode || (*projectID == "") != (*sessionID == "") ||
+		*deploymentTimeout <= 0 || *deploymentTimeout > 30*time.Minute {
 		return errors.New("task enqueue requires a tenant and either DEPLOYMENT \"prompt\" or -bundle")
 	}
 	resolvedRunDirectory := ""
@@ -107,7 +110,9 @@ func enqueueTask(arguments []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	task, err := client.SubmitTaskRequest(ctx, *tenantID, permit, bundle.Request)
+	task, err := client.SubmitTaskRequestInProject(
+		ctx, *tenantID, *projectID, *sessionID, permit, bundle.Request,
+	)
 	if err != nil {
 		return err
 	}

@@ -16,6 +16,8 @@ import (
 type taskRequestSubmit struct {
 	TaskPermit    string `json:"task_permit"`
 	RequestBase64 string `json:"request_base64"`
+	ProjectID     string `json:"project_id,omitempty"`
+	SessionID     string `json:"session_id,omitempty"`
 }
 
 type taskRequestPage struct {
@@ -55,7 +57,8 @@ func (server *Server) taskRequests(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		task, created, err := server.store.SubmitTaskRequest(identity, controlstore.TaskRequestInput{
-			TenantID: tenantID, TaskPermit: input.TaskPermit, Request: body,
+			TenantID: tenantID, ProjectID: input.ProjectID, SessionID: input.SessionID,
+			TaskPermit: input.TaskPermit, Request: body,
 		}, server.now())
 		if err != nil {
 			server.storeError(writer, err, true)

@@ -82,6 +82,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return permitCommand(arguments[1:], stdout, stderr)
 	case "task":
 		return taskCommand(arguments[1:], stdout)
+	case "workroom":
+		return workroomCommand(arguments[1:], stdout)
 	case "executor-command":
 		return executorCommand(arguments[1:], stdout)
 	case "control":
@@ -165,6 +167,7 @@ var commandHelp = map[string]string{
 	"control":          "Back up and restore a stopped controller, enroll nodes, declare provider-neutral node-pool capacity, manage scoped operators, freeze command delivery during incidents, quarantine suspect snapshots, place and drain agent workloads, inspect agent events and task projections, verify fleet evidence, and create metadata-only support bundles.\n\nUsage: stewardctl control backup|pki|tenant|operator|enrollment|node|node-pool|snapshot|operations|quota|freeze|attention|agent|event|task|command|credential|evidence|evidence-capture|support-bundle ...\n",
 	"permit":           "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",
 	"task":             "Run a task immediately or enqueue an exact signed task for durable asynchronous delivery through Control. Gateway remains the authority and replay fence; Control cannot mint or alter task authority.\n\nUsage: stewardctl task run|enqueue|list|get|result|cancel|issue|verify|audit|submit|status|observe|wait ...\n\nWith task defaults in a context: stewardctl task enqueue DEPLOYMENT \"your request\"\n",
+	"workroom":         "Organize signed agent tasks into durable projects and sessions, then register externally stored artifacts and explicit memory references. Control retains metadata only; task authority and artifact bytes stay outside Control.\n\nUsage: stewardctl workroom create|list|show|delete|session create|artifact add|memory add ...\n\nStart with: stewardctl workroom create research -name \"Research desk\"\n",
 	"evidence":         "Verify or export a signed Executor or Gateway receipt chain without contacting a hosted service.\n\nUsage: stewardctl evidence verify|export ...\n",
 	"image":            "Inspect or import one bounded offline OCI/Docker archive and bind it to the signed workload identity.\n\nUsage: stewardctl image inspect|import ...\n",
 	"gateway":          "Validate the Gateway configuration, configure mediated inference providers, bind its enrolled node identity, and inspect routes, connectors, services, and effect policy.\n\nUsage: stewardctl gateway validate|identity|inference|route|connector|service|effects ...\n",
