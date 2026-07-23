@@ -41,11 +41,14 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     'projectedPath("/v1/operations/timeline"',
     'api("/v1/tenants/" + encodeURIComponent(tenantID) + "/instance-events?limit=100"',
     'api("/v1/tenants/" + encodeURIComponent(tenantID) + "/tasks?limit=100"',
+    'api("/v1/tenants/" + encodeURIComponent(tenantID) + "/interactions?limit=100"',
     'api("/v1/node-pools?limit=500"',
     "CAPACITY IS NOT PERMISSION.",
     "A pool label is only discovery metadata.",
     "READ AS A CLAIM, NOT AS PROOF.",
     "REPORTED STATE · NOT VERIFIED OUTCOME",
+    "THE PROMPT IS UNTRUSTED. YOUR RESPONSE IS EXACTLY BOUND.",
+    "SIGN OUTSIDE THE BROWSER",
     'encodeURIComponent(tenantID) + "/quota"',
     "Fleet-wide resource quota",
     "Existing work is not evicted when a limit is lowered.",
@@ -92,6 +95,7 @@ test("source assets do not depend on a network-served asset", async () => {
     readFile(new URL("./app.css", import.meta.url), "utf8"),
     readFile(new URL("./App.jsx", import.meta.url), "utf8"),
     readFile(new URL("./command-courier.js", import.meta.url), "utf8"),
+    readFile(new URL("./interaction-guidance.js", import.meta.url), "utf8"),
     readFile(new URL("./operator-guidance.js", import.meta.url), "utf8"),
   ]);
   const source = files.join("\n");

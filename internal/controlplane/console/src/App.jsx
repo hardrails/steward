@@ -15,6 +15,7 @@ import {
   sessionExpired,
 } from "./session.js";
 import {attentionCommand, attentionGuidance} from "./operator-guidance.js";
+import {interactionResponseCommand} from "./interaction-guidance.js";
 
 const idleTimeoutMilliseconds = 15 * 60 * 1000;
 const absoluteTimeoutMilliseconds = 8 * 60 * 60 * 1000;
@@ -243,13 +244,16 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/projects?limit=128", epoch)
         : Promise.resolve({projects: []}),
+      tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/interactions?limit=100", epoch)
+        : Promise.resolve({interactions: []}),
       includeSiteResources
         ? api("/v1/node-pools?limit=500", epoch)
         : Promise.resolve({node_pools: []}),
     ];
-    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, nodePools] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, nodePools] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, nodePools};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, nodePools};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -581,16 +585,17 @@ function Airlock({authenticating, error, onUnlock}) {
 
 const views = [
   ["overview", "01", "Fleet health"],
-  ["workrooms", "02", "Workrooms"],
-  ["attention", "03", "Needs review"],
-  ["incident", "04", "Incident view"],
-  ["nodes", "05", "Agent nodes"],
-  ["pools", "06", "Node pools"],
-  ["commands", "07", "Signed activity"],
-  ["credentials", "08", "Access records"],
-  ["agents", "09", "Agents"],
-  ["tasks", "10", "Fleet tasks"],
-  ["events", "11", "Agent signals"],
+  ["inbox", "02", "Agent inbox"],
+  ["workrooms", "03", "Workrooms"],
+  ["attention", "04", "Needs review"],
+  ["incident", "05", "Incident view"],
+  ["nodes", "06", "Agent nodes"],
+  ["pools", "07", "Node pools"],
+  ["commands", "08", "Signed activity"],
+  ["credentials", "09", "Access records"],
+  ["agents", "10", "Agents"],
+  ["tasks", "11", "Fleet tasks"],
+  ["events", "12", "Agent signals"],
 ];
 
 function ControlRoom(props) {
@@ -692,6 +697,9 @@ function ControlRoom(props) {
         ) : (
           <>
             {view === "overview" ? <Overview snapshot={snapshot} onAttention={() => props.onView("attention")} /> : null}
+            {view === "inbox" ? (
+              <AgentInboxView page={snapshot.interactions} tenantID={selectedTenant} />
+            ) : null}
             {view === "workrooms" ? (
               <WorkroomsView page={snapshot.projects} tasks={snapshot.tasks} tenantID={selectedTenant} />
             ) : null}
@@ -714,6 +722,163 @@ function ControlRoom(props) {
         )}
       </div>
     </section>
+  );
+}
+
+function AgentInboxView({page, tenantID}) {
+  const interactions = Array.isArray(page?.interactions) ? page.interactions : [];
+  const open = interactions.filter((interaction) => interaction.state === "open").length;
+  const waiting = interactions.filter((interaction) => interaction.state === "response_queued").length;
+  const resolved = interactions.filter((interaction) => interaction.state === "resolved").length;
+  return (
+    <section className="view agent-inbox-view" aria-labelledby="agent-inbox-title">
+      <ViewHeading id="agent-inbox-title" eyebrow="SIGNED HUMAN-IN-THE-LOOP" title="Questions that can safely wait">
+        Running agents can pause for a bounded answer without gaining your key or turning Control into an authority.
+      </ViewHeading>
+      <aside className="interaction-boundary">
+        <strong>THE PROMPT IS UNTRUSTED. YOUR RESPONSE IS EXACTLY BOUND.</strong>
+        <span>Read the request as agent-authored content. Steward signs only your selected answer, the request digest, and the exact workload identity. The answer cannot be replayed for another agent or question.</span>
+      </aside>
+      {!tenantID ? (
+        <article className="incident-empty">
+          <span className="panel-index">TENANT PROJECTION REQUIRED</span>
+          <h3>Select one tenant to open its agent inbox.</h3>
+          <p>Questions and decisions remain inside the tenant boundary that admitted the requesting workload.</p>
+        </article>
+      ) : (
+        <>
+          <dl className="interaction-totals" aria-label="Agent inbox totals">
+            <div className={open ? "is-open" : ""}><dt>Needs answer</dt><dd>{open}</dd></div>
+            <div><dt>In delivery</dt><dd>{waiting}</dd></div>
+            <div><dt>Resolved</dt><dd>{resolved}</dd></div>
+            <div><dt>Retained</dt><dd>{interactions.length}</dd></div>
+          </dl>
+          {interactions.length ? (
+            <ol className="interaction-list">
+              {interactions.map((interaction) => (
+                <li key={interaction.interaction_id}>
+                  <InteractionCard interaction={interaction} />
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <article className="incident-empty">
+              <span className="panel-index">INBOX CLEAR</span>
+              <h3>No agent is waiting for a human response.</h3>
+              <p>Hermes receives the interaction URL only when its signed capsule includes both controller events and task authorities.</p>
+            </article>
+          )}
+        </>
+      )}
+      {page?.next_after ? <p className="truncation-note">More questions are retained. Continue with stewardctl or the MCP interaction cursor.</p> : null}
+    </section>
+  );
+}
+
+function InteractionCard({interaction}) {
+  const options = Array.isArray(interaction.options) ? interaction.options : [];
+  const [choice, setChoice] = useState("");
+  const [text, setText] = useState("");
+  const [copyState, setCopyState] = useState("idle");
+  const [commandError, setCommandError] = useState("");
+  const open = interaction.state === "open" &&
+    Date.parse(interaction.expires_at) > Date.now();
+  const copyCommand = async () => {
+    setCommandError("");
+    try {
+      const command = interactionResponseCommand(interaction, choice, text);
+      await navigator.clipboard.writeText(command);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 2000);
+    } catch (error) {
+      if (error instanceof Error && error.name !== "NotAllowedError") {
+        setCommandError(error.message);
+      } else {
+        setCopyState("failed");
+      }
+    }
+  };
+  return (
+    <article className={"interaction-card is-" + interaction.state}>
+      <header>
+        <div>
+          <span className="interaction-origin">AGENT REQUEST · {humanize(interaction.kind)}</span>
+          <h3>{interaction.title}</h3>
+        </div>
+        <Badge kind={open ? "is-warning" : interaction.state === "resolved" ? "is-ok" : ""}>
+          {open ? "needs answer" : humanize(interaction.state)}
+        </Badge>
+      </header>
+      <div className="untrusted-prompt">
+        <span>UNTRUSTED AGENT CONTENT</span>
+        <p>{interaction.prompt}</p>
+      </div>
+      <dl className="interaction-binding">
+        <div><dt>Agent</dt><dd>{interaction.instance_id} · gen {interaction.generation}</dd></div>
+        <div><dt>Node</dt><dd>{interaction.node_id}</dd></div>
+        {interaction.task_id ? <div><dt>Task</dt><dd>{interaction.task_id}</dd></div> : null}
+        {interaction.project_id ? <div><dt>Workroom</dt><dd>{interaction.project_id}</dd></div> : null}
+        <div><dt>Expires</dt><dd>{formatTime(interaction.expires_at)}</dd></div>
+        <div><dt>Request</dt><dd><code>{interaction.request_digest.slice(0, 22)}…</code></dd></div>
+      </dl>
+      {open ? (
+        <div className="interaction-response">
+          {options.length ? (
+            <fieldset>
+              <legend>Choose an offered response</legend>
+              <div className="interaction-options">
+                {options.map((option) => (
+                  <label key={option}>
+                    <input
+                      type="radio"
+                      name={"choice-" + interaction.interaction_id}
+                      value={option}
+                      checked={choice === option}
+                      onChange={(event) => setChoice(event.target.value)}
+                    />
+                    <span>{option}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ) : null}
+          {interaction.allow_text ? (
+            <label className="interaction-text">
+              <span>{options.length ? "Optional note" : "Your response"}</span>
+              <input
+                type="text"
+                value={text}
+                maxLength="2048"
+                autoComplete="off"
+                spellCheck="true"
+                placeholder="One bounded line; never paste a secret"
+                onChange={(event) => setText(event.target.value)}
+              />
+            </label>
+          ) : null}
+          <div className="interaction-signing-step">
+            <div>
+              <strong>SIGN OUTSIDE THE BROWSER</strong>
+              <span>The command includes only this answer and public workload bindings. Replace the two key placeholders in a trusted terminal.</span>
+            </div>
+            <button
+              className="button button-primary"
+              type="button"
+              disabled={!choice && !text}
+              onClick={copyCommand}
+            >
+              {copyState === "copied" ? "Command copied" : copyState === "failed" ? "Copy failed" : "Copy signed-response command"}
+            </button>
+          </div>
+          {commandError ? <p className="error-message" role="alert">{commandError}</p> : null}
+        </div>
+      ) : (
+        <div className="interaction-terminal">
+          <strong>{interaction.state === "resolved" ? "DELIVERED AND ACKNOWLEDGED BY THE NODE" : humanize(interaction.state).toUpperCase()}</strong>
+          <span>{interaction.response_key_id ? "Signed by " + interaction.response_key_id + "." : "No answer content is stored in this operator view."}</span>
+        </div>
+      )}
+    </article>
   );
 }
 
