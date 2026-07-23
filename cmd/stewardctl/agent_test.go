@@ -203,6 +203,51 @@ func TestAgentCreateDefaultsToSameNamedProjectDirectory(t *testing.T) {
 	}
 }
 
+func TestAgentTemplatesExposeAndRenderEnforcedCapabilityPresets(t *testing.T) {
+	var output bytes.Buffer
+	if err := run([]string{"agent", "template", "list"}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, template := range []string{`"id":"workspace"`, `"id":"research"`, `"id":"developer"`} {
+		if !strings.Contains(output.String(), template) {
+			t.Fatalf("template list omitted %s: %s", template, output.String())
+		}
+	}
+	output.Reset()
+	if err := run([]string{"agent", "template", "show", "research"}, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"tool_profile":"research"`) {
+		t.Fatalf("research template=%s err=%v", output.String(), err)
+	}
+	directory := filepath.Join(t.TempDir(), "researcher")
+	output.Reset()
+	if err := run([]string{
+		"agent", "create", "researcher", "-template", "research", directory,
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "Stewardfile.cue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range []string{
+		`tool_profile: "research"`,
+		`skills: ["steward-research"]`,
+		`"steward-browser-search"`,
+		`"steward-research-extract"`,
+		`controller_events: true`,
+		`memory_mib: 4096`,
+	} {
+		if !bytes.Contains(raw, []byte(binding)) {
+			t.Fatalf("research Stewardfile omitted %q:\n%s", binding, raw)
+		}
+	}
+	if err := run([]string{
+		"agent", "create", "invalid", "-template", "unknown", filepath.Join(t.TempDir(), "invalid"),
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("unknown agent template was accepted")
+	}
+}
+
 func TestAgentValidateAndForkRejectAmbiguousArguments(t *testing.T) {
 	directory := t.TempDir()
 	existing := filepath.Join(directory, "existing")
