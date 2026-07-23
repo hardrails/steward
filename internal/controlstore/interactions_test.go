@@ -151,7 +151,7 @@ func TestInteractionSnapshotAndWALVersionFence(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Version != stateFormatInteractionVersion || snapshot.Interactions == nil {
+	if snapshot.Version != stateFormatWriteVersion || snapshot.Interactions == nil {
 		t.Fatalf("interaction snapshot fence = (%d, nil=%v)", snapshot.Version, snapshot.Interactions == nil)
 	}
 	snapshot.Version = stateFormatWorkroomVersion

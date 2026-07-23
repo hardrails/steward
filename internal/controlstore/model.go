@@ -28,7 +28,7 @@ import (
 
 const (
 	stateFormatMinReadVersion            = 1
-	stateFormatWriteVersion              = 22
+	stateFormatWriteVersion              = 23
 	stateFormatMaxReadVersion            = stateFormatWriteVersion
 	stateFormatEvidenceVersion           = 2
 	stateFormatExecutorV4Version         = 3
@@ -51,8 +51,9 @@ const (
 	stateFormatPoolMembershipVersion     = 20
 	stateFormatWorkroomVersion           = 21
 	stateFormatInteractionVersion        = 22
+	stateFormatTaskScheduleVersion       = 23
 	transactionFormatMinReadVersion      = 1
-	transactionFormatWriteVersion        = 22
+	transactionFormatWriteVersion        = 23
 	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
 	transactionEvidenceVersion           = 2
 	transactionExecutorV4Version         = 3
@@ -75,6 +76,7 @@ const (
 	transactionPoolMembershipVersion     = 20
 	transactionWorkroomVersion           = 21
 	transactionInteractionVersion        = 22
+	transactionTaskScheduleVersion       = 23
 	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -655,6 +657,7 @@ type snapshotState struct {
 	TaskRequests []storedTaskRequest     `json:"task_requests"`
 	Projects     []WorkroomProject       `json:"workroom_projects"`
 	Interactions []storedInteraction     `json:"interactions"`
+	Schedules    []storedTaskSchedule    `json:"task_schedules"`
 }
 
 type storedCredential struct {
@@ -751,6 +754,7 @@ type state struct {
 	taskRequests     map[string]storedTaskRequest
 	workroomProjects map[string]WorkroomProject
 	interactions     map[string]storedInteraction
+	taskSchedules    map[string]storedTaskSchedule
 }
 
 type transaction struct {
@@ -783,6 +787,8 @@ type mutation struct {
 	WorkroomProjectRef *workroomProjectReference `json:"workroom_project_ref,omitempty"`
 	Interaction        *storedInteraction        `json:"interaction,omitempty"`
 	InteractionRef     *interactionReference     `json:"interaction_ref,omitempty"`
+	TaskSchedule       *storedTaskSchedule       `json:"task_schedule,omitempty"`
+	TaskScheduleRef    *taskScheduleReference    `json:"task_schedule_ref,omitempty"`
 }
 
 type taskRequestReference struct {
@@ -793,6 +799,11 @@ type taskRequestReference struct {
 type workroomProjectReference struct {
 	TenantID  string `json:"tenant_id"`
 	ProjectID string `json:"project_id"`
+}
+
+type taskScheduleReference struct {
+	TenantID   string `json:"tenant_id"`
+	ScheduleID string `json:"schedule_id"`
 }
 
 type commandReference struct {
@@ -830,6 +841,8 @@ const (
 	mutationWorkroomProjectDelete = "workroom_project_delete"
 	mutationInteraction           = "interaction_upsert"
 	mutationInteractionDelete     = "interaction_delete"
+	mutationTaskSchedule          = "task_schedule_upsert"
+	mutationTaskScheduleDelete    = "task_schedule_delete"
 )
 
 func emptyState() state {
@@ -841,7 +854,8 @@ func emptyState() state {
 		deployments: make(map[string]Deployment), events: make(map[string]InstanceEvent),
 		nodePools: make(map[string]NodePool), taskProjections: make(map[string]TaskProjection),
 		taskRequests: make(map[string]storedTaskRequest), workroomProjects: make(map[string]WorkroomProject),
-		interactions: make(map[string]storedInteraction),
+		interactions:  make(map[string]storedInteraction),
+		taskSchedules: make(map[string]storedTaskSchedule),
 	}
 }
 
@@ -902,6 +916,9 @@ func (current state) clone() state {
 	}
 	for key, interaction := range current.interactions {
 		next.interactions[key] = cloneStoredInteraction(interaction)
+	}
+	for key, schedule := range current.taskSchedules {
+		next.taskSchedules[key] = cloneStoredTaskSchedule(schedule)
 	}
 	return next
 }
@@ -1237,6 +1254,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
 		Deployments: []storedDeployment{}, Events: []InstanceEvent{}, NodePools: []NodePool{}, Tasks: []TaskProjection{},
 		TaskRequests: []storedTaskRequest{}, Projects: []WorkroomProject{}, Interactions: []storedInteraction{},
+		Schedules: []storedTaskSchedule{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
@@ -1289,6 +1307,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, interaction := range current.interactions {
 		snapshot.Interactions = append(snapshot.Interactions, cloneStoredInteraction(interaction))
 	}
+	for _, schedule := range current.taskSchedules {
+		snapshot.Schedules = append(snapshot.Schedules, cloneStoredTaskSchedule(schedule))
+	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Freezes, func(i, j int) bool {
 		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
@@ -1336,6 +1357,10 @@ func encodeState(current state, limit int) ([]byte, error) {
 		return interactionKey(snapshot.Interactions[i].TenantID, snapshot.Interactions[i].InteractionID) <
 			interactionKey(snapshot.Interactions[j].TenantID, snapshot.Interactions[j].InteractionID)
 	})
+	sort.Slice(snapshot.Schedules, func(i, j int) bool {
+		return taskScheduleKey(snapshot.Schedules[i].TenantID, snapshot.Schedules[i].Statement.ScheduleID) <
+			taskScheduleKey(snapshot.Schedules[j].TenantID, snapshot.Schedules[j].Statement.ScheduleID)
+	})
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, err
@@ -1373,7 +1398,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		snapshot.Version >= stateFormatWorkroomVersion && snapshot.Projects == nil ||
 		snapshot.Version < stateFormatWorkroomVersion && len(snapshot.Projects) != 0 ||
 		snapshot.Version >= stateFormatInteractionVersion && snapshot.Interactions == nil ||
-		snapshot.Version < stateFormatInteractionVersion && len(snapshot.Interactions) != 0 {
+		snapshot.Version < stateFormatInteractionVersion && len(snapshot.Interactions) != 0 ||
+		snapshot.Version >= stateFormatTaskScheduleVersion && snapshot.Schedules == nil ||
+		snapshot.Version < stateFormatTaskScheduleVersion && len(snapshot.Schedules) != 0 {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
 	current := emptyState()
@@ -1579,6 +1606,16 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		current.interactions[key] = cloneStoredInteraction(interaction)
 	}
+	for _, schedule := range snapshot.Schedules {
+		if !validStoredTaskSchedule(schedule) {
+			return state{}, errors.New("control snapshot contains an invalid task schedule")
+		}
+		key := taskScheduleKey(schedule.TenantID, schedule.Statement.ScheduleID)
+		if _, duplicate := current.taskSchedules[key]; duplicate {
+			return state{}, errors.New("control snapshot contains a duplicate task schedule")
+		}
+		current.taskSchedules[key] = cloneStoredTaskSchedule(schedule)
+	}
 	return current, nil
 }
 
@@ -1672,6 +1709,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 			present++
 		}
 		if change.InteractionRef != nil {
+			present++
+		}
+		if change.TaskSchedule != nil {
+			present++
+		}
+		if change.TaskScheduleRef != nil {
 			present++
 		}
 		if present != 1 {
@@ -1955,6 +1998,24 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("interaction deletion references missing state")
 			}
 			delete(next.interactions, key)
+		case mutationTaskSchedule:
+			if value.Version < transactionTaskScheduleVersion || change.TaskSchedule == nil ||
+				!validStoredTaskSchedule(*change.TaskSchedule) {
+				return state{}, errors.New("task schedule mutation is invalid for this transaction version")
+			}
+			schedule := cloneStoredTaskSchedule(*change.TaskSchedule)
+			next.taskSchedules[taskScheduleKey(schedule.TenantID, schedule.Statement.ScheduleID)] = schedule
+		case mutationTaskScheduleDelete:
+			if value.Version < transactionTaskScheduleVersion || change.TaskScheduleRef == nil ||
+				!validRecordID(change.TaskScheduleRef.TenantID, 128) ||
+				!validRecordID(change.TaskScheduleRef.ScheduleID, 96) {
+				return state{}, errors.New("task schedule deletion is invalid for this transaction version")
+			}
+			key := taskScheduleKey(change.TaskScheduleRef.TenantID, change.TaskScheduleRef.ScheduleID)
+			if _, exists := next.taskSchedules[key]; !exists {
+				return state{}, errors.New("task schedule deletion references missing state")
+			}
+			delete(next.taskSchedules, key)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -2158,6 +2219,47 @@ func validateState(current state, limits Limits) error {
 			taskResultBytesByTenant[task.TenantID] > MaxTaskResultBytesPerTenant {
 			return ErrCapacityExceeded
 		}
+	}
+	taskSchedulesByTenant := make(map[string]int)
+	taskScheduleBytesByTenant := make(map[string]int64)
+	var taskScheduleBytesTotal int64
+	for key, schedule := range current.taskSchedules {
+		if key != taskScheduleKey(schedule.TenantID, schedule.Statement.ScheduleID) ||
+			!validStoredTaskSchedule(schedule) {
+			return errors.New("control state contains an invalid task schedule")
+		}
+		_, tenantOK := current.tenants[schedule.TenantID]
+		node, nodeOK := current.nodes[schedule.Statement.NodeID]
+		if !tenantOK || !nodeOK || !tenantMember(node.TenantIDs, schedule.TenantID) {
+			return errors.New("task schedule references an unknown tenant workload")
+		}
+		if schedule.Statement.ProjectID != "" {
+			project, found := current.workroomProjects[workroomProjectKey(schedule.TenantID, schedule.Statement.ProjectID)]
+			sessionFound := false
+			if found {
+				for _, session := range project.Sessions {
+					if session.ID == schedule.Statement.SessionID {
+						sessionFound = true
+						break
+					}
+				}
+			}
+			if !sessionFound {
+				return errors.New("task schedule references an unknown workroom session")
+			}
+		}
+		taskSchedulesByTenant[schedule.TenantID]++
+		courierBytes := taskScheduleCourierBytes(schedule)
+		taskScheduleBytesTotal += courierBytes
+		taskScheduleBytesByTenant[schedule.TenantID] += courierBytes
+		if taskSchedulesByTenant[schedule.TenantID] > MaxTaskSchedulesPerTenant ||
+			taskScheduleBytesTotal > MaxTaskScheduleBytesRetained ||
+			taskScheduleBytesByTenant[schedule.TenantID] > MaxTaskScheduleBytesPerTenant {
+			return ErrCapacityExceeded
+		}
+	}
+	if len(current.taskSchedules) > MaxTaskSchedulesRetained {
+		return ErrCapacityExceeded
 	}
 	for key, freeze := range current.freezes {
 		if key != operationalFreezeKey(freeze.Scope, freeze.TenantID) || !validOperationalFreeze(freeze) {

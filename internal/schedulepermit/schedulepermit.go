@@ -118,6 +118,16 @@ type VerifiedRun struct {
 	DueAt           time.Time
 }
 
+type InspectedRun struct {
+	Statement       Statement
+	KeyID           string
+	EnvelopeDigest  string
+	RunPermitDigest string
+	TaskID          string
+	Ordinal         uint64
+	DueAt           time.Time
+}
+
 type RunPermit struct {
 	SchemaVersion  string `json:"schema_version"`
 	ScheduleBase64 string `json:"schedule_base64"`
@@ -182,8 +192,57 @@ func VerifyRun(
 	trusted map[string]ed25519.PublicKey,
 	now time.Time,
 ) (VerifiedRun, error) {
-	if now.IsZero() || len(raw) == 0 || len(raw) > MaxRunPermitBytes {
-		return VerifiedRun{}, invalid("run permit is empty, oversized, or has no node time")
+	if now.IsZero() {
+		return VerifiedRun{}, invalid("node time is unavailable")
+	}
+	wrapper, schedule, err := decodeRunPermit(raw)
+	if err != nil {
+		return VerifiedRun{}, err
+	}
+	statement, keyID, envelopeDigest, _, err := inspect(schedule, trusted)
+	if err != nil {
+		return VerifiedRun{}, err
+	}
+	due, taskID, err := statement.Run(wrapper.Ordinal)
+	if err != nil || wrapper.DueAt != due.Format(timestampLayout) || wrapper.TaskID != taskID {
+		return VerifiedRun{}, invalid("run identity does not match the signed schedule")
+	}
+	window := time.Duration(statement.WindowSeconds) * time.Second
+	if now.Before(due) || !now.Before(due.Add(window)) {
+		return VerifiedRun{}, invalid("run is outside its signed dispatch window")
+	}
+	return VerifiedRun{
+		Statement: statement, KeyID: keyID, EnvelopeDigest: envelopeDigest,
+		RunPermitDigest: dsse.Digest(raw), TaskID: taskID,
+		Ordinal: wrapper.Ordinal, DueAt: due,
+	}, nil
+}
+
+// InspectRunUnverified validates the wrapper and nested schedule structure
+// without authenticating the signature or applying its dispatch window.
+func InspectRunUnverified(raw []byte) (InspectedRun, error) {
+	wrapper, schedule, err := decodeRunPermit(raw)
+	if err != nil {
+		return InspectedRun{}, err
+	}
+	statement, keyID, envelopeDigest, _, err := inspect(schedule, nil)
+	if err != nil {
+		return InspectedRun{}, err
+	}
+	due, taskID, err := statement.Run(wrapper.Ordinal)
+	if err != nil || wrapper.DueAt != due.Format(timestampLayout) || wrapper.TaskID != taskID {
+		return InspectedRun{}, invalid("run identity does not match the signed schedule")
+	}
+	return InspectedRun{
+		Statement: statement, KeyID: keyID, EnvelopeDigest: envelopeDigest,
+		RunPermitDigest: dsse.Digest(raw), TaskID: taskID,
+		Ordinal: wrapper.Ordinal, DueAt: due,
+	}, nil
+}
+
+func decodeRunPermit(raw []byte) (RunPermit, []byte, error) {
+	if len(raw) == 0 || len(raw) > MaxRunPermitBytes {
+		return RunPermit{}, nil, invalid("run permit is empty or oversized")
 	}
 	var wire struct {
 		SchemaVersion  *string `json:"schema_version"`
@@ -195,29 +254,16 @@ func VerifyRun(
 	if err := dsse.DecodeStrictInto(raw, MaxRunPermitBytes, &wire); err != nil ||
 		wire.SchemaVersion == nil || wire.ScheduleBase64 == nil || wire.Ordinal == nil ||
 		wire.DueAt == nil || wire.TaskID == nil || *wire.SchemaVersion != RunSchemaV1 {
-		return VerifiedRun{}, invalid("decode schedule run permit")
+		return RunPermit{}, nil, invalid("decode schedule run permit")
 	}
 	schedule, err := base64.StdEncoding.DecodeString(*wire.ScheduleBase64)
 	if err != nil || base64.StdEncoding.EncodeToString(schedule) != *wire.ScheduleBase64 {
-		return VerifiedRun{}, invalid("schedule envelope encoding is not canonical")
+		return RunPermit{}, nil, invalid("schedule envelope encoding is not canonical")
 	}
-	statement, keyID, envelopeDigest, _, err := inspect(schedule, trusted)
-	if err != nil {
-		return VerifiedRun{}, err
-	}
-	due, taskID, err := statement.Run(*wire.Ordinal)
-	if err != nil || *wire.DueAt != due.Format(timestampLayout) || *wire.TaskID != taskID {
-		return VerifiedRun{}, invalid("run identity does not match the signed schedule")
-	}
-	window := time.Duration(statement.WindowSeconds) * time.Second
-	if now.Before(due) || !now.Before(due.Add(window)) {
-		return VerifiedRun{}, invalid("run is outside its signed dispatch window")
-	}
-	return VerifiedRun{
-		Statement: statement, KeyID: keyID, EnvelopeDigest: envelopeDigest,
-		RunPermitDigest: dsse.Digest(raw), TaskID: taskID,
-		Ordinal: *wire.Ordinal, DueAt: due,
-	}, nil
+	return RunPermit{
+		SchemaVersion: *wire.SchemaVersion, ScheduleBase64: *wire.ScheduleBase64,
+		Ordinal: *wire.Ordinal, DueAt: *wire.DueAt, TaskID: *wire.TaskID,
+	}, schedule, nil
 }
 
 func (statement Statement) Validate() error {
