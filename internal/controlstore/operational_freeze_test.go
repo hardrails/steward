@@ -112,6 +112,12 @@ func TestOperationalFreezeStopsOnlyNewOrFrozenTenantDelivery(t *testing.T) {
 		signedCommand(t, "tenant-a-after-freeze", "tenant-a", node.NodeID, 0), fixture.now.Add(4*time.Minute),
 	); !errors.Is(err, ErrOperationallyFrozen) {
 		t.Fatalf("new frozen-tenant command error = %v", err)
+	} else {
+		var freezeError *OperationalFreezeError
+		if !errors.As(err, &freezeError) || freezeError.Scope != OperationalFreezeTenant ||
+			freezeError.Error() != ErrOperationallyFrozen.Error() {
+			t.Fatalf("new frozen-tenant command detail = %#v", err)
+		}
 	}
 	if _, created, err := fixture.store.SubmitCommand(
 		fixture.admin, "tenant-b", node.NodeID,

@@ -279,7 +279,9 @@ cross-origin subrequests, permissions, downloads, service workers, and private
 destinations, but browser engines remain a large attack surface. The outer worker
 network must deny every private, node, management, and metadata route. The worker
 does not provide login state, clicking, typing, arbitrary URLs, or consequential
-browser actions.
+browser actions. Its 512-entry source-reference store fails closed at capacity
+until a 15-minute reference expires; separate workers provide independent
+availability for separate tenants or trust domains.
 
 The optional coding worker runs the official Codex or Claude Code CLI in a
 separate container and reports changed paths. It does not prove a patch is correct,

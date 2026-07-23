@@ -9,7 +9,10 @@ It exposes two finite operations:
 - `POST /v1/search` searches an operator-controlled SearXNG service and returns
   short-lived opaque source references.
 - `POST /v1/read` opens only those references in fresh, credential-free browser
-  processes and returns bounded visible text and an optional viewport screenshot.
+processes and returns bounded visible text and an optional viewport screenshot.
+References expire after 15 minutes. The worker retains at most 512 references;
+when that store is full, new searches fail with `source_capacity_exhausted`
+instead of invalidating an active reference early.
 
 The worker rejects local and non-public destinations, pins the selected public
 address into Chromium, blocks cross-origin requests, disables service workers

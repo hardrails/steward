@@ -23,6 +23,12 @@ Hermes cannot supply a raw URL, click, type, upload, download, evaluate
 JavaScript, reuse cookies, open another origin, or invoke arbitrary Playwright
 methods. This is intentionally much smaller than computer use.
 
+Source references expire after 15 minutes. One worker retains at most 512
+references. At capacity, a new search fails with
+`source_capacity_exhausted` until references expire; it never evicts another
+active research session's reference. Run a separate worker for each tenant or
+trust domain when they need independent availability.
+
 ## Security boundary
 
 Web content remains untrusted. It may contain prompt injection, false claims, or

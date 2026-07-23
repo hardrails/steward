@@ -91,29 +91,59 @@ func TestBrowserWorkerUsesOpaqueRefsAndRejectsPrivateDestinations(t *testing.T) 
 	}
 	root := repositoryRoot(t)
 	securityPath := filepath.Join(root, "workers", "browser", "security.mjs")
-	harness := `import {isPublicAddress,publicTarget} from "file://` + securityPath + `";
+	harness := `import {isPublicAddress,publicTarget,readBoundedWebBody,SourceStore} from "file://` + securityPath + `";
 const blocked=[];
-for (const value of ["127.0.0.1","169.254.169.254","10.0.0.1","::1","fc00::1","2001:db8::1"]) blocked.push(isPublicAddress(value));
+for (const value of ["127.0.0.1","169.254.169.254","10.0.0.1","::1","fc00::1","2001::1","2001:db8::1","2002:5db8:d822::1","3fff::1"]) blocked.push(isPublicAddress(value));
+const publicV6=["2606:4700:4700::1111","2a00:1450:4009:822::200e"].map(isPublicAddress);
 const lookup=async()=>[{address:"93.184.216.34",family:4}];
 const accepted=await publicTarget("https://example.com/source",lookup);
 let mixed="accepted";
 try { await publicTarget("https://mixed.example/source",async()=>[{address:"93.184.216.34",family:4},{address:"127.0.0.1",family:4}]); }
 catch(error) { mixed=error.code; }
-process.stdout.write(JSON.stringify({blocked,accepted:accepted.address,mixed}));
+let now=0;
+const store=new SourceStore(()=>now,2,100);
+const refs=store.putMany(["https://one.example","https://two.example"]);
+let capacity="accepted";
+try { store.putMany(["https://three.example"]); } catch(error) { capacity=error.code; }
+const preserved=store.get(refs[0]);
+now=101;
+const replacement=store.putMany(["https://three.example"]);
+let overflow="accepted";
+const oversized=new Response(new Uint8Array(5),{headers:{"content-length":"5"}});
+try { await readBoundedWebBody(oversized,4); } catch(error) { overflow=error.code; }
+let chunkedOverflow="accepted";
+const chunked=new Response(new ReadableStream({start(controller) {
+  controller.enqueue(new Uint8Array([1,2,3]));
+  controller.enqueue(new Uint8Array([4,5,6]));
+  controller.close();
+}}));
+try { await readBoundedWebBody(chunked,4); } catch(error) { chunkedOverflow=error.code; }
+const streamed=await readBoundedWebBody(new Response(new Uint8Array([1,2,3,4])),4);
+process.stdout.write(JSON.stringify({blocked,publicV6,accepted:accepted.address,mixed,capacity,preserved,replacement:replacement.length,overflow,chunkedOverflow,streamed:streamed.length}));
 `
 	raw, err := exec.Command(node, "--input-type=module", "-e", harness).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var result struct {
-		Blocked  []bool `json:"blocked"`
-		Accepted string `json:"accepted"`
-		Mixed    string `json:"mixed"`
+		Blocked         []bool `json:"blocked"`
+		PublicV6        []bool `json:"publicV6"`
+		Accepted        string `json:"accepted"`
+		Mixed           string `json:"mixed"`
+		Capacity        string `json:"capacity"`
+		Preserved       string `json:"preserved"`
+		Replacement     int    `json:"replacement"`
+		Overflow        string `json:"overflow"`
+		ChunkedOverflow string `json:"chunkedOverflow"`
+		Streamed        int    `json:"streamed"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Accepted != "93.184.216.34" || result.Mixed != "private_source_denied" {
+	if result.Accepted != "93.184.216.34" || result.Mixed != "private_source_denied" ||
+		result.Capacity != "source_capacity_exhausted" || result.Preserved != "https://one.example" ||
+		result.Replacement != 1 || result.Overflow != "search_response_too_large" ||
+		result.ChunkedOverflow != "search_response_too_large" || result.Streamed != 4 {
 		t.Fatalf("browser destination result=%s", raw)
 	}
 	for _, accepted := range result.Blocked {
@@ -121,12 +151,19 @@ process.stdout.write(JSON.stringify({blocked,accepted:accepted.address,mixed}));
 			t.Fatalf("browser accepted a private destination: %s", raw)
 		}
 	}
+	for _, accepted := range result.PublicV6 {
+		if !accepted {
+			t.Fatalf("browser rejected a public IPv6 destination: %s", raw)
+		}
+	}
 	source := string(readFile(t, filepath.Join(root, "workers", "browser", "server.mjs"), 1<<20))
+	boundaries := source + string(readFile(t, securityPath, 1<<20))
 	for _, required := range []string{
 		"source_ref_not_found", "serviceWorkers: \"block\"", "acceptDownloads: false",
 		"--host-resolver-rules=MAP", "sameOrigin", "MAX_RESPONSE = 1 << 20",
+		"readBoundedWebBody(response, MAX_SEARCH_RESPONSE)", "sources.putMany",
 	} {
-		if !strings.Contains(source, required) {
+		if !strings.Contains(boundaries, required) {
 			t.Fatalf("browser worker is missing contract %q", required)
 		}
 	}

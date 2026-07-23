@@ -2,18 +2,22 @@
 
 import { createServer } from "node:http";
 import { constants as fsConstants, open } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
-import { DestinationError, publicTarget } from "./security.mjs";
+import {
+  BoundaryError,
+  DestinationError,
+  SourceStore,
+  publicTarget,
+  readBoundedWebBody,
+} from "./security.mjs";
 
 const MAX_REQUEST = 64 << 10;
 const MAX_RESPONSE = 1 << 20;
 const MAX_TEXT = 256 << 10;
 const MAX_SCREENSHOT = 512 << 10;
-const MAX_REFS = 512;
-const REF_TTL_MS = 15 * 60 * 1000;
+const MAX_SEARCH_RESPONSE = 4 << 20;
 const UPSTREAM_TIMEOUT_MS = 30_000;
 const PAGE_TIMEOUT_MS = 30_000;
 
@@ -72,36 +76,6 @@ function parseUpstream(value) {
   return upstream;
 }
 
-class SourceStore {
-  constructor(now = () => Date.now()) {
-    this.now = now;
-    this.values = new Map();
-  }
-
-  put(url) {
-    this.prune();
-    while (this.values.size >= MAX_REFS) this.values.delete(this.values.keys().next().value);
-    const id = `source_${randomUUID().replaceAll("-", "")}`;
-    this.values.set(id, { url, createdAt: this.now() });
-    return id;
-  }
-
-  get(id) {
-    this.prune();
-    const value = this.values.get(id);
-    if (!value) throw new WorkerError(404, "source_ref_not_found", "source reference is missing or expired");
-    return value.url;
-  }
-
-  prune() {
-    const cutoff = this.now() - REF_TTL_MS;
-    for (const [id, value] of this.values) {
-      if (value.createdAt >= cutoff) break;
-      this.values.delete(id);
-    }
-  }
-}
-
 function exactObject(value, names) {
   return value && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).sort().join("\0") === [...names].sort().join("\0");
@@ -127,8 +101,7 @@ async function search(payload, config, sources) {
     throw new WorkerError(502, "search_unavailable", "search upstream is unavailable");
   }
   if (!response.ok) throw new WorkerError(502, "search_rejected", `search upstream returned HTTP ${response.status}`);
-  const raw = Buffer.from(await response.arrayBuffer());
-  if (raw.length > 4 << 20) throw new WorkerError(502, "search_response_too_large", "search upstream exceeded 4 MiB");
+  const raw = await readBoundedWebBody(response, MAX_SEARCH_RESPONSE);
   let decoded;
   try {
     decoded = JSON.parse(raw);
@@ -136,21 +109,26 @@ async function search(payload, config, sources) {
     throw new WorkerError(502, "invalid_search_response", "search upstream returned invalid JSON");
   }
   if (!Array.isArray(decoded?.results)) throw new WorkerError(502, "invalid_search_response", "search response has no result list");
-  const results = [];
+  const candidates = [];
   for (const item of decoded.results) {
-    if (results.length >= payload.limit || !item || typeof item !== "object") continue;
+    if (candidates.length >= payload.limit || !item || typeof item !== "object") continue;
     try {
       const target = await publicTarget(item.url);
-      results.push({
-        source_ref: sources.put(target.url),
+      candidates.push({
+        url: target.url,
         title: boundedText(item.title, 2048),
         snippet: boundedText(item.content, 8192),
         display_url: target.url,
       });
     } catch (error) {
-      if (!(error instanceof WorkerError) && !(error instanceof DestinationError)) throw error;
+      if (!(error instanceof DestinationError)) throw error;
     }
   }
+  const sourceRefs = sources.putMany(candidates.map((candidate) => candidate.url));
+  const results = candidates.map(({ url: _, ...candidate }, index) => ({
+    source_ref: sourceRefs[index],
+    ...candidate,
+  }));
   return { schema_version: "steward.browser-search-result.v1", trust: "untrusted_web_content", results };
 }
 
@@ -315,7 +293,7 @@ export function createBrowserServer(config, sources = new SourceStore()) {
         active--;
       }
     } catch (error) {
-      const safe = error instanceof WorkerError || error instanceof DestinationError ?
+      const safe = error instanceof WorkerError || error instanceof BoundaryError ?
         error : new WorkerError(500, "internal_error", "browser worker failed safely");
       writeJSON(response, safe.status, { error: safe.code, message: safe.message });
     }
