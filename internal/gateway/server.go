@@ -193,15 +193,16 @@ func (retained retainedGrant) grant() Grant {
 }
 
 type snapshot struct {
-	Version int             `json:"version"`
-	Grants  []retainedGrant `json:"grants"`
-	Events  []InstanceEvent `json:"events,omitempty"`
+	Version      int             `json:"version"`
+	Grants       []retainedGrant `json:"grants"`
+	Events       []InstanceEvent `json:"events,omitempty"`
+	Interactions []Interaction   `json:"interactions,omitempty"`
 }
 
 const (
 	gatewayStateReadMinVersion = 1
-	gatewayStateReadMaxVersion = 8
-	gatewayStateWriteVersion   = 8
+	gatewayStateReadMaxVersion = 9
+	gatewayStateWriteVersion   = 9
 )
 
 type grantLease struct {
@@ -250,6 +251,7 @@ type Server struct {
 	connectorListeners       map[string]net.Listener
 	eventListeners           map[string]net.Listener
 	events                   []InstanceEvent
+	interactions             []Interaction
 	egressStats              map[string]EgressStats
 	connectorCalls           map[string]map[string][]string
 	connectorSpends          map[string]connectorSpendOwner
@@ -655,6 +657,9 @@ func (s *Server) ControlHandler() http.Handler {
 	mux.HandleFunc("DELETE /v1/grants/{id}", s.unregister)
 	mux.HandleFunc("GET /v1/events", s.listInstanceEvents)
 	mux.HandleFunc("POST /v1/events/ack", s.ackInstanceEvents)
+	mux.HandleFunc("GET /v1/interactions/outbox", s.listInteractionOutbox)
+	mux.HandleFunc("POST /v1/interactions/ack", s.ackInteractionOutbox)
+	mux.HandleFunc("POST /v1/interactions/responses", s.resolveInteraction)
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -1745,7 +1750,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 			return StateSummary{}, errors.New("gateway state contains a retained grant without a durable route policy binding")
 		}
 		if len(grant.ConnectorIDs) > 0 && state.Version != 3 {
-			if state.Version < 4 || state.Version > 8 {
+			if state.Version < 4 || state.Version > gatewayStateReadMaxVersion {
 				return StateSummary{}, errors.New("gateway state contains a connector grant without durable call accounting")
 			}
 		}
@@ -1789,6 +1794,16 @@ func (s *Server) loadExisting() (StateSummary, error) {
 	for index, event := range state.Events {
 		s.events[index] = cloneEvent(event)
 	}
+	if state.Version < 9 && len(state.Interactions) != 0 {
+		return StateSummary{}, errors.New("gateway state contains interactions without their durable state format")
+	}
+	if err := validateRetainedInteractions(state.Interactions); err != nil {
+		return StateSummary{}, err
+	}
+	s.interactions = make([]Interaction, len(state.Interactions))
+	for index, interaction := range state.Interactions {
+		s.interactions[index] = cloneInteraction(interaction)
+	}
 	return StateSummary{
 		Present: true, FormatVersion: state.Version, RetainedGrants: len(state.Grants), contextLocked: contextLocked,
 	}, nil
@@ -1806,7 +1821,13 @@ func (s *Server) persistLocked() error {
 	for index, event := range s.events {
 		events[index] = cloneEvent(event)
 	}
-	raw, err := json.Marshal(snapshot{Version: gatewayStateWriteVersion, Grants: grants, Events: events})
+	interactions := make([]Interaction, len(s.interactions))
+	for index, interaction := range s.interactions {
+		interactions[index] = cloneInteraction(interaction)
+	}
+	raw, err := json.Marshal(snapshot{
+		Version: gatewayStateWriteVersion, Grants: grants, Events: events, Interactions: interactions,
+	})
 	if err != nil {
 		return err
 	}

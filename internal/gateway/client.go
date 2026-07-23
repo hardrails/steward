@@ -19,6 +19,7 @@ import (
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/interactionpermit"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
@@ -108,6 +109,62 @@ func (c *ControlClient) AckInstanceEvents(ctx context.Context, eventIDs []string
 		seen[id] = struct{}{}
 	}
 	return c.call(ctx, http.MethodPost, "/v1/events/ack", eventAck{EventIDs: eventIDs}, http.StatusNoContent)
+}
+
+// ListInteractionOutbox returns agent-authored requests not yet acknowledged by
+// Control. The caller must commit the whole batch before acknowledging it.
+func (c *ControlClient) ListInteractionOutbox(ctx context.Context) ([]Interaction, error) {
+	var batch interactionBatch
+	if err := c.callInto(ctx, http.MethodGet, "/v1/interactions/outbox", nil, http.StatusOK, &batch); err != nil {
+		return nil, err
+	}
+	if validateRetainedInteractions(batch.Interactions) != nil {
+		return nil, errors.New("gateway interaction outbox is invalid")
+	}
+	result := make([]Interaction, len(batch.Interactions))
+	for index, interaction := range batch.Interactions {
+		result[index] = cloneInteraction(interaction)
+	}
+	return result, nil
+}
+
+func (c *ControlClient) AckInteractions(ctx context.Context, interactionIDs []string) error {
+	if len(interactionIDs) == 0 || len(interactionIDs) > maxInteractions {
+		return errors.New("gateway interaction acknowledgement is invalid")
+	}
+	seen := make(map[string]struct{}, len(interactionIDs))
+	for _, id := range interactionIDs {
+		if !validInteractionID(id) {
+			return errors.New("gateway interaction acknowledgement is invalid")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return errors.New("gateway interaction acknowledgement contains a duplicate")
+		}
+		seen[id] = struct{}{}
+	}
+	return c.call(ctx, http.MethodPost, "/v1/interactions/ack",
+		interactionAck{InteractionIDs: interactionIDs}, http.StatusNoContent)
+}
+
+func (c *ControlClient) ResolveInteraction(
+	ctx context.Context,
+	interactionID string,
+	permitRaw, responseRaw []byte,
+) (Interaction, error) {
+	if !validInteractionID(interactionID) || len(permitRaw) == 0 ||
+		len(permitRaw) > interactionpermit.MaxEnvelopeBytes ||
+		len(responseRaw) == 0 || len(responseRaw) > interactionpermit.MaxResponseBytes {
+		return Interaction{}, errors.New("gateway interaction response is invalid")
+	}
+	var result Interaction
+	if err := c.callInto(ctx, http.MethodPost, "/v1/interactions/responses",
+		interactionCourier(interactionID, permitRaw, responseRaw), http.StatusOK, &result); err != nil {
+		return Interaction{}, err
+	}
+	if validateRetainedInteractions([]Interaction{result}) != nil || result.InteractionID != interactionID {
+		return Interaction{}, errors.New("gateway interaction response result is invalid")
+	}
+	return result, nil
 }
 
 func (c *ControlClient) Inspect(ctx context.Context, grantID string) (Grant, error) {

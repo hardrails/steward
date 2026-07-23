@@ -59,6 +59,10 @@ tags:
     description: Bounded desired agent state reconciled under tenant-signed controller delegation.
   - name: tasks
     description: Durable exact-task submission metadata plus bounded read-only projections derived from untrusted agent events.
+  - name: schedules
+    description: Finite tenant-signed schedules that Control can materialize without receiving task-signing keys.
+  - name: interactions
+    description: Agent-authored questions and decisions with tenant-signed, off-controller responses.
   - name: workrooms
     description: Metadata-only projects, sessions, external artifact handles, and explicit operator-selected memory references.
   - name: evidence
@@ -2066,6 +2070,307 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/schedules:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [schedules]
+      operationId: listTaskSchedules
+      summary: List finite task schedules
+      description: |
+        Returns newest-first schedule metadata and bounded run history. The
+        response excludes the repeated request and signed schedule envelope.
+        Agent-authored task results remain available only through the explicit
+        task-result endpoint.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: A bounded page of retained schedules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSchedulePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      tags: [schedules]
+      operationId: createTaskSchedule
+      summary: Retain one finite, already-signed schedule
+      description: |
+        Durably retains one canonical tenant-signed schedule and the exact
+        request it binds. Control may create deterministic run wrappers at the
+        signed due times, but it cannot change the workload, operation, request,
+        interval, run count, validity window, or concurrency limit. Gateway
+        verifies the nested signature and every binding before dispatch. Exact
+        retries are idempotent; conflicting reuse of a schedule ID is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskScheduleSubmit"
+      responses:
+        "200":
+          description: An exact previously retained schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSchedule"
+        "201":
+          description: A newly retained schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/schedules/{schedule_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: schedule_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Identifier96"
+    get:
+      tags: [schedules]
+      operationId: getTaskSchedule
+      summary: Inspect one finite task schedule
+      description: Returns metadata and bounded run history without the signed envelope or repeated request body.
+      responses:
+        "200":
+          description: Current schedule metadata and bounded run history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [schedules]
+      operationId: cancelTaskSchedule
+      summary: Stop materializing future runs
+      description: |
+        Permanently narrows this retained schedule by preventing future runs.
+        Tasks already dispatched may continue and keep their own lifecycle
+        evidence; cancellation never claims that in-flight work stopped.
+      responses:
+        "200":
+          description: Current schedule metadata including cancellation state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSchedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/interactions:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [interactions]
+      operationId: listInteractions
+      summary: List agent questions and decisions
+      description: |
+        Returns newest-first agent-authored interaction metadata. Prompt and
+        offered choices are workflow data, not authority. The page never
+        includes signed response envelopes or response bodies. An `expired`
+        state is a current-time projection over an unresolved retained record.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: A bounded page of interaction metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InteractionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/interactions/{interaction_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: interaction_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+    get:
+      tags: [interactions]
+      operationId: getInteraction
+      summary: Inspect one agent interaction
+      description: Returns the bounded public projection without response courier bytes.
+      responses:
+        "200":
+          description: Current interaction metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/interactions/{interaction_id}/response:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: interaction_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+    post:
+      tags: [interactions]
+      operationId: submitInteractionResponse
+      summary: Queue one tenant-signed interaction response
+      description: |
+        Control structurally inspects the canonical DSSE envelope only to bind
+        the tenant, interaction, request digest, response digest, size, and
+        active delivery window. Control does not authenticate or sign the
+        answer. The node Gateway verifies it against the workload's admitted
+        task authorities before the agent can read it. Exact retries are
+        idempotent; a different response to the same interaction conflicts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionResponseSubmit"
+      responses:
+        "200":
+          description: The exact response was already queued.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "202":
+          description: The response was durably queued for node delivery.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/tenants/{tenant_id}/projects:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -2872,6 +3177,127 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /executor-uplink/interactions:
+    post:
+      tags: [executor-uplink, interactions]
+      operationId: retainExecutorInteractions
+      summary: Durably retain a Gateway interaction outbox batch
+      description: |
+        Accepts only a node-authenticated batch whose node ID matches the
+        bearer. Identity and request digests were stamped by the active
+        Gateway grant. Exact retries are idempotent. Unanswered records are
+        never evicted to admit newer requests; only resolved or expired
+        records can make room.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionRequestBatch"
+      responses:
+        "200":
+          description: The batch was committed or recognized as an exact retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppliedCount"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/interactions/responses/poll:
+    post:
+      tags: [executor-uplink, interactions]
+      operationId: pollExecutorInteractionResponses
+      summary: Poll opaque signed responses for one node
+      description: |
+        Returns response envelopes and bodies only to their authenticated node.
+        Delivery is at least once. Gateway must verify the tenant signature and
+        exact workload/request binding before the response becomes visible.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionResponsePollRequest"
+      responses:
+        "200":
+          description: Zero or more bounded opaque response deliveries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InteractionResponsePollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/interactions/responses/ack:
+    post:
+      tags: [executor-uplink, interactions]
+      operationId: acknowledgeExecutorInteractionResponse
+      summary: Acknowledge one Gateway-verified response delivery
+      description: |
+        Marks one exact permit delivery resolved only after Gateway accepted it.
+        Exact acknowledgement replay is idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionResponseAck"
+      responses:
+        "200":
+          description: The acknowledgement was applied or was an exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppliedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /executor-uplink/tasks/poll:
     post:
       tags: [executor-uplink]
@@ -3565,7 +3991,7 @@ components:
       description: |
         Read-only fleet facts derived at `generated_at`. `tenant_id` is omitted
         for the site-wide projection and present for a tenant projection.
-      required: [generated_at, capacity, commands, evidence, attention]
+      required: [generated_at, capacity, commands, evidence, workflows, attention]
       properties:
         generated_at:
           type: string
@@ -3582,6 +4008,8 @@ components:
           $ref: "#/components/schemas/CommandSummary"
         evidence:
           $ref: "#/components/schemas/EvidenceSummary"
+        workflows:
+          $ref: "#/components/schemas/WorkflowSummary"
         attention:
           $ref: "#/components/schemas/AttentionSummary"
     CapacityUsage:
@@ -3668,6 +4096,75 @@ components:
           type: integer
           minimum: 0
         equivocation_detected:
+          type: integer
+          minimum: 0
+    WorkflowSummary:
+      type: object
+      additionalProperties: false
+      description: |
+        Content-free counts for finite task schedules and bounded agent
+        interactions. Request, permit, prompt, response, and result bytes are
+        excluded.
+      required:
+        - schedules_total
+        - schedules_active
+        - schedules_completed
+        - schedules_cancelled
+        - runs_queued
+        - runs_running
+        - runs_completed
+        - runs_cancelled
+        - runs_failed
+        - runs_skipped
+        - interactions_total
+        - interactions_open
+        - interactions_queued
+        - interactions_resolved
+        - interactions_expired
+      properties:
+        schedules_total:
+          type: integer
+          minimum: 0
+        schedules_active:
+          type: integer
+          minimum: 0
+        schedules_completed:
+          type: integer
+          minimum: 0
+        schedules_cancelled:
+          type: integer
+          minimum: 0
+        runs_queued:
+          type: integer
+          minimum: 0
+        runs_running:
+          type: integer
+          minimum: 0
+        runs_completed:
+          type: integer
+          minimum: 0
+        runs_cancelled:
+          type: integer
+          minimum: 0
+        runs_failed:
+          type: integer
+          minimum: 0
+        runs_skipped:
+          type: integer
+          minimum: 0
+        interactions_total:
+          type: integer
+          minimum: 0
+        interactions_open:
+          type: integer
+          minimum: 0
+        interactions_queued:
+          type: integer
+          minimum: 0
+        interactions_resolved:
+          type: integer
+          minimum: 0
+        interactions_expired:
           type: integer
           minimum: 0
     AttentionSummary:
@@ -4065,6 +4562,9 @@ components:
         - `steward_control_evidence_nodes` uses `scope` and `status`, where
           status is `all`, `active`, `witnessed`, `unwitnessed`, `current`,
           `stale`, `rollback_detected`, or `equivocation_detected`.
+        - `steward_control_workflows` uses `scope`, `kind`, and `state`.
+          Kind is `schedule`, `schedule_run`, or `interaction`; each kind has
+          only its documented finite lifecycle states.
         - `steward_control_attention` uses `scope`, `reason`, and `severity`.
 
         `scope` is only `site` or `tenant`. No tenant, node, credential,
@@ -5039,6 +5539,354 @@ components:
         next_after:
           type: string
           pattern: '^event-[0-9a-f]{64}$'
+    InteractionRequestBatch:
+      type: object
+      additionalProperties: false
+      required: [schema_version, node_id, interactions]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-request-batch.v1]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        interactions:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/InteractionRequest"
+    InteractionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - interaction_id
+        - idempotency_key
+        - source
+        - tenant_id
+        - node_id
+        - instance_id
+        - generation
+        - runtime_ref
+        - grant_id
+        - capsule_digest
+        - policy_digest
+        - kind
+        - title
+        - prompt
+        - options
+        - allow_text
+        - observed_at
+        - accepted_at
+        - expires_at
+        - request_digest
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-request.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        idempotency_key:
+          $ref: "#/components/schemas/Identifier128"
+        source:
+          type: string
+          enum: [agent]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        grant_id:
+          type: string
+          pattern: '^grant-[0-9a-f]{64}$'
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        kind:
+          type: string
+          enum: [question, decision]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 128
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        options:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        allow_text:
+          type: boolean
+        task_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        run_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        observed_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        request_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+      description: >-
+        Gateway-stamped workflow data, never execution authority. A decision
+        has at least two options. Every interaction has options or permits
+        bounded text.
+    Interaction:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - interaction_id
+        - idempotency_key
+        - source
+        - tenant_id
+        - node_id
+        - instance_id
+        - generation
+        - runtime_ref
+        - grant_id
+        - capsule_digest
+        - policy_digest
+        - kind
+        - title
+        - prompt
+        - options
+        - allow_text
+        - observed_at
+        - accepted_at
+        - expires_at
+        - request_digest
+        - state
+        - received_at
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-request.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        idempotency_key:
+          $ref: "#/components/schemas/Identifier128"
+        source:
+          type: string
+          enum: [agent]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        grant_id:
+          type: string
+          pattern: '^grant-[0-9a-f]{64}$'
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        kind:
+          type: string
+          enum: [question, decision]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 128
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        options:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        allow_text:
+          type: boolean
+        task_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        run_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        observed_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        request_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        project_id:
+          $ref: "#/components/schemas/Identifier128"
+        session_id:
+          $ref: "#/components/schemas/Identifier128"
+        state:
+          type: string
+          enum: [open, response_queued, resolved, expired]
+        response_key_id:
+          $ref: "#/components/schemas/Identifier128"
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        response_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        response_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 4096
+        response_queued_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+        received_at:
+          type: string
+          format: date-time
+      description: >-
+        Public interaction projection. It contains response identity metadata
+        but never the signed response envelope or response body.
+    InteractionPage:
+      type: object
+      additionalProperties: false
+      required: [interactions]
+      properties:
+        interactions:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Interaction"
+        next_after:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+    InteractionResponseSubmit:
+      type: object
+      additionalProperties: false
+      required: [permit_base64, response_base64]
+      properties:
+        permit_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 21848
+          description: Canonical base64 of one canonical tenant-signed DSSE response envelope.
+        response_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 5464
+          description: Canonical base64 of the exact bounded JSON response body.
+    InteractionResponsePollRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, node_id, limit]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-poll.v1]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 64
+    InteractionResponseDelivery:
+      type: object
+      additionalProperties: false
+      required: [schema_version, interaction_id, permit_base64, response_base64, permit_digest]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-delivery.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        permit_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 21848
+        response_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 5464
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+    InteractionResponsePollResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, deliveries]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-poll.v1]
+        deliveries:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/InteractionResponseDelivery"
+    InteractionResponseAck:
+      type: object
+      additionalProperties: false
+      required: [schema_version, interaction_id, permit_digest]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-ack.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+    AppliedCount:
+      type: object
+      additionalProperties: false
+      required: [applied]
+      properties:
+        applied:
+          type: integer
+          minimum: 0
+          maximum: 64
     TaskProjection:
       type: object
       additionalProperties: false
@@ -5251,6 +6099,13 @@ components:
           $ref: "#/components/schemas/SHA256Digest"
         run_id:
           $ref: "#/components/schemas/Identifier128"
+        schedule_id:
+          $ref: "#/components/schemas/Identifier96"
+        schedule_ordinal:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10000
         result_digest:
           $ref: "#/components/schemas/SHA256Digest"
         response_bytes:
@@ -5318,6 +6173,224 @@ components:
             $ref: "#/components/schemas/TaskRequest"
         next_after:
           $ref: "#/components/schemas/Identifier128"
+    TaskScheduleSubmit:
+      type: object
+      additionalProperties: false
+      required: [schedule_permit_base64, request_base64]
+      properties:
+        schedule_permit_base64:
+          type: string
+          minLength: 4
+          maxLength: 32768
+          description: Canonical padded base64 encoding of one DSSE schedule envelope.
+        request_base64:
+          type: string
+          minLength: 4
+          maxLength: 87384
+          description: Canonical padded base64 encoding of the exact JSON request bound by the schedule.
+    TaskScheduleStatement:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - schedule_id
+        - node_id
+        - tenant_id
+        - instance_id
+        - runtime_ref
+        - grant_id
+        - generation
+        - capsule_digest
+        - policy_digest
+        - route_policy_digest
+        - service_id
+        - operation_id
+        - operation_policy_digest
+        - request_digest
+        - request_bytes
+        - content_type
+        - starts_at
+        - interval_seconds
+        - run_count
+        - window_seconds
+        - max_concurrency
+        - overlap_policy
+        - missed_run_policy
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.task-schedule.v1]
+        schedule_id:
+          $ref: "#/components/schemas/Identifier96"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        grant_id:
+          type: string
+          pattern: '^grant-[0-9a-f]{64}$'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        route_policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        service_id:
+          $ref: "#/components/schemas/Identifier128"
+        operation_id:
+          $ref: "#/components/schemas/Identifier128"
+        operation_policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        request_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        request_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 65536
+        content_type:
+          type: string
+          enum: [application/json]
+        starts_at:
+          type: string
+          format: date-time
+        interval_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 2592000
+          description: Zero for a one-time schedule; recurring schedules require at least 60 seconds.
+        run_count:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10000
+        window_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 900
+        max_concurrency:
+          type: integer
+          minimum: 1
+          maximum: 16
+        overlap_policy:
+          type: string
+          enum: [queue, skip]
+        missed_run_policy:
+          type: string
+          enum: [skip]
+        project_id:
+          $ref: "#/components/schemas/Identifier128"
+        session_id:
+          $ref: "#/components/schemas/Identifier128"
+      description: >-
+        Exact finite authority signed outside Control. `project_id` and
+        `session_id` must be supplied together and add organization only.
+    TaskScheduleRun:
+      type: object
+      additionalProperties: false
+      required: [ordinal, due_at, task_id, state, created_at]
+      properties:
+        ordinal:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10000
+        due_at:
+          type: string
+          format: date-time
+        task_id:
+          $ref: "#/components/schemas/Identifier128"
+        state:
+          type: string
+          enum: [queued, leased, dispatched, running, cancel_requested, completed, failed, cancelled, deadline_exceeded, outcome_unknown, skipped]
+        reason:
+          type: string
+          enum: [missed_window, overlap_limit, courier_capacity, target_unavailable]
+        created_at:
+          type: string
+          format: date-time
+    TaskSchedule:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - schedule
+        - permit_digest
+        - permit_key_id
+        - state
+        - next_ordinal
+        - enqueued_runs
+        - skipped_runs
+        - runs
+        - created_at
+        - updated_at
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        schedule:
+          $ref: "#/components/schemas/TaskScheduleStatement"
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        permit_key_id:
+          $ref: "#/components/schemas/Identifier128"
+        state:
+          type: string
+          enum: [active, cancelled, completed]
+        next_ordinal:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10001
+        enqueued_runs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000
+        skipped_runs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000
+        runs:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/TaskScheduleRun"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        cancelled_at:
+          type: string
+          format: date-time
+      description: >-
+        Metadata-only schedule state. At most the newest 256 run records are
+        retained; aggregate counters cover the complete finite schedule.
+    TaskSchedulePage:
+      type: object
+      additionalProperties: false
+      required: [schedules]
+      properties:
+        schedules:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/TaskSchedule"
+        next_after:
+          $ref: "#/components/schemas/Identifier96"
     WorkroomSession:
       type: object
       additionalProperties: false
@@ -7603,6 +8676,11 @@ components:
       type: string
       minLength: 1
       maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    Identifier96:
+      type: string
+      minLength: 1
+      maxLength: 96
       pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
     Identifier256:
       type: string

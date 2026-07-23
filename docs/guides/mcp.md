@@ -194,6 +194,11 @@ lineage is one workload's persistent state history.
 | `steward_control_task_request_list` / `steward_control_task_request_status` | Read canonical asynchronous task lifecycle and content-addressed result metadata. Prompts, permits, and result bodies are excluded. |
 | `steward_control_task_request_submit` | Queue an exact pre-signed task and request after `acknowledge_task_submission=true`. Control does not authenticate the permit; Gateway still verifies it against admitted tenant authority. |
 | `steward_control_task_request_cancel` | Cancel queued work or record cancellation intent after `acknowledge_task_cancellation=true`. The response preserves `outcome_may_continue` when dispatched work may not have stopped. |
+| `steward_control_schedule_list` / `steward_control_schedule_status` | Read finite signed schedule metadata and bounded run history without request, permit, or result bodies. |
+| `steward_control_schedule_create` | Retain one exact externally signed schedule and request after `acknowledge_schedule_submission=true`. The tool cannot sign, alter, or extend the schedule. |
+| `steward_control_schedule_cancel` | Permanently stop future run materialization after `acknowledge_schedule_cancellation=true`. Already dispatched work may continue. |
+| `steward_control_interaction_list` / `steward_control_interaction_status` | Read bounded questions from admitted agents without response signing authority. |
+| `steward_control_interaction_respond` | Submit one exact externally signed response after `acknowledge_agent_response=true`. The tool cannot create the response permit or retarget it to another question. |
 | `steward_control_agent_list` | Page through non-secret agent runtime observations. It reports the last successful workload status separately from the latest signed operation and never schedules, retries, or mutates a workload. |
 | `steward_control_command_list` | Page and filter secret-free command metadata without returning the signed command body, terminal result body, reported status text, or error codes. |
 | `steward_control_credential_list` | Page and filter non-secret operator and node credential metadata without returning bearer material or token verifiers. |
@@ -217,6 +222,12 @@ contain retrieved prompt injection or private workload content, so use
 `stewardctl task result` or the explicit authenticated HTTP result endpoint and
 handle the saved bytes as untrusted data. The node-local `steward_task_observe`
 tool writes a result to a private file and returns only its path and digest.
+
+The ergonomic CLI signs finite schedules and interaction responses on a trusted
+operator workstation. MCP deliberately accepts only already signed envelopes
+because an untrusted MCP client must not inherit the tenant task key. See
+[Run finite scheduled tasks]({{ '/guides/scheduled-tasks/' | relative_url }}) and
+[Answer a running agent safely]({{ '/guides/agent-interactions/' | relative_url }}).
 
 Create the version-2 lifecycle bundle with `stewardctl task issue` on the trusted
 signing station. Its `service_path`, `operation.path`, `request_base64`, and

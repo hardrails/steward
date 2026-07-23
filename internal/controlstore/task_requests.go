@@ -62,6 +62,8 @@ type TaskRequest struct {
 	ObservationAttempts uint64 `json:"observation_attempts"`
 	TaskDigest          string `json:"task_digest,omitempty"`
 	RunID               string `json:"run_id,omitempty"`
+	ScheduleID          string `json:"schedule_id,omitempty"`
+	ScheduleOrdinal     uint64 `json:"schedule_ordinal,omitempty"`
 	ResultDigest        string `json:"result_digest,omitempty"`
 	ResponseBytes       int64  `json:"response_bytes,omitempty"`
 	ResultAvailable     bool   `json:"result_available,omitempty"`
@@ -91,6 +93,8 @@ func (task TaskRequest) Validate() error {
 		!deadline.After(created) || !validTaskRequestState(task.State) ||
 		task.TaskDigest != "" && !validSHA256Digest(task.TaskDigest) ||
 		task.RunID != "" && !validRecordID(task.RunID, 128) ||
+		(task.ScheduleID == "") != (task.ScheduleOrdinal == 0) ||
+		task.ScheduleID != "" && !validRecordID(task.ScheduleID, 96) ||
 		task.ResultDigest != "" && !validSHA256Digest(task.ResultDigest) || task.ResponseBytes < 0 ||
 		task.LastErrorCode != "" && !validRecordID(task.LastErrorCode, controlprotocol.MaxExecutorTaskErrorCodeBytes) ||
 		task.CancelRequestedAt != "" && !validTimestamp(task.CancelRequestedAt) ||
@@ -391,6 +395,9 @@ func (store *Store) PollTaskRequests(identity controlauth.NodeIdentity, now time
 	if node, ok := store.current.nodes[identity.NodeID]; !ok || EffectiveNodePlacement(node).Mode == NodeQuarantined {
 		return []controlprotocol.ExecutorTaskDeliveryV1{}, nil
 	}
+	if err := store.materializeDueTaskSchedule(identity, now); err != nil {
+		return nil, err
+	}
 	mutations := make([]mutation, 0, limit)
 	candidates := make([]storedTaskRequest, 0)
 	for _, retained := range store.current.taskRequests {
@@ -678,6 +685,7 @@ func (store *Store) taskResultCapacityAvailableLocked(tenantID, replacingKey str
 func taskRequestInputEqual(left, right storedTaskRequest) bool {
 	return left.TenantID == right.TenantID && left.TaskID == right.TaskID &&
 		left.ProjectID == right.ProjectID && left.SessionID == right.SessionID &&
+		left.ScheduleID == right.ScheduleID && left.ScheduleOrdinal == right.ScheduleOrdinal &&
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
 		left.TaskPermit == right.TaskPermit && left.RequestBase64 == right.RequestBase64
 }
@@ -737,18 +745,20 @@ func validStoredTaskRequest(task storedTaskRequest) bool {
 	created, createdErr := time.Parse(time.RFC3339Nano, task.CreatedAt)
 	updated, updatedErr := time.Parse(time.RFC3339Nano, task.UpdatedAt)
 	rawRequest, requestErr := base64.StdEncoding.DecodeString(task.RequestBase64)
-	rawPermit, permitErr := taskpermit.DecodeHeader(task.TaskPermit)
-	inspected, inspectErr := taskpermit.InspectUnverified(rawPermit)
+	rawPermit, permitErr := decodeStoredTaskPermitHeader(task.TaskPermit)
+	inspected, inspectErr := inspectStoredTaskPermit(rawPermit)
 	if deadlineErr != nil || createdErr != nil || updatedErr != nil || requestErr != nil || permitErr != nil || inspectErr != nil ||
 		created.After(updated) || task.RequestBytes != int64(len(rawRequest)) ||
 		base64.StdEncoding.EncodeToString(rawRequest) != task.RequestBase64 ||
-		task.RequestDigest != taskpermit.RequestDigest(rawRequest) || task.PermitDigest != inspected.EnvelopeDigest ||
-		task.TenantID != inspected.Statement.TenantID || task.TaskID != inspected.Statement.TaskID ||
-		task.NodeID != inspected.Statement.NodeID || task.InstanceID != inspected.Statement.InstanceID ||
-		task.InstanceGeneration != inspected.Statement.Generation || task.RuntimeRef != inspected.Statement.RuntimeRef ||
-		task.GrantID != inspected.Statement.GrantID || task.ServiceID != inspected.Statement.ServiceID ||
-		task.OperationID != inspected.Statement.OperationID || task.PermitKeyID != inspected.KeyID ||
-		task.Deadline != inspected.Statement.ExpiresAt || !deadline.After(created) || !validTaskRequestState(task.State) {
+		task.RequestDigest != taskpermit.RequestDigest(rawRequest) || task.PermitDigest != inspected.PermitDigest ||
+		task.TenantID != inspected.TenantID || task.TaskID != inspected.TaskID ||
+		task.NodeID != inspected.NodeID || task.InstanceID != inspected.InstanceID ||
+		task.InstanceGeneration != inspected.Generation || task.RuntimeRef != inspected.RuntimeRef ||
+		task.GrantID != inspected.GrantID || task.ServiceID != inspected.ServiceID ||
+		task.OperationID != inspected.OperationID || task.PermitKeyID != inspected.KeyID ||
+		task.Deadline != inspected.Deadline ||
+		task.ScheduleID != inspected.ScheduleID || task.ScheduleOrdinal != inspected.ScheduleOrdinal ||
+		!deadline.After(created) || !validTaskRequestState(task.State) {
 		return false
 	}
 	if task.LeaseUntil != "" {

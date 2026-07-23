@@ -155,12 +155,24 @@ func (s *Server) listenEventGrantLocked(id string) error {
 	}
 	s.eventListeners[id] = listener
 	server := &http.Server{
-		Handler: s.instanceEventHandler(id), ReadHeaderTimeout: 5 * time.Second,
+		Handler: s.interactionAndEventHandler(id), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
 	}
 	go func() { _ = server.Serve(listener) }()
 	return nil
+}
+
+func (s *Server) interactionAndEventHandler(grantID string) http.Handler {
+	events := s.instanceEventHandler(grantID)
+	interactions := s.interactionGrantHandler(grantID)
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/v1/interactions") {
+			interactions.ServeHTTP(writer, request)
+			return
+		}
+		events.ServeHTTP(writer, request)
+	})
 }
 
 func (s *Server) instanceEventHandler(grantID string) http.Handler {

@@ -46,7 +46,8 @@ responses.
 
 ## Build once, choose the agent engine
 
-Define skills, MCP endpoints, a model route, resources, state, lifetime, and
+Choose a built-in `workspace`, `research`, or `developer` starting point, then
+define skills, MCP endpoints, a model route, resources, state, lifetime, and
 placement once. Steward validates the definition with CUE, can require an offline
 OPA policy decision, and packages a deterministic bundle for Hermes.
 The same surface explains which fleet node is eligible, admits and starts the
@@ -54,7 +55,8 @@ agent directly, retains durable desired state through Steward Control, and deriv
 new, short-lived lineage from immutable state snapshot metadata.
 
 ```console
-stewardctl agent init -runtime hermes -name workspace-auditor workspace-auditor
+stewardctl agent template list
+stewardctl agent create workspace-auditor -template workspace
 stewardctl agent build -file workspace-auditor/Stewardfile.cue
 stewardctl agent plan -bundle agent.bundle.json -nodes nodes.json -tenant default
 stewardctl agent apply -bundle agent.bundle.json -nodes nodes.json -tenant default \
@@ -69,9 +71,9 @@ stewardctl agent apply -bundle agent.bundle.json -nodes nodes.json -tenant defau
 ## Useful agents, with finite authority
 
 <div class="grid">
-  <article class="card"><span class="number">01 / RESEARCH</span><h3>Research that survives the chat</h3><p>Hermes can search, read selected JavaScript pages without a logged-in browser, publish source-linked findings, and organize signed tasks and external evidence in durable Workrooms.</p><a href="{{ '/guides/research-agents/' | relative_url }}">Run a research agent →</a> · <a href="{{ '/guides/workrooms/' | relative_url }}">Use Workrooms →</a></article>
-  <article class="card"><span class="number">02 / BUILD</span><h3>Delegate to a coding specialist</h3><p>Hermes can ask the official Codex or Claude Code CLI to inspect or change a disposable Git worktree. The CLI and its login remain in a separate gVisor container.</p><a href="{{ '/guides/coding-workers/' | relative_url }}">Connect a coding worker →</a></article>
-  <article class="card"><span class="number">03 / REPORT</span><h3>Receive findings as they happen</h3><p>A running instance can send bounded status and findings through a durable, identity-stamped, at-least-once event channel. Events carry no command authority.</p><a href="{{ '/guides/controller-events/' | relative_url }}">Receive agent events →</a></article>
+  <article class="card"><span class="number">01 / RESEARCH</span><h3>Research that survives the chat</h3><p>Start from the research template, search and read selected websites, and organize source-linked findings in a durable Workroom.</p><a href="{{ '/guides/research-agents/' | relative_url }}">Run a research agent →</a> · <a href="{{ '/guides/workrooms/' | relative_url }}">Use Workrooms →</a></article>
+  <article class="card"><span class="number">02 / REPEAT</span><h3>Schedule finite recurring work</h3><p>Sign one exact Hermes request for a fixed number of runs. Control cannot extend the schedule, rewrite the prompt, or silently replay expired work.</p><a href="{{ '/guides/scheduled-tasks/' | relative_url }}">Schedule a task →</a></article>
+  <article class="card"><span class="number">03 / DECIDE</span><h3>Pause for a real decision</h3><p>An agent can ask a bounded question and collect only an answer signed for that exact question and workload generation.</p><a href="{{ '/guides/agent-interactions/' | relative_url }}">Answer an agent →</a></article>
 </div>
 
 ## What is protected

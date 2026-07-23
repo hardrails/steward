@@ -17,6 +17,7 @@ import (
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/schedulepermit"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
@@ -62,7 +63,7 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 		writeGatewayError(w, http.StatusBadRequest, "invalid_task_request", "task request body is incomplete, oversized, or ambiguous JSON")
 		return
 	}
-	rawPermit, err := taskpermit.DecodeHeader(permitValues[0])
+	rawPermit, err := decodeServiceTaskPermitHeader(permitValues[0])
 	if err != nil {
 		writeGatewayError(w, http.StatusUnauthorized, "invalid_task_permit", "task permit header is invalid")
 		return
@@ -78,7 +79,9 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 		return
 	}
 	now := s.now().UTC()
-	verified, err := taskpermit.Verify(rawPermit, trusted, now, time.Duration(operation.MaxPermitSeconds)*time.Second)
+	verified, err := verifyServiceTaskPermit(
+		rawPermit, trusted, now, time.Duration(operation.MaxPermitSeconds)*time.Second,
+	)
 	if err != nil || !taskPermitMatches(verified, grant, routePolicyDigest, operation, body) {
 		writeGatewayError(w, http.StatusForbidden, "task_permit_denied", "task permit does not authorize this exact active service request")
 		return
@@ -101,7 +104,9 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 
 	// Authorization is durable now. Recheck time and lifecycle immediately
 	// before dispatch so a slow fsync cannot extend authority or outrun revoke.
-	if _, err := taskpermit.Verify(rawPermit, trusted, s.now().UTC(), time.Duration(operation.MaxPermitSeconds)*time.Second); err != nil {
+	if _, err := verifyServiceTaskPermit(
+		rawPermit, trusted, s.now().UTC(), time.Duration(operation.MaxPermitSeconds)*time.Second,
+	); err != nil {
 		s.finishServiceTaskKnownFailure(w, taskDigest, event, "permit_expired", http.StatusForbidden, "task permit expired before dispatch")
 		return
 	}
@@ -209,7 +214,57 @@ func taskAuthorityKeys(authorities []TaskAuthority) (map[string]ed25519.PublicKe
 	return keys, nil
 }
 
-func taskPermitMatches(verified taskpermit.Verified, grant Grant, routePolicyDigest string, operation ServiceOperation, body []byte) bool {
+type verifiedServiceTaskPermit struct {
+	Statement      taskpermit.Statement
+	KeyID          string
+	EnvelopeDigest string
+	Scheduled      bool
+	WindowSeconds  int64
+}
+
+func verifyServiceTaskPermit(
+	raw []byte,
+	trusted map[string]ed25519.PublicKey,
+	now time.Time,
+	maxValidity time.Duration,
+) (verifiedServiceTaskPermit, error) {
+	exact, exactErr := taskpermit.Verify(raw, trusted, now, maxValidity)
+	if exactErr == nil {
+		return verifiedServiceTaskPermit{
+			Statement: exact.Statement, KeyID: exact.KeyID,
+			EnvelopeDigest: exact.EnvelopeDigest,
+		}, nil
+	}
+	scheduled, scheduleErr := schedulepermit.VerifyRun(raw, trusted, now)
+	if scheduleErr != nil || time.Duration(scheduled.Statement.WindowSeconds)*time.Second > maxValidity {
+		return verifiedServiceTaskPermit{}, errors.New("permit is neither an exact task nor an active scheduled run")
+	}
+	statement := taskpermit.Statement{
+		SchemaVersion: taskpermit.SchemaV1,
+		NodeID:        scheduled.Statement.NodeID, TenantID: scheduled.Statement.TenantID,
+		InstanceID: scheduled.Statement.InstanceID, RuntimeRef: scheduled.Statement.RuntimeRef,
+		GrantID: scheduled.Statement.GrantID, Generation: scheduled.Statement.Generation,
+		CapsuleDigest:     scheduled.Statement.CapsuleDigest,
+		PolicyDigest:      scheduled.Statement.PolicyDigest,
+		RoutePolicyDigest: scheduled.Statement.RoutePolicyDigest,
+		ServiceID:         scheduled.Statement.ServiceID, OperationID: scheduled.Statement.OperationID,
+		OperationPolicyDigest: scheduled.Statement.OperationPolicyDigest,
+		TaskID:                scheduled.TaskID, RequestDigest: scheduled.Statement.RequestDigest,
+		RequestBytes: scheduled.Statement.RequestBytes,
+		ContentType:  scheduled.Statement.ContentType,
+		NotBefore:    scheduled.DueAt.Format(time.RFC3339),
+		ExpiresAt: scheduled.DueAt.Add(
+			time.Duration(scheduled.Statement.WindowSeconds) * time.Second,
+		).Format(time.RFC3339),
+	}
+	return verifiedServiceTaskPermit{
+		Statement: statement, KeyID: scheduled.KeyID,
+		EnvelopeDigest: scheduled.RunPermitDigest, Scheduled: true,
+		WindowSeconds: scheduled.Statement.WindowSeconds,
+	}, nil
+}
+
+func taskPermitMatches(verified verifiedServiceTaskPermit, grant Grant, routePolicyDigest string, operation ServiceOperation, body []byte) bool {
 	statement := verified.Statement
 	return statement.NodeID == grant.NodeID && statement.TenantID == grant.TenantID &&
 		statement.InstanceID == grant.InstanceID && statement.RuntimeRef == grant.RuntimeRef &&
@@ -221,7 +276,7 @@ func taskPermitMatches(verified taskpermit.Verified, grant Grant, routePolicyDig
 		statement.ContentType == operation.ContentType
 }
 
-func serviceTaskReceiptEvent(grant Grant, routePolicyDigest string, operation ServiceOperation, taskDigest string, verified taskpermit.Verified, body []byte) connectorledger.Event {
+func serviceTaskReceiptEvent(grant Grant, routePolicyDigest string, operation ServiceOperation, taskDigest string, verified verifiedServiceTaskPermit, body []byte) connectorledger.Event {
 	return connectorledger.Event{
 		Phase: connectorledger.Authorize, Outcome: connectorledger.Allowed, Kind: connectorledger.ServiceTask,
 		TenantID: grant.TenantID, RuntimeRef: grant.RuntimeRef, CapsuleDigest: grant.CapsuleDigest,
@@ -232,6 +287,22 @@ func serviceTaskReceiptEvent(grant Grant, routePolicyDigest string, operation Se
 		RequestDigest: taskpermit.RequestDigest(body), RequestBytes: int64(len(body)),
 		TaskProtocol: operation.TaskProtocol,
 	}
+}
+
+func decodeServiceTaskPermitHeader(value string) ([]byte, error) {
+	maximum := schedulepermit.MaxRunPermitBytes
+	if taskpermit.MaxEnvelopeBytes > maximum {
+		maximum = taskpermit.MaxEnvelopeBytes
+	}
+	if value == "" || len(value) > base64.RawURLEncoding.EncodedLen(maximum) {
+		return nil, errors.New("task permit header exceeds its encoded bound")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(raw) == 0 || len(raw) > maximum ||
+		base64.RawURLEncoding.EncodeToString(raw) != value {
+		return nil, errors.New("task permit header is not canonical base64url")
+	}
+	return raw, nil
 }
 
 func (s *Server) policyDigestFor(grantID string) string {

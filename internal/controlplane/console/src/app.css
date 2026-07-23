@@ -1056,6 +1056,199 @@ select:focus {
   white-space: nowrap;
 }
 
+.workroom-activity {
+  border-top: 1px solid var(--line);
+  margin: 0 22px;
+  padding: 16px 0;
+}
+
+.workroom-activity h4,
+.schedule-runs h4 {
+  margin: 0 0 10px;
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.workroom-activity ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 7px;
+  list-style: none;
+}
+
+.workroom-activity li {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.workroom-activity li > div,
+.workroom-activity strong {
+  min-width: 0;
+}
+
+.workroom-activity span,
+.workroom-activity strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workroom-activity span,
+.workroom-activity time {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.workroom-activity strong {
+  margin-top: 2px;
+  font-size: 10px;
+}
+
+.schedule-boundary {
+  display: grid;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--signal);
+  background: linear-gradient(105deg, rgb(200 255 67 / 0.06), transparent 58%), var(--panel);
+  gap: 7px;
+  padding: 20px 24px;
+}
+
+.schedule-boundary strong {
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.schedule-boundary span {
+  max-width: 900px;
+  color: var(--paper-muted);
+  font-size: 12px;
+}
+
+.schedule-board {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.schedule-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(145deg, rgb(200 255 67 / 0.035), transparent 46%),
+    var(--panel);
+}
+
+.schedule-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  gap: 18px;
+  padding: 20px 22px;
+}
+
+.schedule-card h3 {
+  margin: 6px 0 3px;
+  font-family: var(--display);
+  font-size: 30px;
+  font-weight: 500;
+}
+
+.schedule-card header code {
+  color: var(--paper-dim);
+  font-size: 9px;
+}
+
+.schedule-card > dl {
+  display: grid;
+  margin: 0;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.schedule-card > dl div {
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 13px 16px;
+}
+
+.schedule-card > dl dt {
+  color: var(--paper-dim);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.schedule-card > dl dd {
+  overflow: hidden;
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-runs {
+  padding: 17px 22px;
+}
+
+.schedule-runs > div {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 9px;
+  padding: 9px 0;
+}
+
+.schedule-runs > div > span,
+.schedule-runs time {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.schedule-runs > div > strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-card > footer {
+  display: grid;
+  border-top: 1px solid var(--line);
+  background: var(--ink-soft);
+  gap: 7px;
+  padding: 14px 22px;
+}
+
+.schedule-card > footer span {
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.schedule-card > footer code {
+  overflow-x: auto;
+  color: var(--paper-muted);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
 .workroom-empty {
   border: 1px dashed var(--line-bright);
   background:
@@ -2686,6 +2879,298 @@ td small {
   text-align: center;
 }
 
+.interaction-boundary {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--warning);
+  margin: 24px 0;
+  background:
+    linear-gradient(110deg, rgb(255 194 71 / 0.11), transparent 52%),
+    var(--ink-soft);
+  grid-template-columns: minmax(220px, 0.65fr) minmax(0, 1.35fr);
+}
+
+.interaction-boundary strong,
+.interaction-boundary span {
+  padding: 17px 20px;
+}
+
+.interaction-boundary strong {
+  border-right: 1px solid var(--warning);
+  color: var(--warning);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+}
+
+.interaction-boundary span {
+  color: var(--paper-muted);
+  font-size: 12px;
+}
+
+.interaction-totals {
+  display: grid;
+  border: 1px solid var(--line);
+  margin: 0 0 18px;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.interaction-totals div {
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  padding: 14px 18px;
+}
+
+.interaction-totals div:last-child {
+  border-right: 0;
+}
+
+.interaction-totals div.is-open {
+  box-shadow: inset 0 3px var(--warning);
+}
+
+.interaction-totals dt {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.interaction-totals dd {
+  margin: 3px 0 0;
+  font-family: var(--display);
+  font-size: 28px;
+}
+
+.interaction-list {
+  display: grid;
+  margin: 0;
+  gap: 16px;
+  list-style: none;
+  padding: 0;
+}
+
+.interaction-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(145deg, rgb(122 200 255 / 0.04), transparent 42%),
+    var(--ink-soft);
+}
+
+.interaction-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--line-bright);
+  content: "";
+}
+
+.interaction-card.is-open::before {
+  background: var(--warning);
+}
+
+.interaction-card.is-resolved::before {
+  background: var(--signal);
+}
+
+.interaction-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  gap: 18px;
+  padding: 20px 24px 17px 28px;
+}
+
+.interaction-origin {
+  color: var(--blue);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.interaction-card h3 {
+  margin: 5px 0 0;
+  font-family: var(--display);
+  font-size: clamp(23px, 3vw, 34px);
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+}
+
+.untrusted-prompt {
+  margin: 20px 24px 0 28px;
+  border: 1px solid rgb(255 194 71 / 0.55);
+  background:
+    repeating-linear-gradient(135deg, transparent 0 14px, rgb(255 194 71 / 0.035) 14px 15px),
+    rgb(255 194 71 / 0.035);
+  padding: 16px 18px;
+}
+
+.untrusted-prompt > span {
+  color: var(--warning);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+
+.untrusted-prompt p {
+  margin: 7px 0 0;
+  color: var(--paper);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.interaction-binding {
+  display: grid;
+  margin: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 18px 24px 18px 28px;
+}
+
+.interaction-binding div {
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  padding: 8px 12px;
+}
+
+.interaction-binding dt {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.interaction-binding dd {
+  margin: 3px 0 0;
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.interaction-response {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  padding: 20px 24px 22px 28px;
+}
+
+.interaction-response fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.interaction-response legend,
+.interaction-text > span {
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.interaction-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.interaction-options label {
+  cursor: pointer;
+}
+
+.interaction-options input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.interaction-options span {
+  display: block;
+  border: 1px solid var(--line-bright);
+  background: var(--ink-soft);
+  color: var(--paper-muted);
+  padding: 9px 13px;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.interaction-options input:focus-visible + span {
+  outline: 3px solid var(--signal);
+  outline-offset: 3px;
+}
+
+.interaction-options input:checked + span {
+  border-color: var(--warning);
+  background: var(--warning);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.interaction-text {
+  display: grid;
+  margin-top: 18px;
+  gap: 8px;
+}
+
+.interaction-text input {
+  width: 100%;
+  border: 1px solid var(--line-bright);
+  border-radius: 0;
+  background: var(--ink-soft);
+  color: var(--paper);
+  padding: 11px 13px;
+}
+
+.interaction-signing-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  gap: 20px;
+  padding-top: 18px;
+}
+
+.interaction-signing-step > div {
+  display: grid;
+  max-width: 680px;
+  gap: 4px;
+}
+
+.interaction-signing-step strong,
+.interaction-terminal strong {
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.09em;
+}
+
+.interaction-signing-step span,
+.interaction-terminal span {
+  color: var(--paper-dim);
+  font-size: 11px;
+}
+
+.interaction-terminal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  gap: 18px;
+  padding: 18px 24px 20px 28px;
+}
+
 @media (max-width: 1040px) {
   .airlock {
     grid-template-columns: 1fr;
@@ -2717,7 +3202,8 @@ td small {
 
   .agent-board,
   .pool-board,
-  .workroom-board {
+  .workroom-board,
+  .schedule-board {
     grid-template-columns: 1fr;
   }
 
@@ -3007,6 +3493,37 @@ td small {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .interaction-boundary,
+  .interaction-binding,
+  .interaction-totals {
+    grid-template-columns: 1fr;
+  }
+
+  .interaction-boundary strong {
+    border-right: 0;
+    border-bottom: 1px solid var(--warning);
+  }
+
+  .interaction-totals div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .interaction-totals div:last-child {
+    border-bottom: 0;
+  }
+
+  .interaction-card > header,
+  .interaction-signing-step,
+  .interaction-terminal {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .interaction-binding div {
+    border-bottom: 1px solid var(--line);
   }
 
   .freeze-banner,

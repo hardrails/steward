@@ -194,13 +194,14 @@ configuration makes the prospective connector-receipt requirement format 2. A
 multi-party authorization or terminal record requires reader 6. A context-required
 grant requires reader 7.
 
-Current manifests also declare `gateway_state` readers 1 through 8 and writer 8.
+Current manifests also declare `gateway_state` readers 1 through 9 and writer 9.
 Gateway state format 4 retains service identity and tenant task authorities for
 task-authorized grants. Format 5 additionally retains authorized mode and the
 signed-policy-derived connector/action-key scopes, so a retained authorized grant
 requires Gateway state format 5 before its first connector event. Format 6 binds a
 multi-party approval threshold into the retained grant. Format 7 retains the
-context-lock requirement. A release whose
+context-lock requirement. Format 8 retains the bounded instance-event outbox.
+Format 9 retains agent interaction requests and their delivery state. A release whose
 reader or writer stops at an observed or configuration-required format is not a
 safe rollback target.
 

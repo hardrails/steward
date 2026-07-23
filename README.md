@@ -36,6 +36,8 @@ they can verify without a vendor service.
 | Repository work with coding agents | Hermes delegates to Codex or Claude Code in a separate isolated worker with its own clean Git worktree and authentication store. |
 | Signed collaboration requests | An optional, tenant-specific Buzz bridge durably queues allowed signed mentions, runs bounded concurrent Hermes tasks, and verifies correctly threaded replies without putting either signing key inside the agent. |
 | Remote task delivery | Control durably couriers an exact tenant-signed request to its assigned node, reports honest cancellation and uncertainty, and retains bounded terminal results without gaining task-signing authority. |
+| Recurring agent work | A tenant can sign one finite schedule for one exact Hermes request. Control materializes only the authorized run numbers and stops at the signed count, deadline, concurrency, and overlap limits. |
+| An agent needs a human decision | A running instance can open one bounded question. Control carries it to an operator and returns only a response signed against that exact question and workload generation. |
 | Disconnected and sovereign sites | Uses local keys, static Go binaries, local state, offline OCI archives, and customer-operated control services. No hosted service is required after transfer. |
 | Controller disaster recovery | Creates one bounded state-and-identity checkpoint under the stopped controller's writer lock, verifies it without extraction, and applies a restore only after the normal state and key readers accept it. |
 | Incident review and audit | Writes signed, hash-linked Executor and Gateway receipts. Receipt exports can be verified offline and omit prompt, request, response, and secret plaintext. |
@@ -191,6 +193,8 @@ security boundary.
 - [Let Hermes use Codex or Claude Code](https://hardrails.github.io/steward/guides/coding-workers/)
 - [Receive events from running agents](https://hardrails.github.io/steward/guides/controller-events/)
 - [Queue remote tasks and retrieve results](https://hardrails.github.io/steward/guides/async-tasks/)
+- [Run finite scheduled tasks](https://hardrails.github.io/steward/guides/scheduled-tasks/)
+- [Answer an agent safely](https://hardrails.github.io/steward/guides/agent-interactions/)
 - [Understand workload admission](https://hardrails.github.io/steward/guides/signed-admission/)
 - [Configure inference, services, connectors, and egress](https://hardrails.github.io/steward/guides/positive-capabilities/)
 
@@ -206,10 +210,11 @@ credential. The isolated coding-worker path can use the official Codex or Claude
 Code CLI's first-party login, but Steward never mounts that login into Hermes or
 brokers it for another user.
 
-Start a portable agent project with:
+Start a portable agent project from the smallest useful template:
 
 ```console
-stewardctl agent create workspace-auditor -runtime hermes
+stewardctl agent template list
+stewardctl agent create workspace-auditor -template workspace
 cd workspace-auditor
 stewardctl agent build
 stewardctl agent publish ../steward-site \
@@ -278,6 +283,19 @@ Control retains the request, short-lived signed permit, and terminal result up t
 512 KiB in its sensitive owner-only state. Gateway still authenticates and spends
 the permit. See [remote tasks and results](https://hardrails.github.io/steward/guides/async-tasks/)
 for deadlines, cancellation limits, and backup implications.
+
+For work that must happen more than once, sign a finite schedule instead of
+installing an unbounded cron job or leaving a task key on the controller:
+
+```console
+stewardctl task schedule workspace-auditor \
+  -every 24h -runs 14 \
+  "Review the new workspace changes and report one evidence-backed issue"
+```
+
+The command signs locally. Control receives authority for exactly 14 run numbers
+and cannot change the prompt, deployment, interval, dispatch window, or concurrency
+policy. See [finite scheduled tasks](https://hardrails.github.io/steward/guides/scheduled-tasks/).
 
 ## Authorize real work
 

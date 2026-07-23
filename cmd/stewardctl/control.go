@@ -128,6 +128,12 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlEventList(arguments[2:], stdout)
 	case "task list":
 		return controlTaskList(arguments[2:], stdout)
+	case "interaction list":
+		return controlInteractionList(arguments[2:], stdout)
+	case "interaction show":
+		return controlInteractionShow(arguments[2:], stdout)
+	case "interaction respond":
+		return controlInteractionRespond(arguments[2:], stdout)
 	case "command submit":
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
@@ -162,7 +168,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, backup create|verify|restore, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|assurance|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete|membership-issue|membership-verify|membership-bind, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, backup create|verify|restore, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|assurance|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-pool list|status|apply|delete|membership-issue|membership-verify|membership-bind, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, incident timeline, agent list, event list, task list, interaction list|show|respond, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 const defaultControlStateDirectory = "/var/lib/steward-control"

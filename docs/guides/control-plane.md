@@ -1062,9 +1062,11 @@ stewardctl control credential list \
 When metrics are enabled, configure the scraper to read a least-privilege operator
 bearer from an owner-only file and send it as the `Authorization: Bearer` header to
 `/metrics`. Do not put the bearer directly in a command line or world-readable
-scraper configuration. Metrics use only fixed labels for scope, resource, state,
-status, reason, and severity. They omit tenant, node, credential, and command IDs,
-prompts, bodies, results, and credentials.
+scraper configuration. Metrics use only fixed labels for scope, resource, kind,
+state, status, reason, and severity. They omit tenant, node, credential, and command IDs,
+prompts, bodies, results, and credentials. The `steward_control_workflows` family
+counts finite schedules, schedule runs, and agent questions by lifecycle state
+without exporting their request, prompt, response, permit, or result content.
 
 Tenant query parameters are not part of Prometheus series identity. If one
 Prometheus server scrapes several tenant projections from the same controller,

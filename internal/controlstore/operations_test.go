@@ -82,6 +82,61 @@ func TestOperationsThresholdsAndCapacityEqualityAreBounded(t *testing.T) {
 	}
 }
 
+func TestWorkflowSummaryIsTenantScopedContentFreeAndExpiryAware(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createTenant(t, "tenant-b")
+	now := fixture.now.Add(time.Hour)
+
+	fixture.store.mu.Lock()
+	fixture.store.current.taskSchedules[taskScheduleKey("tenant-a", "schedule-a")] = storedTaskSchedule{
+		TaskSchedule: TaskSchedule{
+			TenantID: "tenant-a", State: TaskScheduleActive,
+			Runs: []ScheduleRun{
+				{TaskID: "run-queued", State: ScheduleRunQueued},
+				{TaskID: "run-running", State: ScheduleRunQueued},
+				{TaskID: "run-failed", State: ScheduleRunQueued},
+				{TaskID: "run-skipped", State: ScheduleRunSkipped},
+			},
+		},
+	}
+	fixture.store.current.taskSchedules[taskScheduleKey("tenant-b", "schedule-b")] = storedTaskSchedule{
+		TaskSchedule: TaskSchedule{TenantID: "tenant-b", State: TaskScheduleCancelled},
+	}
+	for taskID, state := range map[string]string{
+		"run-queued": TaskRequestQueued, "run-running": TaskRequestRunning,
+		"run-failed": TaskRequestOutcomeUnknown,
+	} {
+		fixture.store.current.taskRequests[taskRequestKey("tenant-a", taskID)] = storedTaskRequest{
+			TaskRequest: TaskRequest{TenantID: "tenant-a", TaskID: taskID, State: state},
+		}
+	}
+	fixture.store.current.interactions[interactionKey("tenant-a", "open")] = storedInteraction{
+		Interaction: Interaction{TenantID: "tenant-a", State: InteractionOpen, ExpiresAt: canonicalTimestamp(now.Add(time.Hour))},
+	}
+	fixture.store.current.interactions[interactionKey("tenant-a", "expired")] = storedInteraction{
+		Interaction: Interaction{TenantID: "tenant-a", State: InteractionOpen, ExpiresAt: canonicalTimestamp(now.Add(-time.Second))},
+	}
+	fixture.store.current.interactions[interactionKey("tenant-b", "resolved")] = storedInteraction{
+		Interaction: Interaction{TenantID: "tenant-b", State: InteractionResolved, ExpiresAt: canonicalTimestamp(now.Add(time.Hour))},
+	}
+	tenant := fixture.store.workflowSummaryLocked(operationsScope{tenantID: "tenant-a"}, now)
+	site := fixture.store.workflowSummaryLocked(operationsScope{siteWide: true}, now)
+	fixture.store.mu.Unlock()
+
+	if tenant != (WorkflowSummary{
+		SchedulesTotal: 1, SchedulesActive: 1,
+		RunsQueued: 1, RunsRunning: 1, RunsFailed: 1, RunsSkipped: 1,
+		InteractionsTotal: 2, InteractionsOpen: 1, InteractionsExpired: 1,
+	}) {
+		t.Fatalf("tenant workflow summary = %+v", tenant)
+	}
+	if site.SchedulesTotal != 2 || site.SchedulesCancelled != 1 ||
+		site.InteractionsTotal != 3 || site.InteractionsResolved != 1 {
+		t.Fatalf("site workflow summary = %+v", site)
+	}
+}
+
 func TestTenantQuotaAttentionWarnsBeforeAndEscalatesAfterTheCeiling(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")

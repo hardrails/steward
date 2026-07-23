@@ -204,12 +204,35 @@ type EvidenceSummary struct {
 	EquivocationDetected int `json:"equivocation_detected"`
 }
 
+// WorkflowSummary is a content-free operational projection. It deliberately
+// counts only fixed lifecycle states; schedule requests, permits, interaction
+// prompts, response bodies, and result bytes never enter operations APIs or
+// metrics.
+type WorkflowSummary struct {
+	SchedulesTotal       int `json:"schedules_total"`
+	SchedulesActive      int `json:"schedules_active"`
+	SchedulesCompleted   int `json:"schedules_completed"`
+	SchedulesCancelled   int `json:"schedules_cancelled"`
+	RunsQueued           int `json:"runs_queued"`
+	RunsRunning          int `json:"runs_running"`
+	RunsCompleted        int `json:"runs_completed"`
+	RunsCancelled        int `json:"runs_cancelled"`
+	RunsFailed           int `json:"runs_failed"`
+	RunsSkipped          int `json:"runs_skipped"`
+	InteractionsTotal    int `json:"interactions_total"`
+	InteractionsOpen     int `json:"interactions_open"`
+	InteractionsQueued   int `json:"interactions_queued"`
+	InteractionsResolved int `json:"interactions_resolved"`
+	InteractionsExpired  int `json:"interactions_expired"`
+}
+
 type OperationsSummary struct {
 	GeneratedAt string           `json:"generated_at"`
 	TenantID    string           `json:"tenant_id,omitempty"`
 	Capacity    []CapacityUsage  `json:"capacity"`
 	Commands    CommandSummary   `json:"commands"`
 	Evidence    EvidenceSummary  `json:"evidence"`
+	Workflows   WorkflowSummary  `json:"workflows"`
 	Attention   AttentionSummary `json:"attention"`
 }
 
@@ -518,8 +541,9 @@ func (store *Store) ListCredentialInventory(actor controlauth.Identity, query Cr
 	return page, nil
 }
 
-// OperationsSummary returns capacity, command, and evidence facts for a site
-// or one exact tenant without deriving authority from those observations.
+// OperationsSummary returns capacity, command, evidence, and content-free
+// workflow facts for a site or one exact tenant without deriving authority
+// from those observations.
 func (store *Store) OperationsSummary(actor controlauth.Identity, tenantID string, now time.Time, thresholds OperationsThresholds) (OperationsSummary, error) {
 	if store == nil {
 		return OperationsSummary{}, ErrUnavailable
@@ -544,9 +568,10 @@ func (store *Store) OperationsSummary(actor controlauth.Identity, tenantID strin
 	}
 	summary := OperationsSummary{
 		GeneratedAt: canonicalTimestamp(now), TenantID: scope.tenantID,
-		Capacity: store.capacityUsageLocked(scope, thresholds.CapacityWarningPercent),
-		Commands: store.commandSummaryLocked(scope),
-		Evidence: store.evidenceSummaryLocked(scope, now, thresholds),
+		Capacity:  store.capacityUsageLocked(scope, thresholds.CapacityWarningPercent),
+		Commands:  store.commandSummaryLocked(scope),
+		Evidence:  store.evidenceSummaryLocked(scope, now, thresholds),
+		Workflows: store.workflowSummaryLocked(scope, now),
 	}
 	summary.Attention = store.attentionSummaryLocked(scope, now, thresholds)
 	return summary, nil
@@ -1066,6 +1091,59 @@ func (store *Store) evidenceSummaryLocked(scope operationsScope, now time.Time, 
 		}
 		if !stale && node.Evidence.Finding == nil {
 			summary.Current++
+		}
+	}
+	return summary
+}
+
+func (store *Store) workflowSummaryLocked(scope operationsScope, now time.Time) WorkflowSummary {
+	var summary WorkflowSummary
+	for _, stored := range store.current.taskSchedules {
+		if !scope.siteWide && stored.TenantID != scope.tenantID {
+			continue
+		}
+		schedule := projectTaskSchedule(stored, store.current.taskRequests)
+		summary.SchedulesTotal++
+		switch schedule.State {
+		case TaskScheduleActive:
+			summary.SchedulesActive++
+		case TaskScheduleCompleted:
+			summary.SchedulesCompleted++
+		case TaskScheduleCancelled:
+			summary.SchedulesCancelled++
+		}
+		for _, run := range schedule.Runs {
+			switch run.State {
+			case TaskRequestQueued, TaskRequestLeased, TaskRequestDispatched:
+				summary.RunsQueued++
+			case TaskRequestRunning, TaskRequestCancelRequested:
+				summary.RunsRunning++
+			case TaskRequestCompleted:
+				summary.RunsCompleted++
+			case TaskRequestCancelled:
+				summary.RunsCancelled++
+			case TaskRequestFailed, TaskRequestDeadlineExceeded, TaskRequestOutcomeUnknown:
+				summary.RunsFailed++
+			case ScheduleRunSkipped:
+				summary.RunsSkipped++
+			}
+		}
+	}
+	for _, stored := range store.current.interactions {
+		if !scope.siteWide && stored.TenantID != scope.tenantID {
+			continue
+		}
+		interaction := cloneInteractionView(stored, now)
+		summary.InteractionsTotal++
+		switch interaction.State {
+		case InteractionOpen:
+			summary.InteractionsOpen++
+		case InteractionResponseQueued:
+			summary.InteractionsQueued++
+		case InteractionResolved:
+			summary.InteractionsResolved++
+		case InteractionExpired:
+			summary.InteractionsExpired++
 		}
 	}
 	return summary

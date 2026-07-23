@@ -67,6 +67,8 @@ jobs:
           scripts/node-installer-security-test.sh scripts/configure-input-boundary-test.sh
           scripts/node-control-plane-conflict-test.sh
           scripts/check-docs-consistency.sh scripts/check-cli-docs-contract.sh
+          scripts/check-agent-workflow-boundaries.sh
+          scripts/check-agent-workflow-boundaries-test.sh
           scripts/signed-admission-acceptance.sh
           scripts/egress-acceptance.sh scripts/positive-capabilities-acceptance.sh
           packaging/debian/preinst packaging/debian/postinst
@@ -99,6 +101,10 @@ jobs:
         run: |
           bash scripts/check-docs-consistency.sh
           bash scripts/check-cli-docs-contract.sh
+      - name: Agent workflow authority boundaries
+        run: |
+          bash scripts/check-agent-workflow-boundaries.sh
+          bash scripts/check-agent-workflow-boundaries-test.sh
       - name: Hermes pin updater
         run: python3 -I scripts/update-hermes-pin-test.py
       - name: Buzz pin updater
@@ -220,7 +226,7 @@ jobs:
           grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},' "$stage/release.json"
           grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},' "$stage/release.json"
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
-          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},' "$stage/release.json"
+          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 9, "write": 9},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
           test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 82
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"

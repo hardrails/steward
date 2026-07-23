@@ -185,12 +185,9 @@ func createPromptTaskArtifacts(deploymentPath, prompt, taskID, requestedDirector
 	if err := dsse.DecodeStrictInto(raw, maxArtifactBytes, &deployment); err != nil {
 		return promptTaskArtifacts{}, fmt.Errorf("decode task-ready deployment: %w", err)
 	}
-	var operationID, requestField string
-	switch deployment.Admission.ServiceID {
-	case "hermes-api":
-		operationID, requestField = "hermes.run", "input"
-	default:
-		return promptTaskArtifacts{}, fmt.Errorf("task prompt mode does not recognize admitted service %q; use expert request flags", deployment.Admission.ServiceID)
+	operationID, requestField, err := promptOperation(deployment.Admission.ServiceID)
+	if err != nil {
+		return promptTaskArtifacts{}, err
 	}
 	request, err := json.Marshal(map[string]string{requestField: prompt, "session_id": taskID})
 	if err != nil {

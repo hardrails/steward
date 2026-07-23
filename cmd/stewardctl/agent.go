@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,13 +22,15 @@ import (
 
 func agentCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("agent requires create, init, validate, build, publish, authorize, service, plan, apply, deploy, deployment, fork, or doctor")
+		return errors.New("agent requires create, init, template, validate, build, publish, authorize, service, plan, apply, deploy, deployment, fork, or doctor")
 	}
 	switch arguments[0] {
 	case "create":
 		return agentCreate(arguments[1:], stdout)
 	case "init":
 		return agentInit(arguments[1:], stdout)
+	case "template":
+		return agentTemplateCommand(arguments[1:], stdout)
 	case "validate":
 		return agentValidate(arguments[1:], stdout)
 	case "build":
@@ -54,7 +57,7 @@ func agentCommand(arguments []string, stdout io.Writer) error {
 	case "doctor":
 		return agentDoctor(arguments[1:], stdout)
 	default:
-		return fmt.Errorf("unknown agent command %q; expected create, init, validate, build, publish, authorize, service, plan, apply, deploy, deployment, fork, or doctor", arguments[0])
+		return fmt.Errorf("unknown agent command %q; expected create, init, template, validate, build, publish, authorize, service, plan, apply, deploy, deployment, fork, or doctor", arguments[0])
 	}
 }
 
@@ -84,6 +87,7 @@ func agentInitWithDefault(arguments []string, stdout io.Writer, defaultDirectory
 	flags := flag.NewFlagSet("agent init", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	engine := flags.String("runtime", "hermes", "agent runtime; currently hermes")
+	templateID := flags.String("template", "workspace", "workspace, research, or developer capability preset")
 	name := flags.String("name", "my-agent", "agent name")
 	force := flags.Bool("force", false, "replace an existing Stewardfile.cue")
 	if err := flags.Parse(arguments); err != nil {
@@ -111,8 +115,13 @@ func agentInitWithDefault(arguments []string, stdout io.Writer, defaultDirectory
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	contract := "steward.hermes-agent.v1"
-	content := fmt.Sprintf(agentCUETemplate, *name, *engine, strings.Repeat("0", 64), contract)
+	definition, err := agentapp.DefinitionFromTemplate(
+		*templateID, *name, "replace.invalid/agent@sha256:"+strings.Repeat("0", 64),
+	)
+	if err != nil {
+		return err
+	}
+	content := renderAgentCUE(definition)
 	if *force {
 		if err := replaceAgentFile(path, []byte(content), 0o644); err != nil {
 			return err
@@ -120,34 +129,69 @@ func agentInitWithDefault(arguments []string, stdout io.Writer, defaultDirectory
 	} else if err := writeNewFile(path, []byte(content), 0o644); err != nil {
 		return err
 	}
-	return writeAgentJSON(stdout, map[string]any{"file": path, "runtime": *engine, "next": "replace the placeholder image, then run stewardctl agent build -file " + path + " -out agent.bundle.json"})
+	return writeAgentJSON(stdout, map[string]any{
+		"file": path, "runtime": *engine, "template": *templateID,
+		"next": "replace the placeholder image, then run stewardctl agent build -file " + path + " -out agent.bundle.json",
+	})
 }
 
-const agentCUETemplate = `// Steward agent application. CUE validates and exports this concrete value.
-{
-  schema: "steward.agent.v1"
-  name: %q
-  runtime: {
-    engine: %q
-    image: "replace.invalid/agent@sha256:%s"
-    adapter_contract: %q
-  }
-  model: route: "local/default"
-  skills: ["workspace-audit"]
-  resources: {
-    cpu_millis: 1000
-    memory_mib: 1024
-    disk_mib: 2048
-    pids: 256
-  }
-  placement: {
-    architectures: ["amd64"]
-    isolation: "hardened"
-  }
-  state: persistent: true
-  lifetime: mode: "service"
+func agentTemplateCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 || len(arguments) > 2 {
+		return errors.New("agent template requires list or show TEMPLATE")
+	}
+	if arguments[0] == "list" && len(arguments) == 1 {
+		return writeAgentJSON(stdout, map[string]any{"templates": agentapp.BuiltinTemplates()})
+	}
+	templateID := arguments[0]
+	if arguments[0] == "show" && len(arguments) == 2 {
+		templateID = arguments[1]
+	} else if len(arguments) != 1 {
+		return errors.New("agent template show requires one template ID")
+	}
+	template, err := agentapp.GetTemplate(templateID)
+	if err != nil {
+		return err
+	}
+	return writeAgentJSON(stdout, template)
 }
-`
+
+func renderAgentCUE(definition agentapp.Definition) string {
+	var content strings.Builder
+	content.WriteString("// Steward agent application. CUE validates and exports this concrete value.\n{\n")
+	fmt.Fprintf(&content, "  schema: %s\n  name: %s\n", strconv.Quote(definition.Schema), strconv.Quote(definition.Name))
+	fmt.Fprintf(&content, "  tool_profile: %s\n", strconv.Quote(definition.ToolProfile))
+	content.WriteString("  runtime: {\n")
+	fmt.Fprintf(&content, "    engine: %s\n    image: %s\n    adapter_contract: %s\n",
+		strconv.Quote(definition.Runtime.Engine), strconv.Quote(definition.Runtime.Image),
+		strconv.Quote(definition.Runtime.AdapterContract))
+	content.WriteString("  }\n")
+	fmt.Fprintf(&content, "  model: route: %s\n", strconv.Quote(definition.Model.Route))
+	fmt.Fprintf(&content, "  skills: %s\n", cueStringList(definition.Skills))
+	content.WriteString("  capabilities: {\n")
+	if len(definition.Capabilities.ConnectorIDs) > 0 {
+		fmt.Fprintf(&content, "    connector_ids: %s\n", cueStringList(definition.Capabilities.ConnectorIDs))
+	}
+	if definition.Capabilities.ControllerEvents {
+		content.WriteString("    controller_events: true\n")
+	}
+	content.WriteString("  }\n")
+	fmt.Fprintf(&content, "  resources: {\n    cpu_millis: %d\n    memory_mib: %d\n    disk_mib: %d\n    pids: %d\n  }\n",
+		definition.Resources.CPUMillis, definition.Resources.MemoryMiB,
+		definition.Resources.DiskMiB, definition.Resources.PIDs)
+	fmt.Fprintf(&content, "  placement: {\n    architectures: %s\n    isolation: %s\n  }\n",
+		cueStringList(definition.Placement.Architectures), strconv.Quote(definition.Placement.Isolation))
+	fmt.Fprintf(&content, "  state: persistent: %t\n  lifetime: mode: %s\n}\n",
+		definition.State.Persistent, strconv.Quote(definition.Lifetime.Mode))
+	return content.String()
+}
+
+func cueStringList(values []string) string {
+	quoted := make([]string, len(values))
+	for index, value := range values {
+		quoted[index] = strconv.Quote(value)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
 
 func agentValidate(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("agent validate", flag.ContinueOnError)

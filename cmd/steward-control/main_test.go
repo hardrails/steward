@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -458,6 +459,84 @@ func TestTransportConfigLoadsOnlyMatchedOwnerOnlyTLSMaterial(t *testing.T) {
 	parsed.tlsCertFile, parsed.tlsKeyFile = invalidCert, invalidKey
 	if _, err := transportConfig(parsed); err == nil || !strings.Contains(err.Error(), "load control TLS") {
 		t.Fatalf("mismatched TLS material error = %v", err)
+	}
+}
+
+func TestControlSigningIdentitiesRemainSeparatedFromTransportAndWitnessKeys(t *testing.T) {
+	witnessPublic, witnessPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerPublic, controllerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWitnessTLSKeySeparation(nil, witnessPrivate); err != nil {
+		t.Fatalf("loopback witness separation: %v", err)
+	}
+	if err := validateControllerKeySeparation(nil, witnessPrivate, controllerPublic); err != nil {
+		t.Fatalf("loopback controller separation: %v", err)
+	}
+	if err := validateWitnessTLSKeySeparation(&tls.Config{}, witnessPrivate); err == nil {
+		t.Fatal("witness accepted a TLS configuration without a certificate")
+	}
+	if err := validateControllerKeySeparation(&tls.Config{}, witnessPrivate, controllerPublic); err == nil {
+		t.Fatal("controller accepted a TLS configuration without a certificate")
+	}
+	if err := validateControllerKeySeparation(nil, nil, controllerPublic); err == nil {
+		t.Fatal("controller accepted an invalid witness key")
+	}
+	if err := validateControllerKeySeparation(nil, witnessPrivate, nil); err == nil {
+		t.Fatal("controller accepted an invalid signing key")
+	}
+	if err := validateControllerKeySeparation(nil, witnessPrivate, witnessPublic); err == nil {
+		t.Fatal("controller reused the witness signing identity")
+	}
+
+	certFile, keyFile := writeControlCertificate(t)
+	config, err := transportConfig(options{
+		address: "0.0.0.0:8443", tlsCertFile: certFile, tlsKeyFile: keyFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWitnessTLSKeySeparation(config, witnessPrivate); err != nil {
+		t.Fatalf("separate witness and ECDSA transport identities: %v", err)
+	}
+	if err := validateControllerKeySeparation(config, witnessPrivate, controllerPublic); err != nil {
+		t.Fatalf("separate controller and ECDSA transport identities: %v", err)
+	}
+
+	witnessCert, witnessKey := writeControlCertificateWithKey(t, t.TempDir(), witnessPrivate)
+	witnessTLS, err := transportConfig(options{
+		address: "0.0.0.0:8443", tlsCertFile: witnessCert, tlsKeyFile: witnessKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWitnessTLSKeySeparation(witnessTLS, witnessPrivate); err == nil {
+		t.Fatal("witness reused the TLS identity")
+	}
+
+	controllerCert, controllerKey := writeControlCertificateWithKey(t, t.TempDir(), controllerPrivate)
+	controllerTLS, err := transportConfig(options{
+		address: "0.0.0.0:8443", tlsCertFile: controllerCert, tlsKeyFile: controllerKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateControllerKeySeparation(controllerTLS, witnessPrivate, controllerPublic); err == nil {
+		t.Fatal("controller reused the TLS identity")
+	}
+
+	malformed := &tls.Config{Certificates: []tls.Certificate{{
+		Certificate: [][]byte{[]byte("not a certificate")},
+	}}}
+	if err := validateWitnessTLSKeySeparation(malformed, witnessPrivate); err == nil {
+		t.Fatal("witness accepted a malformed TLS leaf certificate")
+	}
+	if err := validateControllerKeySeparation(malformed, witnessPrivate, controllerPublic); err == nil {
+		t.Fatal("controller accepted a malformed TLS leaf certificate")
 	}
 }
 

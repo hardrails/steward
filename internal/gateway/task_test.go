@@ -20,6 +20,7 @@ import (
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/schedulepermit"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
@@ -173,6 +174,35 @@ func taskPermitFor(t *testing.T, rig *serviceTaskRig, taskID string, body []byte
 	return header
 }
 
+func scheduleRunPermitFor(
+	t *testing.T, rig *serviceTaskRig, scheduleID string, ordinal uint64, body []byte,
+) string {
+	t.Helper()
+	statement := schedulepermit.Statement{
+		SchemaVersion: schedulepermit.SchemaV1, ScheduleID: scheduleID,
+		NodeID: rig.grant.NodeID, TenantID: rig.grant.TenantID,
+		InstanceID: rig.grant.InstanceID, RuntimeRef: rig.grant.RuntimeRef,
+		GrantID: rig.grant.GrantID, Generation: rig.grant.Generation,
+		CapsuleDigest: rig.grant.CapsuleDigest, PolicyDigest: rig.grant.PolicyDigest,
+		RoutePolicyDigest: rig.server.policyDigestFor(rig.grant.GrantID),
+		ServiceID:         rig.grant.ServiceID, OperationID: rig.operation.ID,
+		OperationPolicyDigest: ServiceOperationDigest(rig.operation),
+		RequestDigest:         taskpermit.RequestDigest(body), RequestBytes: int64(len(body)),
+		ContentType: rig.operation.ContentType, StartsAt: rig.now.Format(time.RFC3339),
+		IntervalSeconds: 60, RunCount: 2, WindowSeconds: 30,
+		MaxConcurrency: 1, OverlapPolicy: "queue", MissedRunPolicy: "skip",
+	}
+	signed, err := schedulepermit.Sign(statement, "task-approver", rig.privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := schedulepermit.BuildRunPermit(signed, ordinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(run)
+}
+
 func invokeServiceTask(rig *serviceTaskRig, body []byte, permit string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "/v1/services/"+rig.grant.GrantID+rig.operation.Path, bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer service-token")
@@ -247,6 +277,41 @@ func TestSignedServiceTaskDispatchesOnceAndReplaysDurableRunID(t *testing.T) {
 	if len(records) != 2 || records[0].Kind != connectorledger.ServiceTask || records[0].RequestDigest != taskpermit.RequestDigest(body) ||
 		records[1].RunID != "run_0123456789abcdef0123456789abcdef" || strings.Contains(string(mustReadFile(t, rig.config.ConnectorReceiptFile)), "STEWARD_WORKSPACE_AUDIT") {
 		t.Fatalf("task receipts=%#v", records)
+	}
+}
+
+func TestSignedScheduleDispatchesOnlyDeterministicRunsInTheirWindows(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		run := calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = fmt.Fprintf(w, `{"run_id":"scheduled-run-%d"}`, run)
+	}))
+	defer upstream.Close()
+	rig := newServiceTaskRig(t, upstream.URL)
+	body := []byte(`{"input":"run bounded research"}`)
+
+	firstPermit := scheduleRunPermitFor(t, rig, "research-hourly", 1, body)
+	first := invokeServiceTask(rig, body, firstPermit)
+	if first.Code != http.StatusAccepted || calls.Load() != 1 {
+		t.Fatalf("first scheduled run status=%d body=%s calls=%d", first.Code, first.Body.String(), calls.Load())
+	}
+
+	secondPermit := scheduleRunPermitFor(t, rig, "research-hourly", 2, body)
+	early := invokeServiceTask(rig, body, secondPermit)
+	if early.Code != http.StatusForbidden || calls.Load() != 1 {
+		t.Fatalf("early scheduled run status=%d body=%s calls=%d", early.Code, early.Body.String(), calls.Load())
+	}
+	rig.server.now = func() time.Time { return rig.now.Add(time.Minute) }
+	second := invokeServiceTask(rig, body, secondPermit)
+	if second.Code != http.StatusAccepted || calls.Load() != 2 {
+		t.Fatalf("second scheduled run status=%d body=%s calls=%d", second.Code, second.Body.String(), calls.Load())
+	}
+	replay := invokeServiceTask(rig, body, secondPermit)
+	if replay.Code != http.StatusAccepted || replay.Header().Get(taskReceiptHeader) != "replayed" ||
+		calls.Load() != 2 {
+		t.Fatalf("scheduled replay status=%d headers=%v calls=%d", replay.Code, replay.Header(), calls.Load())
 	}
 }
 
@@ -772,7 +837,7 @@ func TestTaskAuthorizedGatewayStateWritesCurrentFormatAndRejectsFormatThree(t *t
 		t.Fatal(err)
 	}
 	grants, ok := state["grants"].([]any)
-	if !ok || state["version"] != float64(8) || len(grants) != 1 {
+	if !ok || state["version"] != float64(9) || len(grants) != 1 {
 		t.Fatalf("task state=%s", raw)
 	}
 	retained, ok := grants[0].(map[string]any)

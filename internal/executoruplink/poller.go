@@ -21,6 +21,7 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/gateway"
+	"github.com/hardrails/steward/internal/interactionpermit"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
 
@@ -95,6 +96,8 @@ type Config struct {
 type Poller struct {
 	pollURL, reportURL, schedulingURL, eventsURL string
 	taskPollURL, taskReportURL                   string
+	interactionURL, interactionPollURL           string
+	interactionAckURL                            string
 	credentialPath                               string
 	expected                                     *stewarduplink.Credential
 	interval                                     time.Duration
@@ -221,6 +224,9 @@ func NewPoller(cfg Config) (*Poller, error) {
 	reportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "report")
 	schedulingURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "scheduling")
 	eventsURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "events")
+	interactionURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "interactions")
+	interactionPollURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "interactions", "responses", "poll")
+	interactionAckURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "interactions", "responses", "ack")
 	taskPollURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "tasks", "poll")
 	taskReportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "tasks", "report")
 	client := cfg.HTTPClient
@@ -241,6 +247,7 @@ func NewPoller(cfg Config) (*Poller, error) {
 	)
 	return &Poller{
 		pollURL: pollURL, reportURL: reportURL, schedulingURL: schedulingURL, eventsURL: eventsURL,
+		interactionURL: interactionURL, interactionPollURL: interactionPollURL, interactionAckURL: interactionAckURL,
 		taskPollURL: taskPollURL, taskReportURL: taskReportURL,
 		credentialPath: cfg.CredentialPath,
 		expected:       credential, interval: cfg.PollInterval, client: client, logger: logger,
@@ -293,6 +300,7 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 	if p.eventGateway != nil && p.expected.NodeScoped() {
 		go p.runEvents(ctx)
+		go p.runInteractions(ctx)
 	}
 	if p.taskGateway != nil && p.expected.NodeScoped() {
 		go p.runTasks(ctx)
@@ -323,6 +331,171 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (p *Poller) runInteractions(ctx context.Context) {
+	for {
+		if err := p.syncInteractions(ctx); err != nil && ctx.Err() == nil {
+			p.logger.Warn("executor agent interaction synchronization failed", "error", err)
+		}
+		timer := time.NewTimer(p.interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (p *Poller) syncInteractions(ctx context.Context) error {
+	credential, err := stewarduplink.LoadCredentialWithSecurity(p.credentialPath, p.security)
+	if err != nil {
+		return err
+	}
+	if credential.Version != p.expected.Version || credential.Scope != p.expected.Scope ||
+		credential.TenantID != p.expected.TenantID || credential.NodeID != p.expected.NodeID {
+		return errors.New("rotated uplink credential changed version, scope, tenant_id, or node_id; refusing it")
+	}
+	publishErr := p.publishInteractions(ctx, credential)
+	responseErr := p.deliverInteractionResponses(ctx, credential)
+	return errors.Join(publishErr, responseErr)
+}
+
+func (p *Poller) publishInteractions(ctx context.Context, credential *stewarduplink.Credential) error {
+	values, err := p.eventGateway.ListInteractionOutbox(ctx)
+	if err != nil || len(values) == 0 {
+		return err
+	}
+	batch := controlprotocol.InteractionRequestBatchV1{
+		SchemaVersion: controlprotocol.InteractionBatchSchemaV1,
+		NodeID:        credential.NodeID,
+		Interactions:  make([]controlprotocol.InteractionRequestV1, len(values)),
+	}
+	ids := make([]string, len(values))
+	for index, value := range values {
+		batch.Interactions[index] = controllerInteraction(value)
+		ids[index] = value.InteractionID
+	}
+	if err := batch.Validate(); err != nil {
+		return fmt.Errorf("validate Gateway interaction batch: %w", err)
+	}
+	if err := p.postInteractionJSON(ctx, p.interactionURL, credential.Credential, batch, "interaction request batch"); err != nil {
+		return err
+	}
+	if err := p.eventGateway.AckInteractions(ctx, ids); err != nil {
+		return fmt.Errorf("acknowledge published interactions: %w", err)
+	}
+	return nil
+}
+
+func controllerInteraction(value gateway.Interaction) controlprotocol.InteractionRequestV1 {
+	return controlprotocol.InteractionRequestV1{
+		SchemaVersion: value.SchemaVersion, InteractionID: value.InteractionID,
+		IdempotencyKey: value.IdempotencyKey, Source: value.Source,
+		TenantID: value.TenantID, NodeID: value.NodeID, InstanceID: value.InstanceID,
+		Generation: value.Generation, RuntimeRef: value.RuntimeRef, GrantID: value.GrantID,
+		CapsuleDigest: value.CapsuleDigest, PolicyDigest: value.PolicyDigest,
+		Kind: value.Kind, Title: value.Title, Prompt: value.Prompt,
+		Options: append([]string(nil), value.Options...), AllowText: value.AllowText,
+		TaskID: value.TaskID, RunID: value.RunID, ObservedAt: value.ObservedAt,
+		AcceptedAt: value.AcceptedAt, ExpiresAt: value.ExpiresAt,
+		RequestDigest: value.RequestDigest,
+	}
+}
+
+func (p *Poller) deliverInteractionResponses(
+	ctx context.Context,
+	credential *stewarduplink.Credential,
+) error {
+	poll := controlprotocol.InteractionResponsePollRequestV1{
+		SchemaVersion: controlprotocol.InteractionPollSchemaV1,
+		NodeID:        credential.NodeID,
+		Limit:         controlprotocol.MaxInteractionBatch,
+	}
+	raw, err := p.postInteractionJSONResponse(
+		ctx, p.interactionPollURL, credential.Credential, poll, "interaction response poll",
+	)
+	if err != nil {
+		return err
+	}
+	var response controlprotocol.InteractionResponsePollResponseV1
+	if dsse.DecodeStrictInto(raw, maxWireBytes, &response) != nil ||
+		response.SchemaVersion != controlprotocol.InteractionPollSchemaV1 ||
+		response.Deliveries == nil || len(response.Deliveries) > controlprotocol.MaxInteractionBatch {
+		return errors.New("controller interaction response poll result is invalid")
+	}
+	for _, delivery := range response.Deliveries {
+		permit, permitErr := decodeCanonicalInteractionBase64(delivery.PermitBase64)
+		body, bodyErr := decodeCanonicalInteractionBase64(delivery.ResponseBase64)
+		if delivery.SchemaVersion != controlprotocol.InteractionResponseSchemaV1 ||
+			permitErr != nil || bodyErr != nil || len(permit) == 0 ||
+			len(permit) > interactionpermit.MaxEnvelopeBytes || len(body) == 0 ||
+			len(body) > interactionpermit.MaxResponseBytes || dsse.Digest(permit) != delivery.PermitDigest {
+			return errors.New("controller returned an invalid interaction response delivery")
+		}
+		if _, err := p.eventGateway.ResolveInteraction(ctx, delivery.InteractionID, permit, body); err != nil {
+			return fmt.Errorf("deliver interaction response %s to Gateway: %w", delivery.InteractionID, err)
+		}
+		ack := controlprotocol.InteractionResponseAckV1{
+			SchemaVersion: controlprotocol.InteractionAckSchemaV1,
+			InteractionID: delivery.InteractionID,
+			PermitDigest:  delivery.PermitDigest,
+		}
+		if err := p.postInteractionJSON(ctx, p.interactionAckURL, credential.Credential, ack, "interaction response acknowledgement"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decodeCanonicalInteractionBase64(value string) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || base64.StdEncoding.EncodeToString(raw) != value {
+		return nil, errors.New("interaction courier field is not canonical base64")
+	}
+	return raw, nil
+}
+
+func (p *Poller) postInteractionJSON(
+	ctx context.Context,
+	target, credential string,
+	body any,
+	boundary string,
+) error {
+	_, err := p.postInteractionJSONResponse(ctx, target, credential, body, boundary)
+	return err
+}
+
+func (p *Poller) postInteractionJSONResponse(
+	ctx context.Context,
+	target, credential string,
+	body any,
+	boundary string,
+) ([]byte, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+credential)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := p.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, wireError(boundary, response)
+	}
+	result, err := readBounded(response.Body, maxWireBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read %s response: %w", boundary, err)
+	}
+	return result, nil
 }
 
 func (p *Poller) runEvents(ctx context.Context) {

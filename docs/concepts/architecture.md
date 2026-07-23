@@ -126,12 +126,16 @@ Control is a customer-operated management and evidence-witness plane. Nodes poll
 outbound, which works behind normal inbound firewalls and network address
 translation.
 
-Control stores signed command envelopes and bounded desired deployments. It never
-needs tenant private keys. For automatic lifecycle reconciliation, it signs only
-within an exact tenant delegation using a separate online key; Executor verifies
-both layers locally. Control has no Docker authority and does not receive Gateway
-credential plaintext. Its operator bearer determines API scope. A different
-witness key signs bounded evidence exports and checkpoints.
+Control stores signed command envelopes, bounded desired deployments, exact
+task requests, finite task schedules, and bounded agent interactions. It never
+needs tenant private keys. A schedule lets Control derive only the run ordinals
+and due times already fixed by the tenant signature. An interaction response must
+be signed against the exact question and workload generation. For automatic
+lifecycle reconciliation, Control signs only within an exact tenant delegation
+using a separate online key; Executor verifies both layers locally. Control has no
+Docker authority and does not receive Gateway credential plaintext. Its operator
+bearer determines API scope. A different witness key signs bounded evidence
+exports and checkpoints.
 
 The embedded React console uses the same API. Static assets are compiled into the
 Go binary, no CDN or telemetry is required, and the operator bearer remains in tab
@@ -169,6 +173,21 @@ signed task receipt chain
 
 The task key is scoped in site policy and remains off-node. The exact bundle is
 also the recovery handle after a timeout.
+
+### Finite schedule and interaction
+
+```text
+tenant task key -> exact finite schedule -> Control materializes due ordinal
+                                            |
+                                            v
+                              Gateway verifies nested signature and due time
+
+agent -> exact bounded question -> Control -> exact tenant-signed response
+```
+
+Control can delay, withhold, replay, or cancel authority it already holds. It
+cannot increase the signed run count, change a scheduled request, create a new
+valid response, or retarget a response to a replacement generation.
 
 ### Authorized effect
 
