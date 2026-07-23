@@ -157,6 +157,22 @@ jobs:
           trap 'rm -rf "$stage" "$smoke" /tmp/steward-node-test.deb /tmp/steward-node-test.rpm \
             /tmp/steward-node-test.deb.contents /tmp/steward-node-test.rpm.contents; \
             if [[ -n ${package_verify_root:-} ]]; then sudo rm -rf "$package_verify_root"; fi' EXIT
+          STEWARD_RELEASE_VERSION=v0.0.0-test STEWARD_RELEASE_TARGETS=linux/amd64 \
+            /bin/bash -p scripts/release.sh >/tmp/steward-tar-release.out
+          tar_archive=dist/steward_v0.0.0-test_linux_amd64.tar.gz
+          tar --numeric-owner -tvzf "$tar_archive" | awk '
+            ($2 == "0" && $3 == "0") || $2 == "0/0" { count++; next }
+            { exit 1 }
+            END { if (count == 0) exit 1 }
+          '
+          package_verify_root="/usr/lib/steward-node-tar-smoke-${GITHUB_RUN_ID}-$$"
+          sudo install -d -o root -g root -m 0755 "$package_verify_root"
+          sudo tar -xzf "$tar_archive" -C "$package_verify_root"
+          sudo "$package_verify_root/scripts/install-node.sh" \
+            --expected-version v0.0.0-test --verify-package-only | \
+            grep -Fxq 'install-node: package release verified'
+          sudo rm -rf "$package_verify_root"
+          package_verify_root=
           mkdir -p "$stage/adapters" "$stage/deploy" "$stage/scripts" "$stage/workers"
           go build -o "$stage/steward" ./cmd/steward
           go build -o "$stage/steward-control" ./cmd/steward-control
