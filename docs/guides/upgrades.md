@@ -37,7 +37,7 @@ adds the canonical signer set and threshold for a multi-party authorized call.
 Format 7 binds a context-locked call's response-history head and terminal response
 digest. A single ledger may contain all seven schemas in one signed hash chain.
 Current release manifests declare `connector_receipt_log` readers 1 through 7 and
-writer 8. The inspector reports the
+writer 7. The inspector reports the
 highest format present. It reports format 2 when action authorities are configured
 and format 4 when service-task operations are configured, even before the receipt
 file exists or contains that schema, because the running configuration can write the
@@ -50,11 +50,13 @@ multi-party authorization raises the receipt boundary to 6, and its retained
 grant requires Gateway state format 6 before any call.
 Context-required grants raise both the receipt and retained-state boundary to 7.
 
-Current release manifests declare `gateway_state` readers 1 through 8 and writer 8.
+Current release manifests declare `gateway_state` readers 1 through 9 and writer 9.
 Format 4 retains the service identity and tenant task authorities of task-authorized
 grants. Format 5 additionally retains authorized effect mode and the
 signed-policy-derived connector/action-key scopes. Format 6 additionally retains
 the multi-party approval threshold. Format 7 retains the context-lock requirement.
+Format 8 retains the bounded instance-event outbox. Format 9 retains agent
+interaction requests and delivery state.
 Activation therefore blocks a rollback that
 cannot preserve those bindings.
 

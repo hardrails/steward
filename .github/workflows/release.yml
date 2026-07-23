@@ -175,7 +175,7 @@ jobs:
           grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},' <<<"$manifest"
           grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},' <<<"$manifest"
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
-          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},' <<<"$manifest"
+          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 9, "write": 9},' <<<"$manifest"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' <<<"$manifest"
           grep -Fxq "  \"version\": \"${STEWARD_RELEASE_VERSION}\"," <<<"$manifest"
           grep -Fxq '  "os": "linux",' <<<"$manifest"

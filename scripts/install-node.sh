@@ -994,7 +994,7 @@ write_canonical_manifest() {
 		printf '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},\n'
 		printf '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},\n'
-		printf '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},\n'
+		printf '    "gateway_state": {"read_min": 1, "read_max": 9, "write": 9},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},\n'
