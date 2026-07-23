@@ -4562,6 +4562,9 @@ components:
         - `steward_control_evidence_nodes` uses `scope` and `status`, where
           status is `all`, `active`, `witnessed`, `unwitnessed`, `current`,
           `stale`, `rollback_detected`, or `equivocation_detected`.
+        - `steward_control_workflows` uses `scope`, `kind`, and `state`.
+          Kind is `schedule`, `schedule_run`, or `interaction`; each kind has
+          only its documented finite lifecycle states.
         - `steward_control_attention` uses `scope`, `reason`, and `severity`.
 
         `scope` is only `site` or `tenant`. No tenant, node, credential,
