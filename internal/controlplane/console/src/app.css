@@ -757,6 +757,327 @@ select:focus {
   animation: view-enter 360ms both;
 }
 
+.workroom-principle {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(112deg, rgb(200 255 67 / 0.06), transparent 58%),
+    var(--panel);
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.workroom-principle-mark {
+  display: grid;
+  min-height: 118px;
+  place-items: center;
+  border-right: 1px solid var(--line);
+  color: var(--signal);
+  font-family: var(--display);
+  font-size: 64px;
+  line-height: 1;
+}
+
+.workroom-principle > div {
+  align-self: center;
+  padding: 22px 28px;
+}
+
+.workroom-principle strong,
+.workroom-agent-line span,
+.workroom-card footer span {
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+}
+
+.workroom-principle p {
+  max-width: 900px;
+  margin: 7px 0 0;
+  color: var(--paper-muted);
+  font-size: 12px;
+}
+
+.workroom-totals {
+  display: grid;
+  border-left: 1px solid var(--line);
+  margin: 24px 0;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.workroom-totals div {
+  display: flex;
+  min-height: 88px;
+  align-items: baseline;
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: rgb(255 255 255 / 0.014);
+  gap: 12px;
+  padding: 18px;
+}
+
+.workroom-totals dt {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workroom-totals dd {
+  order: -1;
+  margin: 0;
+  font-family: var(--display);
+  font-size: 42px;
+  line-height: 1;
+}
+
+.workroom-totals .is-live dd {
+  color: var(--signal);
+}
+
+.workroom-board {
+  display: grid;
+  gap: 24px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workroom-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(145deg, rgb(122 200 255 / 0.04), transparent 46%),
+    var(--panel);
+}
+
+.workroom-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--blue);
+  content: "";
+}
+
+.workroom-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  margin: 0 22px;
+  gap: 18px;
+  padding: 22px 0 18px;
+}
+
+.workroom-card h3,
+.workroom-empty h3 {
+  margin: 7px 0 2px;
+  font-family: var(--display);
+  font-size: 34px;
+  font-weight: 500;
+  line-height: 1.08;
+}
+
+.workroom-card header code {
+  color: var(--paper-dim);
+  font-size: 9px;
+}
+
+.workroom-description {
+  min-height: 58px;
+  margin: 0;
+  color: var(--paper-muted);
+  padding: 18px 22px;
+  font-family: var(--display);
+  font-size: 16px;
+}
+
+.workroom-agent-line {
+  display: grid;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  margin: 0 22px;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 14px;
+  padding: 13px 0;
+}
+
+.workroom-agent-line span {
+  color: var(--paper-dim);
+}
+
+.workroom-agent-line strong {
+  overflow: hidden;
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workroom-session-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(150px, 0.75fr);
+}
+
+.workroom-session-grid > section {
+  min-width: 0;
+  padding: 18px 22px;
+}
+
+.workroom-session-grid > section + section {
+  border-left: 1px solid var(--line);
+}
+
+.workroom-session-grid h4 {
+  margin: 0 0 12px;
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.workroom-session-grid ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 8px;
+  list-style: none;
+}
+
+.workroom-session-grid li {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  border-left: 2px solid var(--line-bright);
+  background: rgb(255 255 255 / 0.022);
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  padding: 9px 10px;
+}
+
+.workroom-session-grid li > div {
+  min-width: 0;
+}
+
+.workroom-session-grid li strong,
+.workroom-session-grid li code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workroom-session-grid li strong {
+  font-size: 11px;
+}
+
+.workroom-session-grid li code,
+.workroom-session-grid li > span,
+.workroom-muted {
+  color: var(--paper-dim);
+  font-size: 8px;
+}
+
+.workroom-session-grid li > span {
+  font-family: var(--mono);
+}
+
+.workroom-evidence {
+  display: grid;
+  margin: 0;
+  gap: 10px;
+}
+
+.workroom-evidence div {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 9px;
+}
+
+.workroom-evidence dt {
+  color: var(--paper-dim);
+  font-size: 9px;
+}
+
+.workroom-evidence dd {
+  margin: 3px 0 0;
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.workroom-artifacts {
+  display: grid;
+  border-top: 1px solid var(--line);
+  margin: 0 22px;
+  padding: 14px 0;
+  gap: 6px;
+}
+
+.workroom-artifacts > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 90px minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.workroom-artifacts span,
+.workroom-artifacts code,
+.workroom-artifacts small {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.workroom-artifacts strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workroom-card footer {
+  display: grid;
+  border-top: 1px solid var(--line);
+  background: var(--ink-soft);
+  gap: 7px;
+  padding: 15px 22px;
+}
+
+.workroom-card footer code {
+  overflow-x: auto;
+  color: var(--paper-muted);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.workroom-empty {
+  border: 1px dashed var(--line-bright);
+  background:
+    repeating-linear-gradient(135deg, rgb(255 255 255 / 0.018) 0 1px, transparent 1px 12px),
+    var(--ink-soft);
+  padding: clamp(28px, 5vw, 56px);
+}
+
+.workroom-empty p {
+  max-width: 700px;
+  color: var(--paper-dim);
+}
+
+.workroom-empty pre {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  background: var(--ink);
+  color: var(--signal);
+  padding: 14px;
+}
+
 @keyframes view-enter {
   from {
     opacity: 0;
@@ -2395,7 +2716,8 @@ td small {
   }
 
   .agent-board,
-  .pool-board {
+  .pool-board,
+  .workroom-board {
     grid-template-columns: 1fr;
   }
 
@@ -2539,6 +2861,41 @@ td small {
 
   .metric-grid {
     grid-template-columns: 1fr;
+  }
+
+  .workroom-principle {
+    grid-template-columns: 58px minmax(0, 1fr);
+  }
+
+  .workroom-principle-mark {
+    min-height: 96px;
+    font-size: 42px;
+  }
+
+  .workroom-principle > div {
+    padding: 16px;
+  }
+
+  .workroom-totals {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .workroom-totals div {
+    min-height: 74px;
+  }
+
+  .workroom-session-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workroom-session-grid > section + section {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .workroom-artifacts > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 
   .quota-resource-grid {
