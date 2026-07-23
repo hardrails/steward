@@ -70,6 +70,7 @@ PROFILE_SKILLS = {
     "research": {
         "path": RESEARCH_SKILL,
         "name": "steward-research",
+        "version": "2",
         "entrypoint": "research.py",
         "public_key_sha256": "7ecdb9818979001ac9a6ea4eaf85af1a9388d6f168323fec582a8ac06053e54b",
         "connector_ids": [
@@ -91,6 +92,7 @@ PROFILE_SKILLS = {
     "developer": {
         "path": DEVELOPER_SKILL,
         "name": "steward-coding-worker",
+        "version": "1",
         "entrypoint": "coding_worker.py",
         "public_key_sha256": "0b131eeb43a3f6fd4e5ed8a16c5b4a20501860400d74fb95a7b2f4e9e73e6fac",
         "connector_ids": ["steward-claude-code", "steward-codex"],
@@ -536,7 +538,7 @@ def verify_profile_skill(expected: dict[str, Any]) -> None:
     if (
         descriptor["schema_version"] != "steward.profile-skill-manifest.v1"
         or descriptor["name"] != expected["name"]
-        or descriptor["version"] != "1"
+        or descriptor["version"] != expected["version"]
         or descriptor["entrypoint"] != expected["entrypoint"]
         or descriptor["connector_ids"] != expected["connector_ids"]
         or descriptor["limits"] != expected["limits"]

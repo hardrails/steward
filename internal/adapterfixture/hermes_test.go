@@ -298,6 +298,40 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 	}
 }
 
+func TestHermesEntrypointAcceptsEveryBundledProfileManifest(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	root := hermesAdapterRoot(t)
+	program := `
+import importlib.util, json, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("hermes_entrypoint", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+profiles = pathlib.Path(sys.argv[2])
+for profile, expected in module.PROFILE_SKILLS.items():
+    descriptor = json.loads((profiles / profile / "manifest.json").read_bytes())
+    for field in ("name", "version", "entrypoint", "connector_ids", "limits"):
+        actual = descriptor[field]
+        if actual != expected[field]:
+            raise AssertionError(f"{profile} {field}: manifest={actual!r} validator={expected[field]!r}")
+`
+	command := exec.Command(
+		python,
+		"-I",
+		"-c",
+		program,
+		filepath.Join(root, "entrypoint.py"),
+		filepath.Join(root, "profiles"),
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("entrypoint rejects a bundled profile manifest: %v\n%s", err, output)
+	}
+}
+
 func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *testing.T) {
 	root := filepath.Join(hermesAdapterRoot(t), "profiles")
 	research := string(readBounded(t, filepath.Join(root, "research", "research.py"), 1<<20))
