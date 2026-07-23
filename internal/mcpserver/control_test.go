@@ -20,16 +20,19 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/interactionpermit"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 type fakeControl struct {
-	calls       []string
-	command     []byte
-	taskPermit  string
-	taskRequest []byte
-	inspection  controlprotocol.ExecutorEvidenceInspectionV1
-	err         error
+	calls          []string
+	command        []byte
+	taskPermit     string
+	taskRequest    []byte
+	responsePermit []byte
+	responseBody   []byte
+	inspection     controlprotocol.ExecutorEvidenceInspectionV1
+	err            error
 }
 
 func (control *fakeControl) ListTenants(_ context.Context, after string, limit int) (controlclient.TenantList, error) {
@@ -76,6 +79,37 @@ func (control *fakeControl) SubmitTaskRequest(_ context.Context, tenantID, permi
 func (control *fakeControl) CancelTaskRequest(_ context.Context, tenantID, taskID string) (controlstore.TaskRequest, error) {
 	control.calls = append(control.calls, "task-request-cancel:"+tenantID+":"+taskID)
 	return controlstore.TaskRequest{TenantID: tenantID, TaskID: taskID, State: controlstore.TaskRequestCancelRequested}, control.err
+}
+
+func (control *fakeControl) ListInteractions(
+	_ context.Context, tenantID, after string, limit int,
+) (controlclient.InteractionList, error) {
+	control.calls = append(control.calls, "interaction-list:"+tenantID+":"+after+":"+strconv.Itoa(limit))
+	return controlclient.InteractionList{Interactions: []controlstore.Interaction{{
+		TenantID: tenantID, InteractionID: "interaction-" + strings.Repeat("a", 64),
+		State: controlstore.InteractionOpen,
+	}}}, control.err
+}
+
+func (control *fakeControl) GetInteraction(
+	_ context.Context, tenantID, interactionID string,
+) (controlstore.Interaction, error) {
+	control.calls = append(control.calls, "interaction-status:"+tenantID+":"+interactionID)
+	return controlstore.Interaction{
+		TenantID: tenantID, InteractionID: interactionID, State: controlstore.InteractionOpen,
+	}, control.err
+}
+
+func (control *fakeControl) SubmitInteractionResponse(
+	_ context.Context, tenantID, interactionID string, permit, response []byte,
+) (controlstore.Interaction, error) {
+	control.calls = append(control.calls, "interaction-respond:"+tenantID+":"+interactionID)
+	control.responsePermit = append([]byte(nil), permit...)
+	control.responseBody = append([]byte(nil), response...)
+	return controlstore.Interaction{
+		TenantID: tenantID, InteractionID: interactionID,
+		State: controlstore.InteractionResponseQueued,
+	}, control.err
 }
 
 func (control *fakeControl) ListNodePools(_ context.Context, after string, limit int) (controlclient.NodePoolList, error) {
@@ -245,7 +279,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 22 {
+	if len(listed) != 25 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
@@ -256,6 +290,8 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_event_list", "steward_control_task_list",
 		"steward_control_task_request_list", "steward_control_task_request_status",
 		"steward_control_task_request_submit", "steward_control_task_request_cancel",
+		"steward_control_interaction_list", "steward_control_interaction_status",
+		"steward_control_interaction_respond",
 		"steward_control_command_status", "steward_control_operations_summary",
 		"steward_control_attention_list", "steward_control_command_list",
 		"steward_control_incident_timeline",
@@ -271,7 +307,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 			t.Fatalf("control-only tool list exposed %s: %s", forbidden, raw)
 		}
 	}
-	for _, acknowledgment := range []string{"acknowledge_tenant_creation", "acknowledge_node_revocation", "acknowledge_command_submission", "acknowledge_task_submission", "acknowledge_task_cancellation"} {
+	for _, acknowledgment := range []string{"acknowledge_tenant_creation", "acknowledge_node_revocation", "acknowledge_command_submission", "acknowledge_task_submission", "acknowledge_task_cancellation", "acknowledge_agent_response"} {
 		if !strings.Contains(raw, acknowledgment) {
 			t.Fatalf("control tool list omitted %s", acknowledgment)
 		}
@@ -297,6 +333,9 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_task_request_status"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_task_request_submit"], false, true, true, true)
 	requireAnnotations(t, definitions["steward_control_task_request_cancel"], false, true, true, false)
+	requireAnnotations(t, definitions["steward_control_interaction_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_interaction_status"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_interaction_respond"], false, false, true, false)
 	requireAnnotations(t, definitions["steward_control_command_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_agent_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_credential_list"], true, false, true, false)
@@ -307,6 +346,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_command_submit":      "acknowledge_command_submission",
 		"steward_control_task_request_submit": "acknowledge_task_submission",
 		"steward_control_task_request_cancel": "acknowledge_task_cancellation",
+		"steward_control_interaction_respond": "acknowledge_agent_response",
 	} {
 		schema := definitions[toolName]["inputSchema"].(map[string]any)
 		properties := schema["properties"].(map[string]any)
@@ -320,6 +360,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_incident_timeline",
 		"steward_control_event_list", "steward_control_task_list",
 		"steward_control_task_request_list", "steward_control_task_request_status",
+		"steward_control_interaction_list", "steward_control_interaction_status",
 		"steward_control_node_pool_list", "steward_control_node_pool_status",
 		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
 	} {
@@ -354,6 +395,8 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 	command := testControlCommand(t)
 	taskRequest := []byte(`{"input":"bounded research"}`)
 	taskPermit := testControlTaskPermit(t, taskRequest)
+	interactionID := "interaction-" + strings.Repeat("a", 64)
+	responsePermit, responseBody := testControlInteractionResponse(t, interactionID)
 	calls := []struct {
 		name      string
 		arguments map[string]any
@@ -378,6 +421,18 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		}},
 		{name: "steward_control_task_request_cancel", arguments: map[string]any{
 			"tenant_id": "tenant-a", "task_id": "task-a", "acknowledge_task_cancellation": true,
+		}},
+		{name: "steward_control_interaction_list", arguments: map[string]any{
+			"tenant_id": "tenant-a", "after": interactionID, "limit": 25,
+		}},
+		{name: "steward_control_interaction_status", arguments: map[string]any{
+			"tenant_id": "tenant-a", "interaction_id": interactionID,
+		}},
+		{name: "steward_control_interaction_respond", arguments: map[string]any{
+			"tenant_id": "tenant-a", "interaction_id": interactionID,
+			"permit_base64":              base64.StdEncoding.EncodeToString(responsePermit),
+			"response_base64":            base64.StdEncoding.EncodeToString(responseBody),
+			"acknowledge_agent_response": true,
 		}},
 		{name: "steward_control_evidence_status", arguments: map[string]any{"node_id": "node-a"}},
 	}
@@ -486,6 +541,9 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		"task-request-status:tenant-a:task-a",
 		"task-request-submit:tenant-a",
 		"task-request-cancel:tenant-a:task-a",
+		"interaction-list:tenant-a:" + interactionID + ":25",
+		"interaction-status:tenant-a:" + interactionID,
+		"interaction-respond:tenant-a:" + interactionID,
 		"evidence-status:node-a",
 		"operations-summary:tenant-a",
 		"attention-list:tenant-a:node_stale:" + attentionCursor + ":25",
@@ -504,6 +562,10 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 	}
 	if control.taskPermit != taskPermit || !bytes.Equal(control.taskRequest, taskRequest) {
 		t.Fatal("MCP did not preserve exact signed task bytes")
+	}
+	if !bytes.Equal(control.responsePermit, responsePermit) ||
+		!bytes.Equal(control.responseBody, responseBody) {
+		t.Fatal("MCP did not preserve exact signed interaction response bytes")
 	}
 }
 
@@ -543,6 +605,41 @@ func testControlTaskPermit(t *testing.T, request []byte) string {
 	return header
 }
 
+func testControlInteractionResponse(t *testing.T, interactionID string) ([]byte, []byte) {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := json.Marshal(interactionpermit.ResponseBody{
+		SchemaVersion: interactionpermit.ResponseBodySchemaV1,
+		Choice:        "continue",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	statement := interactionpermit.Statement{
+		SchemaVersion: interactionpermit.SchemaV1,
+		NodeID:        "node-a", TenantID: "tenant-a", InstanceID: "agent-a",
+		RuntimeRef: "executor-" + strings.Repeat("a", 64),
+		GrantID:    "grant-" + strings.Repeat("b", 64), Generation: 1,
+		CapsuleDigest:  "sha256:" + strings.Repeat("c", 64),
+		PolicyDigest:   "sha256:" + strings.Repeat("d", 64),
+		InteractionID:  interactionID,
+		RequestDigest:  "sha256:" + strings.Repeat("e", 64),
+		ResponseDigest: interactionpermit.ResponseDigest(response),
+		ResponseBytes:  int64(len(response)),
+		NotBefore:      now.Format(time.RFC3339),
+		ExpiresAt:      now.Add(5 * time.Minute).Format(time.RFC3339),
+	}
+	permit, err := interactionpermit.Sign(statement, "tenant-task", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return permit, response
+}
+
 func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 	control := &fakeControl{}
 	server, _ := NewConfigured(Config{Control: control, Version: "v1"})
@@ -578,6 +675,12 @@ func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 		{name: "task request status", tool: "steward_control_task_request_status", arguments: map[string]any{"tenant_id": "tenant-a"}},
 		{name: "task request submit acknowledgement", tool: "steward_control_task_request_submit", arguments: map[string]any{"tenant_id": "tenant-a"}},
 		{name: "task request cancel acknowledgement", tool: "steward_control_task_request_cancel", arguments: map[string]any{"tenant_id": "tenant-a", "task_id": "task-a"}},
+		{name: "interaction tenant", tool: "steward_control_interaction_list", arguments: map[string]any{}},
+		{name: "interaction cursor", tool: "steward_control_interaction_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "interaction-invalid"}},
+		{name: "interaction status", tool: "steward_control_interaction_status", arguments: map[string]any{"tenant_id": "tenant-a"}},
+		{name: "interaction response acknowledgement", tool: "steward_control_interaction_respond", arguments: map[string]any{
+			"tenant_id": "tenant-a", "interaction_id": "interaction-" + strings.Repeat("a", 64),
+		}},
 		{name: "node pool cursor", tool: "steward_control_node_pool_list", arguments: map[string]any{"after": " bad"}},
 		{name: "node pool limit", tool: "steward_control_node_pool_list", arguments: map[string]any{"limit": 501}},
 		{name: "node pool identity", tool: "steward_control_node_pool_status", arguments: map[string]any{"pool_id": "-pool"}},
@@ -619,6 +722,8 @@ func TestMCPControlMutationsRequireExplicitAcknowledgments(t *testing.T) {
 	control := &fakeControl{}
 	server, _ := NewConfigured(Config{Control: control, Version: "v1"})
 	command := testControlCommand(t)
+	interactionID := "interaction-" + strings.Repeat("a", 64)
+	responsePermit, responseBody := testControlInteractionResponse(t, interactionID)
 	for _, call := range []struct {
 		name      string
 		arguments map[string]any
@@ -629,6 +734,12 @@ func TestMCPControlMutationsRequireExplicitAcknowledgments(t *testing.T) {
 			"tenant_id": "tenant-a", "node_id": "node-a", "command_dsse_base64": base64.StdEncoding.EncodeToString(command),
 			"acknowledge_command_submission": false,
 		}},
+		{name: "steward_control_interaction_respond", arguments: map[string]any{
+			"tenant_id": "tenant-a", "interaction_id": interactionID,
+			"permit_base64":              base64.StdEncoding.EncodeToString(responsePermit),
+			"response_base64":            base64.StdEncoding.EncodeToString(responseBody),
+			"acknowledge_agent_response": false,
+		}},
 	} {
 		result := callMCPControlTool(t, server, call.name, call.arguments)
 		if !controlToolIsError(result) {
@@ -637,6 +748,42 @@ func TestMCPControlMutationsRequireExplicitAcknowledgments(t *testing.T) {
 	}
 	if len(control.calls) != 0 {
 		t.Fatalf("unacknowledged mutations reached controller: %#v", control.calls)
+	}
+}
+
+func TestMCPControlInteractionResponseRejectsRebindingAndNoncanonicalBytes(t *testing.T) {
+	control := &fakeControl{}
+	server, _ := NewConfigured(Config{Control: control, Version: "v1"})
+	interactionID := "interaction-" + strings.Repeat("a", 64)
+	permit, response := testControlInteractionResponse(t, interactionID)
+	base := map[string]any{
+		"tenant_id": "tenant-a", "interaction_id": interactionID,
+		"permit_base64":              base64.StdEncoding.EncodeToString(permit),
+		"response_base64":            base64.StdEncoding.EncodeToString(response),
+		"acknowledge_agent_response": true,
+	}
+	for name, arguments := range map[string]map[string]any{
+		"other interaction": replaceControlArgument(
+			base, "interaction_id", "interaction-"+strings.Repeat("b", 64),
+		),
+		"changed response": replaceControlArgument(
+			base, "response_base64", base64.StdEncoding.EncodeToString([]byte(`{"choice":"other"}`)),
+		),
+		"noncanonical permit": replaceControlArgument(
+			base, "permit_base64", base["permit_base64"].(string)+"\n",
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := callMCPControlTool(
+				t, server, "steward_control_interaction_respond", arguments,
+			)
+			if !controlToolIsError(result) {
+				t.Fatalf("invalid signed response succeeded: %#v", result)
+			}
+		})
+	}
+	if len(control.calls) != 0 {
+		t.Fatalf("invalid interaction response reached controller: %#v", control.calls)
 	}
 }
 
