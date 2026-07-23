@@ -203,10 +203,12 @@ func (value Definition) Validate() error {
 	case "workspace":
 	case "research":
 		if !value.Capabilities.ControllerEvents ||
+			!slices.Contains(value.Capabilities.ConnectorIDs, "steward-browser-search") ||
+			!slices.Contains(value.Capabilities.ConnectorIDs, "steward-browser-read") ||
 			!slices.Contains(value.Capabilities.ConnectorIDs, "steward-research-search") ||
 			!slices.Contains(value.Capabilities.ConnectorIDs, "steward-research-extract") ||
 			!slices.Contains(value.Skills, "steward-research") {
-			return errors.New("research tool profile requires its signed skill, search and extract connectors, and controller events")
+			return errors.New("research tool profile requires its signed skill, search, extract, browser-search and browser-read connectors, and controller events")
 		}
 	case "developer":
 		if !slices.Contains(value.Skills, "steward-coding-worker") ||

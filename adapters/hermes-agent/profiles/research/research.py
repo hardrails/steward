@@ -75,6 +75,25 @@ def extract(arguments: argparse.Namespace) -> object:
     )
 
 
+def browser_search(arguments: argparse.Namespace) -> object:
+    return post_json(
+        CONNECTOR_ORIGIN,
+        "/v1/connectors/steward-browser-search/operations/search",
+        {"query": bounded_text(arguments.query, 2048), "limit": arguments.limit},
+    )
+
+
+def browser_read(arguments: argparse.Namespace) -> object:
+    refs: list[str] = []
+    for value in arguments.source_ref:
+        refs.append(bounded_text(value, 128))
+    return post_json(
+        CONNECTOR_ORIGIN,
+        "/v1/connectors/steward-browser-read/operations/read",
+        {"source_refs": refs, "screenshot": arguments.screenshot},
+    )
+
+
 def report(arguments: argparse.Namespace) -> object:
     source_url = ""
     if arguments.source_url:
@@ -105,6 +124,12 @@ def parser() -> argparse.ArgumentParser:
     search_command.add_argument("--limit", type=int, choices=range(1, 21), default=5)
     extract_command = commands.add_parser("extract")
     extract_command.add_argument("--url", action="append", required=True)
+    browser_search_command = commands.add_parser("browser-search")
+    browser_search_command.add_argument("--query", required=True)
+    browser_search_command.add_argument("--limit", type=int, choices=range(1, 21), default=5)
+    browser_read_command = commands.add_parser("browser-read")
+    browser_read_command.add_argument("--source-ref", action="append", required=True)
+    browser_read_command.add_argument("--screenshot", action="store_true")
     report_command = commands.add_parser("report")
     report_command.add_argument("--code", required=True)
     report_command.add_argument("--summary", required=True)
@@ -122,6 +147,12 @@ def main() -> int:
         if len(arguments.url) > 10:
             raise ValueError("at most 10 URLs may be extracted per call")
         value = extract(arguments)
+    elif arguments.command == "browser-search":
+        value = browser_search(arguments)
+    elif arguments.command == "browser-read":
+        if len(arguments.source_ref) > 5:
+            raise ValueError("at most 5 browser source references may be read per call")
+        value = browser_read(arguments)
     else:
         value = report(arguments)
     json.dump(value, sys.stdout, ensure_ascii=False, separators=(",", ":"), sort_keys=True)

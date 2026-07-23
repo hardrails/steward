@@ -59,8 +59,8 @@ func TestToolProfilesRequireTheirExactPositiveCapabilities(t *testing.T) {
 		wantError  string
 	}{
 		{name: "workspace", profile: "workspace"},
-		{name: "research", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-research-search", "steward-research-extract"}, events: true},
-		{name: "research missing events", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-research-search", "steward-research-extract"}, wantError: "controller events"},
+		{name: "research", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-browser-read", "steward-browser-search", "steward-research-search", "steward-research-extract"}, events: true},
+		{name: "research missing events", profile: "research", skills: []string{"steward-research"}, connectors: []string{"steward-browser-read", "steward-browser-search", "steward-research-search", "steward-research-extract"}, wantError: "controller events"},
 		{name: "developer codex", profile: "developer", skills: []string{"steward-coding-worker"}, connectors: []string{"steward-codex"}},
 		{name: "developer claude", profile: "developer", skills: []string{"steward-coding-worker"}, connectors: []string{"steward-claude-code"}},
 		{name: "developer missing worker", profile: "developer", skills: []string{"steward-coding-worker"}, wantError: "coding-worker connector"},

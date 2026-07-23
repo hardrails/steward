@@ -221,10 +221,10 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 	}{
 		{
 			profile: "research", name: "steward-research", entrypoint: "research.py",
-			publicDigest: "b8e13bf2e90dd3f360f5b5ddfb34bddc79df47d2b6d3456dc3f7d67a5be16e35",
-			connectors:   []string{"steward-research-extract", "steward-research-search"},
+			publicDigest: "7ecdb9818979001ac9a6ea4eaf85af1a9388d6f168323fec582a8ac06053e54b",
+			connectors:   []string{"steward-browser-read", "steward-browser-search", "steward-research-extract", "steward-research-search"},
 			limits: map[string]int{"max_extract_urls": 10, "max_request_bytes": 65536, "max_response_bytes": 1048576,
-				"max_search_results": 20, "timeout_seconds": 30},
+				"max_search_results": 20, "max_browser_refs": 5, "timeout_seconds": 180},
 		},
 		{
 			profile: "developer", name: "steward-coding-worker", entrypoint: "coding_worker.py",
@@ -276,7 +276,8 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 			if err := requireEOF(decoder); err != nil {
 				t.Fatal(err)
 			}
-			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" || manifest.Version != "1" ||
+			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" ||
+				manifest.Version != map[string]string{"research": "2", "developer": "1"}[test.profile] ||
 				manifest.Name != test.name || manifest.Entrypoint != test.entrypoint ||
 				!valuesEqual(manifest.ConnectorIDs, test.connectors) || !valuesEqual(manifest.Limits, test.limits) || len(manifest.Files) != 2 {
 				t.Fatalf("unexpected profile authority: %#v", manifest)
@@ -314,6 +315,8 @@ func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *t
 				`EVENT_ORIGIN = "http://steward-relay:8083"`,
 				`/v1/connectors/steward-research-search/operations/search`,
 				`/v1/connectors/steward-research-extract/operations/extract`,
+				`/v1/connectors/steward-browser-search/operations/search`,
+				`/v1/connectors/steward-browser-read/operations/read`,
 				`/v1/events`,
 			},
 		},

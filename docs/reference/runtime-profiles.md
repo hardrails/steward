@@ -22,7 +22,8 @@ before signing, import, or admission.
 The three Hermes profiles run the same qualified adapter but expose different
 signed skill directories and Hermes toolsets. `hermes-v1` is the general
 workspace profile. The research profile requires the normalized search and
-extract connectors plus controller events. The developer profile requires at
+extract connectors, the opaque-reference browser search and read connectors, and
+controller events. The developer profile requires at
 least one separately operated Claude Code or Codex connector. Credentials stay
 in those services; they are not mounted into Hermes state.
 
