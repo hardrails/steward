@@ -1955,13 +1955,14 @@ import sys
 
 site_path, tenant_path, admin_tenant_path = map(pathlib.Path, sys.argv[1:4])
 tenant_id, other_tenant_id, node_id, command_id, credential_id = sys.argv[4:9]
-allowed_labels = {"scope", "resource", "state", "status", "reason", "severity"}
+allowed_labels = {"scope", "resource", "kind", "state", "status", "reason", "severity"}
 required_families = {
     "steward_control_capacity_used",
     "steward_control_capacity_limit",
     "steward_control_capacity_warning",
     "steward_control_commands",
     "steward_control_evidence_nodes",
+    "steward_control_workflows",
 }
 texts = {
     "site": site_path.read_text(encoding="utf-8"),
