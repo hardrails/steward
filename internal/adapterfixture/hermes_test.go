@@ -506,6 +506,7 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		"for path in /opt/data /tmp /workspace /dev/shm",
 		"agent writable mount topology is unexpected",
 		"release_root=$root",
+		`${root##*/} == integration`,
 		`release_root=$(cd "$root/.." && pwd -P)`,
 		"steward-integration-$run_id-generation-2",
 		"gateway service set",
