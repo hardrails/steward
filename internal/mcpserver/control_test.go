@@ -21,18 +21,21 @@ import (
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/interactionpermit"
+	"github.com/hardrails/steward/internal/schedulepermit"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 type fakeControl struct {
-	calls          []string
-	command        []byte
-	taskPermit     string
-	taskRequest    []byte
-	responsePermit []byte
-	responseBody   []byte
-	inspection     controlprotocol.ExecutorEvidenceInspectionV1
-	err            error
+	calls           []string
+	command         []byte
+	taskPermit      string
+	taskRequest     []byte
+	schedulePermit  []byte
+	scheduleRequest []byte
+	responsePermit  []byte
+	responseBody    []byte
+	inspection      controlprotocol.ExecutorEvidenceInspectionV1
+	err             error
 }
 
 func (control *fakeControl) ListTenants(_ context.Context, after string, limit int) (controlclient.TenantList, error) {
@@ -79,6 +82,43 @@ func (control *fakeControl) SubmitTaskRequest(_ context.Context, tenantID, permi
 func (control *fakeControl) CancelTaskRequest(_ context.Context, tenantID, taskID string) (controlstore.TaskRequest, error) {
 	control.calls = append(control.calls, "task-request-cancel:"+tenantID+":"+taskID)
 	return controlstore.TaskRequest{TenantID: tenantID, TaskID: taskID, State: controlstore.TaskRequestCancelRequested}, control.err
+}
+
+func (control *fakeControl) ListTaskSchedules(
+	_ context.Context, tenantID, after string, limit int,
+) (controlclient.TaskScheduleList, error) {
+	control.calls = append(control.calls, "schedule-list:"+tenantID+":"+after+":"+strconv.Itoa(limit))
+	return controlclient.TaskScheduleList{Schedules: []controlstore.TaskSchedule{}}, control.err
+}
+
+func (control *fakeControl) GetTaskSchedule(
+	_ context.Context, tenantID, scheduleID string,
+) (controlstore.TaskSchedule, error) {
+	control.calls = append(control.calls, "schedule-status:"+tenantID+":"+scheduleID)
+	return controlstore.TaskSchedule{
+		TenantID:  tenantID,
+		Statement: schedulepermit.Statement{ScheduleID: scheduleID},
+	}, control.err
+}
+
+func (control *fakeControl) CreateTaskSchedule(
+	_ context.Context, tenantID string, permit, request []byte,
+) (controlstore.TaskSchedule, error) {
+	control.calls = append(control.calls, "schedule-create:"+tenantID)
+	control.schedulePermit = append([]byte(nil), permit...)
+	control.scheduleRequest = append([]byte(nil), request...)
+	inspected, _ := schedulepermit.InspectUnverified(permit)
+	return controlstore.TaskSchedule{TenantID: tenantID, Statement: inspected.Statement}, control.err
+}
+
+func (control *fakeControl) CancelTaskSchedule(
+	_ context.Context, tenantID, scheduleID string,
+) (controlstore.TaskSchedule, error) {
+	control.calls = append(control.calls, "schedule-cancel:"+tenantID+":"+scheduleID)
+	return controlstore.TaskSchedule{
+		TenantID: tenantID, Statement: schedulepermit.Statement{ScheduleID: scheduleID},
+		State: controlstore.TaskScheduleCancelled,
+	}, control.err
 }
 
 func (control *fakeControl) ListInteractions(
@@ -279,7 +319,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 25 {
+	if len(listed) != 29 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
@@ -290,6 +330,8 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_event_list", "steward_control_task_list",
 		"steward_control_task_request_list", "steward_control_task_request_status",
 		"steward_control_task_request_submit", "steward_control_task_request_cancel",
+		"steward_control_schedule_list", "steward_control_schedule_status",
+		"steward_control_schedule_create", "steward_control_schedule_cancel",
 		"steward_control_interaction_list", "steward_control_interaction_status",
 		"steward_control_interaction_respond",
 		"steward_control_command_status", "steward_control_operations_summary",
@@ -307,7 +349,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 			t.Fatalf("control-only tool list exposed %s: %s", forbidden, raw)
 		}
 	}
-	for _, acknowledgment := range []string{"acknowledge_tenant_creation", "acknowledge_node_revocation", "acknowledge_command_submission", "acknowledge_task_submission", "acknowledge_task_cancellation", "acknowledge_agent_response"} {
+	for _, acknowledgment := range []string{"acknowledge_tenant_creation", "acknowledge_node_revocation", "acknowledge_command_submission", "acknowledge_task_submission", "acknowledge_task_cancellation", "acknowledge_schedule_submission", "acknowledge_schedule_cancellation", "acknowledge_agent_response"} {
 		if !strings.Contains(raw, acknowledgment) {
 			t.Fatalf("control tool list omitted %s", acknowledgment)
 		}
@@ -333,6 +375,10 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_task_request_status"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_task_request_submit"], false, true, true, true)
 	requireAnnotations(t, definitions["steward_control_task_request_cancel"], false, true, true, false)
+	requireAnnotations(t, definitions["steward_control_schedule_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_schedule_status"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_schedule_create"], false, true, true, true)
+	requireAnnotations(t, definitions["steward_control_schedule_cancel"], false, true, true, false)
 	requireAnnotations(t, definitions["steward_control_interaction_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_interaction_status"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_interaction_respond"], false, false, true, false)
@@ -346,6 +392,8 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_command_submit":      "acknowledge_command_submission",
 		"steward_control_task_request_submit": "acknowledge_task_submission",
 		"steward_control_task_request_cancel": "acknowledge_task_cancellation",
+		"steward_control_schedule_create":     "acknowledge_schedule_submission",
+		"steward_control_schedule_cancel":     "acknowledge_schedule_cancellation",
 		"steward_control_interaction_respond": "acknowledge_agent_response",
 	} {
 		schema := definitions[toolName]["inputSchema"].(map[string]any)
@@ -360,6 +408,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_incident_timeline",
 		"steward_control_event_list", "steward_control_task_list",
 		"steward_control_task_request_list", "steward_control_task_request_status",
+		"steward_control_schedule_list", "steward_control_schedule_status",
 		"steward_control_interaction_list", "steward_control_interaction_status",
 		"steward_control_node_pool_list", "steward_control_node_pool_status",
 		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
@@ -395,6 +444,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 	command := testControlCommand(t)
 	taskRequest := []byte(`{"input":"bounded research"}`)
 	taskPermit := testControlTaskPermit(t, taskRequest)
+	schedulePermit := testControlTaskSchedulePermit(t, taskRequest)
 	interactionID := "interaction-" + strings.Repeat("a", 64)
 	responsePermit, responseBody := testControlInteractionResponse(t, interactionID)
 	calls := []struct {
@@ -421,6 +471,22 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		}},
 		{name: "steward_control_task_request_cancel", arguments: map[string]any{
 			"tenant_id": "tenant-a", "task_id": "task-a", "acknowledge_task_cancellation": true,
+		}},
+		{name: "steward_control_schedule_list", arguments: map[string]any{
+			"tenant_id": "tenant-a", "after": "schedule-before", "limit": 25,
+		}},
+		{name: "steward_control_schedule_status", arguments: map[string]any{
+			"tenant_id": "tenant-a", "schedule_id": "schedule-a",
+		}},
+		{name: "steward_control_schedule_create", arguments: map[string]any{
+			"tenant_id":                       "tenant-a",
+			"schedule_permit_base64":          base64.StdEncoding.EncodeToString(schedulePermit),
+			"request_base64":                  base64.StdEncoding.EncodeToString(taskRequest),
+			"acknowledge_schedule_submission": true,
+		}},
+		{name: "steward_control_schedule_cancel", arguments: map[string]any{
+			"tenant_id": "tenant-a", "schedule_id": "schedule-a",
+			"acknowledge_schedule_cancellation": true,
 		}},
 		{name: "steward_control_interaction_list", arguments: map[string]any{
 			"tenant_id": "tenant-a", "after": interactionID, "limit": 25,
@@ -541,6 +607,10 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		"task-request-status:tenant-a:task-a",
 		"task-request-submit:tenant-a",
 		"task-request-cancel:tenant-a:task-a",
+		"schedule-list:tenant-a:schedule-before:25",
+		"schedule-status:tenant-a:schedule-a",
+		"schedule-create:tenant-a",
+		"schedule-cancel:tenant-a:schedule-a",
 		"interaction-list:tenant-a:" + interactionID + ":25",
 		"interaction-status:tenant-a:" + interactionID,
 		"interaction-respond:tenant-a:" + interactionID,
@@ -562,6 +632,10 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 	}
 	if control.taskPermit != taskPermit || !bytes.Equal(control.taskRequest, taskRequest) {
 		t.Fatal("MCP did not preserve exact signed task bytes")
+	}
+	if !bytes.Equal(control.schedulePermit, schedulePermit) ||
+		!bytes.Equal(control.scheduleRequest, taskRequest) {
+		t.Fatal("MCP did not preserve exact signed schedule bytes")
 	}
 	if !bytes.Equal(control.responsePermit, responsePermit) ||
 		!bytes.Equal(control.responseBody, responseBody) {
@@ -603,6 +677,35 @@ func testControlTaskPermit(t *testing.T, request []byte) string {
 		t.Fatal(err)
 	}
 	return header
+}
+
+func testControlTaskSchedulePermit(t *testing.T, request []byte) []byte {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	statement := schedulepermit.Statement{
+		SchemaVersion: schedulepermit.SchemaV1, ScheduleID: "schedule-a",
+		NodeID: "node-a", TenantID: "tenant-a", InstanceID: "agent-a",
+		RuntimeRef: "executor-" + strings.Repeat("a", 64),
+		GrantID:    "grant-" + strings.Repeat("b", 64), Generation: 1,
+		CapsuleDigest:     "sha256:" + strings.Repeat("c", 64),
+		PolicyDigest:      "sha256:" + strings.Repeat("d", 64),
+		RoutePolicyDigest: "sha256:" + strings.Repeat("e", 64),
+		ServiceID:         "hermes-api", OperationID: "hermes.run",
+		OperationPolicyDigest: "sha256:" + strings.Repeat("f", 64),
+		RequestDigest:         taskpermit.RequestDigest(request), RequestBytes: int64(len(request)),
+		ContentType: "application/json", StartsAt: now.Add(time.Minute).Format(time.RFC3339),
+		IntervalSeconds: 3600, RunCount: 24, WindowSeconds: 300,
+		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "catch_up_one",
+	}
+	permit, err := schedulepermit.Sign(statement, "tenant-task", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return permit
 }
 
 func testControlInteractionResponse(t *testing.T, interactionID string) ([]byte, []byte) {
@@ -675,6 +778,11 @@ func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 		{name: "task request status", tool: "steward_control_task_request_status", arguments: map[string]any{"tenant_id": "tenant-a"}},
 		{name: "task request submit acknowledgement", tool: "steward_control_task_request_submit", arguments: map[string]any{"tenant_id": "tenant-a"}},
 		{name: "task request cancel acknowledgement", tool: "steward_control_task_request_cancel", arguments: map[string]any{"tenant_id": "tenant-a", "task_id": "task-a"}},
+		{name: "schedule tenant", tool: "steward_control_schedule_list", arguments: map[string]any{}},
+		{name: "schedule cursor", tool: "steward_control_schedule_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": strings.Repeat("a", 97)}},
+		{name: "schedule status", tool: "steward_control_schedule_status", arguments: map[string]any{"tenant_id": "tenant-a"}},
+		{name: "schedule create acknowledgement", tool: "steward_control_schedule_create", arguments: map[string]any{"tenant_id": "tenant-a"}},
+		{name: "schedule cancel acknowledgement", tool: "steward_control_schedule_cancel", arguments: map[string]any{"tenant_id": "tenant-a", "schedule_id": "schedule-a"}},
 		{name: "interaction tenant", tool: "steward_control_interaction_list", arguments: map[string]any{}},
 		{name: "interaction cursor", tool: "steward_control_interaction_list", arguments: map[string]any{"tenant_id": "tenant-a", "after": "interaction-invalid"}},
 		{name: "interaction status", tool: "steward_control_interaction_status", arguments: map[string]any{"tenant_id": "tenant-a"}},
@@ -724,6 +832,8 @@ func TestMCPControlMutationsRequireExplicitAcknowledgments(t *testing.T) {
 	command := testControlCommand(t)
 	interactionID := "interaction-" + strings.Repeat("a", 64)
 	responsePermit, responseBody := testControlInteractionResponse(t, interactionID)
+	scheduleRequest := []byte(`{"input":"bounded research"}`)
+	schedulePermit := testControlTaskSchedulePermit(t, scheduleRequest)
 	for _, call := range []struct {
 		name      string
 		arguments map[string]any
@@ -739,6 +849,16 @@ func TestMCPControlMutationsRequireExplicitAcknowledgments(t *testing.T) {
 			"permit_base64":              base64.StdEncoding.EncodeToString(responsePermit),
 			"response_base64":            base64.StdEncoding.EncodeToString(responseBody),
 			"acknowledge_agent_response": false,
+		}},
+		{name: "steward_control_schedule_create", arguments: map[string]any{
+			"tenant_id":                       "tenant-a",
+			"schedule_permit_base64":          base64.StdEncoding.EncodeToString(schedulePermit),
+			"request_base64":                  base64.StdEncoding.EncodeToString(scheduleRequest),
+			"acknowledge_schedule_submission": false,
+		}},
+		{name: "steward_control_schedule_cancel", arguments: map[string]any{
+			"tenant_id": "tenant-a", "schedule_id": "schedule-a",
+			"acknowledge_schedule_cancellation": false,
 		}},
 	} {
 		result := callMCPControlTool(t, server, call.name, call.arguments)

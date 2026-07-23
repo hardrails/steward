@@ -428,6 +428,8 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 		"steward_control_event_list", "steward_control_task_list",
 		"steward_control_task_request_list", "steward_control_task_request_status",
 		"steward_control_task_request_submit", "steward_control_task_request_cancel",
+		"steward_control_schedule_list", "steward_control_schedule_status",
+		"steward_control_schedule_create", "steward_control_schedule_cancel",
 		"steward_control_interaction_list", "steward_control_interaction_status",
 		"steward_control_interaction_respond",
 		"steward_control_command_submit", "steward_control_command_status",
