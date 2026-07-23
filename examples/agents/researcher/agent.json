@@ -10,7 +10,12 @@
   "model": {"route": "local/default"},
   "skills": ["steward-research"],
   "capabilities": {
-    "connector_ids": ["steward-research-extract", "steward-research-search"],
+    "connector_ids": [
+      "steward-browser-read",
+      "steward-browser-search",
+      "steward-research-extract",
+      "steward-research-search"
+    ],
     "controller_events": true
   },
   "resources": {"cpu_millis": 1500, "memory_mib": 2048, "disk_mib": 4096, "pids": 256},

@@ -181,10 +181,11 @@ jobs:
           grep -Fxq '  "os": "linux",' <<<"$manifest"
           grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
           grep -Fq '    "steward-control": "' <<<"$manifest"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 76
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 82
           grep -Fq '    "integration/adapters/hermes-agent/profiles/research/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/workers/coding/package-lock.json": "' <<<"$manifest"
           grep -Fq '    "integration/workers/research/research_worker.py": "' <<<"$manifest"
+          grep -Fq '    "integration/workers/browser/package-lock.json": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/adapter.json": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/skill/SKILL.md": "' <<<"$manifest"

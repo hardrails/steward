@@ -32,7 +32,7 @@ they can verify without a vendor service.
 | Prompt injection reaching a powerful tool | Keeps reusable connector credentials outside the workload. A protected action can require a tenant signature over the exact operation and request bytes. |
 | Replayed or stale authority | Spends one-use permits before network dispatch and rejects old instance generations and command sequences. |
 | Inference and service credentials | Gateway injects credentials only at the trusted outbound boundary. Agents receive a scoped route, not the upstream secret. |
-| Web research over hostile content | A bounded Hermes profile reaches search and extraction through credential-isolating connectors, then reports source-linked findings over a durable event channel. |
+| Web research over hostile content | A bounded Hermes profile reaches static extraction or credential-free JavaScript rendering through finite connectors, then reports source-linked findings over a durable event channel and can organize signed tasks and external evidence in Workrooms. |
 | Repository work with coding agents | Hermes delegates to Codex or Claude Code in a separate isolated worker with its own clean Git worktree and authentication store. |
 | Signed collaboration requests | An optional, tenant-specific Buzz bridge durably queues allowed signed mentions, runs bounded concurrent Hermes tasks, and verifies correctly threaded replies without putting either signing key inside the agent. |
 | Remote task delivery | Control durably couriers an exact tenant-signed request to its assigned node, reports honest cancellation and uncertainty, and retains bounded terminal results without gaining task-signing authority. |
@@ -186,6 +186,8 @@ security boundary.
 
 - [Run Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/)
 - [Run a web research agent](https://hardrails.github.io/steward/guides/research-agents/)
+- [Keep agent work in a durable Workroom](https://hardrails.github.io/steward/guides/workrooms/)
+- [Read JavaScript websites through the constrained browser worker](https://hardrails.github.io/steward/guides/browser-research/)
 - [Let Hermes use Codex or Claude Code](https://hardrails.github.io/steward/guides/coding-workers/)
 - [Receive events from running agents](https://hardrails.github.io/steward/guides/controller-events/)
 - [Queue remote tasks and retrieve results](https://hardrails.github.io/steward/guides/async-tasks/)

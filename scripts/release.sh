@@ -129,6 +129,24 @@ dist="dist"
 rm -rf "$dist"
 mkdir -p "$dist"
 
+archive_owner_flags=(--owner=0 --group=0 --numeric-owner)
+if ! tar "${archive_owner_flags[@]}" -cf /dev/null -T /dev/null >/dev/null 2>&1; then
+	echo "release: tar cannot normalize archive ownership to numeric root" >&2
+	exit 2
+fi
+
+verify_archive_root_ownership() {
+	local archive=$1
+	tar --numeric-owner -tvzf "$archive" | awk '
+		($2 == "0" && $3 == "0") || $2 == "0/0" { count++; next }
+		{ exit 1 }
+		END { if (count == 0) exit 1 }
+	' || {
+		echo "release: archive contains a non-root owner: $(basename "$archive")" >&2
+		return 2
+	}
+}
+
 for target in "${targets[@]}"; do
 	goos="${target%/*}"
 	goarch="${target#*/}"
@@ -166,10 +184,11 @@ for target in "${targets[@]}"; do
 	buzz_archive="${dist}/steward-buzz_${VERSION}_${goos}_${goarch}.tar.gz"
 	buzz_files=(LICENSE README.md build-buzz cmd deploy integrations prebuilt scripts)
 	if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
-		COPYFILE_DISABLE=1 tar --no-xattrs -C "$buzz_stage" -czf "$buzz_archive" "${buzz_files[@]}"
+		COPYFILE_DISABLE=1 tar --no-xattrs "${archive_owner_flags[@]}" -C "$buzz_stage" -czf "$buzz_archive" "${buzz_files[@]}"
 	else
-		COPYFILE_DISABLE=1 tar -C "$buzz_stage" -czf "$buzz_archive" "${buzz_files[@]}"
+		COPYFILE_DISABLE=1 tar "${archive_owner_flags[@]}" -C "$buzz_stage" -czf "$buzz_archive" "${buzz_files[@]}"
 	fi
+	verify_archive_root_ownership "$buzz_archive"
 	rm -rf "$buzz_stage"
 	files=(steward steward-control stewardctl steward-mcp LICENSE README.md)
 	mkdir -p "${stage}/examples" "${stage}/schemas"
@@ -197,14 +216,15 @@ for target in "${targets[@]}"; do
 		control_archive="${dist}/steward-control_${VERSION}_linux_${goarch}.tar.gz"
 		control_files=(LICENSE control.env control-doctor.sh steward-control steward-control.service)
 		if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
-			COPYFILE_DISABLE=1 tar --no-xattrs -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
+			COPYFILE_DISABLE=1 tar --no-xattrs "${archive_owner_flags[@]}" -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
 		else
-			COPYFILE_DISABLE=1 tar -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
+			COPYFILE_DISABLE=1 tar "${archive_owner_flags[@]}" -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
 		fi
+		verify_archive_root_ownership "$control_archive"
 		rm -rf "$control_stage"
 		mkdir -p "${stage}/adapters" "${stage}/deploy" "${stage}/scripts" "${stage}/workers"
 		cp -R adapters/hermes-agent "${stage}/adapters/"
-		cp -R workers/coding workers/research "${stage}/workers/"
+		cp -R workers/browser workers/coding workers/research "${stage}/workers/"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		# Controller deployment assets belong only to the dedicated archive. The
 		# node archive and native packages retain the binary for operator tooling,
@@ -231,14 +251,15 @@ for target in "${targets[@]}"; do
 	# artifact. COPYFILE_DISABLE handles macOS; use --no-xattrs where the installed
 	# tar accepts it, without making a local dry run depend on that extension.
 	if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
-		COPYFILE_DISABLE=1 tar --no-xattrs -C "${stage}" \
+		COPYFILE_DISABLE=1 tar --no-xattrs "${archive_owner_flags[@]}" -C "${stage}" \
 			-czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
 			"${files[@]}"
 	else
-		COPYFILE_DISABLE=1 tar -C "${stage}" \
+		COPYFILE_DISABLE=1 tar "${archive_owner_flags[@]}" -C "${stage}" \
 			-czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
 			"${files[@]}"
 	fi
+	verify_archive_root_ownership "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz"
 	if [ "$goos" = "linux" ] && command -v dpkg-deb >/dev/null 2>&1; then
 		/bin/bash -p scripts/build-deb.sh "$stage" "$VERSION" "$goarch" \
 			"${dist}/steward-node_${VERSION}_${goarch}.deb"

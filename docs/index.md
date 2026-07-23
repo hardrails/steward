@@ -69,7 +69,7 @@ stewardctl agent apply -bundle agent.bundle.json -nodes nodes.json -tenant defau
 ## Useful agents, with finite authority
 
 <div class="grid">
-  <article class="card"><span class="number">01 / RESEARCH</span><h3>Search without handing over the keys</h3><p>Hermes can search and extract web sources through an isolated worker, treat retrieved text as untrusted, and publish source-linked findings to the control plane.</p><a href="{{ '/guides/research-agents/' | relative_url }}">Run a research agent →</a></article>
+  <article class="card"><span class="number">01 / RESEARCH</span><h3>Research that survives the chat</h3><p>Hermes can search, read selected JavaScript pages without a logged-in browser, publish source-linked findings, and organize signed tasks and external evidence in durable Workrooms.</p><a href="{{ '/guides/research-agents/' | relative_url }}">Run a research agent →</a> · <a href="{{ '/guides/workrooms/' | relative_url }}">Use Workrooms →</a></article>
   <article class="card"><span class="number">02 / BUILD</span><h3>Delegate to a coding specialist</h3><p>Hermes can ask the official Codex or Claude Code CLI to inspect or change a disposable Git worktree. The CLI and its login remain in a separate gVisor container.</p><a href="{{ '/guides/coding-workers/' | relative_url }}">Connect a coding worker →</a></article>
   <article class="card"><span class="number">03 / REPORT</span><h3>Receive findings as they happen</h3><p>A running instance can send bounded status and findings through a durable, identity-stamped, at-least-once event channel. Events carry no command authority.</p><a href="{{ '/guides/controller-events/' | relative_url }}">Receive agent events →</a></article>
 </div>

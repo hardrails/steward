@@ -251,6 +251,11 @@ type TaskRequestList struct {
 	NextAfter string                     `json:"next_after,omitempty"`
 }
 
+type WorkroomProjectList struct {
+	Projects  []controlstore.WorkroomProject `json:"projects"`
+	NextAfter string                         `json:"next_after,omitempty"`
+}
+
 type NodePoolList struct {
 	NodePools []controlstore.NodePoolStatus `json:"node_pools"`
 	NextAfter string                        `json:"next_after,omitempty"`
@@ -641,7 +646,18 @@ func (c *Client) SubmitTaskRequest(
 	tenantID, taskPermit string,
 	requestBody []byte,
 ) (controlstore.TaskRequest, error) {
+	return c.SubmitTaskRequestInProject(ctx, tenantID, "", "", taskPermit, requestBody)
+}
+
+func (c *Client) SubmitTaskRequestInProject(
+	ctx context.Context,
+	tenantID, projectID, sessionID, taskPermit string,
+	requestBody []byte,
+) (controlstore.TaskRequest, error) {
 	if !validOperationsIdentifier(tenantID, 128, false) || taskPermit == "" ||
+		(projectID == "") != (sessionID == "") ||
+		projectID != "" && !validOperationsIdentifier(projectID, 128, false) ||
+		sessionID != "" && !validOperationsIdentifier(sessionID, 128, false) ||
 		len(requestBody) == 0 || int64(len(requestBody)) > 64<<10 {
 		return controlstore.TaskRequest{}, errors.New("async task submission requires a tenant, permit, and request of at most 64 KiB")
 	}
@@ -649,14 +665,122 @@ func (c *Client) SubmitTaskRequest(
 	err := c.do(ctx, http.MethodPost, "/v1/tenants/"+url.PathEscape(tenantID)+"/task-requests", struct {
 		TaskPermit    string `json:"task_permit"`
 		RequestBase64 string `json:"request_base64"`
-	}{TaskPermit: taskPermit, RequestBase64: base64.StdEncoding.EncodeToString(requestBody)}, &task, true)
+		ProjectID     string `json:"project_id,omitempty"`
+		SessionID     string `json:"session_id,omitempty"`
+	}{
+		TaskPermit: taskPermit, RequestBase64: base64.StdEncoding.EncodeToString(requestBody),
+		ProjectID: projectID, SessionID: sessionID,
+	}, &task, true)
 	if err != nil {
 		return controlstore.TaskRequest{}, err
 	}
-	if task.TenantID != tenantID || task.Validate() != nil {
+	if task.TenantID != tenantID || task.ProjectID != projectID || task.SessionID != sessionID || task.Validate() != nil {
 		return controlstore.TaskRequest{}, errors.New("control async task response is invalid")
 	}
 	return task, nil
+}
+
+func (c *Client) ListWorkroomProjects(
+	ctx context.Context,
+	tenantID, after string,
+	limit int,
+) (WorkroomProjectList, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || limit <= 0 || limit > 500 {
+		return WorkroomProjectList{}, errors.New("workroom project list requires a tenant and limit from 1 to 500")
+	}
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/projects", after, limit)
+	if err != nil {
+		return WorkroomProjectList{}, err
+	}
+	var page WorkroomProjectList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return WorkroomProjectList{}, err
+	}
+	if page.Projects == nil || len(page.Projects) > limit {
+		return WorkroomProjectList{}, errors.New("control workroom project page is invalid")
+	}
+	for index, project := range page.Projects {
+		if project.TenantID != tenantID || project.Validate() != nil ||
+			index > 0 && page.Projects[index-1].ID >= project.ID {
+			return WorkroomProjectList{}, errors.New("control workroom project page contains an invalid project")
+		}
+	}
+	if page.NextAfter != "" && (len(page.Projects) == 0 || page.NextAfter != page.Projects[len(page.Projects)-1].ID) {
+		return WorkroomProjectList{}, errors.New("control workroom project page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) GetWorkroomProject(
+	ctx context.Context,
+	tenantID, projectID string,
+) (controlstore.WorkroomProject, error) {
+	path, err := workroomProjectPath(tenantID, projectID)
+	if err != nil {
+		return controlstore.WorkroomProject{}, err
+	}
+	var project controlstore.WorkroomProject
+	if err := c.do(ctx, http.MethodGet, path, nil, &project, true); err != nil {
+		return controlstore.WorkroomProject{}, err
+	}
+	if project.TenantID != tenantID || project.ID != projectID || project.Validate() != nil {
+		return controlstore.WorkroomProject{}, errors.New("control workroom project response is invalid")
+	}
+	return project, nil
+}
+
+func (c *Client) ApplyWorkroomProject(
+	ctx context.Context,
+	project controlstore.WorkroomProject,
+	expectedRevision uint64,
+) (controlstore.WorkroomProject, error) {
+	path, err := workroomProjectPath(project.TenantID, project.ID)
+	if err != nil {
+		return controlstore.WorkroomProject{}, err
+	}
+	var result controlstore.WorkroomProject
+	err = c.do(ctx, http.MethodPut, path, struct {
+		ExpectedRevision uint64                                 `json:"expected_revision"`
+		Name             string                                 `json:"name"`
+		Description      string                                 `json:"description,omitempty"`
+		AgentRef         string                                 `json:"agent_ref,omitempty"`
+		Skills           []string                               `json:"skills,omitempty"`
+		Sessions         []controlstore.WorkroomSession         `json:"sessions"`
+		Artifacts        []controlstore.WorkroomArtifact        `json:"artifacts"`
+		MemoryRefs       []controlstore.WorkroomMemoryReference `json:"memory_refs"`
+	}{
+		ExpectedRevision: expectedRevision, Name: project.Name, Description: project.Description,
+		AgentRef: project.AgentRef, Skills: project.Skills, Sessions: project.Sessions,
+		Artifacts: project.Artifacts, MemoryRefs: project.MemoryRefs,
+	}, &result, true)
+	if err != nil {
+		return controlstore.WorkroomProject{}, err
+	}
+	if result.TenantID != project.TenantID || result.ID != project.ID || result.Validate() != nil {
+		return controlstore.WorkroomProject{}, errors.New("control workroom project response is invalid")
+	}
+	return result, nil
+}
+
+func (c *Client) DeleteWorkroomProject(
+	ctx context.Context,
+	tenantID, projectID string,
+	expectedRevision uint64,
+) error {
+	path, err := workroomProjectPath(tenantID, projectID)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodDelete, path, struct {
+		ExpectedRevision uint64 `json:"expected_revision"`
+	}{ExpectedRevision: expectedRevision}, nil, true)
+}
+
+func workroomProjectPath(tenantID, projectID string) (string, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || !validOperationsIdentifier(projectID, 128, false) {
+		return "", errors.New("workroom project identity is invalid")
+	}
+	return "/v1/tenants/" + url.PathEscape(tenantID) + "/projects/" + url.PathEscape(projectID), nil
 }
 
 func (c *Client) ListTaskRequests(ctx context.Context, tenantID, after string, limit int) (TaskRequestList, error) {

@@ -84,6 +84,18 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "connector", "set", "-preset", "research-"}); !slices.Equal(candidates, []string{"research-extract", "research-search"}) {
 		t.Fatalf("research connector preset candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "connector", "set", "-preset", "browser-"}); !slices.Equal(candidates, []string{"browser-read", "browser-search"}) {
+		t.Fatalf("browser connector preset candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"work"}); !slices.Equal(candidates, []string{"workroom"}) {
+		t.Fatalf("workroom root candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"workroom", "session", ""}); !slices.Equal(candidates, []string{"create"}) {
+		t.Fatalf("workroom session candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"task", "enqueue", "-pro"}); !slices.Equal(candidates, []string{"-project"}) {
+		t.Fatalf("task Workroom flag candidates=%v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-provider", "v"}); !slices.Equal(candidates, []string{"vllm"}) {
 		t.Fatalf("inference provider candidates=%v", candidates)
 	}

@@ -8,8 +8,8 @@ section: How-to guide
 
 Steward Control serves an observation-first operator control room at `/console/`.
 It shows the operations summary, derived attention findings, enrolled nodes,
-observed agent runtimes, command metadata, and credential metadata already
-available through the bounded control API.
+observed agent runtimes, durable Workrooms, command metadata, and credential
+metadata already available through the bounded control API.
 
 The console has one deliberately narrow mutation: it can submit the exact bytes
 of an Executor command that was already signed outside the browser. It cannot
@@ -84,7 +84,7 @@ Initial authentication has a two-minute hard deadline. Navigation or `pagehide`
 also clears the credential while those first reads are still in flight; a stalled
 response cannot retain pre-session authority indefinitely.
 
-## Read the ten views
+## Read the eleven views
 
 Every view starts with the effective command-delivery state for the selected
 scope. A green banner means Control may deliver new commands. A red striped banner
@@ -100,6 +100,7 @@ The console does not set or clear a freeze. Use the authenticated
 | View | What it shows | What it omits |
 | --- | --- | --- |
 | Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, retained-state capacity, and the selected tenant's fleet-wide resource quota and usage | Mutation controls and raw evidence frames |
+| Workrooms | Tenant-scoped projects, sessions, linked signed task IDs, external artifact digests, and operator-selected memory references | Prompts, task bodies, result bytes, artifact bytes, storage credentials, signing, or project mutation |
 | Attention | Deterministic findings derived from retained facts and current process observations, including the bounded cause, impact, safest next step, and a copyable `stewardctl explain` command; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, direct remediation, or incident workflow |
 | Incident view | Current containment, evidence divergence, access revocation, and failed-workload facts in newest-first order, with site or tenant scope and bounded reasons | Complete history, overwritten transitions, command or result bodies, credentials, prompts, logs, acknowledgement, or remediation |
 | Nodes | Node state, placement mode, durable drain state and request ID, failed drain instance when applicable, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
@@ -115,6 +116,12 @@ transition replaces the earlier retained state, and bounded records can disappea
 Use the CLI support bundle to preserve the current metadata snapshot, and preserve
 signed evidence or export events to your own SIEM when historical reconstruction
 is required.
+
+The Workrooms view is a bounded index, not a content store. It is shown only for
+one tenant projection. Create sessions, enqueue signed tasks, and register
+external artifacts with `stewardctl`; the console receives no task-signing or
+storage credential. See
+[Keep agent work in a durable Workroom]({{ '/guides/workrooms/' | relative_url }}).
 
 The Agents view keeps workload status separate from operation outcome. For
 example, if a running agent receives a stop command that fails, the card shows

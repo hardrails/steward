@@ -37,7 +37,8 @@ func TestWorkerImagesPinReplaceableEnginesWithoutChangingGoDependencies(t *testi
 	root := repositoryRoot(t)
 	researchDockerfile := string(readFile(t, filepath.Join(root, "workers", "research", "Dockerfile"), 64<<10))
 	codingDockerfile := string(readFile(t, filepath.Join(root, "workers", "coding", "Dockerfile"), 64<<10))
-	for name, source := range map[string]string{"research": researchDockerfile, "coding": codingDockerfile} {
+	browserDockerfile := string(readFile(t, filepath.Join(root, "workers", "browser", "Dockerfile"), 64<<10))
+	for name, source := range map[string]string{"research": researchDockerfile, "coding": codingDockerfile, "browser": browserDockerfile} {
 		for _, required := range []string{"FROM ", "@sha256:", "USER 65532:65532"} {
 			if !strings.Contains(source, required) {
 				t.Fatalf("%s worker Dockerfile is missing %q", name, required)
@@ -50,6 +51,11 @@ func TestWorkerImagesPinReplaceableEnginesWithoutChangingGoDependencies(t *testi
 	for _, required := range []string{"npm ci --omit=dev --ignore-scripts", "unsupported coding-worker architecture", "/usr/local/bin/claude"} {
 		if !strings.Contains(codingDockerfile, required) {
 			t.Fatalf("coding worker build is missing %q", required)
+		}
+	}
+	for _, required := range []string{"mcr.microsoft.com/playwright:v1.61.0-noble@sha256:", "npm ci --omit=dev --ignore-scripts"} {
+		if !strings.Contains(browserDockerfile, required) {
+			t.Fatalf("browser worker build is missing %q", required)
 		}
 	}
 
@@ -74,6 +80,118 @@ func TestWorkerImagesPinReplaceableEnginesWithoutChangingGoDependencies(t *testi
 		item, ok := lock.Packages[path]
 		if !ok || item.Version != version || !strings.HasPrefix(item.Integrity, "sha512-") {
 			t.Fatalf("package %s=%#v, want exact version %s with integrity", path, item, version)
+		}
+	}
+}
+
+func TestBrowserWorkerUsesOpaqueRefsAndRejectsPrivateDestinations(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable")
+	}
+	root := repositoryRoot(t)
+	securityPath := filepath.Join(root, "workers", "browser", "security.mjs")
+	harness := `import {isPublicAddress,publicTarget,readBoundedWebBody,SourceStore} from "file://` + securityPath + `";
+const blocked=[];
+for (const value of ["127.0.0.1","169.254.169.254","10.0.0.1","::1","fc00::1","2001::1","2001:db8::1","2002:5db8:d822::1","3fff::1"]) blocked.push(isPublicAddress(value));
+const publicV6=["2606:4700:4700::1111","2a00:1450:4009:822::200e"].map(isPublicAddress);
+const lookup=async()=>[{address:"93.184.216.34",family:4}];
+const accepted=await publicTarget("https://example.com/source",lookup);
+let mixed="accepted";
+try { await publicTarget("https://mixed.example/source",async()=>[{address:"93.184.216.34",family:4},{address:"127.0.0.1",family:4}]); }
+catch(error) { mixed=error.code; }
+let now=0;
+const store=new SourceStore(()=>now,2,100);
+const refs=store.putMany(["https://one.example","https://two.example"]);
+let capacity="accepted";
+try { store.putMany(["https://three.example"]); } catch(error) { capacity=error.code; }
+const preserved=store.get(refs[0]);
+now=101;
+const replacement=store.putMany(["https://three.example"]);
+let overflow="accepted";
+const oversized=new Response(new Uint8Array(5),{headers:{"content-length":"5"}});
+try { await readBoundedWebBody(oversized,4); } catch(error) { overflow=error.code; }
+let chunkedOverflow="accepted";
+const chunked=new Response(new ReadableStream({start(controller) {
+  controller.enqueue(new Uint8Array([1,2,3]));
+  controller.enqueue(new Uint8Array([4,5,6]));
+  controller.close();
+}}));
+try { await readBoundedWebBody(chunked,4); } catch(error) { chunkedOverflow=error.code; }
+const streamed=await readBoundedWebBody(new Response(new Uint8Array([1,2,3,4])),4);
+process.stdout.write(JSON.stringify({blocked,publicV6,accepted:accepted.address,mixed,capacity,preserved,replacement:replacement.length,overflow,chunkedOverflow,streamed:streamed.length}));
+`
+	raw, err := exec.Command(node, "--input-type=module", "-e", harness).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Blocked         []bool `json:"blocked"`
+		PublicV6        []bool `json:"publicV6"`
+		Accepted        string `json:"accepted"`
+		Mixed           string `json:"mixed"`
+		Capacity        string `json:"capacity"`
+		Preserved       string `json:"preserved"`
+		Replacement     int    `json:"replacement"`
+		Overflow        string `json:"overflow"`
+		ChunkedOverflow string `json:"chunkedOverflow"`
+		Streamed        int    `json:"streamed"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Accepted != "93.184.216.34" || result.Mixed != "private_source_denied" ||
+		result.Capacity != "source_capacity_exhausted" || result.Preserved != "https://one.example" ||
+		result.Replacement != 1 || result.Overflow != "search_response_too_large" ||
+		result.ChunkedOverflow != "search_response_too_large" || result.Streamed != 4 {
+		t.Fatalf("browser destination result=%s", raw)
+	}
+	for _, accepted := range result.Blocked {
+		if accepted {
+			t.Fatalf("browser accepted a private destination: %s", raw)
+		}
+	}
+	for _, accepted := range result.PublicV6 {
+		if !accepted {
+			t.Fatalf("browser rejected a public IPv6 destination: %s", raw)
+		}
+	}
+	source := string(readFile(t, filepath.Join(root, "workers", "browser", "server.mjs"), 1<<20))
+	boundaries := source + string(readFile(t, securityPath, 1<<20))
+	for _, required := range []string{
+		"source_ref_not_found", "serviceWorkers: \"block\"", "acceptDownloads: false",
+		"--host-resolver-rules=MAP", "sameOrigin", "MAX_RESPONSE = 1 << 20",
+		"readBoundedWebBody(response, MAX_SEARCH_RESPONSE)", "sources.putMany",
+	} {
+		if !strings.Contains(boundaries, required) {
+			t.Fatalf("browser worker is missing contract %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"page.click(", "page.fill(", "page.evaluate(", "browserType.connect(",
+		"launchServer(", "node:child_process",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("browser worker exposes forbidden primitive %q", forbidden)
+		}
+	}
+	var lock struct {
+		LockfileVersion int `json:"lockfileVersion"`
+		Packages        map[string]struct {
+			Version   string `json:"version"`
+			Integrity string `json:"integrity"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal(readFile(t, filepath.Join(root, "workers", "browser", "package-lock.json"), 2<<20), &lock); err != nil {
+		t.Fatal(err)
+	}
+	for path, version := range map[string]string{
+		"node_modules/playwright":      "1.61.0",
+		"node_modules/playwright-core": "1.61.0",
+	} {
+		item := lock.Packages[path]
+		if lock.LockfileVersion != 3 || item.Version != version || !strings.HasPrefix(item.Integrity, "sha512-") {
+			t.Fatalf("browser dependency %s=%#v", path, item)
 		}
 	}
 }

@@ -42,6 +42,8 @@ const (
 // the permit and authorizes dispatch.
 type TaskRequest struct {
 	TenantID            string `json:"tenant_id"`
+	ProjectID           string `json:"project_id,omitempty"`
+	SessionID           string `json:"session_id,omitempty"`
 	TaskID              string `json:"task_id"`
 	NodeID              string `json:"node_id"`
 	InstanceID          string `json:"instance_id"`
@@ -78,6 +80,9 @@ func (task TaskRequest) Validate() error {
 	updated, updatedErr := time.Parse(time.RFC3339Nano, task.UpdatedAt)
 	if deadlineErr != nil || createdErr != nil || updatedErr != nil || created.After(updated) ||
 		!validRecordID(task.TenantID, 128) || !validRecordID(task.TaskID, 128) ||
+		(task.ProjectID == "") != (task.SessionID == "") ||
+		task.ProjectID != "" && !validRecordID(task.ProjectID, 128) ||
+		task.SessionID != "" && !validRecordID(task.SessionID, 128) ||
 		!validRecordID(task.NodeID, 128) || !validRecordID(task.InstanceID, 256) ||
 		task.InstanceGeneration == 0 || !validExecutorRuntimeRef(task.RuntimeRef) ||
 		!validRecordID(task.ServiceID, 128) || !validRecordID(task.OperationID, 128) ||
@@ -110,6 +115,8 @@ type storedTaskRequest struct {
 
 type TaskRequestInput struct {
 	TenantID   string
+	ProjectID  string
+	SessionID  string
 	TaskPermit string
 	Request    []byte
 }
@@ -119,6 +126,9 @@ func (store *Store) SubmitTaskRequest(actor controlauth.Identity, input TaskRequ
 		return TaskRequest{}, false, ErrUnavailable
 	}
 	if now.IsZero() || !controlauth.AuthorizedTenant(actor, input.TenantID) ||
+		(input.ProjectID == "") != (input.SessionID == "") ||
+		input.ProjectID != "" && !validRecordID(input.ProjectID, 128) ||
+		input.SessionID != "" && !validRecordID(input.SessionID, 128) ||
 		len(input.Request) == 0 || int64(len(input.Request)) > taskpermit.MaxRequestBytes {
 		return TaskRequest{}, false, invalid("task request is invalid or exceeds its bound")
 	}
@@ -138,7 +148,8 @@ func (store *Store) SubmitTaskRequest(actor controlauth.Identity, input TaskRequ
 	}
 	stored := storedTaskRequest{
 		TaskRequest: TaskRequest{
-			TenantID: statement.TenantID, TaskID: statement.TaskID, NodeID: statement.NodeID,
+			TenantID: statement.TenantID, ProjectID: input.ProjectID, SessionID: input.SessionID,
+			TaskID: statement.TaskID, NodeID: statement.NodeID,
 			InstanceID: statement.InstanceID, InstanceGeneration: statement.Generation,
 			RuntimeRef: statement.RuntimeRef, ServiceID: statement.ServiceID, OperationID: statement.OperationID,
 			RequestDigest: statement.RequestDigest, RequestBytes: statement.RequestBytes,
@@ -170,9 +181,41 @@ func (store *Store) SubmitTaskRequest(actor controlauth.Identity, input TaskRequ
 		}
 		return TaskRequest{}, false, ErrConflict
 	}
+	var projectMutation mutation
+	if input.ProjectID != "" {
+		projectKey := workroomProjectKey(input.TenantID, input.ProjectID)
+		project, found := store.current.workroomProjects[projectKey]
+		if !found {
+			return TaskRequest{}, false, ErrNotFound
+		}
+		sessionFound := false
+		for index := range project.Sessions {
+			if project.Sessions[index].ID != input.SessionID {
+				continue
+			}
+			if project.Sessions[index].State != "active" ||
+				len(project.Sessions[index].TaskIDs) >= MaxWorkroomTasksPerSession {
+				return TaskRequest{}, false, ErrConflict
+			}
+			project.Sessions[index].TaskIDs = append(project.Sessions[index].TaskIDs, statement.TaskID)
+			project.Sessions[index].TaskIDs = canonicalStringSet(project.Sessions[index].TaskIDs)
+			project.Sessions[index].UpdatedAt = canonicalTimestamp(now)
+			sessionFound = true
+			break
+		}
+		if !sessionFound || project.Revision == ^uint64(0) {
+			return TaskRequest{}, false, ErrNotFound
+		}
+		project.Revision++
+		project.UpdatedAt = canonicalTimestamp(now)
+		projectMutation = workroomProjectMutation(project)
+	}
 	mutations, err := store.taskCapacityMutationsLocked(input.TenantID, taskCourierBytes(stored))
 	if err != nil {
 		return TaskRequest{}, false, err
+	}
+	if input.ProjectID != "" {
+		mutations = append(mutations, projectMutation)
 	}
 	mutations = append(mutations, taskRequestMutation(stored))
 	if err := store.applyMutationsLocked(mutations...); err != nil {
@@ -634,6 +677,7 @@ func (store *Store) taskResultCapacityAvailableLocked(tenantID, replacingKey str
 
 func taskRequestInputEqual(left, right storedTaskRequest) bool {
 	return left.TenantID == right.TenantID && left.TaskID == right.TaskID &&
+		left.ProjectID == right.ProjectID && left.SessionID == right.SessionID &&
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
 		left.TaskPermit == right.TaskPermit && left.RequestBase64 == right.RequestBase64
 }

@@ -221,10 +221,10 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 	}{
 		{
 			profile: "research", name: "steward-research", entrypoint: "research.py",
-			publicDigest: "b8e13bf2e90dd3f360f5b5ddfb34bddc79df47d2b6d3456dc3f7d67a5be16e35",
-			connectors:   []string{"steward-research-extract", "steward-research-search"},
+			publicDigest: "7ecdb9818979001ac9a6ea4eaf85af1a9388d6f168323fec582a8ac06053e54b",
+			connectors:   []string{"steward-browser-read", "steward-browser-search", "steward-research-extract", "steward-research-search"},
 			limits: map[string]int{"max_extract_urls": 10, "max_request_bytes": 65536, "max_response_bytes": 1048576,
-				"max_search_results": 20, "timeout_seconds": 30},
+				"max_search_results": 20, "max_browser_refs": 5, "timeout_seconds": 180},
 		},
 		{
 			profile: "developer", name: "steward-coding-worker", entrypoint: "coding_worker.py",
@@ -276,7 +276,8 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 			if err := requireEOF(decoder); err != nil {
 				t.Fatal(err)
 			}
-			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" || manifest.Version != "1" ||
+			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" ||
+				manifest.Version != map[string]string{"research": "2", "developer": "1"}[test.profile] ||
 				manifest.Name != test.name || manifest.Entrypoint != test.entrypoint ||
 				!valuesEqual(manifest.ConnectorIDs, test.connectors) || !valuesEqual(manifest.Limits, test.limits) || len(manifest.Files) != 2 {
 				t.Fatalf("unexpected profile authority: %#v", manifest)
@@ -297,6 +298,40 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 	}
 }
 
+func TestHermesEntrypointAcceptsEveryBundledProfileManifest(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	root := hermesAdapterRoot(t)
+	program := `
+import importlib.util, json, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("hermes_entrypoint", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+profiles = pathlib.Path(sys.argv[2])
+for profile, expected in module.PROFILE_SKILLS.items():
+    descriptor = json.loads((profiles / profile / "manifest.json").read_bytes())
+    for field in ("name", "version", "entrypoint", "connector_ids", "limits"):
+        actual = descriptor[field]
+        if actual != expected[field]:
+            raise AssertionError(f"{profile} {field}: manifest={actual!r} validator={expected[field]!r}")
+`
+	command := exec.Command(
+		python,
+		"-I",
+		"-c",
+		program,
+		filepath.Join(root, "entrypoint.py"),
+		filepath.Join(root, "profiles"),
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("entrypoint rejects a bundled profile manifest: %v\n%s", err, output)
+	}
+}
+
 func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *testing.T) {
 	root := filepath.Join(hermesAdapterRoot(t), "profiles")
 	research := string(readBounded(t, filepath.Join(root, "research", "research.py"), 1<<20))
@@ -314,6 +349,8 @@ func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *t
 				`EVENT_ORIGIN = "http://steward-relay:8083"`,
 				`/v1/connectors/steward-research-search/operations/search`,
 				`/v1/connectors/steward-research-extract/operations/extract`,
+				`/v1/connectors/steward-browser-search/operations/search`,
+				`/v1/connectors/steward-browser-read/operations/read`,
 				`/v1/events`,
 			},
 		},
@@ -469,6 +506,7 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		"for path in /opt/data /tmp /workspace /dev/shm",
 		"agent writable mount topology is unexpected",
 		"release_root=$root",
+		`${root##*/} == integration`,
 		`release_root=$(cd "$root/.." && pwd -P)`,
 		"steward-integration-$run_id-generation-2",
 		"gateway service set",

@@ -6,9 +6,10 @@ section: How-to guide
 
 # Run a web research agent
 
-The research profile lets Hermes search the web, extract selected pages, and send
-findings to Steward Control. Hermes does not receive a browser, public network
-route, or search key.
+The research profile lets Hermes search the web, extract static pages, read
+selected JavaScript-rendered pages, and send findings to Steward Control. Hermes
+does not receive a browser session, raw URL fetch primitive, public network route,
+or search key.
 
 This separation matters because web content is untrusted. A page can contain text
 that tells an agent to ignore its task, reveal a secret, or call another service.
@@ -20,8 +21,10 @@ credentials available after the model reads it.
 1. Hermes calls the fixed search or extraction path on its local Steward Relay.
 2. Gateway verifies the admitted connector grant, call budget, request size, and
    exact operation.
-3. The optional research worker adds its own search credential for SearXNG, or
+3. The optional lightweight worker adds its own search credential for SearXNG, or
    fetches an explicitly selected public page through its pinned-address extractor.
+   The separate browser worker issues opaque source references and renders only
+   those references in fresh, credential-free Chromium processes.
 4. The worker returns normalized JSON. Its search credential never enters the
    Hermes container.
 5. Hermes can publish a bounded finding to Steward Control. The event contains a
@@ -32,7 +35,7 @@ The bundled skill tells Hermes to treat every search result and page as data, no
 instructions. This is useful defense in depth, but it is not a prompt-injection
 detector or proof that a finding is true.
 
-## 1. Run the research worker
+## 1. Run the lightweight research worker
 
 Build the worker from a Steward source checkout:
 
@@ -74,13 +77,43 @@ sudo docker run -d --name steward-research-worker --restart unless-stopped \
   steward-research-worker
 ```
 
-The reference worker is not a crawler, browser, or search engine. It extracts
+The lightweight worker is not a crawler, browser, or search engine. It extracts
 bounded text from HTML, XHTML, and plain-text responses; it does not execute
 JavaScript. The SearXNG upstream may be omitted when only extraction is needed. See the
 [worker reference](https://github.com/hardrails/steward/tree/main/workers/research)
 for its complete environment contract.
 
-## 2. Connect the worker to Gateway
+## 2. Run the browser worker
+
+The browser worker covers public pages that require JavaScript. It accepts no raw
+URL from Hermes. Search returns short-lived opaque references; read opens only
+those references with no cookies, permissions, downloads, cross-origin requests,
+or reusable browser state.
+
+Build and run it as a separate non-root gVisor workload on a network with no
+private or metadata routes:
+
+```console
+docker build --pull=false -t steward-browser-worker workers/browser
+
+sudo docker run -d --name steward-browser-worker --restart unless-stopped \
+  --read-only --runtime runsc --user 65532:65532 --cap-drop ALL \
+  --security-opt no-new-privileges:true --pids-limit 128 \
+  --memory 1g --cpus 2 --shm-size 256m \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m \
+  -p 127.0.0.1:9081:8080 \
+  -e STEWARD_WORKER_TOKEN_FILE=/run/secrets/worker-token \
+  -e STEWARD_SEARCH_BASE_URL=https://search.example \
+  --mount type=bind,src=/etc/steward/browser-worker/token,dst=/run/secrets/worker-token,readonly \
+  steward-browser-worker
+```
+
+See [Let Hermes read JavaScript websites safely]({{ '/guides/browser-research/' |
+relative_url }}) for credential setup, network requirements, pin updates, and the
+exact limitations. Use the lightweight extractor when JavaScript is unnecessary;
+it has a smaller attack surface and resource footprint.
+
+## 3. Connect both workers to Gateway
 
 The presets fix the connector IDs, methods, paths, and conservative request,
 response, concurrency, time, and per-grant call limits. The local HTTP exception
@@ -103,6 +136,22 @@ sudo stewardctl gateway connector set \
   -allow-cidr 127.0.0.0/8 \
   -tenant-budget research=8388608
 
+sudo stewardctl gateway connector set \
+  -preset browser-search \
+  -base-url http://127.0.0.1:9081 \
+  -credential-file /etc/steward/credentials/browser-worker \
+  -allow-insecure-http \
+  -allow-cidr 127.0.0.0/8 \
+  -tenant-budget research=8388608
+
+sudo stewardctl gateway connector set \
+  -preset browser-read \
+  -base-url http://127.0.0.1:9081 \
+  -credential-file /etc/steward/credentials/browser-worker \
+  -allow-insecure-http \
+  -allow-cidr 127.0.0.0/8 \
+  -tenant-budget research=8388608
+
 sudo systemctl restart steward-gateway
 ```
 
@@ -110,14 +159,14 @@ Gateway validates the whole candidate configuration before replacing it. The
 tenant budget reserves durable connector-receipt capacity; it is not an API spend
 limit.
 
-## 3. Authorize the research application
+## 4. Authorize the research application
 
-Create the initial site policy with both ordinary connector identities:
+Create the initial site policy with all four ordinary connector identities:
 
 ```console
 stewardctl site init steward-site \
   -tenant-id research \
-  -connector-ids steward-research-extract,steward-research-search
+  -connector-ids steward-browser-read,steward-browser-search,steward-research-extract,steward-research-search
 ```
 
 Start from
@@ -125,7 +174,7 @@ Start from
 Replace the placeholder image digest and model route, then use the normal
 [build, publish, and apply workflow]({{ '/guides/build-agents/' | relative_url }}).
 The definition selects `tool_profile: research`, the signed
-`steward-research` skill, both connector IDs, and controller events. Admission
+`steward-research` skill, all four connector IDs, and controller events. Admission
 fails if any required part is missing.
 
 Run one top-level task after activating the Hermes service:
@@ -141,7 +190,27 @@ iterations, one level of delegation, 180 seconds of delegation time, and 32 tota
 Hermes turns. Search and extraction still pass through Gateway's independent call
 and byte budgets. Steward does not create an unsigned remote-dispatch tier.
 
-## 4. Read findings outside the instance
+## 5. Keep the work in a Workroom
+
+Create a durable project and session before enqueueing the signed task:
+
+```console
+stewardctl workroom create web-intelligence \
+  -tenant-id research \
+  -description "Primary-source research and operator-selected evidence"
+stewardctl workroom session create web-intelligence \
+  -tenant-id research \
+  -id current-question \
+  -title "Current research question"
+```
+
+Use `stewardctl task enqueue` with
+`-project web-intelligence -session current-question`. The Workroom records the
+signed task ID and later artifact locations. It does not store prompts or give
+the task more authority. See
+[Keep agent work in a durable Workroom]({{ '/guides/workrooms/' | relative_url }}).
+
+## 6. Read findings outside the instance
 
 Use the React control room, or list retained events from a trusted terminal:
 

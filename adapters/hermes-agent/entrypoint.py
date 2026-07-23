@@ -70,21 +70,29 @@ PROFILE_SKILLS = {
     "research": {
         "path": RESEARCH_SKILL,
         "name": "steward-research",
+        "version": "2",
         "entrypoint": "research.py",
-        "public_key_sha256": "b8e13bf2e90dd3f360f5b5ddfb34bddc79df47d2b6d3456dc3f7d67a5be16e35",
-        "connector_ids": ["steward-research-extract", "steward-research-search"],
+        "public_key_sha256": "7ecdb9818979001ac9a6ea4eaf85af1a9388d6f168323fec582a8ac06053e54b",
+        "connector_ids": [
+            "steward-browser-read",
+            "steward-browser-search",
+            "steward-research-extract",
+            "steward-research-search",
+        ],
         "limits": {
+            "max_browser_refs": 5,
             "max_extract_urls": 10,
             "max_request_bytes": 65536,
             "max_response_bytes": 1048576,
             "max_search_results": 20,
-            "timeout_seconds": 30,
+            "timeout_seconds": 180,
         },
         "files": {"SKILL.md": ("read", 0o444), "research.py": ("execute", 0o555)},
     },
     "developer": {
         "path": DEVELOPER_SKILL,
         "name": "steward-coding-worker",
+        "version": "1",
         "entrypoint": "coding_worker.py",
         "public_key_sha256": "0b131eeb43a3f6fd4e5ed8a16c5b4a20501860400d74fb95a7b2f4e9e73e6fac",
         "connector_ids": ["steward-claude-code", "steward-codex"],
@@ -530,7 +538,7 @@ def verify_profile_skill(expected: dict[str, Any]) -> None:
     if (
         descriptor["schema_version"] != "steward.profile-skill-manifest.v1"
         or descriptor["name"] != expected["name"]
-        or descriptor["version"] != "1"
+        or descriptor["version"] != expected["version"]
         or descriptor["entrypoint"] != expected["entrypoint"]
         or descriptor["connector_ids"] != expected["connector_ids"]
         or descriptor["limits"] != expected["limits"]

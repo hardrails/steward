@@ -103,6 +103,8 @@ jobs:
         run: python3 -I scripts/update-hermes-pin-test.py
       - name: Buzz pin updater
         run: python3 -I scripts/update-buzz-pin-test.py
+      - name: Playwright pin updater
+        run: python3 -I scripts/update-playwright-pin-test.py
       - name: Installer plan smoke
         run: |
           /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
@@ -155,6 +157,22 @@ jobs:
           trap 'rm -rf "$stage" "$smoke" /tmp/steward-node-test.deb /tmp/steward-node-test.rpm \
             /tmp/steward-node-test.deb.contents /tmp/steward-node-test.rpm.contents; \
             if [[ -n ${package_verify_root:-} ]]; then sudo rm -rf "$package_verify_root"; fi' EXIT
+          STEWARD_RELEASE_VERSION=v0.0.0-test STEWARD_RELEASE_TARGETS=linux/amd64 \
+            /bin/bash -p scripts/release.sh >/tmp/steward-tar-release.out
+          tar_archive=dist/steward_v0.0.0-test_linux_amd64.tar.gz
+          tar --numeric-owner -tvzf "$tar_archive" | awk '
+            ($2 == "0" && $3 == "0") || $2 == "0/0" { count++; next }
+            { exit 1 }
+            END { if (count == 0) exit 1 }
+          '
+          package_verify_root="/usr/lib/steward-node-tar-smoke-${GITHUB_RUN_ID}-$$"
+          sudo install -d -o root -g root -m 0755 "$package_verify_root"
+          sudo tar -xzf "$tar_archive" -C "$package_verify_root"
+          sudo "$package_verify_root/scripts/install-node.sh" \
+            --expected-version v0.0.0-test --verify-package-only | \
+            grep -Fxq 'install-node: package release verified'
+          sudo rm -rf "$package_verify_root"
+          package_verify_root=
           mkdir -p "$stage/adapters" "$stage/deploy" "$stage/scripts" "$stage/workers"
           go build -o "$stage/steward" ./cmd/steward
           go build -o "$stage/steward-control" ./cmd/steward-control
@@ -176,7 +194,7 @@ jobs:
           grep -Fxq -- '-apply' <<<"$recover_completion"
           grep -Fxq -- '-output' <<<"$recover_completion"
           cp -R adapters/hermes-agent "$stage/adapters/"
-          cp -R workers/coding workers/research "$stage/workers/"
+          cp -R workers/browser workers/coding workers/research "$stage/workers/"
           cp -R examples schemas "$stage/"
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           rm -f "$stage/deploy/config/control.env" \
@@ -204,7 +222,7 @@ jobs:
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 8, "write": 8},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 76
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 82
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
@@ -296,6 +314,8 @@ jobs:
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/workers/research/research_worker.py' \
             /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/workers/browser/package-lock.json' \
+            /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/examples/agents/hermes/agent.json' \
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/examples/agents/nodes.json' \
@@ -337,6 +357,8 @@ jobs:
           grep -q '/usr/lib/steward-node/release/workers/coding/package-lock.json' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/workers/research/research_worker.py' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/workers/browser/package-lock.json' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/examples/agents/hermes/agent.json' \
             /tmp/steward-node-test.rpm.contents

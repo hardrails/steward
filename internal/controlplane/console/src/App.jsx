@@ -240,13 +240,16 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/tasks?limit=100", epoch)
         : Promise.resolve({tasks: []}),
+      tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/projects?limit=128", epoch)
+        : Promise.resolve({projects: []}),
       includeSiteResources
         ? api("/v1/node-pools?limit=500", epoch)
         : Promise.resolve({node_pools: []}),
     ];
-    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, nodePools] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, nodePools] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, nodePools};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, nodePools};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -578,15 +581,16 @@ function Airlock({authenticating, error, onUnlock}) {
 
 const views = [
   ["overview", "01", "Fleet health"],
-  ["attention", "02", "Needs review"],
-  ["incident", "03", "Incident view"],
-  ["nodes", "04", "Agent nodes"],
-  ["pools", "05", "Node pools"],
-  ["commands", "06", "Signed activity"],
-  ["credentials", "07", "Access records"],
-  ["agents", "08", "Agents"],
-  ["tasks", "09", "Fleet tasks"],
-  ["events", "10", "Agent signals"],
+  ["workrooms", "02", "Workrooms"],
+  ["attention", "03", "Needs review"],
+  ["incident", "04", "Incident view"],
+  ["nodes", "05", "Agent nodes"],
+  ["pools", "06", "Node pools"],
+  ["commands", "07", "Signed activity"],
+  ["credentials", "08", "Access records"],
+  ["agents", "09", "Agents"],
+  ["tasks", "10", "Fleet tasks"],
+  ["events", "11", "Agent signals"],
 ];
 
 function ControlRoom(props) {
@@ -688,6 +692,9 @@ function ControlRoom(props) {
         ) : (
           <>
             {view === "overview" ? <Overview snapshot={snapshot} onAttention={() => props.onView("attention")} /> : null}
+            {view === "workrooms" ? (
+              <WorkroomsView page={snapshot.projects} tasks={snapshot.tasks} tenantID={selectedTenant} />
+            ) : null}
             {view === "attention" ? <AttentionView page={snapshot.attention} /> : null}
             {view === "incident" ? <IncidentTimelineView page={snapshot.timeline} /> : null}
             {view === "nodes" ? <NodesView page={snapshot.nodes} tenantID={selectedTenant} /> : null}
@@ -706,6 +713,124 @@ function ControlRoom(props) {
           </>
         )}
       </div>
+    </section>
+  );
+}
+
+function WorkroomsView({page, tasks, tenantID}) {
+  const projects = Array.isArray(page?.projects) ? page.projects : [];
+  const taskByID = new Map((tasks?.tasks || []).map((task) => [task.task_id, task]));
+  const sessionCount = projects.reduce((total, project) => total + project.sessions.length, 0);
+  const artifactCount = projects.reduce((total, project) => total + project.artifacts.length, 0);
+  const activeTasks = projects.reduce((total, project) => (
+    total + project.sessions.reduce((sessionTotal, session) => (
+      sessionTotal + session.task_ids.filter((taskID) => {
+        const state = taskByID.get(taskID)?.state;
+        return state && state !== "completed" && state !== "failed" && state !== "rejected";
+      }).length
+    ), 0)
+  ), 0);
+
+  return (
+    <section className="view workrooms-view" aria-labelledby="workrooms-title">
+      <ViewHeading id="workrooms-title" eyebrow="DURABLE AGENT WORK" title="Research that survives the chat">
+        Workrooms keep a bounded index of sessions, signed tasks, external artifacts, and memory you selected on purpose.
+      </ViewHeading>
+      <aside className="workroom-principle">
+        <span className="workroom-principle-mark" aria-hidden="true">W</span>
+        <div>
+          <strong>THE PROJECT REMEMBERS. THE AGENT DOES NOT GAIN AUTHORITY.</strong>
+          <p>Artifacts stay in storage you control. Steward retains their digest and location, while every consequential task still needs authority signed outside this browser.</p>
+        </div>
+      </aside>
+      <dl className="workroom-totals" aria-label="Workroom totals">
+        <div><dt>Projects</dt><dd>{projects.length}</dd></div>
+        <div><dt>Sessions</dt><dd>{sessionCount}</dd></div>
+        <div><dt>Indexed artifacts</dt><dd>{artifactCount}</dd></div>
+        <div className={activeTasks ? "is-live" : ""}><dt>Active tasks</dt><dd>{activeTasks}</dd></div>
+      </dl>
+      {!tenantID ? (
+        <article className="workroom-empty">
+          <span className="panel-index">TENANT PROJECT SPACE</span>
+          <h3>Select one tenant to enter its Workrooms.</h3>
+          <p>Site-wide authority can inspect fleet posture, but project evidence is always projected through one tenant boundary.</p>
+        </article>
+      ) : projects.length ? (
+        <div className="workroom-board">
+          {projects.map((project, projectIndex) => (
+            <article className="workroom-card" key={project.id}>
+              <header>
+                <div>
+                  <span className="panel-index">PROJECT {String(projectIndex + 1).padStart(2, "0")} / REV {project.revision}</span>
+                  <h3>{project.name}</h3>
+                  <code>{project.id}</code>
+                </div>
+                <Badge kind={project.sessions.some((item) => item.state === "active") ? "is-ok" : ""}>
+                  {project.sessions.some((item) => item.state === "active") ? "active" : "archived"}
+                </Badge>
+              </header>
+              <p className="workroom-description">{project.description || "No project description has been retained."}</p>
+              <div className="workroom-agent-line">
+                <span>DEFAULT AGENT</span>
+                <strong>{project.agent_ref || "choose when dispatching"}</strong>
+                <span>SKILLS</span>
+                <strong>{displayStringList(project.skills).length ? displayStringList(project.skills).join(" · ") : "task-defined"}</strong>
+              </div>
+              <div className="workroom-session-grid">
+                <section aria-label={`${project.name} sessions`}>
+                  <h4>Sessions</h4>
+                  {project.sessions.length ? (
+                    <ol>
+                      {project.sessions.map((session) => (
+                        <li key={session.id}>
+                          <div>
+                            <strong>{session.title}</strong>
+                            <code>{session.id}</code>
+                          </div>
+                          <span>{session.task_ids.length} task{session.task_ids.length === 1 ? "" : "s"}</span>
+                          <Badge kind={session.state === "active" ? "is-ok" : ""}>{session.state}</Badge>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : <p className="workroom-muted">No sessions yet.</p>}
+                </section>
+                <section aria-label={`${project.name} retained evidence`}>
+                  <h4>Evidence index</h4>
+                  <dl className="workroom-evidence">
+                    <div><dt>Artifacts</dt><dd>{project.artifacts.length}</dd></div>
+                    <div><dt>Selected memory</dt><dd>{project.memory_refs.length}</dd></div>
+                    <div><dt>Updated</dt><dd>{formatTime(project.updated_at)}</dd></div>
+                  </dl>
+                </section>
+              </div>
+              {project.artifacts.length ? (
+                <div className="workroom-artifacts">
+                  {project.artifacts.slice(-3).reverse().map((artifact) => (
+                    <div key={artifact.id}>
+                      <span>{artifact.media_type}</span>
+                      <strong>{artifact.name}</strong>
+                      <code>{artifact.sha256.slice(0, 20)}…</code>
+                    </div>
+                  ))}
+                  {project.artifacts.length > 3 ? <small>+ {project.artifacts.length - 3} more indexed artifacts</small> : null}
+                </div>
+              ) : null}
+              <footer>
+                <span>CREATE THE NEXT SESSION</span>
+                <code>stewardctl workroom session create {project.id} -tenant-id {tenantID} -id SESSION -title &quot;Research question&quot;</code>
+              </footer>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <article className="workroom-empty">
+          <span className="panel-index">FIRST PROJECT / TENANT {tenantID}</span>
+          <h3>Give long-running work a place to land.</h3>
+          <p>Create one project, open a session, then attach signed research tasks. The browser never receives a task-signing key.</p>
+          <pre><code>stewardctl workroom create research -tenant-id {tenantID} -description &quot;Evidence-backed market research&quot;</code></pre>
+        </article>
+      )}
+      {page?.next_after ? <p className="truncation-note">More projects exist. Continue with the API or stewardctl workroom cursor.</p> : null}
     </section>
   );
 }

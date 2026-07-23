@@ -14,7 +14,9 @@ root=$(cd "$(dirname "$script_path")/.." && pwd -P)
 release_root=
 if [[ -x $root/steward-executor && -x $root/steward-gateway && -x $root/steward-relay && -x $root/stewardctl ]]; then
 	release_root=$root
-elif [[ -x $root/../steward-executor && -x $root/../steward-gateway && -x $root/../steward-relay && -x $root/../stewardctl ]]; then
+elif [[ ${root##*/} == integration &&
+	-x $root/../steward-executor && -x $root/../steward-gateway &&
+	-x $root/../steward-relay && -x $root/../stewardctl ]]; then
 	release_root=$(cd "$root/.." && pwd -P)
 fi
 if [[ $# -eq 1 && $1 == --check-layout ]]; then
