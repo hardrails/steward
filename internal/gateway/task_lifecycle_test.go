@@ -170,7 +170,7 @@ func requireLifecycleTaskChain(t *testing.T, records []connectorledger.VerifiedR
 
 func lifecycleAuthorizationEvent(t *testing.T, rig *serviceTaskRig, body []byte, permitHeader string) connectorledger.Event {
 	t.Helper()
-	rawPermit, err := taskpermit.DecodeHeader(permitHeader)
+	rawPermit, err := decodeServiceTaskPermitHeader(permitHeader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func lifecycleAuthorizationEvent(t *testing.T, rig *serviceTaskRig, body []byte,
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := taskpermit.Verify(rawPermit, trusted, rig.now, time.Duration(rig.operation.MaxPermitSeconds)*time.Second)
+	verified, err := verifyServiceTaskPermit(rawPermit, trusted, rig.now, time.Duration(rig.operation.MaxPermitSeconds)*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

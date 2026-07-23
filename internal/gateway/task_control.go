@@ -15,6 +15,7 @@ import (
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/schedulepermit"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
@@ -26,7 +27,7 @@ const (
 )
 
 var maxControlTaskSubmitBytes = int64(
-	base64.RawURLEncoding.EncodedLen(taskpermit.MaxEnvelopeBytes) +
+	base64.RawURLEncoding.EncodedLen(schedulepermit.MaxRunPermitBytes) +
 		base64.StdEncoding.EncodedLen(int(taskpermit.MaxRequestBytes)) +
 		2048,
 )
@@ -246,7 +247,7 @@ func decodeControlTaskSubmitRequest(raw []byte) (controlTaskSubmitRequest, []byt
 		!validTaskJSON(body, int(taskpermit.MaxRequestBytes)) {
 		return controlTaskSubmitRequest{}, nil, nil, errors.New("task submission body is invalid")
 	}
-	rawPermit, err := taskpermit.DecodeHeader(submission.TaskPermit)
+	rawPermit, err := decodeServiceTaskPermitHeader(submission.TaskPermit)
 	if err != nil {
 		return controlTaskSubmitRequest{}, nil, nil, err
 	}
