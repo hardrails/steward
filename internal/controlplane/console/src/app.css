@@ -1056,6 +1056,199 @@ select:focus {
   white-space: nowrap;
 }
 
+.workroom-activity {
+  border-top: 1px solid var(--line);
+  margin: 0 22px;
+  padding: 16px 0;
+}
+
+.workroom-activity h4,
+.schedule-runs h4 {
+  margin: 0 0 10px;
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.workroom-activity ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 7px;
+  list-style: none;
+}
+
+.workroom-activity li {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.workroom-activity li > div,
+.workroom-activity strong {
+  min-width: 0;
+}
+
+.workroom-activity span,
+.workroom-activity strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workroom-activity span,
+.workroom-activity time {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.workroom-activity strong {
+  margin-top: 2px;
+  font-size: 10px;
+}
+
+.schedule-boundary {
+  display: grid;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--signal);
+  background: linear-gradient(105deg, rgb(200 255 67 / 0.06), transparent 58%), var(--panel);
+  gap: 7px;
+  padding: 20px 24px;
+}
+
+.schedule-boundary strong {
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.schedule-boundary span {
+  max-width: 900px;
+  color: var(--paper-muted);
+  font-size: 12px;
+}
+
+.schedule-board {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.schedule-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(145deg, rgb(200 255 67 / 0.035), transparent 46%),
+    var(--panel);
+}
+
+.schedule-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  gap: 18px;
+  padding: 20px 22px;
+}
+
+.schedule-card h3 {
+  margin: 6px 0 3px;
+  font-family: var(--display);
+  font-size: 30px;
+  font-weight: 500;
+}
+
+.schedule-card header code {
+  color: var(--paper-dim);
+  font-size: 9px;
+}
+
+.schedule-card > dl {
+  display: grid;
+  margin: 0;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.schedule-card > dl div {
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 13px 16px;
+}
+
+.schedule-card > dl dt {
+  color: var(--paper-dim);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.schedule-card > dl dd {
+  overflow: hidden;
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-runs {
+  padding: 17px 22px;
+}
+
+.schedule-runs > div {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 9px;
+  padding: 9px 0;
+}
+
+.schedule-runs > div > span,
+.schedule-runs time {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.schedule-runs > div > strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-card > footer {
+  display: grid;
+  border-top: 1px solid var(--line);
+  background: var(--ink-soft);
+  gap: 7px;
+  padding: 14px 22px;
+}
+
+.schedule-card > footer span {
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.schedule-card > footer code {
+  overflow-x: auto;
+  color: var(--paper-muted);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
 .workroom-empty {
   border: 1px dashed var(--line-bright);
   background:
@@ -3009,7 +3202,8 @@ td small {
 
   .agent-board,
   .pool-board,
-  .workroom-board {
+  .workroom-board,
+  .schedule-board {
     grid-template-columns: 1fr;
   }
 

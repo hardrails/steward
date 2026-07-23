@@ -247,13 +247,16 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/interactions?limit=100", epoch)
         : Promise.resolve({interactions: []}),
+      tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/schedules?limit=100", epoch)
+        : Promise.resolve({schedules: []}),
       includeSiteResources
         ? api("/v1/node-pools?limit=500", epoch)
         : Promise.resolve({node_pools: []}),
     ];
-    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, nodePools] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, schedules, nodePools] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, nodePools};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, schedules, nodePools};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -587,15 +590,16 @@ const views = [
   ["overview", "01", "Fleet health"],
   ["inbox", "02", "Agent inbox"],
   ["workrooms", "03", "Workrooms"],
-  ["attention", "04", "Needs review"],
-  ["incident", "05", "Incident view"],
-  ["nodes", "06", "Agent nodes"],
-  ["pools", "07", "Node pools"],
-  ["commands", "08", "Signed activity"],
-  ["credentials", "09", "Access records"],
-  ["agents", "10", "Agents"],
-  ["tasks", "11", "Fleet tasks"],
-  ["events", "12", "Agent signals"],
+  ["schedules", "04", "Schedules"],
+  ["attention", "05", "Needs review"],
+  ["incident", "06", "Incident view"],
+  ["nodes", "07", "Agent nodes"],
+  ["pools", "08", "Node pools"],
+  ["commands", "09", "Signed activity"],
+  ["credentials", "10", "Access records"],
+  ["agents", "11", "Agents"],
+  ["tasks", "12", "Fleet tasks"],
+  ["events", "13", "Agent signals"],
 ];
 
 function ControlRoom(props) {
@@ -701,8 +705,15 @@ function ControlRoom(props) {
               <AgentInboxView page={snapshot.interactions} tenantID={selectedTenant} />
             ) : null}
             {view === "workrooms" ? (
-              <WorkroomsView page={snapshot.projects} tasks={snapshot.tasks} tenantID={selectedTenant} />
+              <WorkroomsView
+                page={snapshot.projects}
+                tasks={snapshot.tasks}
+                interactions={snapshot.interactions}
+                schedules={snapshot.schedules}
+                tenantID={selectedTenant}
+              />
             ) : null}
+            {view === "schedules" ? <SchedulesView page={snapshot.schedules} tenantID={selectedTenant} /> : null}
             {view === "attention" ? <AttentionView page={snapshot.attention} /> : null}
             {view === "incident" ? <IncidentTimelineView page={snapshot.timeline} /> : null}
             {view === "nodes" ? <NodesView page={snapshot.nodes} tenantID={selectedTenant} /> : null}
@@ -882,11 +893,15 @@ function InteractionCard({interaction}) {
   );
 }
 
-function WorkroomsView({page, tasks, tenantID}) {
+function WorkroomsView({page, tasks, interactions, schedules, tenantID}) {
   const projects = Array.isArray(page?.projects) ? page.projects : [];
   const taskByID = new Map((tasks?.tasks || []).map((task) => [task.task_id, task]));
+  const interactionItems = Array.isArray(interactions?.interactions) ? interactions.interactions : [];
+  const scheduleItems = Array.isArray(schedules?.schedules) ? schedules.schedules : [];
   const sessionCount = projects.reduce((total, project) => total + project.sessions.length, 0);
   const artifactCount = projects.reduce((total, project) => total + project.artifacts.length, 0);
+  const openQuestions = interactionItems.filter((item) => item.state === "open").length;
+  const activeSchedules = scheduleItems.filter((item) => item.state === "active").length;
   const activeTasks = projects.reduce((total, project) => (
     total + project.sessions.reduce((sessionTotal, session) => (
       sessionTotal + session.task_ids.filter((taskID) => {
@@ -899,7 +914,7 @@ function WorkroomsView({page, tasks, tenantID}) {
   return (
     <section className="view workrooms-view" aria-labelledby="workrooms-title">
       <ViewHeading id="workrooms-title" eyebrow="DURABLE AGENT WORK" title="Research that survives the chat">
-        Workrooms keep a bounded index of sessions, signed tasks, external artifacts, and memory you selected on purpose.
+        Workrooms join sessions, signed tasks, agent questions, finite schedules, external artifacts, and memory you selected on purpose.
       </ViewHeading>
       <aside className="workroom-principle">
         <span className="workroom-principle-mark" aria-hidden="true">W</span>
@@ -913,6 +928,8 @@ function WorkroomsView({page, tasks, tenantID}) {
         <div><dt>Sessions</dt><dd>{sessionCount}</dd></div>
         <div><dt>Indexed artifacts</dt><dd>{artifactCount}</dd></div>
         <div className={activeTasks ? "is-live" : ""}><dt>Active tasks</dt><dd>{activeTasks}</dd></div>
+        <div className={openQuestions ? "is-live" : ""}><dt>Open questions</dt><dd>{openQuestions}</dd></div>
+        <div className={activeSchedules ? "is-live" : ""}><dt>Active schedules</dt><dd>{activeSchedules}</dd></div>
       </dl>
       {!tenantID ? (
         <article className="workroom-empty">
@@ -922,7 +939,26 @@ function WorkroomsView({page, tasks, tenantID}) {
         </article>
       ) : projects.length ? (
         <div className="workroom-board">
-          {projects.map((project, projectIndex) => (
+          {projects.map((project, projectIndex) => {
+            const projectInteractions = interactionItems.filter((item) => item.project_id === project.id);
+            const projectSchedules = scheduleItems.filter((item) => item.schedule?.project_id === project.id);
+            const activity = [
+              ...projectInteractions.map((item) => ({
+                id: "interaction-" + item.interaction_id,
+                at: item.received_at,
+                kind: "AGENT QUESTION · UNTRUSTED TEXT",
+                title: item.title,
+                state: item.state,
+              })),
+              ...projectSchedules.flatMap((schedule) => (schedule.runs || []).map((run) => ({
+                id: "schedule-" + schedule.schedule.schedule_id + "-" + run.ordinal,
+                at: run.created_at,
+                kind: "SCHEDULE RUN " + run.ordinal,
+                title: run.task_id,
+                state: run.state,
+              }))),
+            ].sort((left, right) => String(right.at).localeCompare(String(left.at))).slice(0, 5);
+            return (
             <article className="workroom-card" key={project.id}>
               <header>
                 <div>
@@ -980,12 +1016,27 @@ function WorkroomsView({page, tasks, tenantID}) {
                   {project.artifacts.length > 3 ? <small>+ {project.artifacts.length - 3} more indexed artifacts</small> : null}
                 </div>
               ) : null}
+              <section className="workroom-activity" aria-label={`${project.name} recent activity`}>
+                <h4>Recent activity</h4>
+                {activity.length ? (
+                  <ol>
+                    {activity.map((item) => (
+                      <li key={item.id}>
+                        <div><span>{item.kind}</span><strong>{item.title}</strong></div>
+                        <Badge kind={item.state === "completed" || item.state === "resolved" ? "is-ok" : ""}>{item.state}</Badge>
+                        <time>{formatTime(item.at)}</time>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <p className="workroom-muted">No retained task questions or schedule runs yet.</p>}
+              </section>
               <footer>
                 <span>CREATE THE NEXT SESSION</span>
                 <code>stewardctl workroom session create {project.id} -tenant-id {tenantID} -id SESSION -title &quot;Research question&quot;</code>
               </footer>
             </article>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <article className="workroom-empty">
@@ -998,6 +1049,96 @@ function WorkroomsView({page, tasks, tenantID}) {
       {page?.next_after ? <p className="truncation-note">More projects exist. Continue with the API or stewardctl workroom cursor.</p> : null}
     </section>
   );
+}
+
+function SchedulesView({page, tenantID}) {
+  const schedules = Array.isArray(page?.schedules) ? page.schedules : [];
+  const active = schedules.filter((schedule) => schedule.state === "active").length;
+  const queued = schedules.reduce((total, schedule) => (
+    total + (schedule.runs || []).filter((run) => ["queued", "leased", "dispatched", "running"].includes(run.state)).length
+  ), 0);
+  return (
+    <section className="view schedules-view" aria-labelledby="schedules-title">
+      <ViewHeading id="schedules-title" eyebrow="FINITE SIGNED AUTOMATION" title="Repeat work without handing over a signing key">
+        Every schedule fixes one workload, operation, request, interval, run count, dispatch window, and concurrency ceiling. Control can materialize due runs, but it cannot widen those signed bounds.
+      </ViewHeading>
+      <aside className="schedule-boundary">
+        <strong>CONTROL HOLDS A FINITE ENVELOPE, NOT YOUR TASK KEY.</strong>
+        <span>Gateway verifies the tenant signature and exact due run before an agent receives the request. Cancelling a schedule only narrows future authority.</span>
+      </aside>
+      <dl className="workroom-totals" aria-label="Schedule totals">
+        <div><dt>Retained</dt><dd>{schedules.length}</dd></div>
+        <div className={active ? "is-live" : ""}><dt>Active</dt><dd>{active}</dd></div>
+        <div className={queued ? "is-live" : ""}><dt>Runs in flight</dt><dd>{queued}</dd></div>
+      </dl>
+      {!tenantID ? (
+        <article className="workroom-empty">
+          <span className="panel-index">TENANT-SCOPED AUTHORITY</span>
+          <h3>Select one tenant to inspect its finite schedules.</h3>
+        </article>
+      ) : schedules.length ? (
+        <div className="schedule-board">
+          {schedules.map((item) => {
+            const schedule = item.schedule;
+            const recentRuns = (item.runs || []).slice(-4).reverse();
+            return (
+              <article className="schedule-card" key={schedule.schedule_id}>
+                <header>
+                  <div>
+                    <span className="panel-index">NEXT RUN {item.next_ordinal} / {schedule.run_count}</span>
+                    <h3>{schedule.schedule_id}</h3>
+                    <code>{schedule.service_id} · {schedule.operation_id}</code>
+                  </div>
+                  <Badge kind={item.state === "active" ? "is-ok" : ""}>{item.state}</Badge>
+                </header>
+                <dl>
+                  <div><dt>First due</dt><dd>{formatTime(schedule.starts_at)}</dd></div>
+                  <div><dt>Interval</dt><dd>{schedule.interval_seconds ? formatDurationSeconds(schedule.interval_seconds) : "one time"}</dd></div>
+                  <div><dt>Dispatch window</dt><dd>{formatDurationSeconds(schedule.window_seconds)}</dd></div>
+                  <div><dt>Concurrency</dt><dd>{schedule.max_concurrency} · {schedule.overlap_policy}</dd></div>
+                  <div><dt>Runs</dt><dd>{item.enqueued_runs} queued · {item.skipped_runs} skipped</dd></div>
+                  <div><dt>Agent</dt><dd>{schedule.instance_id}</dd></div>
+                </dl>
+                <section className="schedule-runs">
+                  <h4>Recent runs</h4>
+                  {recentRuns.length ? recentRuns.map((run) => (
+                    <div key={run.ordinal}>
+                      <span>#{run.ordinal}</span>
+                      <strong>{run.task_id}</strong>
+                      <Badge kind={run.state === "completed" ? "is-ok" : ""}>{run.state}</Badge>
+                      <time>{formatTime(run.due_at)}</time>
+                    </div>
+                  )) : <p className="workroom-muted">Waiting for the first signed due time.</p>}
+                </section>
+                {item.state === "active" ? (
+                  <footer>
+                    <span>STOP FUTURE RUNS</span>
+                    <code>stewardctl task schedule cancel {schedule.schedule_id} -tenant-id {tenantID}</code>
+                  </footer>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <article className="workroom-empty">
+          <span className="panel-index">FIRST FINITE SCHEDULE / TENANT {tenantID}</span>
+          <h3>Turn a proven prompt into bounded recurring work.</h3>
+          <p>The current CLI context supplies Control, trust, and signing paths. You choose the deployment, frequency, and finite run count.</p>
+          <pre><code>stewardctl task schedule researcher -every 1h -runs 24 &quot;Check primary sources and report material changes&quot;</code></pre>
+        </article>
+      )}
+      {page?.next_after ? <p className="truncation-note">More schedules exist. Continue with stewardctl task schedule list -after.</p> : null}
+    </section>
+  );
+}
+
+function formatDurationSeconds(value) {
+  const seconds = Number(value) || 0;
+  if (seconds % 86400 === 0) return `${seconds / 86400}d`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
 }
 
 function OperationalFreezeBanner({status, tenantID}) {
