@@ -42,9 +42,9 @@ stewardctl workroom session create market-intelligence \
 ```
 
 Open `/console/`, choose the tenant, then select **Workrooms**. The embedded React
-console shows projects, sessions, linked tasks, artifact digests, and selected
-memory. It remains an inspection surface: private task keys never enter the
-browser.
+console shows projects, sessions, linked tasks, artifact digests, selected memory,
+open agent questions, and recent scheduled runs. It remains an inspection surface:
+private task keys never enter the browser.
 
 ## Attach a signed task
 
@@ -71,6 +71,21 @@ stewardctl task enqueue \
   -project market-intelligence \
   -session battery-supply
 ```
+
+For recurring work, attach one finite signed schedule to the same session:
+
+```console
+stewardctl task schedule researcher \
+  -every 24h \
+  -runs 14 \
+  -project market-intelligence \
+  -session battery-supply \
+  "Review the approved sources and report material changes"
+```
+
+Each materialized run becomes a normal signed task linked to the session. See
+[Run finite scheduled tasks]({{ '/guides/scheduled-tasks/' | relative_url }})
+for overlap, missed-run, restart, and cancellation behavior.
 
 ## Register an artifact
 
@@ -122,4 +137,5 @@ as a substitute for expiring task results or deleting external storage.
 
 [Run a web research agent]({{ '/guides/research-agents/' | relative_url }}) ·
 [Run remote tasks]({{ '/guides/async-tasks/' | relative_url }}) ·
+[Answer an agent safely]({{ '/guides/agent-interactions/' | relative_url }}) ·
 [Operate the React console]({{ '/guides/operator-console/' | relative_url }})

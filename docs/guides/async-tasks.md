@@ -166,3 +166,8 @@ This boundary works in `strict-sovereign` mode because Control transports existi
 tenant authority rather than holding a controller signing key. Availability still
 depends on Control, and compromise can expose retained prompts and results; the
 mode limits execution authority, not confidentiality or denial of service.
+
+For a fixed number of recurring runs, use
+[finite scheduled tasks]({{ '/guides/scheduled-tasks/' | relative_url }}). For a
+running agent that must pause for a bounded operator decision, use
+[agent interactions]({{ '/guides/agent-interactions/' | relative_url }}).

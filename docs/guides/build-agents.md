@@ -31,9 +31,31 @@ sensitive production work on a Linux node that reports `hardened`.
 ## Create an agent project
 
 ```console
-stewardctl agent create workspace-auditor -runtime hermes
+stewardctl agent template list
+stewardctl agent create workspace-auditor -template workspace
 cd workspace-auditor
 ```
+
+### Start from a capability-aware template
+
+The built-in templates are reviewed starting points:
+
+| Template | Intended work | Optional capabilities declared |
+| --- | --- | --- |
+| `workspace` | General Hermes tasks | None |
+| `research` | Source-linked web research | Search and extraction connectors plus controller events |
+| `developer` | Repository work through an isolated coding worker | The coding connector |
+
+Inspect one before creating the project:
+
+```console
+stewardctl agent template show research
+stewardctl agent create source-reviewer -template research
+```
+
+A template is editable configuration, not trusted policy or runtime authority.
+Remove capabilities the application does not need. Signed site policy, admission,
+and Gateway configuration must still allow every declared capability.
 
 `Stewardfile.cue` is concrete CUE. Replace the placeholder image with the digest
 of the adapter image you built and qualified. Image tags alone are rejected.

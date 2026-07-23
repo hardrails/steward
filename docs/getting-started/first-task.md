@@ -60,15 +60,20 @@ meaning of each section.
 
 Create a small Hermes application in the current directory:
 
-<!-- cli-flags: agent create | -runtime -->
+<!-- cli-flags: agent create | -template -->
 ```console
-stewardctl agent create workspace-auditor -runtime hermes
+stewardctl agent create workspace-auditor -template workspace
 cd workspace-auditor
 ```
 
+The `workspace` template gives a general-purpose Hermes agent the smallest
+capability set. Use `stewardctl agent template list` to inspect the built-in
+`research` and `developer` starting points. Templates are editable definitions,
+not trusted policy and not permission to run.
+
 The directory contains a CUE application definition. CUE is a configuration
 language that validates values and relationships before Steward creates a signed
-runtime bundle. You can start with the generated defaults.
+runtime bundle.
 
 Build the portable bundle:
 
