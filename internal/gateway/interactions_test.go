@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +179,18 @@ func TestInteractionLifecycleDerivesIdentityAndVerifiesResponse(t *testing.T) {
 		created.State != "open" || created.ControllerAccepted {
 		t.Fatalf("created interaction = %+v", created)
 	}
+	listRequest, _ := http.NewRequest(http.MethodGet, "http://gateway/v1/interactions", nil)
+	listResponse, err := unixHTTPClient(socket).Do(listRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed interactionBatch
+	if listResponse.StatusCode != http.StatusOK ||
+		json.NewDecoder(listResponse.Body).Decode(&listed) != nil ||
+		len(listed.Interactions) != 1 || listed.Interactions[0].InteractionID != created.InteractionID {
+		t.Fatalf("agent interaction list status=%d values=%+v", listResponse.StatusCode, listed)
+	}
+	_ = listResponse.Body.Close()
 
 	// The same agent key and same content are idempotent.
 	response = postInteraction(t, socket, input)
@@ -226,6 +239,60 @@ func TestInteractionLifecycleDerivesIdentityAndVerifiesResponse(t *testing.T) {
 	if agentResponse.StatusCode != http.StatusOK || json.NewDecoder(agentResponse.Body).Decode(&visible) != nil ||
 		visible.Response == nil || visible.Response.Body.Choice != "approve" {
 		t.Fatalf("agent response status=%d visible=%+v", agentResponse.StatusCode, visible)
+	}
+}
+
+func TestInteractionRoutesRejectMalformedCourierAndAmbiguousAgentRequests(t *testing.T) {
+	rig := newInteractionRig(t)
+	socket := eventSocketPath(rig.config.GrantRoot, rig.grant.GrantID)
+	for _, test := range []struct {
+		method string
+		target string
+		body   string
+		status int
+	}{
+		{http.MethodGet, "http://gateway/v1/interactions?unexpected=1", "", http.StatusBadRequest},
+		{http.MethodGet, "http://gateway/v1/interactions/bad-id", "", http.StatusNotFound},
+		{http.MethodPut, "http://gateway/v1/interactions", "", http.StatusNotFound},
+		{http.MethodPost, "http://gateway/v1/interactions?unexpected=1", `{}`, http.StatusBadRequest},
+		{http.MethodPost, "http://gateway/v1/interactions", `{}`, http.StatusBadRequest},
+		{http.MethodPost, "http://gateway/v1/interactions", strings.Repeat("x", maxInteractionRequestBytes+1), http.StatusRequestEntityTooLarge},
+	} {
+		request, err := http.NewRequest(test.method, test.target, strings.NewReader(test.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := unixHTTPClient(socket).Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != test.status {
+			t.Fatalf("%s %s status=%d want=%d", test.method, test.target, response.StatusCode, test.status)
+		}
+		_ = response.Body.Close()
+	}
+
+	control := rig.server.ControlHandler()
+	for _, test := range []struct {
+		method string
+		target string
+		body   string
+		status int
+	}{
+		{http.MethodGet, "/v1/interactions/outbox?unexpected=1", "", http.StatusBadRequest},
+		{http.MethodPost, "/v1/interactions/ack", `{}`, http.StatusBadRequest},
+		{http.MethodPost, "/v1/interactions/ack", `{"interaction_ids":["bad"]}`, http.StatusBadRequest},
+		{http.MethodPost, "/v1/interactions/ack", `{"interaction_ids":["interaction-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","interaction-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}`, http.StatusBadRequest},
+		{http.MethodPost, "/v1/interactions/responses", `{}`, http.StatusBadRequest},
+		{http.MethodPost, "/v1/interactions/responses", `{"interaction_id":"interaction-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","permit_base64":"!!!!","response_base64":"e30="}`, http.StatusBadRequest},
+		{http.MethodPost, "/v1/interactions/responses", strings.Repeat("x", maxInteractionCourierBytes+1), http.StatusRequestEntityTooLarge},
+	} {
+		recorder := httptest.NewRecorder()
+		control.ServeHTTP(recorder, httptest.NewRequest(test.method, test.target, strings.NewReader(test.body)))
+		if recorder.Code != test.status {
+			t.Fatalf("%s %s status=%d want=%d body=%s",
+				test.method, test.target, recorder.Code, test.status, recorder.Body.String())
+		}
 	}
 }
 
@@ -310,5 +377,65 @@ func TestInteractionOutboxAndResolutionSurviveRestart(t *testing.T) {
 	resolved, err := client.ResolveInteraction(context.Background(), created.InteractionID, permitRaw, responseRaw)
 	if err != nil || resolved.State != "resolved" {
 		t.Fatalf("restored resolution=%+v err=%v", resolved, err)
+	}
+}
+
+func TestRetainedInteractionValidationRejectsCorruptionAndQuotaOverflow(t *testing.T) {
+	rig := newInteractionRig(t)
+	response := postInteraction(t, eventSocketPath(rig.config.GrantRoot, rig.grant.GrantID),
+		validInteractionInput(rig.now, "retained"))
+	var valid Interaction
+	if err := json.NewDecoder(response.Body).Decode(&valid); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if err := validateRetainedInteractions([]Interaction{valid}); err != nil {
+		t.Fatalf("valid retained interaction=%v", err)
+	}
+	for name, mutate := range map[string]func(*Interaction){
+		"binding": func(value *Interaction) { value.RequestDigest = "sha256:" + strings.Repeat("0", 64) },
+		"input":   func(value *Interaction) { value.Prompt = "" },
+		"resolved without response": func(value *Interaction) {
+			value.State = "resolved"
+		},
+		"open with response": func(value *Interaction) {
+			value.Response = &InteractionResponse{}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := cloneInteraction(valid)
+			mutate(&candidate)
+			if err := validateRetainedInteractions([]Interaction{candidate}); err == nil {
+				t.Fatal("corrupt retained interaction was accepted")
+			}
+		})
+	}
+	body := InteractionResponseBody{SchemaVersion: interactionResponseBodySchemaV1, Choice: "approve"}
+	permit, responseRaw := signedInteractionResponse(t, rig, valid, body)
+	resolved, err := interactionControlClient(rig.server).ResolveInteraction(
+		context.Background(), valid.InteractionID, permit, responseRaw,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved.Response.ResolvedAt = "not-a-time"
+	if err := validateRetainedInteractions([]Interaction{resolved}); err == nil {
+		t.Fatal("invalid retained resolution time was accepted")
+	}
+	if err := validateRetainedInteractions(make([]Interaction, maxInteractions+1)); err == nil {
+		t.Fatal("oversized retained interaction set was accepted")
+	}
+	quota := make([]Interaction, maxInteractionsGrant+1)
+	for index := range quota {
+		quota[index] = cloneInteraction(valid)
+		quota[index].IdempotencyKey = "question-" + strconv.Itoa(index)
+		quota[index].InteractionID = interactionID(quota[index].GrantID, quota[index].IdempotencyKey)
+		quota[index].RequestDigest = interactionRequestDigest(quota[index])
+	}
+	if err := validateRetainedInteractions(quota); err == nil {
+		t.Fatal("per-grant retained interaction quota was accepted")
+	}
+	if err := validateRetainedInteractions([]Interaction{valid, valid}); err == nil {
+		t.Fatal("duplicate retained interaction was accepted")
 	}
 }

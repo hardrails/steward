@@ -140,6 +140,125 @@ func TestControlInteractionCommandsRejectIncompleteOrUnsafeInput(t *testing.T) {
 	}
 }
 
+func TestControlInteractionRespondExplainsUnsafeOrStaleResponses(t *testing.T) {
+	now := time.Date(2026, 7, 23, 14, 0, 0, 0, time.UTC)
+	previousNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previousNow })
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "task.private.pem")
+	writeAgentPrivateKey(t, keyPath, private)
+	tokenPath := filepath.Join(t.TempDir(), "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name         string
+		mutate       func(*controlstore.Interaction)
+		choice       string
+		text         string
+		keyPath      string
+		rejectSubmit bool
+		want         string
+	}{
+		{
+			name:   "choice was not offered",
+			mutate: func(*controlstore.Interaction) {},
+			choice: "untrusted", want: "offered",
+		},
+		{
+			name: "free text was not allowed",
+			mutate: func(value *controlstore.Interaction) {
+				value.AllowText = false
+				refreshCLIInteractionDigest(value)
+			},
+			choice: "primary", text: "override", want: "interaction response body is invalid",
+		},
+		{
+			name: "expired interaction",
+			mutate: func(value *controlstore.Interaction) {
+				value.ObservedAt = now.Add(-2 * time.Hour).Format(time.RFC3339)
+				value.AcceptedAt = now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+				value.ExpiresAt = now.Add(-time.Hour).Format(time.RFC3339)
+				refreshCLIInteractionDigest(value)
+			},
+			choice: "primary", want: "expired",
+		},
+		{
+			name:    "private key is missing",
+			mutate:  func(*controlstore.Interaction) {},
+			choice:  "primary",
+			keyPath: filepath.Join(t.TempDir(), "missing.pem"),
+			want:    "read task-authority private key",
+		},
+		{
+			name:         "controller rejects courier",
+			mutate:       func(*controlstore.Interaction) {},
+			choice:       "primary",
+			rejectSubmit: true,
+			want:         "HTTP 409",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			interaction := cliInteraction(now)
+			test.mutate(&interaction)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Header.Get("Authorization") != "Bearer operator" {
+					writer.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				writer.Header().Set("Content-Type", "application/json")
+				switch {
+				case request.Method == http.MethodGet:
+					_ = json.NewEncoder(writer).Encode(interaction)
+				case request.Method == http.MethodPost && test.rejectSubmit:
+					writer.WriteHeader(http.StatusConflict)
+					_, _ = writer.Write([]byte(`{"error":"response_conflict","message":"interaction response conflicts with retained state"}`))
+				default:
+					writer.WriteHeader(http.StatusInternalServerError)
+				}
+			}))
+			defer server.Close()
+			responseKey := keyPath
+			if test.keyPath != "" {
+				responseKey = test.keyPath
+			}
+			err := controlInteractionRespond([]string{
+				"-tenant-id", "tenant-a",
+				"-interaction-id", interaction.InteractionID,
+				"-choice", test.choice,
+				"-text", test.text,
+				"-key", responseKey,
+				"-key-id", "tenant-task",
+				"-control-url", server.URL,
+				"-token-file", tokenPath,
+			}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("response error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func refreshCLIInteractionDigest(value *controlstore.Interaction) {
+	request := controlprotocol.InteractionRequestV1{
+		SchemaVersion: value.SchemaVersion, InteractionID: value.InteractionID,
+		IdempotencyKey: value.IdempotencyKey, Source: value.Source,
+		TenantID: value.TenantID, NodeID: value.NodeID, InstanceID: value.InstanceID,
+		Generation: value.Generation, RuntimeRef: value.RuntimeRef, GrantID: value.GrantID,
+		CapsuleDigest: value.CapsuleDigest, PolicyDigest: value.PolicyDigest,
+		Kind: value.Kind, Title: value.Title, Prompt: value.Prompt,
+		Options: append([]string(nil), value.Options...), AllowText: value.AllowText,
+		TaskID: value.TaskID, RunID: value.RunID, ObservedAt: value.ObservedAt,
+		AcceptedAt: value.AcceptedAt, ExpiresAt: value.ExpiresAt,
+	}
+	value.RequestDigest = controlprotocol.InteractionRequestDigest(request)
+}
+
 func cliInteraction(now time.Time) controlstore.Interaction {
 	grantID := "grant-" + strings.Repeat("b", 64)
 	key := "question-1"

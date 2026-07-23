@@ -126,6 +126,85 @@ func TestInteractionResponsePermitRejectsOmittedAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestInteractionResponseBodyEnforcesExactHumanInputBounds(t *testing.T) {
+	options := []string{"approve", "deny"}
+	for name, test := range map[string]struct {
+		body      ResponseBody
+		allowText bool
+		valid     bool
+	}{
+		"choice": {
+			body: ResponseBody{SchemaVersion: ResponseBodySchemaV1, Choice: "approve"}, valid: true,
+		},
+		"text": {
+			body:      ResponseBody{SchemaVersion: ResponseBodySchemaV1, Text: "Use the primary source."},
+			allowText: true, valid: true,
+		},
+		"choice and text": {
+			body: ResponseBody{
+				SchemaVersion: ResponseBodySchemaV1, Choice: "deny", Text: "Needs another source.",
+			},
+			allowText: true, valid: true,
+		},
+		"schema": {
+			body: ResponseBody{SchemaVersion: "other", Choice: "approve"},
+		},
+		"empty": {
+			body: ResponseBody{SchemaVersion: ResponseBodySchemaV1},
+		},
+		"unoffered": {
+			body: ResponseBody{SchemaVersion: ResponseBodySchemaV1, Choice: "publish"},
+		},
+		"text disabled": {
+			body: ResponseBody{SchemaVersion: ResponseBodySchemaV1, Text: "explain"},
+		},
+		"choice whitespace": {
+			body: ResponseBody{SchemaVersion: ResponseBodySchemaV1, Choice: " approve"},
+		},
+		"text control": {
+			body:      ResponseBody{SchemaVersion: ResponseBodySchemaV1, Text: "line\nbreak"},
+			allowText: true,
+		},
+		"text too long": {
+			body:      ResponseBody{SchemaVersion: ResponseBodySchemaV1, Text: strings.Repeat("x", 2049)},
+			allowText: true,
+		},
+		"text invalid utf8": {
+			body:      ResponseBody{SchemaVersion: ResponseBodySchemaV1, Text: string([]byte{0xff})},
+			allowText: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := test.body.Validate(options, test.allowText)
+			if (err == nil) != test.valid {
+				t.Fatalf("Validate error=%v valid=%v", err, test.valid)
+			}
+		})
+	}
+}
+
+func TestInteractionPermitRejectsInvalidSigningInputsAndNodeTime(t *testing.T) {
+	_, private, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	statement := validStatement(now, []byte(`{"choice":"approve"}`))
+	if _, err := Sign(statement, "bad key", private); err == nil {
+		t.Fatal("invalid signing key ID was accepted")
+	}
+	if _, err := Sign(statement, "tenant-task", ed25519.PrivateKey("short")); err == nil {
+		t.Fatal("invalid private key was accepted")
+	}
+	raw, err := Sign(statement, "tenant-task", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(raw, nil, time.Time{}, time.Hour); err == nil {
+		t.Fatal("zero node time was accepted")
+	}
+	if _, err := Verify(raw, nil, now, 0); err == nil {
+		t.Fatal("zero maximum validity was accepted")
+	}
+}
+
 func validStatement(now time.Time, body []byte) Statement {
 	return Statement{
 		SchemaVersion: SchemaV1,

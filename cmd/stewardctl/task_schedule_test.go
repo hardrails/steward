@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,11 +10,105 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/schedulepermit"
 )
+
+func TestTaskScheduleCLIShortFormCreatesExactFiniteAuthority(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	deployment := taskRunControlDeploymentFixture(fixture)
+	tokenPath := filepath.Join(fixture.directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var receivedPermit, receivedRequest []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer operator" {
+			t.Errorf("authorization=%q", request.Header.Get("Authorization"))
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.Method + " " + request.URL.Path {
+		case "GET /v1/tenants/tenant-a/deployments/auditor":
+			_ = json.NewEncoder(writer).Encode(deployment)
+		case "POST /v1/tenants/tenant-a/schedules":
+			var input struct {
+				SchedulePermitBase64 string `json:"schedule_permit_base64"`
+				RequestBase64        string `json:"request_base64"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				t.Errorf("decode schedule input: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			var err error
+			receivedPermit, err = base64.StdEncoding.DecodeString(input.SchedulePermitBase64)
+			if err != nil {
+				t.Errorf("permit base64: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			receivedRequest, err = base64.StdEncoding.DecodeString(input.RequestBase64)
+			if err != nil {
+				t.Errorf("request base64: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			inspected, err := schedulepermit.InspectUnverified(receivedPermit)
+			if err != nil {
+				t.Errorf("inspect schedule permit: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			now := fixture.now.Format(time.RFC3339Nano)
+			_ = json.NewEncoder(writer).Encode(controlstore.TaskSchedule{
+				TenantID: "tenant-a", Statement: inspected.Statement,
+				PermitDigest: inspected.EnvelopeDigest, PermitKeyID: inspected.KeyID,
+				State: controlstore.TaskScheduleActive, NextOrdinal: 1,
+				Runs: []controlstore.ScheduleRun{}, CreatedAt: now, UpdatedAt: now,
+			})
+		default:
+			t.Errorf("unexpected schedule request %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	priorNow := timeNow
+	timeNow = func() time.Time { return fixture.now }
+	t.Cleanup(func() { timeNow = priorNow })
+	var output bytes.Buffer
+	if err := taskScheduleCommand([]string{
+		"auditor", "-no-context", "-control-url", server.URL, "-token-file", tokenPath,
+		"-tenant-id", "tenant-a", "-trust", fixture.trustPath,
+		"-key", fixture.privatePath, "-key-id", fixture.keyID,
+		"-id", "research-hourly", "-start-in", "1s", "-every", "1m", "-runs", "2",
+		"Research the primary sources",
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(receivedPermit) == 0 || string(receivedRequest) !=
+		`{"input":"Research the primary sources","session_id":"research-hourly"}` {
+		t.Fatalf("created courier permit=%d request=%s", len(receivedPermit), receivedRequest)
+	}
+	inspected, err := schedulepermit.InspectUnverified(receivedPermit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := inspected.Statement
+	if statement.ScheduleID != "research-hourly" || statement.RunCount != 2 ||
+		statement.IntervalSeconds != 60 || statement.StartsAt != fixture.now.Add(time.Second).Format(time.RFC3339) ||
+		statement.WindowSeconds != 300 || statement.OperationID != fixture.operation.ID ||
+		statement.ProjectID != "" || statement.SessionID != "" {
+		t.Fatalf("schedule statement=%+v", statement)
+	}
+	if !strings.Contains(output.String(), `"schedule_id":"research-hourly"`) {
+		t.Fatalf("output=%s", output.String())
+	}
+}
 
 func TestTaskScheduleCLIListsShowsAndCancels(t *testing.T) {
 	schedule := taskScheduleCLIFixture()
@@ -101,6 +196,19 @@ func TestTaskScheduleCLIRejectsUnboundedOrIncompleteCreation(t *testing.T) {
 	}
 	if _, _, err := promptOperation("unknown"); err == nil {
 		t.Fatal("unknown service prompt contract was accepted")
+	}
+	if err := taskScheduleCommand(nil, &bytes.Buffer{}); err == nil {
+		t.Fatal("empty task schedule command was accepted")
+	}
+	for _, arguments := range [][]string{
+		{"create"},
+		{"list"},
+		{"show"},
+		{"cancel"},
+	} {
+		if err := taskScheduleCommand(arguments, &bytes.Buffer{}); err == nil {
+			t.Fatalf("incomplete task schedule command %q was accepted", arguments)
+		}
 	}
 }
 

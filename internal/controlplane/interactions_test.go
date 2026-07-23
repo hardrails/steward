@@ -132,6 +132,51 @@ func TestInteractionHTTPWorkflowKeepsSigningOffControl(t *testing.T) {
 		http.StatusBadRequest, "invalid_request")
 }
 
+func TestInteractionHTTPRoutesRejectMalformedMethodsQueriesAndBodies(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	response := fixture.request(t, http.MethodPost, "/v1/enrollments", fixture.adminToken,
+		`{"request_id":"interaction-route-enrollment","node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
+	requireStatus(t, response, http.StatusCreated)
+	var enrollment testEnrollmentCapability
+	decodeResponse(t, response, &enrollment)
+	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
+		enrollmentExchangeBody(t, enrollment, "interaction-route-exchange", fixture.evidenceIdentityProof(t, enrollment)))
+	requireStatus(t, response, http.StatusCreated)
+	var credential controlauth.NodeCredentialFile
+	decodeResponse(t, response, &credential)
+	nodeToken := credential.Credential
+	interactionID := "interaction-" + strings.Repeat("a", 64)
+	for _, test := range []struct {
+		method string
+		path   string
+		token  string
+		body   string
+		status int
+		code   string
+	}{
+		{http.MethodGet, "/executor-uplink/interactions", nodeToken, "", http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodPost, "/executor-uplink/interactions?unexpected=1", nodeToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/executor-uplink/interactions", nodeToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodGet, "/executor-uplink/interactions/responses/poll", nodeToken, "", http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodPost, "/executor-uplink/interactions/responses/poll?unexpected=1", nodeToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/executor-uplink/interactions/responses/poll", nodeToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodGet, "/executor-uplink/interactions/responses/ack", nodeToken, "", http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodPost, "/executor-uplink/interactions/responses/ack?unexpected=1", nodeToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/executor-uplink/interactions/responses/ack", nodeToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/v1/tenants/tenant-a/interactions", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodGet, "/v1/tenants/tenant-a/interactions?unexpected=1", fixture.adminToken, "", http.StatusBadRequest, "invalid_request"},
+		{http.MethodGet, "/v1/tenants/tenant-a/interactions/" + interactionID + "?unexpected=1", fixture.adminToken, "", http.StatusBadRequest, "invalid_request"},
+		{http.MethodGet, "/v1/tenants/tenant-a/interactions/" + interactionID, fixture.adminToken, "", http.StatusNotFound, "not_found"},
+		{http.MethodPost, "/v1/tenants/tenant-a/interactions/" + interactionID + "/response?unexpected=1", fixture.adminToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/v1/tenants/tenant-a/interactions/" + interactionID + "/response", fixture.adminToken, "", http.StatusUnsupportedMediaType, "unsupported_media_type"},
+		{http.MethodDelete, "/v1/tenants/tenant-a/interactions/" + interactionID, fixture.adminToken, "", http.StatusMethodNotAllowed, "method_not_allowed"},
+	} {
+		requireError(t, fixture.request(t, test.method, test.path, test.token, test.body), test.status, test.code)
+	}
+}
+
 func controlplaneInteraction(now time.Time) controlprotocol.InteractionRequestV1 {
 	grantID := "grant-" + strings.Repeat("b", 64)
 	key := "question-1"

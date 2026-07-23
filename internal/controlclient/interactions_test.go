@@ -13,6 +13,7 @@ import (
 
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/interactionpermit"
 )
 
 func TestInteractionClientValidatesPagesLookupsAndResponseCourier(t *testing.T) {
@@ -108,10 +109,88 @@ func TestInteractionClientRejectsInvalidInputAndServerProjection(t *testing.T) {
 	}
 }
 
+func TestInteractionClientRejectsNoncanonicalPagesAndCourierResults(t *testing.T) {
+	first := controlClientInteractionAt("question-1", time.Date(2026, 7, 23, 14, 0, 0, 0, time.UTC))
+	second := controlClientInteractionAt("question-2", time.Date(2026, 7, 23, 14, 1, 0, 0, time.UTC))
+	mode := "nil-page"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch mode {
+		case "nil-page":
+			_ = json.NewEncoder(writer).Encode(InteractionList{})
+		case "oversized-page":
+			_ = json.NewEncoder(writer).Encode(InteractionList{
+				Interactions: []controlstore.Interaction{first, second},
+			})
+		case "noncanonical-page":
+			_ = json.NewEncoder(writer).Encode(InteractionList{
+				Interactions: []controlstore.Interaction{first, second},
+			})
+		case "bad-cursor":
+			_ = json.NewEncoder(writer).Encode(InteractionList{
+				Interactions: []controlstore.Interaction{second},
+				NextAfter:    first.InteractionID,
+			})
+		case "wrong-lookup":
+			changed := first
+			changed.InteractionID = second.InteractionID
+			_ = json.NewEncoder(writer).Encode(changed)
+		case "wrong-courier-result":
+			changed := first
+			changed.TenantID = "tenant-b"
+			_ = json.NewEncoder(writer).Encode(changed)
+		default:
+			writer.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "operator", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selected := range []string{"nil-page", "oversized-page", "noncanonical-page", "bad-cursor"} {
+		mode = selected
+		limit := 1
+		if selected == "noncanonical-page" {
+			limit = 2
+		}
+		if _, err := client.ListInteractions(context.Background(), "tenant-a", "", limit); err == nil {
+			t.Fatalf("%s interaction page was accepted", selected)
+		}
+	}
+	mode = "wrong-lookup"
+	if _, err := client.GetInteraction(context.Background(), "tenant-a", first.InteractionID); err == nil {
+		t.Fatal("lookup accepted a mismatched interaction identity")
+	}
+	mode = "wrong-courier-result"
+	if _, err := client.SubmitInteractionResponse(
+		context.Background(), "tenant-a", first.InteractionID, []byte("permit"), []byte("{}"),
+	); err == nil {
+		t.Fatal("courier accepted a cross-tenant result")
+	}
+	if _, err := client.SubmitInteractionResponse(
+		context.Background(), "tenant-a", first.InteractionID,
+		make([]byte, interactionpermit.MaxEnvelopeBytes+1), []byte("{}"),
+	); err == nil {
+		t.Fatal("courier accepted an oversized response permit")
+	}
+	if _, err := client.SubmitInteractionResponse(
+		context.Background(), "tenant-a", first.InteractionID,
+		[]byte("permit"), make([]byte, interactionpermit.MaxResponseBytes+1),
+	); err == nil {
+		t.Fatal("courier accepted an oversized response body")
+	}
+}
+
 func controlClientInteraction() controlstore.Interaction {
-	now := time.Date(2026, 7, 23, 14, 0, 0, 0, time.UTC)
+	return controlClientInteractionAt(
+		"question-1",
+		time.Date(2026, 7, 23, 14, 0, 0, 0, time.UTC),
+	)
+}
+
+func controlClientInteractionAt(key string, now time.Time) controlstore.Interaction {
 	grantID := "grant-" + strings.Repeat("b", 64)
-	key := "question-1"
 	sum := sha256.Sum256([]byte("steward-interaction-v1\x00" + grantID + "\x00" + key))
 	request := controlprotocol.InteractionRequestV1{
 		SchemaVersion:  controlprotocol.InteractionRequestSchemaV1,

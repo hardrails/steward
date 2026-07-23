@@ -1,6 +1,7 @@
 package executoruplink
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -160,6 +161,182 @@ func TestPollerSynchronizesAgentInteractionsInBothDirections(t *testing.T) {
 		controlRequest.Load() != 1 || controlResponseAck.Load() != 1 {
 		t.Fatalf("interaction sync counts gateway_ack=%d gateway_response=%d control_request=%d control_ack=%d",
 			gatewayRequestAck.Load(), gatewayResponse.Load(), controlRequest.Load(), controlResponseAck.Load())
+	}
+}
+
+func TestInteractionSynchronizationRejectsCredentialIdentityRotation(t *testing.T) {
+	credentialPath := filepath.Join(t.TempDir(), "credential.json")
+	if err := os.WriteFile(
+		credentialPath,
+		[]byte(`{"version":2,"scope":"node","node_id":"node-2","credential":"rotated"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	poller := &Poller{
+		credentialPath: credentialPath,
+		expected: &stewarduplink.Credential{
+			Version: 2, Scope: "node", NodeID: "node-1", Credential: "original",
+		},
+		security: stewarduplink.CredentialSecurity{
+			SecureExecutor: true, ProtectedTransport: true,
+		},
+	}
+	err := poller.syncInteractions(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "rotated uplink credential changed") {
+		t.Fatalf("credential identity rotation error = %v", err)
+	}
+}
+
+func TestInteractionSynchronizationLoopStopsAfterCredentialFailure(t *testing.T) {
+	poller := &Poller{
+		credentialPath: filepath.Join(t.TempDir(), "missing-credential.json"),
+		expected: &stewarduplink.Credential{
+			Version: 2, Scope: "node", NodeID: "node-1", Credential: "bearer",
+		},
+		interval: time.Millisecond,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		poller.runInteractions(ctx)
+		close(done)
+	}()
+	time.Sleep(5 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("interaction synchronization loop did not stop after cancellation")
+	}
+}
+
+func TestInteractionCourierRejectsInvalidWireResponses(t *testing.T) {
+	if _, err := decodeCanonicalInteractionBase64("not-base64"); err == nil {
+		t.Fatal("invalid interaction courier base64 was accepted")
+	}
+	if _, err := decodeCanonicalInteractionBase64("YQ"); err == nil {
+		t.Fatal("non-canonical interaction courier base64 was accepted")
+	}
+
+	for _, test := range []struct {
+		name    string
+		handler http.Handler
+		want    string
+	}{
+		{
+			name: "upstream rejection",
+			handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(http.StatusForbidden)
+				_, _ = writer.Write([]byte(`{"error":"denied","message":"policy denied courier"}`))
+			}),
+			want: "interaction response poll returned HTTP 403",
+		},
+		{
+			name: "oversized response",
+			handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write(bytes.Repeat([]byte("x"), maxWireBytes+1))
+			}),
+			want: "response exceeds",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(test.handler)
+			defer server.Close()
+			poller := &Poller{client: server.Client()}
+			_, err := poller.postInteractionJSONResponse(
+				context.Background(),
+				server.URL,
+				"secret",
+				map[string]string{"node_id": "node-1"},
+				"interaction response poll",
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("courier wire error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestInteractionCourierFailsClosedOnCorruptGatewayOutbox(t *testing.T) {
+	socket := filepath.Join("/tmp", fmt.Sprintf("steward-corrupt-interactions-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/interactions/outbox" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"interactions": []gateway.Interaction{{InteractionID: "corrupt"}},
+		})
+	})}
+	go func() { _ = gatewayServer.Serve(listener) }()
+	t.Cleanup(func() { _ = gatewayServer.Close() })
+	gatewayControl, err := gateway.NewControlClient(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller := &Poller{eventGateway: gatewayControl}
+	err = poller.publishInteractions(context.Background(), &stewarduplink.Credential{
+		Version: 2, Scope: "node", NodeID: "node-1", Credential: "bearer",
+	})
+	if err == nil || !strings.Contains(err.Error(), "gateway interaction outbox is invalid") {
+		t.Fatalf("corrupt Gateway outbox error = %v", err)
+	}
+}
+
+func TestInteractionCourierFailsClosedOnInvalidControllerDeliveries(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body any
+		want string
+	}{
+		{
+			name: "invalid poll projection",
+			body: map[string]any{"deliveries": []any{}},
+			want: "poll result is invalid",
+		},
+		{
+			name: "invalid courier encoding",
+			body: controlprotocol.InteractionResponsePollResponseV1{
+				SchemaVersion: controlprotocol.InteractionPollSchemaV1,
+				Deliveries: []controlprotocol.InteractionResponseDeliveryV1{{
+					SchemaVersion:  controlprotocol.InteractionResponseSchemaV1,
+					InteractionID:  "interaction-" + strings.Repeat("a", 64),
+					PermitBase64:   "!!!!",
+					ResponseBase64: base64.StdEncoding.EncodeToString([]byte("{}")),
+					PermitDigest:   "sha256:" + strings.Repeat("b", 64),
+				}},
+			},
+			want: "invalid interaction response delivery",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(writer).Encode(test.body)
+			}))
+			defer server.Close()
+			poller := &Poller{
+				interactionPollURL: server.URL,
+				client:             server.Client(),
+			}
+			err := poller.deliverInteractionResponses(
+				context.Background(),
+				&stewarduplink.Credential{
+					Version: 2, Scope: "node", NodeID: "node-1", Credential: "bearer",
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid controller delivery error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
