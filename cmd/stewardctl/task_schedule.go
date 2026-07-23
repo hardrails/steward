@@ -56,7 +56,7 @@ func createTaskSchedule(arguments []string, stdout io.Writer) error {
 	window := flags.Duration("window", 0, "dispatch window; defaults to the operation maximum up to 5m")
 	maxConcurrency := flags.Int("max-concurrency", 1, "maximum unfinished runs")
 	overlap := flags.String("overlap", "skip", "skip or queue when concurrency is full")
-	missed := flags.String("missed", "catch_up_one", "skip or catch_up_one")
+	missed := flags.String("missed", "skip", "missed-run policy; currently skip")
 	projectID := flags.String("project", "", "optional Workroom project")
 	sessionID := flags.String("session", "", "optional Workroom session")
 	deploymentTimeout := flags.Duration("deployment-timeout", 5*time.Minute, "bounded wait for a task-ready instance")
@@ -80,7 +80,7 @@ func createTaskSchedule(arguments []string, stdout io.Writer) error {
 	if *window < 0 || *window > schedulepermit.MaxWindow || *window%time.Second != 0 ||
 		*maxConcurrency < 1 || *maxConcurrency > schedulepermit.MaxConcurrency ||
 		(*overlap != "skip" && *overlap != "queue") ||
-		(*missed != "skip" && *missed != "catch_up_one") ||
+		*missed != "skip" ||
 		*deploymentTimeout <= 0 || *deploymentTimeout > 30*time.Minute {
 		return errors.New("task schedule window, concurrency, overlap, missed-run policy, or deployment timeout is invalid")
 	}

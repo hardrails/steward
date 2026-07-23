@@ -6214,7 +6214,7 @@ components:
           enum: [queue, skip]
         missed_run_policy:
           type: string
-          enum: [skip, catch_up_one]
+          enum: [skip]
         project_id:
           $ref: "#/components/schemas/Identifier128"
         session_id:

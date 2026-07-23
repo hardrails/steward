@@ -285,7 +285,7 @@ func (statement Statement) Validate() error {
 		time.Duration(statement.WindowSeconds)*time.Second > MaxWindow ||
 		statement.MaxConcurrency < 1 || statement.MaxConcurrency > MaxConcurrency ||
 		(statement.OverlapPolicy != "queue" && statement.OverlapPolicy != "skip") ||
-		(statement.MissedRunPolicy != "skip" && statement.MissedRunPolicy != "catch_up_one") ||
+		statement.MissedRunPolicy != "skip" ||
 		(statement.ProjectID == "") != (statement.SessionID == "") ||
 		statement.ProjectID != "" && !identifier(statement.ProjectID) ||
 		statement.SessionID != "" && !identifier(statement.SessionID) {

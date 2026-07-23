@@ -118,7 +118,7 @@ func taskScheduleCLIFixture() controlstore.TaskSchedule {
 		RequestDigest:         "sha256:" + strings.Repeat("1", 64), RequestBytes: 20,
 		ContentType: "application/json", StartsAt: "2026-07-23T12:05:00Z",
 		IntervalSeconds: 3600, RunCount: 24, WindowSeconds: 300,
-		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "catch_up_one",
+		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "skip",
 	}
 	return controlstore.TaskSchedule{
 		TenantID: "tenant-a", Statement: statement,

@@ -189,7 +189,7 @@ func signedTaskScheduleInput(
 		RequestDigest: taskpermit.RequestDigest(request), RequestBytes: int64(len(request)),
 		ContentType: "application/json", StartsAt: start.Format(time.RFC3339),
 		IntervalSeconds: intervalSeconds, RunCount: runCount, WindowSeconds: 30,
-		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "catch_up_one",
+		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "skip",
 	}
 	raw, err := schedulepermit.Sign(statement, "tenant-task", private)
 	if err != nil {

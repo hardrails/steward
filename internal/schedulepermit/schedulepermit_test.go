@@ -79,6 +79,7 @@ func TestScheduleStatementBoundsFiniteAuthority(t *testing.T) {
 		"wide window":        func(value *Statement) { value.WindowSeconds = int64(MaxWindow/time.Second) + 1 },
 		"ambiguous workroom": func(value *Statement) { value.SessionID = "" },
 		"invalid overlap":    func(value *Statement) { value.OverlapPolicy = "parallel" },
+		"illusory catch-up":  func(value *Statement) { value.MissedRunPolicy = "catch_up_one" },
 		"one-time repeats":   func(value *Statement) { value.IntervalSeconds, value.RunCount = 0, 2 },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -106,7 +107,7 @@ func fixtureStatement(start time.Time) Statement {
 		RequestDigest:         taskpermit.RequestDigest(request), RequestBytes: int64(len(request)),
 		ContentType: "application/json", StartsAt: start.Format(time.RFC3339),
 		IntervalSeconds: 300, RunCount: 3, WindowSeconds: 60,
-		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "catch_up_one",
+		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "skip",
 		ProjectID: "research-project", SessionID: "scheduled-session",
 	}
 }

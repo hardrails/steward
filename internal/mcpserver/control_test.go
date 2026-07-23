@@ -699,7 +699,7 @@ func testControlTaskSchedulePermit(t *testing.T, request []byte) []byte {
 		RequestDigest:         taskpermit.RequestDigest(request), RequestBytes: int64(len(request)),
 		ContentType: "application/json", StartsAt: now.Add(time.Minute).Format(time.RFC3339),
 		IntervalSeconds: 3600, RunCount: 24, WindowSeconds: 300,
-		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "catch_up_one",
+		MaxConcurrency: 1, OverlapPolicy: "skip", MissedRunPolicy: "skip",
 	}
 	permit, err := schedulepermit.Sign(statement, "tenant-task", private)
 	if err != nil {
