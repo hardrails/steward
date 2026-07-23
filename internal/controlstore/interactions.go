@@ -2,6 +2,7 @@ package controlstore
 
 import (
 	"encoding/base64"
+	"errors"
 	"reflect"
 	"sort"
 	"time"
@@ -28,23 +29,72 @@ const (
 // logs, metrics, and support bundles cannot disclose answer text or replayable
 // material.
 type Interaction struct {
-	controlprotocol.InteractionRequestV1
-	ProjectID        string `json:"project_id,omitempty"`
-	SessionID        string `json:"session_id,omitempty"`
-	State            string `json:"state"`
-	ResponseKeyID    string `json:"response_key_id,omitempty"`
-	PermitDigest     string `json:"permit_digest,omitempty"`
-	ResponseDigest   string `json:"response_digest,omitempty"`
-	ResponseBytes    int64  `json:"response_bytes,omitempty"`
-	ResponseQueuedAt string `json:"response_queued_at,omitempty"`
-	ResolvedAt       string `json:"resolved_at,omitempty"`
-	ReceivedAt       string `json:"received_at"`
+	SchemaVersion    string   `json:"schema_version"`
+	InteractionID    string   `json:"interaction_id"`
+	IdempotencyKey   string   `json:"idempotency_key"`
+	Source           string   `json:"source"`
+	TenantID         string   `json:"tenant_id"`
+	NodeID           string   `json:"node_id"`
+	InstanceID       string   `json:"instance_id"`
+	Generation       uint64   `json:"generation"`
+	RuntimeRef       string   `json:"runtime_ref"`
+	GrantID          string   `json:"grant_id"`
+	CapsuleDigest    string   `json:"capsule_digest"`
+	PolicyDigest     string   `json:"policy_digest"`
+	Kind             string   `json:"kind"`
+	Title            string   `json:"title"`
+	Prompt           string   `json:"prompt"`
+	Options          []string `json:"options"`
+	AllowText        bool     `json:"allow_text"`
+	TaskID           string   `json:"task_id,omitempty"`
+	RunID            string   `json:"run_id,omitempty"`
+	ObservedAt       string   `json:"observed_at"`
+	AcceptedAt       string   `json:"accepted_at"`
+	ExpiresAt        string   `json:"expires_at"`
+	RequestDigest    string   `json:"request_digest"`
+	ProjectID        string   `json:"project_id,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	State            string   `json:"state"`
+	ResponseKeyID    string   `json:"response_key_id,omitempty"`
+	PermitDigest     string   `json:"permit_digest,omitempty"`
+	ResponseDigest   string   `json:"response_digest,omitempty"`
+	ResponseBytes    int64    `json:"response_bytes,omitempty"`
+	ResponseQueuedAt string   `json:"response_queued_at,omitempty"`
+	ResolvedAt       string   `json:"resolved_at,omitempty"`
+	ReceivedAt       string   `json:"received_at"`
 }
 
 type storedInteraction struct {
-	Interaction
+	Interaction    `json:"interaction"`
 	PermitBase64   string `json:"permit_base64,omitempty"`
 	ResponseBase64 string `json:"response_base64,omitempty"`
+}
+
+func (value Interaction) Validate() error {
+	if interactionRequest(value).Validate() != nil || !validTimestamp(value.ReceivedAt) ||
+		(value.ProjectID == "") != (value.SessionID == "") ||
+		value.ProjectID != "" && !validRecordID(value.ProjectID, 128) ||
+		value.SessionID != "" && !validRecordID(value.SessionID, 128) ||
+		(value.State != InteractionOpen && value.State != InteractionResponseQueued &&
+			value.State != InteractionResolved && value.State != InteractionExpired) {
+		return errors.New("interaction projection is invalid")
+	}
+	hasResponse := value.ResponseKeyID != "" || value.PermitDigest != "" ||
+		value.ResponseDigest != "" || value.ResponseBytes != 0 || value.ResponseQueuedAt != ""
+	if hasResponse {
+		if !validRecordID(value.ResponseKeyID, 128) || !validSHA256Digest(value.PermitDigest) ||
+			!validSHA256Digest(value.ResponseDigest) || value.ResponseBytes <= 0 ||
+			value.ResponseBytes > interactionpermit.MaxResponseBytes || !validTimestamp(value.ResponseQueuedAt) {
+			return errors.New("interaction response projection is invalid")
+		}
+	}
+	if value.State == InteractionOpen && hasResponse ||
+		value.State == InteractionResponseQueued && !hasResponse ||
+		value.State == InteractionResolved && (!hasResponse || !validTimestamp(value.ResolvedAt)) ||
+		value.State != InteractionResolved && value.ResolvedAt != "" {
+		return errors.New("interaction state projection is invalid")
+	}
+	return nil
 }
 
 func cloneStoredInteraction(value storedInteraction) storedInteraction {
@@ -62,7 +112,7 @@ func cloneInteractionView(value storedInteraction, now time.Time) Interaction {
 }
 
 func validStoredInteraction(value storedInteraction) bool {
-	if value.InteractionRequestV1.Validate() != nil || !validTimestamp(value.ReceivedAt) ||
+	if interactionRequest(value.Interaction).Validate() != nil || !validTimestamp(value.ReceivedAt) ||
 		(value.ProjectID == "") != (value.SessionID == "") ||
 		value.ProjectID != "" && !validRecordID(value.ProjectID, 128) ||
 		value.SessionID != "" && !validRecordID(value.SessionID, 128) ||
@@ -97,7 +147,7 @@ func validStoredInteraction(value storedInteraction) bool {
 	inspected, err := interactionpermit.InspectUnverified(permit)
 	if err != nil || inspected.KeyID != value.ResponseKeyID ||
 		inspected.EnvelopeDigest != value.PermitDigest ||
-		!interactionStatementMatches(inspected.Statement, value.InteractionRequestV1, response) {
+		!interactionStatementMatches(inspected.Statement, interactionRequest(value.Interaction), response) {
 		return false
 	}
 	permitExpires, permitExpiresErr := time.Parse(time.RFC3339, inspected.Statement.ExpiresAt)
@@ -183,18 +233,14 @@ func (store *Store) RetainInteractions(
 	for _, request := range batch.Interactions {
 		key := interactionKey(request.TenantID, request.InteractionID)
 		if existing, exists := candidates[key]; exists {
-			if !reflect.DeepEqual(existing.InteractionRequestV1, request) {
+			if !reflect.DeepEqual(interactionRequest(existing.Interaction), request) {
 				return 0, ErrConflict
 			}
 			continue
 		}
-		stored := storedInteraction{
-			Interaction: Interaction{
-				InteractionRequestV1: request,
-				State:                InteractionOpen,
-				ReceivedAt:           receivedAt,
-			},
-		}
+		stored := storedInteraction{Interaction: interactionFromRequest(request)}
+		stored.State = InteractionOpen
+		stored.ReceivedAt = receivedAt
 		stored.ProjectID, stored.SessionID = interactionWorkroomLink(store.current.taskRequests, request)
 		candidates[key] = stored
 		mutations = append(mutations, interactionMutation(stored))
@@ -356,7 +402,7 @@ func (store *Store) SubmitInteractionResponse(
 	}
 	interactionExpires, _ := time.Parse(time.RFC3339, existing.ExpiresAt)
 	if expires.After(interactionExpires) ||
-		!interactionStatementMatches(inspected.Statement, existing.InteractionRequestV1, input.Response) {
+		!interactionStatementMatches(inspected.Statement, interactionRequest(existing.Interaction), input.Response) {
 		return Interaction{}, false, invalid("interaction response permit does not bind the retained active request")
 	}
 	existing.State = InteractionResponseQueued
@@ -383,6 +429,36 @@ func (store *Store) SubmitInteractionResponse(
 		return Interaction{}, false, err
 	}
 	return cloneInteractionView(existing, now), true, nil
+}
+
+func interactionFromRequest(request controlprotocol.InteractionRequestV1) Interaction {
+	return Interaction{
+		SchemaVersion: request.SchemaVersion, InteractionID: request.InteractionID,
+		IdempotencyKey: request.IdempotencyKey, Source: request.Source,
+		TenantID: request.TenantID, NodeID: request.NodeID, InstanceID: request.InstanceID,
+		Generation: request.Generation, RuntimeRef: request.RuntimeRef, GrantID: request.GrantID,
+		CapsuleDigest: request.CapsuleDigest, PolicyDigest: request.PolicyDigest,
+		Kind: request.Kind, Title: request.Title, Prompt: request.Prompt,
+		Options: append([]string(nil), request.Options...), AllowText: request.AllowText,
+		TaskID: request.TaskID, RunID: request.RunID, ObservedAt: request.ObservedAt,
+		AcceptedAt: request.AcceptedAt, ExpiresAt: request.ExpiresAt,
+		RequestDigest: request.RequestDigest,
+	}
+}
+
+func interactionRequest(value Interaction) controlprotocol.InteractionRequestV1 {
+	return controlprotocol.InteractionRequestV1{
+		SchemaVersion: value.SchemaVersion, InteractionID: value.InteractionID,
+		IdempotencyKey: value.IdempotencyKey, Source: value.Source,
+		TenantID: value.TenantID, NodeID: value.NodeID, InstanceID: value.InstanceID,
+		Generation: value.Generation, RuntimeRef: value.RuntimeRef, GrantID: value.GrantID,
+		CapsuleDigest: value.CapsuleDigest, PolicyDigest: value.PolicyDigest,
+		Kind: value.Kind, Title: value.Title, Prompt: value.Prompt,
+		Options: append([]string(nil), value.Options...), AllowText: value.AllowText,
+		TaskID: value.TaskID, RunID: value.RunID, ObservedAt: value.ObservedAt,
+		AcceptedAt: value.AcceptedAt, ExpiresAt: value.ExpiresAt,
+		RequestDigest: value.RequestDigest,
+	}
 }
 
 func interactionStatementMatches(

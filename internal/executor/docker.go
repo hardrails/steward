@@ -809,6 +809,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 	}
 	if w.Runtime != nil && w.Runtime.ControllerEvents {
 		environment = append(environment, "STEWARD_EVENT_URL=http://steward-relay:8083/v1/events")
+		if len(w.Runtime.TaskAuthorities) > 0 {
+			environment = append(environment, "STEWARD_INTERACTION_URL=http://steward-relay:8083/v1/interactions")
+		}
 	}
 	dns := []string(nil)
 	if w.Runtime != nil {
@@ -1039,6 +1042,10 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		}
 		if runtimeGrant.ControllerEvents {
 			runtimeHardened = runtimeHardened && contains(payload.Config.Env, "STEWARD_EVENT_URL=http://steward-relay:8083/v1/events")
+			if len(runtimeGrant.TaskAuthorities) > 0 {
+				runtimeHardened = runtimeHardened &&
+					contains(payload.Config.Env, "STEWARD_INTERACTION_URL=http://steward-relay:8083/v1/interactions")
+			}
 		}
 	}
 	return ObservedWorkload{

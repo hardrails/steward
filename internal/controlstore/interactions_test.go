@@ -89,6 +89,14 @@ func TestInteractionCourierIsDurableBoundedAndOffAuthority(t *testing.T) {
 	if err != nil || !found || got.State != InteractionResolved || got.ResolvedAt == "" {
 		t.Fatalf("get resolved interaction = (%+v, %v, %v)", got, found, err)
 	}
+	reopenControlFixture(t, &fixture)
+	got, found, err = fixture.store.GetInteraction(
+		fixture.admin, "tenant-a", request.InteractionID, fixture.now.Add(8*time.Minute),
+	)
+	if err != nil || !found || got.State != InteractionResolved ||
+		got.PermitDigest != dsse.Digest(permit) {
+		t.Fatalf("reopened interaction = (%+v, %v, %v)", got, found, err)
+	}
 }
 
 func TestInteractionCourierRejectsConflictsExpiryAndWrongNode(t *testing.T) {

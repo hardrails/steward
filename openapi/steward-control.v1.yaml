@@ -59,6 +59,8 @@ tags:
     description: Bounded desired agent state reconciled under tenant-signed controller delegation.
   - name: tasks
     description: Durable exact-task submission metadata plus bounded read-only projections derived from untrusted agent events.
+  - name: interactions
+    description: Agent-authored questions and decisions with tenant-signed, off-controller responses.
   - name: workrooms
     description: Metadata-only projects, sessions, external artifact handles, and explicit operator-selected memory references.
   - name: evidence
@@ -2066,6 +2068,152 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/interactions:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [interactions]
+      operationId: listInteractions
+      summary: List agent questions and decisions
+      description: |
+        Returns newest-first agent-authored interaction metadata. Prompt and
+        offered choices are workflow data, not authority. The page never
+        includes signed response envelopes or response bodies. An `expired`
+        state is a current-time projection over an unresolved retained record.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: A bounded page of interaction metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InteractionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/interactions/{interaction_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: interaction_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+    get:
+      tags: [interactions]
+      operationId: getInteraction
+      summary: Inspect one agent interaction
+      description: Returns the bounded public projection without response courier bytes.
+      responses:
+        "200":
+          description: Current interaction metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/interactions/{interaction_id}/response:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: interaction_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+    post:
+      tags: [interactions]
+      operationId: submitInteractionResponse
+      summary: Queue one tenant-signed interaction response
+      description: |
+        Control structurally inspects the canonical DSSE envelope only to bind
+        the tenant, interaction, request digest, response digest, size, and
+        active delivery window. Control does not authenticate or sign the
+        answer. The node Gateway verifies it against the workload's admitted
+        task authorities before the agent can read it. Exact retries are
+        idempotent; a different response to the same interaction conflicts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionResponseSubmit"
+      responses:
+        "200":
+          description: The exact response was already queued.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "202":
+          description: The response was durably queued for node delivery.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/tenants/{tenant_id}/projects:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -2858,6 +3006,127 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/interactions:
+    post:
+      tags: [executor-uplink, interactions]
+      operationId: retainExecutorInteractions
+      summary: Durably retain a Gateway interaction outbox batch
+      description: |
+        Accepts only a node-authenticated batch whose node ID matches the
+        bearer. Identity and request digests were stamped by the active
+        Gateway grant. Exact retries are idempotent. Unanswered records are
+        never evicted to admit newer requests; only resolved or expired
+        records can make room.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionRequestBatch"
+      responses:
+        "200":
+          description: The batch was committed or recognized as an exact retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppliedCount"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/interactions/responses/poll:
+    post:
+      tags: [executor-uplink, interactions]
+      operationId: pollExecutorInteractionResponses
+      summary: Poll opaque signed responses for one node
+      description: |
+        Returns response envelopes and bodies only to their authenticated node.
+        Delivery is at least once. Gateway must verify the tenant signature and
+        exact workload/request binding before the response becomes visible.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionResponsePollRequest"
+      responses:
+        "200":
+          description: Zero or more bounded opaque response deliveries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InteractionResponsePollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/interactions/responses/ack:
+    post:
+      tags: [executor-uplink, interactions]
+      operationId: acknowledgeExecutorInteractionResponse
+      summary: Acknowledge one Gateway-verified response delivery
+      description: |
+        Marks one exact permit delivery resolved only after Gateway accepted it.
+        Exact acknowledgement replay is idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractionResponseAck"
+      responses:
+        "200":
+          description: The acknowledgement was applied or was an exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppliedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "405":
@@ -5039,6 +5308,354 @@ components:
         next_after:
           type: string
           pattern: '^event-[0-9a-f]{64}$'
+    InteractionRequestBatch:
+      type: object
+      additionalProperties: false
+      required: [schema_version, node_id, interactions]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-request-batch.v1]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        interactions:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/InteractionRequest"
+    InteractionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - interaction_id
+        - idempotency_key
+        - source
+        - tenant_id
+        - node_id
+        - instance_id
+        - generation
+        - runtime_ref
+        - grant_id
+        - capsule_digest
+        - policy_digest
+        - kind
+        - title
+        - prompt
+        - options
+        - allow_text
+        - observed_at
+        - accepted_at
+        - expires_at
+        - request_digest
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-request.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        idempotency_key:
+          $ref: "#/components/schemas/Identifier128"
+        source:
+          type: string
+          enum: [agent]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        grant_id:
+          type: string
+          pattern: '^grant-[0-9a-f]{64}$'
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        kind:
+          type: string
+          enum: [question, decision]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 128
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        options:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        allow_text:
+          type: boolean
+        task_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        run_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        observed_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        request_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+      description: >-
+        Gateway-stamped workflow data, never execution authority. A decision
+        has at least two options. Every interaction has options or permits
+        bounded text.
+    Interaction:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - interaction_id
+        - idempotency_key
+        - source
+        - tenant_id
+        - node_id
+        - instance_id
+        - generation
+        - runtime_ref
+        - grant_id
+        - capsule_digest
+        - policy_digest
+        - kind
+        - title
+        - prompt
+        - options
+        - allow_text
+        - observed_at
+        - accepted_at
+        - expires_at
+        - request_digest
+        - state
+        - received_at
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-request.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        idempotency_key:
+          $ref: "#/components/schemas/Identifier128"
+        source:
+          type: string
+          enum: [agent]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        runtime_ref:
+          type: string
+          pattern: '^executor-[0-9a-f]{64}$'
+        grant_id:
+          type: string
+          pattern: '^grant-[0-9a-f]{64}$'
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        kind:
+          type: string
+          enum: [question, decision]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 128
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        options:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        allow_text:
+          type: boolean
+        task_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        run_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        observed_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        request_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        project_id:
+          $ref: "#/components/schemas/Identifier128"
+        session_id:
+          $ref: "#/components/schemas/Identifier128"
+        state:
+          type: string
+          enum: [open, response_queued, resolved, expired]
+        response_key_id:
+          $ref: "#/components/schemas/Identifier128"
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        response_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        response_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 4096
+        response_queued_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+        received_at:
+          type: string
+          format: date-time
+      description: >-
+        Public interaction projection. It contains response identity metadata
+        but never the signed response envelope or response body.
+    InteractionPage:
+      type: object
+      additionalProperties: false
+      required: [interactions]
+      properties:
+        interactions:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Interaction"
+        next_after:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+    InteractionResponseSubmit:
+      type: object
+      additionalProperties: false
+      required: [permit_base64, response_base64]
+      properties:
+        permit_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 21848
+          description: Canonical base64 of one canonical tenant-signed DSSE response envelope.
+        response_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 5464
+          description: Canonical base64 of the exact bounded JSON response body.
+    InteractionResponsePollRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, node_id, limit]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-poll.v1]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 64
+    InteractionResponseDelivery:
+      type: object
+      additionalProperties: false
+      required: [schema_version, interaction_id, permit_base64, response_base64, permit_digest]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-delivery.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        permit_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 21848
+        response_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 5464
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+    InteractionResponsePollResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, deliveries]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-poll.v1]
+        deliveries:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/InteractionResponseDelivery"
+    InteractionResponseAck:
+      type: object
+      additionalProperties: false
+      required: [schema_version, interaction_id, permit_digest]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.interaction-response-ack.v1]
+        interaction_id:
+          type: string
+          pattern: '^interaction-[0-9a-f]{64}$'
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+    AppliedCount:
+      type: object
+      additionalProperties: false
+      required: [applied]
+      properties:
+        applied:
+          type: integer
+          minimum: 0
+          maximum: 64
     TaskProjection:
       type: object
       additionalProperties: false

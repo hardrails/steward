@@ -27,6 +27,7 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/interactionpermit"
 	"github.com/hardrails/steward/internal/poolmembership"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -254,6 +255,11 @@ type TaskRequestList struct {
 type WorkroomProjectList struct {
 	Projects  []controlstore.WorkroomProject `json:"projects"`
 	NextAfter string                         `json:"next_after,omitempty"`
+}
+
+type InteractionList struct {
+	Interactions []controlstore.Interaction `json:"interactions"`
+	NextAfter    string                     `json:"next_after,omitempty"`
 }
 
 type NodePoolList struct {
@@ -600,6 +606,106 @@ func (c *Client) ListInstanceEvents(
 		return InstanceEventList{}, errors.New("control instance event page cursor is inconsistent")
 	}
 	return page, nil
+}
+
+func (c *Client) ListInteractions(
+	ctx context.Context,
+	tenantID, after string,
+	limit int,
+) (InteractionList, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || limit <= 0 || limit > 100 {
+		return InteractionList{}, errors.New("interaction list requires a tenant and limit from 1 to 100")
+	}
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/interactions", after, limit)
+	if err != nil {
+		return InteractionList{}, err
+	}
+	var page InteractionList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return InteractionList{}, err
+	}
+	if page.Interactions == nil || len(page.Interactions) > limit {
+		return InteractionList{}, errors.New("control interaction page is invalid")
+	}
+	for index, interaction := range page.Interactions {
+		if interaction.TenantID != tenantID || interaction.Validate() != nil {
+			return InteractionList{}, errors.New("control interaction page contains an invalid interaction")
+		}
+		if index > 0 {
+			previous := page.Interactions[index-1]
+			previousAt, _ := time.Parse(time.RFC3339Nano, previous.AcceptedAt)
+			currentAt, _ := time.Parse(time.RFC3339Nano, interaction.AcceptedAt)
+			if previousAt.Before(currentAt) ||
+				previous.AcceptedAt == interaction.AcceptedAt &&
+					previous.InteractionID <= interaction.InteractionID {
+				return InteractionList{}, errors.New("control interaction page is not canonical")
+			}
+		}
+	}
+	if page.NextAfter != "" &&
+		(len(page.Interactions) == 0 ||
+			page.NextAfter != page.Interactions[len(page.Interactions)-1].InteractionID) {
+		return InteractionList{}, errors.New("control interaction page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) GetInteraction(
+	ctx context.Context,
+	tenantID, interactionID string,
+) (controlstore.Interaction, error) {
+	path, err := interactionPath(tenantID, interactionID)
+	if err != nil {
+		return controlstore.Interaction{}, err
+	}
+	var interaction controlstore.Interaction
+	if err := c.do(ctx, http.MethodGet, path, nil, &interaction, true); err != nil {
+		return controlstore.Interaction{}, err
+	}
+	if interaction.TenantID != tenantID || interaction.InteractionID != interactionID ||
+		interaction.Validate() != nil {
+		return controlstore.Interaction{}, errors.New("control interaction response is invalid")
+	}
+	return interaction, nil
+}
+
+func (c *Client) SubmitInteractionResponse(
+	ctx context.Context,
+	tenantID, interactionID string,
+	permit, response []byte,
+) (controlstore.Interaction, error) {
+	path, err := interactionPath(tenantID, interactionID)
+	if err != nil {
+		return controlstore.Interaction{}, err
+	}
+	if len(permit) == 0 || len(permit) > interactionpermit.MaxEnvelopeBytes ||
+		len(response) == 0 || len(response) > interactionpermit.MaxResponseBytes {
+		return controlstore.Interaction{}, errors.New("interaction response exceeds its bounded courier contract")
+	}
+	var interaction controlstore.Interaction
+	if err := c.do(ctx, http.MethodPost, path+"/response", struct {
+		PermitBase64   string `json:"permit_base64"`
+		ResponseBase64 string `json:"response_base64"`
+	}{
+		PermitBase64:   base64.StdEncoding.EncodeToString(permit),
+		ResponseBase64: base64.StdEncoding.EncodeToString(response),
+	}, &interaction, true); err != nil {
+		return controlstore.Interaction{}, err
+	}
+	if interaction.TenantID != tenantID || interaction.InteractionID != interactionID ||
+		interaction.Validate() != nil {
+		return controlstore.Interaction{}, errors.New("control interaction response result is invalid")
+	}
+	return interaction, nil
+}
+
+func interactionPath(tenantID, interactionID string) (string, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) ||
+		!validOperationsIdentifier(interactionID, 128, false) {
+		return "", errors.New("interaction operation requires canonical tenant and interaction IDs")
+	}
+	return "/v1/tenants/" + url.PathEscape(tenantID) +
+		"/interactions/" + url.PathEscape(interactionID), nil
 }
 
 func (c *Client) ListTaskProjections(

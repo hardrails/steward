@@ -35,6 +35,7 @@ const (
 	eventAddress                 = "0.0.0.0:8083"
 	maxEventRequestBytes         = 8 << 10
 	maxEventResponseBytes        = 4 << 10
+	maxInteractionResponseBytes  = 1 << 20
 	connectorRequestBodyLifetime = 30 * time.Second
 	connectorResponseWriteTime   = 30 * time.Second
 	connectorStreamStatusTrailer = "X-Steward-Stream-Status"
@@ -245,36 +246,44 @@ func eventProxy(socket string) http.Handler {
 	client := &http.Client{Transport: transport, Timeout: 15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return http.HandlerFunc(func(w http.ResponseWriter, incoming *http.Request) {
-		if incoming.Method != http.MethodPost || incoming.URL.Path != "/v1/events" || incoming.URL.RawQuery != "" ||
-			incoming.Header.Get("Content-Type") != "application/json" {
-			writeConnectorError(w, http.StatusForbidden, "event_denied", "controller event method, path, query, or content type is not allowed")
+		upstreamMethod, requestLimit, responseLimit, code, ok := eventProxyRoute(incoming)
+		if !ok {
+			writeConnectorError(w, http.StatusForbidden, code+"_denied", code+" method, path, query, content type, or body is not allowed")
 			return
 		}
-		if incoming.ContentLength > maxEventRequestBytes {
-			writeConnectorError(w, http.StatusRequestEntityTooLarge, "event_too_large", "controller event exceeds the byte limit")
+		if incoming.ContentLength > int64(requestLimit) {
+			writeConnectorError(w, http.StatusRequestEntityTooLarge, code+"_too_large", code+" request exceeds the byte limit")
 			return
 		}
-		incoming.Body = http.MaxBytesReader(w, incoming.Body, maxEventRequestBytes)
-		raw, err := io.ReadAll(incoming.Body)
+		var raw []byte
+		if requestLimit > 0 {
+			incoming.Body = http.MaxBytesReader(w, incoming.Body, int64(requestLimit))
+			var err error
+			raw, err = io.ReadAll(incoming.Body)
+			if err != nil {
+				writeConnectorError(w, http.StatusRequestEntityTooLarge, code+"_too_large", code+" request exceeds the byte limit")
+				return
+			}
+		}
+		request, err := http.NewRequestWithContext(
+			incoming.Context(), upstreamMethod, "http://steward-gateway"+incoming.URL.Path, bytes.NewReader(raw),
+		)
 		if err != nil {
-			writeConnectorError(w, http.StatusRequestEntityTooLarge, "event_too_large", "controller event exceeds the byte limit")
+			writeConnectorError(w, http.StatusBadRequest, "invalid_"+code, code+" request could not be constructed")
 			return
 		}
-		request, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, "http://steward-gateway/v1/events", bytes.NewReader(raw))
-		if err != nil {
-			writeConnectorError(w, http.StatusBadRequest, "invalid_event", "controller event request could not be constructed")
-			return
+		if upstreamMethod == http.MethodPost {
+			request.Header.Set("Content-Type", "application/json")
 		}
-		request.Header.Set("Content-Type", "application/json")
 		response, err := client.Do(request)
 		if err != nil {
-			writeConnectorError(w, http.StatusBadGateway, "event_gateway_unavailable", "controller event gateway unavailable")
+			writeConnectorError(w, http.StatusBadGateway, code+"_gateway_unavailable", code+" gateway unavailable")
 			return
 		}
 		defer response.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(response.Body, maxEventResponseBytes+1))
-		if err != nil || len(body) > maxEventResponseBytes {
-			writeConnectorError(w, http.StatusBadGateway, "event_response_invalid", "controller event gateway response exceeded its limit")
+		body, err := io.ReadAll(io.LimitReader(response.Body, int64(responseLimit)+1))
+		if err != nil || len(body) > responseLimit {
+			writeConnectorError(w, http.StatusBadGateway, code+"_response_invalid", code+" gateway response exceeded its limit")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -285,6 +294,45 @@ func eventProxy(socket string) http.Handler {
 		w.WriteHeader(response.StatusCode)
 		_, _ = w.Write(body)
 	})
+}
+
+func eventProxyRoute(request *http.Request) (string, int, int, string, bool) {
+	if request.URL.RawQuery != "" {
+		return "", 0, 0, "workflow", false
+	}
+	switch {
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/events" &&
+		request.Header.Get("Content-Type") == "application/json":
+		return http.MethodPost, maxEventRequestBytes, maxEventResponseBytes, "event", true
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/interactions" &&
+		request.Header.Get("Content-Type") == "application/json":
+		return http.MethodPost, maxEventRequestBytes, maxInteractionResponseBytes, "interaction", true
+	case request.Method == http.MethodGet &&
+		(request.URL.Path == "/v1/interactions" || validInteractionRelayPath(request.URL.Path)) &&
+		request.ContentLength == 0 && len(request.TransferEncoding) == 0:
+		return http.MethodGet, 0, maxInteractionResponseBytes, "interaction", true
+	default:
+		code := "workflow"
+		if request.URL.Path == "/v1/events" {
+			code = "event"
+		} else if strings.HasPrefix(request.URL.Path, "/v1/interactions") {
+			code = "interaction"
+		}
+		return "", 0, 0, code, false
+	}
+}
+
+func validInteractionRelayPath(path string) bool {
+	const prefix = "/v1/interactions/interaction-"
+	if !strings.HasPrefix(path, prefix) || len(path) != len(prefix)+64 {
+		return false
+	}
+	for _, character := range path[len(prefix):] {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func connectorProxy(socket string) http.Handler {

@@ -28,8 +28,162 @@ import (
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executor"
 	"github.com/hardrails/steward/internal/gateway"
+	"github.com/hardrails/steward/internal/interactionpermit"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
+
+func TestPollerSynchronizesAgentInteractionsInBothDirections(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := commandPolicyFixture(t, public, []string{"read"})
+	credentialPath := filepath.Join(t.TempDir(), "credential.json")
+	if err := os.WriteFile(credentialPath,
+		[]byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"bearer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := uplinkInteractionRequest()
+	interaction := gateway.Interaction{
+		SchemaVersion: request.SchemaVersion, InteractionID: request.InteractionID,
+		IdempotencyKey: request.IdempotencyKey, Source: request.Source,
+		TenantID: request.TenantID, NodeID: request.NodeID, InstanceID: request.InstanceID,
+		Generation: request.Generation, RuntimeRef: request.RuntimeRef, GrantID: request.GrantID,
+		CapsuleDigest: request.CapsuleDigest, PolicyDigest: request.PolicyDigest,
+		Kind: request.Kind, Title: request.Title, Prompt: request.Prompt,
+		Options: request.Options, AllowText: request.AllowText, TaskID: request.TaskID,
+		RunID: request.RunID, ObservedAt: request.ObservedAt, AcceptedAt: request.AcceptedAt,
+		ExpiresAt: request.ExpiresAt, RequestDigest: request.RequestDigest, State: "open",
+	}
+	responseBody := []byte(`{"schema_version":"steward.interaction-response-body.v1","choice":"primary"}`)
+	permit := []byte("opaque-signed-permit")
+	var gatewayRequestAck, gatewayResponse, controlRequest, controlResponseAck atomic.Int32
+	socket := filepath.Join("/tmp", fmt.Sprintf("steward-interactions-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/v1/interactions/outbox":
+			values := []gateway.Interaction{interaction}
+			if gatewayRequestAck.Load() > 0 {
+				values = nil
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"interactions": values})
+		case "/v1/interactions/ack":
+			gatewayRequestAck.Add(1)
+			writer.WriteHeader(http.StatusNoContent)
+		case "/v1/interactions/responses":
+			gatewayResponse.Add(1)
+			resolved := interaction
+			resolved.State = "resolved"
+			resolved.Response = &gateway.InteractionResponse{
+				Body: gateway.InteractionResponseBody{
+					SchemaVersion: "steward.interaction-response-body.v1", Choice: "primary",
+				},
+				KeyID: "tenant-task", PermitDigest: dsse.Digest(permit),
+				ResponseDigest: interactionpermit.ResponseDigest(responseBody),
+				ResolvedAt:     "2026-07-23T14:02:00Z",
+			}
+			_ = json.NewEncoder(writer).Encode(resolved)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	})}
+	go func() { _ = gatewayServer.Serve(listener) }()
+	t.Cleanup(func() { _ = gatewayServer.Close() })
+	gatewayControl, err := gateway.NewControlClient(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controller := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer bearer" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/executor-uplink/interactions":
+			var batch controlprotocol.InteractionRequestBatchV1
+			if err := json.NewDecoder(request.Body).Decode(&batch); err != nil ||
+				batch.Validate() != nil || len(batch.Interactions) != 1 {
+				t.Errorf("invalid interaction batch: %+v err=%v", batch, err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			controlRequest.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"applied": 1})
+		case "/executor-uplink/interactions/responses/poll":
+			_ = json.NewEncoder(writer).Encode(controlprotocol.InteractionResponsePollResponseV1{
+				SchemaVersion: controlprotocol.InteractionPollSchemaV1,
+				Deliveries: []controlprotocol.InteractionResponseDeliveryV1{{
+					SchemaVersion:  controlprotocol.InteractionResponseSchemaV1,
+					InteractionID:  interaction.InteractionID,
+					PermitBase64:   base64.StdEncoding.EncodeToString(permit),
+					ResponseBase64: base64.StdEncoding.EncodeToString(responseBody),
+					PermitDigest:   dsse.Digest(permit),
+				}},
+			})
+		case "/executor-uplink/interactions/responses/ack":
+			var ack controlprotocol.InteractionResponseAckV1
+			if err := json.NewDecoder(request.Body).Decode(&ack); err != nil ||
+				ack.InteractionID != interaction.InteractionID || ack.PermitDigest != dsse.Digest(permit) {
+				t.Errorf("invalid interaction ack: %+v err=%v", ack, err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			controlResponseAck.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"applied": true})
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer controller.Close()
+	poller, err := NewPoller(Config{
+		BaseURL: controller.URL, CredentialPath: credentialPath, PollInterval: time.Second,
+		HTTPClient: controller.Client(), Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		LocalToken: "local", State: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
+		SecureExecutor: true, SecureNodeID: "node-1", ProtectedTransport: true,
+		CommandPolicy: &policy, ProtocolVersion: 2, GatewayControl: gatewayControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := poller.syncInteractions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gatewayRequestAck.Load() != 1 || gatewayResponse.Load() != 1 ||
+		controlRequest.Load() != 1 || controlResponseAck.Load() != 1 {
+		t.Fatalf("interaction sync counts gateway_ack=%d gateway_response=%d control_request=%d control_ack=%d",
+			gatewayRequestAck.Load(), gatewayResponse.Load(), controlRequest.Load(), controlResponseAck.Load())
+	}
+}
+
+func uplinkInteractionRequest() controlprotocol.InteractionRequestV1 {
+	now := time.Date(2026, 7, 23, 14, 0, 0, 0, time.UTC)
+	grantID := "grant-" + strings.Repeat("b", 64)
+	key := "question-1"
+	sum := sha256.Sum256([]byte("steward-interaction-v1\x00" + grantID + "\x00" + key))
+	value := controlprotocol.InteractionRequestV1{
+		SchemaVersion:  controlprotocol.InteractionRequestSchemaV1,
+		InteractionID:  "interaction-" + hex.EncodeToString(sum[:]),
+		IdempotencyKey: key, Source: "agent", TenantID: "tenant-a", NodeID: "node-1",
+		InstanceID: "researcher-a", Generation: 1,
+		RuntimeRef: "executor-" + strings.Repeat("a", 64), GrantID: grantID,
+		CapsuleDigest: "sha256:" + strings.Repeat("c", 64),
+		PolicyDigest:  "sha256:" + strings.Repeat("d", 64),
+		Kind:          "decision", Title: "Choose source", Prompt: "Which source should be used?",
+		Options: []string{"primary", "secondary"}, AllowText: true,
+		ObservedAt: now.Format(time.RFC3339), AcceptedAt: now.Add(time.Second).Format(time.RFC3339Nano),
+		ExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
+	}
+	value.RequestDigest = controlprotocol.InteractionRequestDigest(value)
+	return value
+}
 
 func TestPollerPublishesControllerEventsAtLeastOnce(t *testing.T) {
 	public, _, err := ed25519.GenerateKey(rand.Reader)

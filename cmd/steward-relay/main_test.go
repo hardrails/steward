@@ -404,6 +404,81 @@ func TestEventProxyForwardsOnlyExactBoundedEventsAndFailsClosedAfterRevocation(t
 	}
 }
 
+func TestEventProxyExposesOnlyBoundedInteractionWorkflowRoutes(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "sir-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "v.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interactionID := "interaction-" + strings.Repeat("a", 64)
+	upstream := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "" || request.URL.RawQuery != "" {
+			t.Errorf("interaction proxy forwarded ambient authority or query: %v %s", request.Header, request.URL.RawQuery)
+		}
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/interactions":
+			body, _ := io.ReadAll(request.Body)
+			if request.Header.Get("Content-Type") != "application/json" || string(body) != `{"schema_version":"steward.interaction-request.v1"}` {
+				t.Errorf("interaction create request = headers=%v body=%q", request.Header, body)
+			}
+			writer.WriteHeader(http.StatusAccepted)
+			_, _ = writer.Write([]byte(`{"state":"open"}`))
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/interactions":
+			_, _ = writer.Write([]byte(`{"interactions":[]}`))
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/interactions/"+interactionID:
+			_, _ = writer.Write([]byte(`{"interaction_id":"` + interactionID + `"}`))
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	})}
+	go func() { _ = upstream.Serve(listener) }()
+	defer upstream.Close()
+	handler := eventProxy(socket)
+
+	create := httptest.NewRequest(http.MethodPost, "/v1/interactions",
+		strings.NewReader(`{"schema_version":"steward.interaction-request.v1"}`))
+	create.Header.Set("Content-Type", "application/json")
+	create.Header.Set("Authorization", "Bearer must-not-forward")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, create)
+	if response.Code != http.StatusAccepted || response.Body.String() != `{"state":"open"}` {
+		t.Fatalf("interaction create status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, path := range []string{"/v1/interactions", "/v1/interactions/" + interactionID} {
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("interaction GET %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	for name, denied := range map[string]*http.Request{
+		"delete": httpRequest(t, http.MethodDelete, "/v1/interactions", nil),
+		"query":  httpRequest(t, http.MethodGet, "/v1/interactions?all=true", nil),
+		"bad id": httpRequest(t, http.MethodGet, "/v1/interactions/interaction-bad", nil),
+		"body":   httptest.NewRequest(http.MethodGet, "/v1/interactions", strings.NewReader("{}")),
+	} {
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, denied)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("%s status=%d body=%s", name, response.Code, response.Body.String())
+		}
+	}
+}
+
+func httpRequest(t *testing.T, method, target string, body io.Reader) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(method, target, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
 func TestConnectorProxyAllowsGatewayOperationBudgetThenNarrowsResponseWriteDeadline(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "srt-")
 	if err != nil {

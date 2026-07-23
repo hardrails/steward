@@ -14,6 +14,7 @@ const (
 	InteractionRequestSchemaV1  = "steward.interaction-request.v1"
 	InteractionBatchSchemaV1    = "steward.interaction-request-batch.v1"
 	InteractionResponseSchemaV1 = "steward.interaction-response-delivery.v1"
+	InteractionPollSchemaV1     = "steward.interaction-response-poll.v1"
 	InteractionAckSchemaV1      = "steward.interaction-response-ack.v1"
 
 	MaxInteractionBatch   = 64
@@ -68,10 +69,29 @@ type InteractionResponseDeliveryV1 struct {
 	PermitDigest   string `json:"permit_digest"`
 }
 
+type InteractionResponsePollRequestV1 struct {
+	SchemaVersion string `json:"schema_version"`
+	NodeID        string `json:"node_id"`
+	Limit         int    `json:"limit"`
+}
+
+type InteractionResponsePollResponseV1 struct {
+	SchemaVersion string                          `json:"schema_version"`
+	Deliveries    []InteractionResponseDeliveryV1 `json:"deliveries"`
+}
+
 type InteractionResponseAckV1 struct {
 	SchemaVersion string `json:"schema_version"`
 	InteractionID string `json:"interaction_id"`
 	PermitDigest  string `json:"permit_digest"`
+}
+
+func (request InteractionResponsePollRequestV1) Validate() error {
+	if request.SchemaVersion != InteractionPollSchemaV1 || !recordID(request.NodeID, 128) ||
+		request.Limit <= 0 || request.Limit > MaxInteractionBatch {
+		return errors.New("interaction response poll is invalid")
+	}
+	return nil
 }
 
 func (batch InteractionRequestBatchV1) Validate() error {
