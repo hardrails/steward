@@ -145,6 +145,12 @@ release_files=(
 	integration/workers/research/Dockerfile
 	integration/workers/research/README.md
 	integration/workers/research/research_worker.py
+	integration/workers/browser/Dockerfile
+	integration/workers/browser/README.md
+	integration/workers/browser/package-lock.json
+	integration/workers/browser/package.json
+	integration/workers/browser/security.mjs
+	integration/workers/browser/server.mjs
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in

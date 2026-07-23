@@ -581,7 +581,7 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("gateway connector "+action, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
-	preset := flags.String("preset", "", "vetted preset: github-issues, research-search, research-extract, codex-worker, or claude-code-worker")
+	preset := flags.String("preset", "", "vetted preset: github-issues, research-search, research-extract, browser-search, browser-read, codex-worker, or claude-code-worker")
 	presetRepository := flags.String("repository", "", "preset repository in OWNER/NAME form")
 	id := flags.String("id", "", "stable connector ID")
 	baseURL := flags.String("base-url", "", "exact upstream HTTPS origin")
@@ -911,6 +911,14 @@ func applyAgentServiceConnectorPreset(
 		"research-extract": {
 			id: "steward-research-extract", operation: "extract=POST:/v1/extract",
 			concurrent: 4, request: 64 << 10, response: 4 << 20, seconds: 60, calls: 64,
+		},
+		"browser-search": {
+			id: "steward-browser-search", operation: "search=POST:/v1/search",
+			concurrent: 4, request: 64 << 10, response: 1 << 20, seconds: 45, calls: 64,
+		},
+		"browser-read": {
+			id: "steward-browser-read", operation: "read=POST:/v1/read",
+			concurrent: 2, request: 64 << 10, response: 1 << 20, seconds: 180, calls: 32,
 		},
 		"codex-worker": {
 			id: "steward-codex", operation: "run=POST:/v1/run",

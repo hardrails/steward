@@ -204,7 +204,7 @@ for target in "${targets[@]}"; do
 		rm -rf "$control_stage"
 		mkdir -p "${stage}/adapters" "${stage}/deploy" "${stage}/scripts" "${stage}/workers"
 		cp -R adapters/hermes-agent "${stage}/adapters/"
-		cp -R workers/coding workers/research "${stage}/workers/"
+		cp -R workers/browser workers/coding workers/research "${stage}/workers/"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		# Controller deployment assets belong only to the dedicated archive. The
 		# node archive and native packages retain the binary for operator tooling,

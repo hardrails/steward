@@ -1,0 +1,82 @@
+name: Playwright pin refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 2"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: playwright-pin-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Propose qualified Playwright release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: workers/browser/package-lock.json
+      - name: Resolve stable package and official image
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(npm view playwright version)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          image="mcr.microsoft.com/playwright:v${version}-noble"
+          digest=$(docker buildx imagetools inspect "$image" | awk '$1 == "Digest:" {print $2; exit}')
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
+      - name: Update exact package, lock, and image identity
+        run: |
+          python3 -I scripts/update-playwright-pin.py \
+            --version "${{ steps.pin.outputs.version }}" \
+            --manifest-digest "${{ steps.pin.outputs.digest }}"
+          npm install --package-lock-only --ignore-scripts --prefix workers/browser
+          npm audit --omit=dev --audit-level=high --prefix workers/browser
+      - name: Qualify the candidate
+        run: |
+          python3 -I scripts/update-playwright-pin-test.py
+          go test ./internal/workerfixture
+          docker build --pull=false -t steward-browser-worker:pin-candidate workers/browser
+      - name: Open or refresh proposal
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pin.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Playwright is already pinned to $VERSION."
+            exit 0
+          fi
+          branch="automation/playwright-${VERSION}"
+          git config user.name "steward-release-bot"
+          git config user.email "steward-release-bot@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add workers/browser/package.json workers/browser/package-lock.json workers/browser/Dockerfile
+          git commit -m "Pin Playwright $VERSION"
+          git push --force-with-lease origin "$branch"
+          existing=$(gh pr list --state open --head "$branch" --json url --jq '.[0].url // ""')
+          if [[ -n $existing ]]; then
+            echo "$existing"
+            exit 0
+          fi
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Pin Playwright $VERSION" \
+            --body "Updates the exact Playwright npm integrity and official multi-platform image digest. The workflow audits the production dependency, builds the pinned image, and runs Steward's browser-boundary tests before opening this proposal."

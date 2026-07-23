@@ -31,12 +31,15 @@ Steward also includes fixed presets for its optional research and coding workers
 | --- | --- | --- |
 | `research-search` | `steward-research-search` | `POST /v1/search` |
 | `research-extract` | `steward-research-extract` | `POST /v1/extract` |
+| `browser-search` | `steward-browser-search` | `POST /v1/search` |
+| `browser-read` | `steward-browser-read` | `POST /v1/read` |
 | `codex-worker` | `steward-codex` | `POST /v1/run` |
 | `claude-code-worker` | `steward-claude-code` | `POST /v1/run` |
 
 These presets fix the operation and safety budgets but require the operator to
 name the separately deployed worker origin and credential file. Follow the
-[web research]({{ '/guides/research-agents/' | relative_url }}) or
+[web research]({{ '/guides/research-agents/' | relative_url }}),
+[browser research]({{ '/guides/browser-research/' | relative_url }}), or
 [coding worker]({{ '/guides/coding-workers/' | relative_url }}) guide for the
 complete boundary.
 

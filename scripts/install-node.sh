@@ -929,6 +929,12 @@ release_files=(
 	integration/workers/research/Dockerfile
 	integration/workers/research/README.md
 	integration/workers/research/research_worker.py
+	integration/workers/browser/Dockerfile
+	integration/workers/browser/README.md
+	integration/workers/browser/package-lock.json
+	integration/workers/browser/package.json
+	integration/workers/browser/security.mjs
+	integration/workers/browser/server.mjs
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -1211,7 +1217,7 @@ install -d -o root -g root -m 0755 "$incoming/integration" \
 	"$incoming/integration/adapters/hermes-agent/profiles/developer" \
 	"$incoming/integration/adapters/hermes-agent/profiles/research" \
 	"$incoming/integration/workers" "$incoming/integration/workers/coding" \
-	"$incoming/integration/workers/research" \
+	"$incoming/integration/workers/research" "$incoming/integration/workers/browser" \
 	"$incoming/integration/deploy" "$incoming/integration/deploy/config" \
 	"$incoming/integration/deploy/systemd" "$incoming/integration/scripts"
 for file in agents/hermes/agent.json agents/developer/agent.json agents/researcher/agent.json agents/nodes.json \
@@ -1248,6 +1254,10 @@ done
 for file in Dockerfile README.md research_worker.py; do
 	install -o root -g root -m 0644 "$root/workers/research/$file" \
 		"$incoming/integration/workers/research/$file"
+done
+for file in Dockerfile README.md package-lock.json package.json security.mjs server.mjs; do
+	install -o root -g root -m 0644 "$root/workers/browser/$file" \
+		"$incoming/integration/workers/browser/$file"
 done
 for file in deploy/config/executor-gateway.env deploy/config/executor.env \
 	deploy/config/gateway.json.in deploy/config/steward-local.json deploy/config/steward.json deploy/config/storage-zfs.json.in \

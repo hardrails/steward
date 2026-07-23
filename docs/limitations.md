@@ -266,12 +266,20 @@ separate.
 
 ## Research and coding workers add trust boundaries
 
-The optional research worker normalizes SearXNG results and extracts bounded text
+The optional lightweight research worker normalizes SearXNG results and extracts bounded text
 from public HTML, XHTML, and plain-text pages. It rejects non-public DNS answers,
 pins the selected address for each connection, and rechecks every redirect. It
 does not execute JavaScript or provide browser-grade rendering. Retrieved text
 remains untrusted and can contain prompt injection. Source URLs and multiple
 documents improve review; they do not prove an agent's conclusion.
+
+The separate browser research worker executes JavaScript for short-lived opaque
+source references in fresh credential-free Chromium processes. It blocks
+cross-origin subrequests, permissions, downloads, service workers, and private
+destinations, but browser engines remain a large attack surface. The outer worker
+network must deny every private, node, management, and metadata route. The worker
+does not provide login state, clicking, typing, arbitrary URLs, or consequential
+browser actions.
 
 The optional coding worker runs the official Codex or Claude Code CLI in a
 separate container and reports changed paths. It does not prove a patch is correct,

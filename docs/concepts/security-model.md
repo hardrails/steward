@@ -290,6 +290,10 @@ matters.
   is not a tenant sandbox and has no resource isolation.
 - Computer-use and browser automation must run in a separate sandboxed workload,
   not inside the Steward process.
+- The optional browser research worker exposes only search and opaque-reference
+  read operations. It has no login state, raw URL input, click, type, download,
+  upload, or generic browser-control interface; its network must deny private,
+  management, node, and metadata routes.
 - Model serving and semantic inference-data policy remain outside Steward. Steward
   enforces only the approved transport route, model alias, and credential boundary.
 - Authorized Effects covers only Steward-mediated connectors. Unmanaged

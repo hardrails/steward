@@ -55,6 +55,7 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	adapters/hermes-agent/license-inventory.json adapters/hermes-agent/source-inputs.sha256 \
 	workers/coding/Dockerfile workers/coding/README.md workers/coding/coding_worker.py workers/coding/package-lock.json workers/coding/package.json \
 	workers/research/Dockerfile workers/research/README.md workers/research/research_worker.py \
+	workers/browser/Dockerfile workers/browser/README.md workers/browser/package-lock.json workers/browser/package.json workers/browser/security.mjs workers/browser/server.mjs \
 	examples/agents/hermes/agent.json examples/agents/researcher/agent.json examples/agents/developer/agent.json \
 	examples/agents/nodes.json examples/policy/steward.rego schemas/agent.cue \
 	release.json LICENSE README.md; do
