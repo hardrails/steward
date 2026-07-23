@@ -53,6 +53,7 @@ type controlContextCommandSpec struct {
 	token   bool
 	tenant  bool
 	node    bool
+	taskKey bool
 }
 
 var controlContextCommands = map[string]controlContextCommandSpec{
@@ -86,7 +87,13 @@ var controlContextCommands = map[string]controlContextCommandSpec{
 	"freeze set":                {network: true, token: true, tenant: true},
 	"freeze clear":              {network: true, token: true, tenant: true},
 	"attention list":            {network: true, token: true, tenant: true},
+	"incident timeline":         {network: true, token: true, tenant: true},
 	"agent list":                {network: true, token: true, tenant: true, node: true},
+	"event list":                {network: true, token: true, tenant: true},
+	"task list":                 {network: true, token: true, tenant: true},
+	"interaction list":          {network: true, token: true, tenant: true},
+	"interaction show":          {network: true, token: true, tenant: true},
+	"interaction respond":       {network: true, token: true, tenant: true, taskKey: true},
 	"command submit":            {network: true, token: true, tenant: true, node: true},
 	"command status":            {network: true, token: true, tenant: true, node: true},
 	"command list":              {network: true, token: true, tenant: true, node: true},
@@ -374,6 +381,10 @@ func applyCLIContext(arguments []string) ([]string, error) {
 	}
 	if spec.node {
 		result = injectContextFlag(result, "node-id", selected.NodeID)
+	}
+	if spec.taskKey {
+		result = injectContextFlag(result, "key", selected.TaskKeyFile)
+		result = injectContextFlag(result, "key-id", selected.TaskKeyID)
 	}
 	return result, nil
 }

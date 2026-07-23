@@ -18,7 +18,7 @@ import (
 
 const (
 	interactionRequestSchemaV1      = controlprotocol.InteractionRequestSchemaV1
-	interactionResponseBodySchemaV1 = "steward.interaction-response-body.v1"
+	interactionResponseBodySchemaV1 = interactionpermit.ResponseBodySchemaV1
 	maxInteractionRequestBytes      = 8 << 10
 	maxInteractionCourierBytes      = 32 << 10
 	maxInteractions                 = 64
@@ -83,11 +83,7 @@ type InteractionResponse struct {
 	ResolvedAt     string                  `json:"resolved_at"`
 }
 
-type InteractionResponseBody struct {
-	SchemaVersion string `json:"schema_version"`
-	Choice        string `json:"choice,omitempty"`
-	Text          string `json:"text,omitempty"`
-}
+type InteractionResponseBody = interactionpermit.ResponseBody
 
 type interactionBatch struct {
 	Interactions []Interaction `json:"interactions"`
@@ -134,20 +130,6 @@ func (input InteractionInput) validate(now time.Time) error {
 	expires, err := canonicalInteractionTime(input.ExpiresAt)
 	if err != nil || !expires.After(now) || expires.After(now.Add(maxInteractionWait)) {
 		return errors.New("interaction expires_at is invalid")
-	}
-	return nil
-}
-
-func (body InteractionResponseBody) validate(interaction Interaction) error {
-	if body.SchemaVersion != interactionResponseBodySchemaV1 ||
-		body.Choice == "" && body.Text == "" ||
-		body.Choice != "" && !eventText(body.Choice, 128) ||
-		body.Text != "" && !eventText(body.Text, 2048) ||
-		body.Text != "" && !interaction.AllowText {
-		return errors.New("interaction response is invalid")
-	}
-	if body.Choice != "" && !slices.Contains(interaction.Options, body.Choice) {
-		return errors.New("interaction response choice is not offered")
 	}
 	return nil
 }
@@ -442,7 +424,7 @@ func (s *Server) resolveInteraction(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	interaction := s.interactions[index]
-	if body.validate(interaction) != nil {
+	if body.Validate(interaction.Options, interaction.AllowText) != nil {
 		writeGatewayError(writer, http.StatusBadRequest, "invalid_interaction_response", "interaction response is not valid for the offered choices")
 		return
 	}
@@ -531,7 +513,7 @@ func validateRetainedInteractions(values []Interaction) error {
 			return errors.New("gateway state contains an invalid interaction")
 		}
 		if value.State == "resolved" {
-			if value.Response == nil || value.Response.Body.validate(value) != nil ||
+			if value.Response == nil || value.Response.Body.Validate(value.Options, value.AllowText) != nil ||
 				!validSHA256Digest(value.Response.PermitDigest) ||
 				!validSHA256Digest(value.Response.ResponseDigest) ||
 				!routeID(value.Response.KeyID) {

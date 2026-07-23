@@ -10,19 +10,22 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/dsse"
 )
 
 const (
-	PayloadType = "application/vnd.steward.interaction-response.v1+json"
-	SchemaV1    = "steward.interaction-response.v1"
+	PayloadType          = "application/vnd.steward.interaction-response.v1+json"
+	SchemaV1             = "steward.interaction-response.v1"
+	ResponseBodySchemaV1 = "steward.interaction-response-body.v1"
 
 	MaxEnvelopeBytes = 16 << 10
 	MaxResponseBytes = 4 << 10
@@ -85,6 +88,62 @@ type Verified struct {
 	Statement      Statement
 	KeyID          string
 	EnvelopeDigest string
+}
+
+type ResponseBody struct {
+	SchemaVersion string `json:"schema_version"`
+	Choice        string `json:"choice,omitempty"`
+	Text          string `json:"text,omitempty"`
+}
+
+func (body ResponseBody) Validate(options []string, allowText bool) error {
+	if body.SchemaVersion != ResponseBodySchemaV1 ||
+		body.Choice == "" && body.Text == "" ||
+		body.Choice != "" && !responseText(body.Choice, 128) ||
+		body.Text != "" && (!allowText || !responseText(body.Text, 2048)) {
+		return invalid("interaction response body is invalid")
+	}
+	if body.Choice != "" {
+		found := false
+		for _, option := range options {
+			if option == body.Choice {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return invalid("interaction response choice was not offered")
+		}
+	}
+	return nil
+}
+
+// Sign creates one canonical, single-signature response permit after applying
+// the same structural bounds enforced by inspection and verification.
+func Sign(statement Statement, keyID string, private ed25519.PrivateKey) ([]byte, error) {
+	if !identifier(keyID) || len(private) != ed25519.PrivateKeySize {
+		return nil, invalid("response signing key is invalid")
+	}
+	notBefore, err := canonicalTime(statement.NotBefore)
+	if err != nil {
+		return nil, invalid("not_before: %v", err)
+	}
+	if err := validateStatement(statement, notBefore, MaxValidity); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(statement)
+	if err != nil {
+		return nil, invalid("marshal response statement")
+	}
+	envelope, err := dsse.Sign(PayloadType, payload, keyID, private)
+	if err != nil {
+		return nil, invalid("sign response statement")
+	}
+	raw, err := dsse.Marshal(envelope)
+	if err != nil || len(raw) > MaxEnvelopeBytes {
+		return nil, invalid("marshal response envelope")
+	}
+	return raw, nil
 }
 
 // ResponseDigest binds the exact JSON response bytes without parsing or
@@ -235,6 +294,19 @@ func canonicalTime(value string) (time.Time, error) {
 func publicIdentity(value string, limit int) bool {
 	return strings.TrimSpace(value) != "" && len(value) <= limit && utf8.ValidString(value) &&
 		!strings.ContainsRune(value, '\x00')
+}
+
+func responseText(value string, limit int) bool {
+	if value == "" || len(value) > limit || !utf8.ValidString(value) ||
+		strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func identifier(value string) bool { return identifierPattern.MatchString(value) }
