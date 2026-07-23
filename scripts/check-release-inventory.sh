@@ -117,4 +117,12 @@ if [[ $manifest_read_min != "$code_read_min" || $manifest_read_max != "$code_rea
 	exit 1
 fi
 
+workflow_gateway_format="    \"gateway_state\": {\"read_min\": $manifest_read_min, \"read_max\": $manifest_read_max, \"write\": $manifest_write},"
+for workflow in "$root/.github/workflows/ci.yml" "$root/.github/workflows/release.yml"; do
+	if ! grep -Fq "$workflow_gateway_format" "$workflow"; then
+		echo "check-release-inventory: $(basename "$workflow") asserts a stale Gateway state format" >&2
+		exit 1
+	fi
+done
+
 echo "check-release-inventory: node release inventory and state formats are synchronized"
