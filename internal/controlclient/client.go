@@ -29,7 +29,9 @@ import (
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/interactionpermit"
 	"github.com/hardrails/steward/internal/poolmembership"
+	"github.com/hardrails/steward/internal/schedulepermit"
 	"github.com/hardrails/steward/internal/securefile"
+	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 const (
@@ -250,6 +252,11 @@ type TaskProjectionList struct {
 type TaskRequestList struct {
 	Tasks     []controlstore.TaskRequest `json:"tasks"`
 	NextAfter string                     `json:"next_after,omitempty"`
+}
+
+type TaskScheduleList struct {
+	Schedules []controlstore.TaskSchedule `json:"schedules"`
+	NextAfter string                      `json:"next_after,omitempty"`
 }
 
 type WorkroomProjectList struct {
@@ -984,6 +991,108 @@ func taskRequestPath(tenantID, taskID string) (string, error) {
 		return "", errors.New("async task identity is invalid")
 	}
 	return "/v1/tenants/" + url.PathEscape(tenantID) + "/task-requests/" + url.PathEscape(taskID), nil
+}
+
+func (c *Client) CreateTaskSchedule(
+	ctx context.Context,
+	tenantID string,
+	schedulePermit, request []byte,
+) (controlstore.TaskSchedule, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) ||
+		len(schedulePermit) == 0 || len(schedulePermit) > schedulepermit.MaxEnvelopeBytes ||
+		len(request) == 0 || int64(len(request)) > taskpermit.MaxRequestBytes {
+		return controlstore.TaskSchedule{}, errors.New("task schedule requires a tenant, signed permit, and bounded request")
+	}
+	var schedule controlstore.TaskSchedule
+	err := c.do(ctx, http.MethodPost, "/v1/tenants/"+url.PathEscape(tenantID)+"/schedules", struct {
+		SchedulePermitBase64 string `json:"schedule_permit_base64"`
+		RequestBase64        string `json:"request_base64"`
+	}{
+		SchedulePermitBase64: base64.StdEncoding.EncodeToString(schedulePermit),
+		RequestBase64:        base64.StdEncoding.EncodeToString(request),
+	}, &schedule, true)
+	if err != nil {
+		return controlstore.TaskSchedule{}, err
+	}
+	if schedule.TenantID != tenantID || schedule.Validate() != nil {
+		return controlstore.TaskSchedule{}, errors.New("control task schedule response is invalid")
+	}
+	return schedule, nil
+}
+
+func (c *Client) ListTaskSchedules(ctx context.Context, tenantID, after string, limit int) (TaskScheduleList, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) || limit <= 0 || limit > 100 {
+		return TaskScheduleList{}, errors.New("task schedule list requires a tenant and limit from 1 to 100")
+	}
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/schedules", after, limit)
+	if err != nil {
+		return TaskScheduleList{}, err
+	}
+	var page TaskScheduleList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return TaskScheduleList{}, err
+	}
+	if page.Schedules == nil || len(page.Schedules) > limit {
+		return TaskScheduleList{}, errors.New("control task schedule page is invalid")
+	}
+	for index, schedule := range page.Schedules {
+		if schedule.TenantID != tenantID || schedule.Validate() != nil {
+			return TaskScheduleList{}, errors.New("control task schedule page contains an invalid schedule")
+		}
+		if index > 0 {
+			previous := page.Schedules[index-1]
+			if previous.CreatedAt < schedule.CreatedAt ||
+				previous.CreatedAt == schedule.CreatedAt &&
+					previous.Statement.ScheduleID <= schedule.Statement.ScheduleID {
+				return TaskScheduleList{}, errors.New("control task schedule page is not canonical")
+			}
+		}
+	}
+	if page.NextAfter != "" && (len(page.Schedules) == 0 ||
+		page.NextAfter != page.Schedules[len(page.Schedules)-1].Statement.ScheduleID) {
+		return TaskScheduleList{}, errors.New("control task schedule page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) GetTaskSchedule(ctx context.Context, tenantID, scheduleID string) (controlstore.TaskSchedule, error) {
+	path, err := taskSchedulePath(tenantID, scheduleID)
+	if err != nil {
+		return controlstore.TaskSchedule{}, err
+	}
+	var schedule controlstore.TaskSchedule
+	if err := c.do(ctx, http.MethodGet, path, nil, &schedule, true); err != nil {
+		return controlstore.TaskSchedule{}, err
+	}
+	if schedule.TenantID != tenantID || schedule.Statement.ScheduleID != scheduleID ||
+		schedule.Validate() != nil {
+		return controlstore.TaskSchedule{}, errors.New("control task schedule response is invalid")
+	}
+	return schedule, nil
+}
+
+func (c *Client) CancelTaskSchedule(ctx context.Context, tenantID, scheduleID string) (controlstore.TaskSchedule, error) {
+	path, err := taskSchedulePath(tenantID, scheduleID)
+	if err != nil {
+		return controlstore.TaskSchedule{}, err
+	}
+	var schedule controlstore.TaskSchedule
+	if err := c.do(ctx, http.MethodDelete, path, nil, &schedule, true); err != nil {
+		return controlstore.TaskSchedule{}, err
+	}
+	if schedule.TenantID != tenantID || schedule.Statement.ScheduleID != scheduleID ||
+		schedule.Validate() != nil || schedule.State == controlstore.TaskScheduleActive {
+		return controlstore.TaskSchedule{}, errors.New("control task schedule cancellation response is invalid")
+	}
+	return schedule, nil
+}
+
+func taskSchedulePath(tenantID, scheduleID string) (string, error) {
+	if !validOperationsIdentifier(tenantID, 128, false) ||
+		!validOperationsIdentifier(scheduleID, 96, false) {
+		return "", errors.New("task schedule identity is invalid")
+	}
+	return "/v1/tenants/" + url.PathEscape(tenantID) + "/schedules/" + url.PathEscape(scheduleID), nil
 }
 
 func (c *Client) ListNodePools(ctx context.Context, after string, limit int) (NodePoolList, error) {
