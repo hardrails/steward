@@ -3991,7 +3991,7 @@ components:
       description: |
         Read-only fleet facts derived at `generated_at`. `tenant_id` is omitted
         for the site-wide projection and present for a tenant projection.
-      required: [generated_at, capacity, commands, evidence, attention]
+      required: [generated_at, capacity, commands, evidence, workflows, attention]
       properties:
         generated_at:
           type: string
@@ -4008,6 +4008,8 @@ components:
           $ref: "#/components/schemas/CommandSummary"
         evidence:
           $ref: "#/components/schemas/EvidenceSummary"
+        workflows:
+          $ref: "#/components/schemas/WorkflowSummary"
         attention:
           $ref: "#/components/schemas/AttentionSummary"
     CapacityUsage:
@@ -4094,6 +4096,75 @@ components:
           type: integer
           minimum: 0
         equivocation_detected:
+          type: integer
+          minimum: 0
+    WorkflowSummary:
+      type: object
+      additionalProperties: false
+      description: |
+        Content-free counts for finite task schedules and bounded agent
+        interactions. Request, permit, prompt, response, and result bytes are
+        excluded.
+      required:
+        - schedules_total
+        - schedules_active
+        - schedules_completed
+        - schedules_cancelled
+        - runs_queued
+        - runs_running
+        - runs_completed
+        - runs_cancelled
+        - runs_failed
+        - runs_skipped
+        - interactions_total
+        - interactions_open
+        - interactions_queued
+        - interactions_resolved
+        - interactions_expired
+      properties:
+        schedules_total:
+          type: integer
+          minimum: 0
+        schedules_active:
+          type: integer
+          minimum: 0
+        schedules_completed:
+          type: integer
+          minimum: 0
+        schedules_cancelled:
+          type: integer
+          minimum: 0
+        runs_queued:
+          type: integer
+          minimum: 0
+        runs_running:
+          type: integer
+          minimum: 0
+        runs_completed:
+          type: integer
+          minimum: 0
+        runs_cancelled:
+          type: integer
+          minimum: 0
+        runs_failed:
+          type: integer
+          minimum: 0
+        runs_skipped:
+          type: integer
+          minimum: 0
+        interactions_total:
+          type: integer
+          minimum: 0
+        interactions_open:
+          type: integer
+          minimum: 0
+        interactions_queued:
+          type: integer
+          minimum: 0
+        interactions_resolved:
+          type: integer
+          minimum: 0
+        interactions_expired:
           type: integer
           minimum: 0
     AttentionSummary:

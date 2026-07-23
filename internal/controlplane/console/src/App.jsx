@@ -1193,6 +1193,12 @@ function Overview({snapshot, onAttention}) {
         <Metric label="Failed actions" value={failures}>
           {summary.commands.failed} failed · {summary.commands.outcome_unknown} unknown
         </Metric>
+        <Metric label="Active schedules" value={summary.workflows.schedules_active}>
+          {summary.workflows.runs_running} running · {summary.workflows.runs_failed} failed
+        </Metric>
+        <Metric label="Agent questions" value={summary.workflows.interactions_open}>
+          {summary.workflows.interactions_queued} awaiting delivery · {summary.workflows.interactions_expired} expired
+        </Metric>
       </div>
       {snapshot.quota ? <TenantQuotaPanel status={snapshot.quota} /> : null}
       <div className="overview-grid">

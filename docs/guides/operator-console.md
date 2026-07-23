@@ -99,7 +99,7 @@ The console does not set or clear a freeze. Use the authenticated
 
 | View | What it shows | What it omits |
 | --- | --- | --- |
-| Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, retained-state capacity, and the selected tenant's fleet-wide resource quota and usage | Mutation controls and raw evidence frames |
+| Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, active schedules, open agent questions, retained-state capacity, and the selected tenant's fleet-wide resource quota and usage | Mutation controls, workflow content, and raw evidence frames |
 | Workrooms | Tenant-scoped projects, sessions, linked signed task IDs, external artifact digests, selected memory, open questions, and recent scheduled runs | Prompts, task bodies, result bytes, artifact bytes, storage credentials, signing, or project mutation |
 | Schedules | Finite signed schedule metadata, next run, recent run states, overlap policy, and a copyable cancellation command | Request bodies, permit bytes, result bodies, private keys, schedule creation, or browser-side cancellation |
 | Questions | Bounded agent questions, allowed choices, expiry, workload identity, and response state | Private keys, response signing, response text entry, or proof that agent-authored text is trustworthy |

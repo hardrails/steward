@@ -327,7 +327,9 @@ func TestMetricsAreOptInAuthenticatedTenantProjectedAndFixedCardinality(t *testi
 	}
 	tenant := request("/metrics", operator)
 	requireStatus(t, tenant, http.StatusOK)
-	if !strings.Contains(tenant.Body.String(), `scope="tenant"`) {
+	if !strings.Contains(tenant.Body.String(), `scope="tenant"`) ||
+		!strings.Contains(tenant.Body.String(), `steward_control_workflows{scope="tenant",kind="schedule",state="active"} 0`) ||
+		!strings.Contains(tenant.Body.String(), `steward_control_workflows{scope="tenant",kind="interaction",state="open"} 0`) {
 		t.Fatalf("tenant metrics omitted projected scope:\n%s", tenant.Body.String())
 	}
 	for _, sensitive := range []string{

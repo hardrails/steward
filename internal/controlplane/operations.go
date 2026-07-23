@@ -407,6 +407,35 @@ func operationsMetrics(summary controlstore.OperationsSummary, scope string) []b
 			scope, metric.status, metric.value,
 		)
 	}
+	output.WriteString("# HELP steward_control_workflows Retained agent workflows by kind and lifecycle state.\n")
+	output.WriteString("# TYPE steward_control_workflows gauge\n")
+	workflowMetrics := []struct {
+		kind  string
+		state string
+		value int
+	}{
+		{"schedule", "all", summary.Workflows.SchedulesTotal},
+		{"schedule", "active", summary.Workflows.SchedulesActive},
+		{"schedule", "completed", summary.Workflows.SchedulesCompleted},
+		{"schedule", "cancelled", summary.Workflows.SchedulesCancelled},
+		{"schedule_run", "queued", summary.Workflows.RunsQueued},
+		{"schedule_run", "running", summary.Workflows.RunsRunning},
+		{"schedule_run", "completed", summary.Workflows.RunsCompleted},
+		{"schedule_run", "cancelled", summary.Workflows.RunsCancelled},
+		{"schedule_run", "failed", summary.Workflows.RunsFailed},
+		{"schedule_run", "skipped", summary.Workflows.RunsSkipped},
+		{"interaction", "all", summary.Workflows.InteractionsTotal},
+		{"interaction", "open", summary.Workflows.InteractionsOpen},
+		{"interaction", "response_queued", summary.Workflows.InteractionsQueued},
+		{"interaction", "resolved", summary.Workflows.InteractionsResolved},
+		{"interaction", "expired", summary.Workflows.InteractionsExpired},
+	}
+	for _, metric := range workflowMetrics {
+		fmt.Fprintf(
+			&output, "steward_control_workflows{scope=%q,kind=%q,state=%q} %d\n",
+			scope, metric.kind, metric.state, metric.value,
+		)
+	}
 	output.WriteString("# HELP steward_control_attention Derived action-required facts.\n")
 	output.WriteString("# TYPE steward_control_attention gauge\n")
 	for _, count := range summary.Attention.Counts {
