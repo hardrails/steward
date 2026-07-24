@@ -153,6 +153,10 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 			t.Fatalf("agent %s flags %v missing %s", command, flags, expected)
 		}
 	}
+	authorizeFlags := stewardctlCompletionCandidates([]string{"agent", "authorize", "-"})
+	if !slices.Contains(authorizeFlags, "-resume-state") {
+		t.Fatalf("agent authorize flags %v missing -resume-state", authorizeFlags)
+	}
 	deploymentFlags := stewardctlCompletionCandidates([]string{"agent", "deployment", "apply", "-"})
 	for _, expected := range []string{"-bundle", "-capsule", "-delegation", "-revision", "-tenant"} {
 		if !slices.Contains(deploymentFlags, expected) {

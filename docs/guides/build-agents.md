@@ -224,6 +224,25 @@ absent, then switches that replica to the target delegation and issues `admit`,
 `renew`, and `start`. The old authority is never overwritten while it may still own
 a runtime.
 
+If the agent has persistent state and the replacement should keep the same lineage,
+authorize the new generation with `-resume-state`:
+
+```console
+stewardctl agent authorize SITE_DIRECTORY \
+  -controller-public-key controller.public.pem \
+  -node-ids node-1,node-2 \
+  -deployment auditor \
+  -instance-id auditor \
+  -lineage-id LINEAGE \
+  -generation 2 \
+  -resume-state
+```
+
+Without `-resume-state`, the signed admission requires a new empty lineage and
+Executor refuses an existing state volume. The flag does not restore a snapshot or
+create a fork; it only permits the named generation to reattach the exact existing
+lineage. Use `agent fork` for a new lineage copied from an immutable snapshot.
+
 `max_unavailable` bounds rollout and node-drain disruption in the same atomic store
 transaction. The default is one, so a multi-replica deployment replaces one agent
 at a time. Steward currently retains the assigned node and does not create surge

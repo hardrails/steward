@@ -47,6 +47,7 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 	lineageID := flags.String("lineage-id", "", "stable state lineage identity")
 	generation := flags.Uint64("generation", 1, "authorized instance generation")
 	claimGeneration := flags.Uint64("claim-generation", 1, "tenant command authority generation")
+	resumeState := flags.Bool("resume-state", false, "reattach the existing persistent lineage instead of requiring new state")
 	validFor := flags.Duration("valid-for", defaultExecutorDelegationValidity, "finite controller authority lifetime")
 	forkPlanPath := flags.String("fork-plan", "", "fork plan whose fresh identity and cleanup lifecycle to authorize")
 	outputPath := flags.String("out", "delegation.dsse.json", "new tenant-signed controller delegation")
@@ -137,7 +138,7 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 		PolicyPath:   filepath.Join(siteDirectory, "public", "site-policy.dsse.json"),
 		SiteRootPath: filepath.Join(siteDirectory, "public", "site-root.public"), SiteRootKeyID: "site-root-1",
 		TenantID: verifiedSite.inventory.TenantID, NodeID: nodeIDs[0], InstanceID: *instanceID,
-		LineageID: *lineageID, Generation: *generation, ResumeState: forkPlan != nil,
+		LineageID: *lineageID, Generation: *generation, ResumeState: *resumeState || forkPlan != nil,
 	})
 	if err != nil {
 		return err
