@@ -254,6 +254,43 @@ Pause is not rollback. Returning to an older bundle requires a new, higher
 generation and a fresh tenant-signed delegation; Steward never moves generation
 fences backward. Automatic mixed-generation rollback is not implemented.
 
+Renew the finite controller authority before it expires without rolling the
+workload generation. Reissue the delegation with the same deployment, instance,
+lineage, generation, claim generation, nodes, operations, admission template,
+controller key, bundle, and capsule; only the signed validity window may advance.
+Then apply it with the current generation explicitly:
+
+```console
+stewardctl agent authorize SITE_DIRECTORY \
+  -bundle agent.bundle.json \
+  -capsule capsule.dsse.json \
+  -controller-public-key controller.public \
+  -node-ids node-1,node-2 \
+  -deployment auditor \
+  -instance-id auditor \
+  -lineage-id LINEAGE \
+  -generation 4 \
+  -claim-generation 1 \
+  -valid-for 8h \
+  -out renewed-delegation.dsse.json
+
+stewardctl agent apply auditor \
+  -bundle agent.bundle.json \
+  -capsule capsule.dsse.json \
+  -delegation renewed-delegation.dsse.json \
+  -generation 4
+```
+
+Control rejects a same-generation update that changes any authority-bearing field,
+shortens the expiry, or moves the issue time backward. Those changes require a new
+generation and the normal rollout path. An otherwise exact monotonic renewal can
+complete while reconciliation advances the deployment revision; it cannot
+overwrite a concurrent generation, desired-state, or authority change. If renewal
+happens after the old authority and workload lease expired, Executor has already
+stopped the workload locally. The first successful renewal observation reports
+that stopped state, and Control issues a fresh signed start without changing the
+instance generation.
+
 ```console
 stewardctl agent deployment remove auditor
 ```

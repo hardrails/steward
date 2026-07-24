@@ -77,7 +77,9 @@ refuses to delete key material automatically.
 When the certificate and key are configured, Steward Control accepts TLS 1.3 only.
 The Steward Control client used by `stewardctl control` and `steward-mcp` likewise
 requires TLS 1.3 for HTTPS. Plain HTTP remains limited to a literal loopback
-listener.
+listener. Direct TLS responses include one year of HTTP Strict Transport Security
+(HSTS). A TLS-terminating proxy must set HSTS itself; Control deliberately does
+not infer HTTPS from an untrusted forwarded-protocol header.
 
 ### Embedded operator console
 

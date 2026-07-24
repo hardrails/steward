@@ -69,12 +69,13 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/nodes/{node_id}/evidence/captures/{capture_id}/export` | Export exact signed frames and the controller's purpose-separated witness signature |
 | `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands` | Retain one exact signed Executor command |
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
+| `PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Create or roll forward desired state, or replace only the advancing validity window of an otherwise identical same-generation delegation |
 | `GET /v1/operations/summary` | Read tenant-projected capacity, command, evidence, and attention totals |
 | `GET or PUT /v1/tenants/{tenant_id}/quota` | Inspect requested-resource usage or optimistically set and clear the site-defined fleet-wide tenant ceiling; mutation requires a site administrator |
 | `GET or PUT /v1/operations/freeze` | Inspect or optimistically change the site-wide command-delivery freeze; mutation requires a site administrator |
 | `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
 | `GET /v1/operations/timeline` | Page current metadata-only containment, evidence, access, and failed-workload facts in newest-first order |
-| `GET /v1/operations/agents` | Page through non-secret observed agent runtime state and latest signed operations |
+| `GET /v1/operations/agents` | Page through non-secret observed agent runtime state, logical instance identity when retained, and latest signed operations |
 | `GET /v1/operations/commands` | Page and filter command metadata without command or result bodies |
 | `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
 | `GET /metrics` | Optional authenticated Prometheus exposition with fixed bounded labels |
