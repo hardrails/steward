@@ -102,6 +102,9 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-credential-mode", "x"}); !slices.Equal(candidates, []string{"x-api-key"}) {
 		t.Fatalf("inference credential candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-up"}); !slices.Equal(candidates, []string{"-upstream-model"}) {
+		t.Fatalf("inference upstream model candidates=%v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"site", "init", "new-site", "-authorized-effects", "r"}); !slices.Equal(candidates, []string{"required"}) {
 		t.Fatalf("site effects candidates=%v", candidates)
 	}

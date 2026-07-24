@@ -155,7 +155,10 @@ func TestGatewayInferencePresetsAreValidatedAndAtomic(t *testing.T) {
 	}
 
 	output.Reset()
-	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "openrouter", "-credential-file", credential}, &output, &output); err != nil {
+	if err := run([]string{
+		"gateway", "inference", "set", "-config", path, "-provider", "openrouter",
+		"-upstream-model", "openai/gpt-4.1-mini", "-credential-file", credential,
+	}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "anthropic", "-credential-file", credential}, &output, &output); err == nil ||
@@ -171,6 +174,7 @@ func TestGatewayInferencePresetsAreValidatedAndAtomic(t *testing.T) {
 	}
 	loaded, _, _, _, err = gateway.LoadConfig(path)
 	if err != nil || len(loaded.Routes) != 3 || loaded.Routes[1].BaseURL != "https://openrouter.ai/api/v1" ||
+		loaded.Routes[1].UpstreamModel != "openai/gpt-4.1-mini" ||
 		loaded.Routes[2].Protocol != gateway.InferenceProtocolAnthropic || loaded.Routes[2].CredentialMode != gateway.CredentialModeXAPIKey {
 		t.Fatalf("routes=%#v err=%v", loaded.Routes, err)
 	}

@@ -104,6 +104,41 @@ func TestInferenceGrantEnforcesModelAndSynthesizesModels(t *testing.T) {
 	}
 }
 
+func TestInferenceRouteMapsSignedAliasToPinnedUpstreamModel(t *testing.T) {
+	var forwarded map[string]json.RawMessage
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&forwarded); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	base, _ := url.Parse(upstream.URL + "/v1")
+	route := loadedRoute{
+		Route: Route{
+			ID: "openai", BaseURL: base.String(), Protocol: InferenceProtocolOpenAI,
+			UpstreamModel: "gpt-4.1-mini", MaxConcurrent: 1,
+		},
+		base: base,
+	}
+	server := &Server{client: upstream.Client()}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"http://relay/v1/chat/completions",
+		strings.NewReader(`{"model":"default","messages":[{"role":"user","content":{"model":"preserved"}}]}`),
+	)
+	recorder := httptest.NewRecorder()
+	server.proxyInference(recorder, request, Grant{ModelAlias: "default"}, route)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if string(forwarded["model"]) != `"gpt-4.1-mini"` ||
+		!bytes.Contains(forwarded["messages"], []byte(`"model":"preserved"`)) {
+		t.Fatalf("forwarded request = %#v", forwarded)
+	}
+}
+
 func TestInferenceProvidersUsePinnedProtocolPathAndCredentials(t *testing.T) {
 	t.Run("OpenRouter OpenAI-compatible prefix", func(t *testing.T) {
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +238,7 @@ func TestInferenceProviderProtocolIsPinnedIntoRoutePolicy(t *testing.T) {
 	mutations := []func(*loadedRoute){
 		func(route *loadedRoute) { route.Protocol = InferenceProtocolAnthropic },
 		func(route *loadedRoute) { route.CredentialMode = CredentialModeXAPIKey },
+		func(route *loadedRoute) { route.UpstreamModel = "provider/model-v2" },
 		func(route *loadedRoute) {
 			route.Protocol = InferenceProtocolAnthropic
 			route.AnthropicVersion = "2024-01-01"

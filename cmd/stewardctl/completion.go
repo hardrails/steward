@@ -184,7 +184,7 @@ var completionFlags = map[string][]string{
 	"node":                                {"-node-url", "-token-file", "-no-context", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation", "-reason", "-apply"},
 	"gateway":                             {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
 	"gateway identity set":                {"-config", "-node-id"},
-	"gateway inference set":               {"-config", "-provider", "-id", "-base-url", "-protocol", "-credential-file", "-credential-mode", "-anthropic-version", "-max-concurrent"},
+	"gateway inference set":               {"-config", "-provider", "-id", "-base-url", "-protocol", "-upstream-model", "-credential-file", "-credential-mode", "-anthropic-version", "-max-concurrent"},
 	"capsule check-profile":               {"-in"},
 	"gateway connector set":               {"-preset", "-repository", "-id", "-base-url", "-credential-file", "-credential-mode", "-credential-epoch", "-allow-cidr", "-operation", "-tenant-budget", "-action-authority", "-action-authority-tenant", "-action-node-id", "-max-action-permit-seconds", "-max-concurrent", "-max-request-bytes", "-max-response-bytes", "-max-seconds", "-max-calls-per-grant"},
 }

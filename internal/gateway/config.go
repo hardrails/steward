@@ -111,6 +111,7 @@ type Route struct {
 	ID               string            `json:"id"`
 	BaseURL          string            `json:"base_url"`
 	Protocol         InferenceProtocol `json:"protocol,omitempty"`
+	UpstreamModel    string            `json:"upstream_model,omitempty"`
 	CredentialFile   string            `json:"credential_file,omitempty"`
 	CredentialMode   CredentialMode    `json:"credential_mode,omitempty"`
 	AnthropicVersion string            `json:"anthropic_version,omitempty"`
@@ -742,6 +743,10 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 	for _, route := range c.Routes {
 		if !bounded(route.ID, 128) || route.MaxConcurrent < 1 || route.MaxConcurrent > 256 {
 			return nil, errors.New("gateway route requires bounded id and max_concurrent from 1 to 256")
+		}
+		if route.UpstreamModel != "" &&
+			(!bounded(route.UpstreamModel, 256) || strings.TrimSpace(route.UpstreamModel) != route.UpstreamModel) {
+			return nil, fmt.Errorf("gateway route %q upstream_model must be a bounded exact model identifier", route.ID)
 		}
 		if _, exists := loaded[route.ID]; exists {
 			return nil, fmt.Errorf("duplicate gateway route %q", route.ID)

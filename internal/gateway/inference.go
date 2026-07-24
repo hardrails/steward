@@ -99,6 +99,29 @@ func topLevelModel(raw []byte) (string, error) {
 	return model, nil
 }
 
+func rewriteTopLevelModel(raw []byte, upstreamModel string) ([]byte, error) {
+	if upstreamModel == "" {
+		return raw, nil
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	model, err := json.Marshal(upstreamModel)
+	if err != nil {
+		return nil, err
+	}
+	document["model"] = model
+	rewritten, err := json.Marshal(document)
+	if err != nil {
+		return nil, err
+	}
+	if len(rewritten) > maxProxyBody {
+		return nil, errors.New("inference request exceeds the byte limit after model mapping")
+	}
+	return rewritten, nil
+}
+
 func skipJSONValue(decoder *json.Decoder, first json.Token) error {
 	delimiter, composite := first.(json.Delim)
 	if !composite {
