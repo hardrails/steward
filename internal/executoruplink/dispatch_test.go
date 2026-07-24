@@ -63,9 +63,16 @@ func TestDispatcherRoutesBoundedWorkloadLeaseForExactGeneration(t *testing.T) {
 	called := 0
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called++
-		wantPath := "/v1/workloads/" + executor.RuntimeRef("tenant-a", "agent-1") + "/lease"
-		if r.Method != http.MethodPost || r.URL.Path != wantPath {
-			t.Fatalf("renew request = %s %s, want POST %s", r.Method, r.URL.Path, wantPath)
+		wantPath := "/v1/workloads/" + executor.RuntimeRef("tenant-a", "agent-1")
+		if r.Method == http.MethodGet && r.URL.Path == wantPath {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"runtime_ref": executor.RuntimeRef("tenant-a", "agent-1"),
+				"status":      "exited",
+			})
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != wantPath+"/lease" {
+			t.Fatalf("renew request = %s %s, want POST %s", r.Method, r.URL.Path, wantPath+"/lease")
 		}
 		var lease admission.WorkloadLease
 		if err := json.NewDecoder(r.Body).Decode(&lease); err != nil ||
@@ -89,14 +96,56 @@ func TestDispatcherRoutesBoundedWorkloadLeaseForExactGeneration(t *testing.T) {
 		Payload: json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:02:00Z"}`),
 	}
 	rep := d.execute(context.Background(), cmd)
-	if rep.Status != "done" || rep.ReportedStatus != "leased" || called != 1 {
+	if rep.Status != "done" || rep.ReportedStatus != "stopped" || called != 2 {
 		t.Fatalf("renew report=%+v calls=%d", rep, called)
 	}
 	cmd.CommandID = "renew-2"
 	cmd.CommandSequence = 3
 	cmd.Payload = json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T11:59:59Z"}`)
-	if rep := d.execute(context.Background(), cmd); rep.Status != "failed" || called != 1 {
+	if rep := d.execute(context.Background(), cmd); rep.Status != "failed" || called != 2 {
 		t.Fatalf("invalid renew report=%+v calls=%d", rep, called)
+	}
+}
+
+func TestDispatcherTreatsPostRenewObservationFailureAsEffectUncertain(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
+	if err := store.advance("tenant-a", "agent-1", position{
+		ClaimGeneration: 1, Generation: 2, Sequence: 1, ReportedStatus: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			var lease admission.WorkloadLease
+			if err := json.NewDecoder(r.Body).Decode(&lease); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(lease)
+			return
+		}
+		http.Error(w, `{"error":"docker_unavailable","message":"Docker inspection failed"}`, http.StatusBadGateway)
+	})
+	d := dispatcher{
+		handler: handler, token: "token", nodeID: "node-1", nodeScoped: true,
+		state: store, now: func() time.Time { return now },
+	}
+	runtimeRef, err := RuntimeRefV2("tenant-a", "node-1", "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := d.execute(context.Background(), command{
+		CommandID: "renew-1", TenantID: "tenant-a", NodeID: "node-1", InstanceID: "agent-1",
+		RuntimeRef: runtimeRef, Kind: "renew", ClaimGeneration: 1,
+		InstanceGeneration: 2, CommandSequence: 2, signed: true,
+		Payload: json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:02:00Z"}`),
+	})
+	if report.Status != "failed" || !report.effectUncertain ||
+		!strings.Contains(report.Result["error"].(string), "lease renewed but runtime status could not be observed") {
+		t.Fatalf("renew report=%+v", report)
+	}
+	if current, ok := store.position("tenant-a", "agent-1"); !ok || current.Sequence != 1 {
+		t.Fatalf("renew advanced durable position after uncertain observation: %#v %t", current, ok)
 	}
 }
 

@@ -352,10 +352,11 @@ func (d *dispatcher) apply(ctx context.Context, cmd command, tenantID, instanceI
 			return "", err
 		}
 		ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
-		if err := d.callWorkloadLease(ctx, runtimeRef, lease); err != nil {
+		status, err := d.callWorkloadLease(ctx, runtimeRef, lease)
+		if err != nil {
 			return "", err
 		}
-		return "leased", nil
+		return status, nil
 	case "stop":
 		if err := validateLifecyclePayload(cmd); err != nil {
 			return "", err
@@ -709,10 +710,10 @@ func (d *dispatcher) callWorkloadLease(
 	ctx context.Context,
 	runtimeRef string,
 	want admission.WorkloadLease,
-) error {
+) (string, error) {
 	raw, err := json.Marshal(want)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(
 		ctx,
@@ -721,17 +722,17 @@ func (d *dispatcher) callWorkloadLease(
 		bytes.NewReader(raw),
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+d.token)
 	req.Header.Set("Content-Type", "application/json")
 	response := newLocalResponse(controlprotocol.MaxExecutorReportBytes)
 	d.handler.ServeHTTP(response, req)
 	if response.overflow {
-		return localCallError(http.MethodPost, errLocalResponseLimit)
+		return "", localCallError(http.MethodPost, errLocalResponseLimit)
 	}
 	if response.status >= 400 {
-		return localCallError(http.MethodPost, fmt.Errorf(
+		return "", localCallError(http.MethodPost, fmt.Errorf(
 			"local executor returned HTTP %d: %s",
 			response.status,
 			strings.TrimSpace(response.body.String()),
@@ -739,12 +740,24 @@ func (d *dispatcher) callWorkloadLease(
 	}
 	var got admission.WorkloadLease
 	if err := dsse.DecodeStrictInto(response.body.Bytes(), controlprotocol.MaxExecutorReportBytes, &got); err != nil {
-		return localCallError(http.MethodPost, fmt.Errorf("decode local workload lease response: %w", err))
+		return "", localCallError(http.MethodPost, fmt.Errorf("decode local workload lease response: %w", err))
 	}
 	if got != want {
-		return localCallError(http.MethodPost, errors.New("local executor response changed workload lease expiry"))
+		return "", localCallError(http.MethodPost, errors.New("local executor response changed workload lease expiry"))
 	}
-	return nil
+	// A lease update proves authority, not liveness. Re-read the actual runtime
+	// after the persisted renewal so an expired workload that Executor already
+	// stopped cannot be reported to Control as healthy. A failed observation is
+	// effect-uncertain because the preceding lease mutation did succeed; the
+	// durable delivery protocol may safely retry the idempotent exact renewal.
+	status, err := d.call(ctx, http.MethodGet, "/v1/workloads/"+runtimeRef, nil)
+	if err != nil {
+		return "", uncertainEffectError{cause: fmt.Errorf(
+			"workload lease renewed but runtime status could not be observed: %w",
+			err,
+		)}
+	}
+	return status, nil
 }
 
 type localResponse struct {
