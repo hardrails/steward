@@ -208,7 +208,7 @@ func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities
 		`Existing work is not evicted when a limit is lowered.`,
 		`New command delivery is frozen`,
 		`A command already accepted by a node is not instantly revoked`,
-		`OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.`,
+		`SAFE BY DEFAULT: MOST ACTIONS STAY IN THE CLI.`,
 		`method !== "GET" && !commandSubmission`,
 		`reenteredCredential !== credentialRef.current`,
 		`command_dsse_base64: preview.envelopeBase64`,

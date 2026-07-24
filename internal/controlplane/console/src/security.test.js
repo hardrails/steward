@@ -36,7 +36,7 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     "More nodes exist.",
     "tenantPage.next_after",
     "Load 500 more",
-    "OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.",
+    "SAFE BY DEFAULT: MOST ACTIONS STAY IN THE CLI.",
     'projectedPath("/v1/operations/agents"',
     'projectedPath("/v1/operations/timeline"',
     'api("/v1/tenants/" + encodeURIComponent(tenantID) + "/instance-events?limit=100"',
@@ -70,6 +70,18 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
   }
   const explicitMutations = Array.from(source.matchAll(/method:\s*"(POST|PUT|PATCH|DELETE)"/gu), (match) => match[1]);
   assert.deepEqual(explicitMutations, ["POST"]);
+});
+
+test("every labelled console section points at a real heading", async () => {
+  const source = await readFile(new URL("./App.jsx", import.meta.url), "utf8");
+  const labelledBy = Array.from(
+    source.matchAll(/aria-labelledby="([^"]+)"/gu),
+    (match) => match[1],
+  );
+  assert.ok(labelledBy.length >= 10);
+  for (const id of labelledBy) {
+    assert.equal(source.includes(`id="${id}"`), true, `missing heading id: ${id}`);
+  }
 });
 
 test("the command courier has no signing, key import, persistence, or network authority", async () => {
