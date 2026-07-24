@@ -92,6 +92,18 @@ func localCallError(method string, cause error) error {
 	return uncertainEffectError{cause: cause}
 }
 
+// localHTTPStatusError classifies only a complete response from Steward's
+// in-process Executor handler. A 4xx response is an authoritative rejection:
+// the handler understood the request and refused it before accepting the
+// requested state transition. Server errors and every failure without a
+// complete HTTP response remain effect-uncertain for mutating methods.
+func localHTTPStatusError(method string, status int, cause error) error {
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+		return cause
+	}
+	return localCallError(method, cause)
+}
+
 type workloadPayload struct {
 	ProfileID string             `json:"profile_id"`
 	Image     string             `json:"image"`
@@ -510,8 +522,9 @@ func (d *dispatcher) callAdmissionV4(
 		return "", nil, localCallError(http.MethodPost, errLocalResponseLimit)
 	}
 	if response.status >= 400 {
-		return "", nil, localCallError(
+		return "", nil, localHTTPStatusError(
 			http.MethodPost,
+			response.status,
 			fmt.Errorf(
 				"local executor returned HTTP %d: %s",
 				response.status,
@@ -677,7 +690,11 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 		return "", localCallError(method, errLocalResponseLimit)
 	}
 	if res.status >= 400 {
-		return "", localCallError(method, fmt.Errorf("local executor returned HTTP %d: %s", res.status, strings.TrimSpace(res.body.String())))
+		return "", localHTTPStatusError(
+			method,
+			res.status,
+			fmt.Errorf("local executor returned HTTP %d: %s", res.status, strings.TrimSpace(res.body.String())),
+		)
 	}
 	if res.status == http.StatusNoContent {
 		return "stopped", nil
@@ -732,11 +749,15 @@ func (d *dispatcher) callWorkloadLease(
 		return "", localCallError(http.MethodPost, errLocalResponseLimit)
 	}
 	if response.status >= 400 {
-		return "", localCallError(http.MethodPost, fmt.Errorf(
-			"local executor returned HTTP %d: %s",
+		return "", localHTTPStatusError(
+			http.MethodPost,
 			response.status,
-			strings.TrimSpace(response.body.String()),
-		))
+			fmt.Errorf(
+				"local executor returned HTTP %d: %s",
+				response.status,
+				strings.TrimSpace(response.body.String()),
+			),
+		)
 	}
 	var got admission.WorkloadLease
 	if err := dsse.DecodeStrictInto(response.body.Bytes(), controlprotocol.MaxExecutorReportBytes, &got); err != nil {

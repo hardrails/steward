@@ -214,6 +214,69 @@ func TestV3ReportsDistinguishRejectedValidationFromUncertainMutation(t *testing.
 	}
 }
 
+func TestV3ReportsTreatCompleteExecutor4xxAsRejected(t *testing.T) {
+	status := http.StatusConflict
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"state_exists","message":"use resume"}`, status)
+	})
+	d := dispatcher{
+		handler: handler, token: "token", tenantID: "tenant-a", nodeID: "node-1",
+		state: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
+	}
+	base := command{
+		CommandID: "explicit-rejection", TenantID: "tenant-a", NodeID: "node-1",
+		RuntimeRef: "uplink:6:node-1:agent-1", Kind: "provision",
+		Payload:         json.RawMessage(`{"profile_id":"hermes-v1","image":"registry/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"memory_bytes":1048576,"cpu_millis":100,"pids":32},"egress":{}}`),
+		ClaimGeneration: 1, InstanceGeneration: 1, CommandSequence: 1,
+	}
+	rejected := d.execute(context.Background(), base)
+	if rejected.Status != controlprotocol.ExecutorStatusFailed || rejected.effectUncertain {
+		t.Fatalf("complete 409 response = %#v", rejected)
+	}
+	delivery := deliveryFixture("explicit-rejection", 1)
+	delivery.CommandID = base.CommandID
+	wire := makeReportV3(delivery, rejected)
+	if wire.Status != controlprotocol.ExecutorStatusRejected || wire.ErrorCode != "executor_command_rejected" {
+		t.Fatalf("complete 409 wire report = %#v", wire)
+	}
+	if got := rejected.Result["error"]; !strings.Contains(got.(string), "HTTP 409") ||
+		!strings.Contains(got.(string), "state_exists") {
+		t.Fatalf("rejection lost safe boundary evidence: %v", got)
+	}
+
+	status = http.StatusInternalServerError
+	base.CommandID = "explicit-server-error"
+	uncertain := d.execute(context.Background(), base)
+	if uncertain.Status != controlprotocol.ExecutorStatusFailed || !uncertain.effectUncertain {
+		t.Fatalf("complete 500 response = %#v", uncertain)
+	}
+	delivery.CommandID = base.CommandID
+	wire = makeReportV3(delivery, uncertain)
+	if wire.Status != controlprotocol.ExecutorStatusOutcomeUnknown || wire.ErrorCode != "outcome_unknown" {
+		t.Fatalf("complete 500 wire report = %#v", wire)
+	}
+}
+
+func TestProtocol4AdmissionTreatsCompleteExecutor4xxAsRejected(t *testing.T) {
+	status := http.StatusConflict
+	d := dispatcher{
+		handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, `{"error":"state_exists","message":"use resume"}`, status)
+		}),
+		token: "token",
+	}
+	_, _, err := d.callAdmissionV4(context.Background(), admissionPayload{}, "unused")
+	if err == nil || effectMayHaveOccurred(err) || !strings.Contains(err.Error(), "state_exists") {
+		t.Fatalf("protocol-4 admission 409 = %v", err)
+	}
+
+	status = http.StatusInternalServerError
+	_, _, err = d.callAdmissionV4(context.Background(), admissionPayload{}, "unused")
+	if err == nil || !effectMayHaveOccurred(err) {
+		t.Fatalf("protocol-4 admission 500 = %v", err)
+	}
+}
+
 func TestV3ReportBoundsAndSanitizesReportedStatus(t *testing.T) {
 	delivery := deliveryFixture("bounded-status", 1)
 	invalid := "  run\r\n\x00" + string([]byte{0xff}) + strings.Repeat("é", 64) + "  "
