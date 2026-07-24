@@ -27,22 +27,10 @@ const (
 )
 
 func consoleCommand(arguments []string, stdout io.Writer) error {
-	var selected cliContext
-	if !hasNamedFlag(arguments, "no-context") {
-		config, _, err := loadCLIContextConfig()
-		if err != nil {
-			return err
-		}
-		selected, err = selectedCLIContext(config)
-		if err != nil {
-			return err
-		}
-	}
-
 	flags := flag.NewFlagSet("console", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	controlURL := flags.String("control-url", selected.ControlURL, "Steward Control origin")
-	caFile := flags.String("ca-file", selected.CAFile, "private Control CA PEM bundle")
+	flags.SetOutput(stdout)
+	controlURL := flags.String("control-url", "", "Steward Control origin")
+	caFile := flags.String("ca-file", "", "private Control CA PEM bundle")
 	listenAddress := flags.String("listen", "127.0.0.1:0", "literal loopback listener")
 	noContext := flags.Bool("no-context", false, "do not use the selected CLI context")
 	if err := flags.Parse(arguments); err != nil {
@@ -53,6 +41,22 @@ func consoleCommand(arguments []string, stdout io.Writer) error {
 	}
 	if *noContext && !hasNamedFlag(arguments, "control-url") {
 		return errors.New("console -no-context requires -control-url")
+	}
+	if !*noContext {
+		config, _, err := loadCLIContextConfig()
+		if err != nil {
+			return err
+		}
+		selected, err := selectedCLIContext(config)
+		if err != nil {
+			return err
+		}
+		if !hasNamedFlag(arguments, "control-url") {
+			*controlURL = selected.ControlURL
+		}
+		if !hasNamedFlag(arguments, "ca-file") {
+			*caFile = selected.CAFile
+		}
 	}
 	if *controlURL == "" {
 		return errors.New("console requires a Control connection; select a context or pass -no-context -control-url")

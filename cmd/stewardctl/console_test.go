@@ -6,10 +6,14 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"flag"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -128,6 +132,61 @@ func TestConsoleProxyRejectsRemoteAndNamedListeners(t *testing.T) {
 			t.Fatalf("listenConsoleLoopback(%q): %v", address, err)
 		}
 		_ = listener.Close()
+	}
+}
+
+func TestConsoleCommandValidatesBeforeListening(t *testing.T) {
+	contextPath := filepath.Join(t.TempDir(), "contexts.json")
+	t.Setenv("STEWARD_CONTEXT_FILE", contextPath)
+
+	var help bytes.Buffer
+	if err := consoleCommand([]string{"-help"}, &help); !errors.Is(err, flag.ErrHelp) ||
+		!strings.Contains(help.String(), "-control-url") {
+		t.Fatalf("console -help error=%v output=%q", err, help.String())
+	}
+	tests := []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{"missing context", nil, "no Steward CLI context is selected"},
+		{"no-context needs URL", []string{"-no-context"}, "requires -control-url"},
+		{"positional argument", []string{"-no-context", "-control-url", "https://127.0.0.1:8443", "extra"}, "named flags only"},
+		{"remote plaintext", []string{"-no-context", "-control-url", "http://control.example:8443"}, "remote control URL must use HTTPS"},
+		{"invalid URL", []string{"-no-context", "-control-url", "not-a-url"}, "absolute HTTPS origin"},
+		{"missing CA", []string{"-no-context", "-control-url", "https://127.0.0.1:8443", "-ca-file", filepath.Join(t.TempDir(), "missing.pem")}, "read Control CA"},
+		{"remote listener", []string{"-no-context", "-control-url", "https://127.0.0.1:8443", "-listen", "0.0.0.0:8443"}, "literal loopback IP"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := consoleCommand(test.arguments, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("consoleCommand(%q) error = %v, want %q", test.arguments, err, test.want)
+			}
+		})
+	}
+}
+
+func TestConsoleCommandUsesSelectedContextBeforeBinding(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEWARD_CONTEXT_FILE", filepath.Join(directory, "contexts.json"))
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("test-operator-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := contextSet([]string{
+		"dev",
+		"-control-url", "https://127.0.0.1:8443",
+		"-token-file", tokenPath,
+	}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	err := consoleCommand([]string{"-listen", "0.0.0.0:0"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "literal loopback IP") {
+		t.Fatalf("selected-context console error = %v", err)
 	}
 }
 
