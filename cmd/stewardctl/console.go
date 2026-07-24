@@ -78,7 +78,6 @@ func consoleCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -108,6 +107,14 @@ func serveConsoleProxy(
 	transport http.RoundTripper,
 	stdout io.Writer,
 ) error {
+	// Keep ownership until Serve starts so validation and output failures do not
+	// leak the listener. http.Server owns and closes it after Serve is called.
+	serveStarted := false
+	defer func() {
+		if !serveStarted {
+			_ = listener.Close()
+		}
+	}()
 	parsedTarget, parseErr := parseConsoleTarget(targetURL)
 	if parseErr != nil {
 		return parseErr
@@ -158,6 +165,7 @@ func serveConsoleProxy(
 	}
 
 	serveResult := make(chan error, 1)
+	serveStarted = true
 	go func() {
 		serveResult <- server.Serve(listener)
 	}()

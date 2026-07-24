@@ -171,6 +171,16 @@ func TestDeploymentAuthorityRenewalRecoversExpiredRunningGenerationWithoutWideni
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("same-generation authority shortening error = %v", err)
 	}
+	sameIssueTime := renewal
+	sameIssueTime.ExpectedRevision = renewed.Revision
+	sameIssueTime.DelegationDSSE = rewriteDeploymentDelegation(t, renewal.DelegationDSSE, func(value *admission.CommandDelegation) {
+		value.ExpiresAt = canonicalTimestamp(renewedAt.Add(5 * time.Hour))
+	})
+	if _, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, sameIssueTime, renewedAt.Add(time.Hour),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same-generation authority issue-time replay error = %v", err)
+	}
 }
 
 func TestDeploymentUpdateCannotForgetAuthorityForAFormerRuntime(t *testing.T) {
@@ -624,49 +634,53 @@ func TestDeploymentRolloutTransitionsRejectUnavailableAndInvalidInputs(t *testin
 	}
 }
 
-func TestSuccessfulRenewObservationRestartsAWorkloadStoppedAtLeaseExpiry(t *testing.T) {
-	fixture := newRecordsFixture(t, DefaultLimits())
-	fixture.createTenant(t, "tenant-a")
-	_, node := fixture.createNode(t, "tenant-a")
-	created, _, err := fixture.store.ApplyDeployment(
-		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	instance := created.Instances[0]
-	statement := baseV4CommandStatement(
-		"renew-after-expiry", "tenant-a", "node-1", "renew", 1, instance.Generation,
-	)
-	statement.InstanceID = instance.InstanceID
-	delivery := submitAndPollV4(t, fixture, node, &statement)
-	report := controlprotocol.ExecutorReportV4{
-		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
-		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
-		CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
-		Status: controlprotocol.ExecutorStatusDone, ReportedStatus: "stopped", ClaimGeneration: 1,
-		Result: controlprotocol.ExecutorReportResultV4{RuntimeRef: statement.RuntimeRef},
-	}
-	if applied, err := fixture.store.ApplyReportV4(node, report, fixture.now.Add(4*time.Minute)); err != nil || !applied {
-		t.Fatalf("apply stopped renewal report = (%v, %v)", applied, err)
-	}
-	instance.NodeID = "node-1"
-	instance.Phase = DeploymentInstanceRunning
-	instance.CommandID = statement.CommandID
-	instance.CommandOperation = "renew"
-	instance.CommandSequence = 7
-	created.Instances[0] = instance
-	created.Phase = DeploymentReady
-	fixture.store.mu.Lock()
-	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
-	fixture.store.mu.Unlock()
+func TestSuccessfulRenewObservationRestartsANonRunningWorkload(t *testing.T) {
+	for _, reportedStatus := range []string{"stopped", "failed"} {
+		t.Run(reportedStatus, func(t *testing.T) {
+			fixture := newRecordsFixture(t, DefaultLimits())
+			fixture.createTenant(t, "tenant-a")
+			_, node := fixture.createNode(t, "tenant-a")
+			created, _, err := fixture.store.ApplyDeployment(
+				fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instance := created.Instances[0]
+			statement := baseV4CommandStatement(
+				"renew-after-expiry", "tenant-a", "node-1", "renew", 1, instance.Generation,
+			)
+			statement.InstanceID = instance.InstanceID
+			delivery := submitAndPollV4(t, fixture, node, &statement)
+			report := controlprotocol.ExecutorReportV4{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+				DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+				CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+				Status: controlprotocol.ExecutorStatusDone, ReportedStatus: reportedStatus, ClaimGeneration: 1,
+				Result: controlprotocol.ExecutorReportResultV4{RuntimeRef: statement.RuntimeRef},
+			}
+			if applied, err := fixture.store.ApplyReportV4(node, report, fixture.now.Add(4*time.Minute)); err != nil || !applied {
+				t.Fatalf("apply %s renewal report = (%v, %v)", reportedStatus, applied, err)
+			}
+			instance.NodeID = "node-1"
+			instance.Phase = DeploymentInstanceRunning
+			instance.CommandID = statement.CommandID
+			instance.CommandOperation = "renew"
+			instance.CommandSequence = 7
+			created.Instances[0] = instance
+			created.Phase = DeploymentReady
+			fixture.store.mu.Lock()
+			fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+			fixture.store.mu.Unlock()
 
-	observed, changed, err := fixture.store.ObserveDeploymentCommand(
-		"tenant-a", "deployment-a", instance.InstanceID, created.Revision, fixture.now.Add(5*time.Minute),
-	)
-	if err != nil || !changed || observed.Instances[0].Phase != DeploymentInstanceStarting ||
-		observed.Instances[0].CommandID != "" || observed.Instances[0].CommandOperation != "" {
-		t.Fatalf("observe stopped renewal = (%+v, %v, %v)", observed, changed, err)
+			observed, changed, err := fixture.store.ObserveDeploymentCommand(
+				"tenant-a", "deployment-a", instance.InstanceID, created.Revision, fixture.now.Add(5*time.Minute),
+			)
+			if err != nil || !changed || observed.Instances[0].Phase != DeploymentInstanceStarting ||
+				observed.Instances[0].CommandID != "" || observed.Instances[0].CommandOperation != "" {
+				t.Fatalf("observe %s renewal = (%+v, %v, %v)", reportedStatus, observed, changed, err)
+			}
+		})
 	}
 }
 

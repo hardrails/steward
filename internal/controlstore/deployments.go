@@ -441,7 +441,7 @@ func deploymentDelegationRenewalEqual(
 	replacementIssued, replacementIssuedErr := time.Parse(time.RFC3339Nano, replacement.IssuedAt)
 	if currentExpiryErr != nil || replacementExpiryErr != nil ||
 		currentIssuedErr != nil || replacementIssuedErr != nil ||
-		!replacementExpiry.After(currentExpiry) || replacementIssued.Before(currentIssued) {
+		!replacementExpiry.After(currentExpiry) || !replacementIssued.After(currentIssued) {
 		return false
 	}
 	current.IssuedAt, current.ExpiresAt = "", ""

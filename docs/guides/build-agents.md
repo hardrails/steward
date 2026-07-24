@@ -282,14 +282,14 @@ stewardctl agent apply auditor \
 ```
 
 Control rejects a same-generation update that changes any authority-bearing field,
-shortens the expiry, or moves the issue time backward. Those changes require a new
-generation and the normal rollout path. An otherwise exact monotonic renewal can
-complete while reconciliation advances the deployment revision; it cannot
+does not extend the expiry, or does not advance the issue time. Those changes
+require a new generation and the normal rollout path. An otherwise exact monotonic
+renewal can complete while reconciliation advances the deployment revision; it cannot
 overwrite a concurrent generation, desired-state, or authority change. If renewal
 happens after the old authority and workload lease expired, Executor has already
 stopped the workload locally. The first successful renewal observation reports
-that stopped state, and Control issues a fresh signed start without changing the
-instance generation.
+that stopped or failed state, and Control issues a fresh signed start without
+changing the instance generation.
 
 ```console
 stewardctl agent deployment remove auditor
