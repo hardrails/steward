@@ -473,9 +473,28 @@ select:focus {
   flex-direction: column;
 }
 
+.nav-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-group + .nav-group {
+  border-top: 1px solid var(--line-bright);
+}
+
+.nav-group-label {
+  padding: 14px 20px 7px;
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
 .nav-item {
   display: grid;
-  min-height: 58px;
+  min-height: 46px;
   align-items: center;
   border: 0;
   border-bottom: 1px solid var(--line);
@@ -512,6 +531,64 @@ select:focus {
   color: var(--danger);
   font-family: var(--mono);
   font-size: 9px;
+}
+
+.technical-details {
+  border-top: 1px solid var(--line);
+}
+
+.technical-details summary,
+.command-courier-shell > summary {
+  cursor: pointer;
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.technical-details summary {
+  padding: 13px 0;
+}
+
+.technical-details[open] summary {
+  color: var(--signal);
+}
+
+.command-courier-shell {
+  margin-bottom: 28px;
+  border: 1px solid var(--line);
+  background: var(--ink-soft);
+}
+
+.command-courier-shell > summary {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  list-style-position: inside;
+}
+
+.command-courier-shell > summary small {
+  border: 1px solid var(--line-bright);
+  padding: 4px 7px;
+  color: var(--paper-dim);
+  font-size: 8px;
+}
+
+.command-courier-shell[open] > summary {
+  border-bottom: 1px solid var(--line);
+  color: var(--signal);
+}
+
+.command-courier-intro {
+  max-width: 820px;
+  margin: 0;
+  padding: 18px 20px 0;
+  color: var(--paper-muted);
+  font-size: 12px;
 }
 
 .trust-rail {
@@ -3306,6 +3383,14 @@ td small {
   .navigation nav {
     overflow-x: auto;
     flex-direction: row;
+  }
+
+  .nav-group {
+    display: contents;
+  }
+
+  .nav-group-label {
+    display: none;
   }
 
   .nav-item {

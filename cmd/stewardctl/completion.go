@@ -14,8 +14,9 @@ import (
 )
 
 var completionTree = map[string][]string{
-	"":                            {"help", "status", "explain", "recover", "site", "agent", "workroom", "context", "completion", "support", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
-	"help":                        {"status", "explain", "recover", "site", "agent", "workroom", "context", "completion", "support", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
+	"":                            {"help", "status", "explain", "recover", "console", "site", "agent", "workroom", "context", "completion", "support", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
+	"help":                        {"status", "explain", "recover", "console", "site", "agent", "workroom", "context", "completion", "support", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
+	"console":                     {},
 	"status":                      {},
 	"explain":                     {},
 	"recover":                     {},
@@ -89,6 +90,7 @@ var completionFlags = map[string][]string{
 	"status":                              {"-output", "-watch", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-url", "-node-token-file", "-no-context"},
 	"explain":                             {"-output", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-url", "-node-token-file", "-no-context"},
 	"recover":                             {"-apply", "-output", "-node-url", "-token-file", "-no-context"},
+	"console":                             {"-listen", "-control-url", "-ca-file", "-no-context"},
 	"support matrix":                      {"-output"},
 	"site init":                           {"-site-id", "-tenant-id", "-repository", "-service-id", "-service-ids", "-connector-id", "-connector-ids", "-control-server-names", "-authorized-effects", "-dry-run"},
 	"site verify":                         {"-site-root-public-key"},

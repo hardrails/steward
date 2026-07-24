@@ -4383,6 +4383,10 @@ components:
           $ref: "#/components/schemas/Identifier128"
         node_id:
           $ref: "#/components/schemas/Identifier128"
+        instance_id:
+          allOf:
+            - $ref: "#/components/schemas/Identifier256"
+          description: Logical signed instance identity when retained by the command record.
         runtime_ref:
           type: string
           minLength: 73

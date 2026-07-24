@@ -384,6 +384,27 @@ func NewFromFiles(baseURL, tokenPath, caPath string) (*Client, error) {
 	return New(baseURL, token, ca)
 }
 
+// NewProxyTarget returns the verified Control origin and a dedicated transport
+// for a local reverse proxy. It applies the same URL, TLS, private-CA, timeout,
+// compression, and no-environment-proxy policy as the authenticated client, but
+// it carries no bearer credential. The caller remains responsible for binding
+// its listener to loopback and bounding requests.
+func NewProxyTarget(baseURL string, caPEM []byte) (*url.URL, *http.Transport, error) {
+	client, err := New(baseURL, "", caPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+	target, err := url.Parse(client.baseURL)
+	if err != nil {
+		return nil, nil, errors.New("parse validated control URL")
+	}
+	transport, ok := client.http.Transport.(*http.Transport)
+	if !ok {
+		return nil, nil, errors.New("control transport is unavailable")
+	}
+	return target, transport.Clone(), nil
+}
+
 func (c *Client) CreateTenant(ctx context.Context, tenantID string) (Tenant, error) {
 	var tenant Tenant
 	err := c.do(ctx, http.MethodPost, "/v1/tenants", struct {

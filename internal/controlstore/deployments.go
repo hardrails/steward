@@ -2,6 +2,7 @@ package controlstore
 
 import (
 	"bytes"
+	"reflect"
 	"slices"
 	"sort"
 	"time"
@@ -29,8 +30,11 @@ type DeploymentApply struct {
 }
 
 // ApplyDeployment creates or rolls forward desired state. Exact retries are
-// idempotent. A changed generation requires the last observed revision so two
-// operators cannot silently overwrite each other.
+// idempotent. A tenant may also replace an expiring delegation at the same
+// generation when every authority-bearing field remains identical and only
+// the signed validity window advances. Every other change requires a higher
+// generation and the last observed revision so two operators cannot silently
+// overwrite each other.
 func (store *Store) ApplyDeployment(
 	actor controlauth.Identity,
 	input DeploymentApply,
@@ -153,6 +157,27 @@ func (store *Store) ApplyDeployment(
 		if otherKey != key && deploymentIdentitiesOverlap(other.Instances, instances) {
 			return Deployment{}, false, ErrConflict
 		}
+	}
+	if exists && input.Generation == existing.Generation &&
+		deploymentDelegationRenewalEqual(existing, input, delegation) {
+		if existing.Revision == ^uint64(0) {
+			return Deployment{}, false, ErrCapacityExceeded
+		}
+		deployment := cloneDeployment(existing)
+		deployment.DelegationDSSE = append([]byte(nil), input.DelegationDSSE...)
+		for index := range deployment.Instances {
+			if deployment.Instances[index].LastError == string(DeploymentBlockedDelegationExpired) {
+				deployment.Instances[index].LastError = ""
+				deployment.Instances[index].TransitionedAt = canonicalTimestamp(now)
+			}
+		}
+		deployment.Revision++
+		deployment.UpdatedAt = canonicalTimestamp(now)
+		deployment.Phase = deploymentAggregatePhase(deployment)
+		if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+			return Deployment{}, false, err
+		}
+		return cloneDeployment(deployment), true, nil
 	}
 	if !exists && input.ExpectedRevision != 0 || exists && input.ExpectedRevision != existing.Revision {
 		return Deployment{}, false, ErrConflict
@@ -391,6 +416,37 @@ func deploymentSpecEqual(existing Deployment, input DeploymentApply) bool {
 		deploymentForkEqual(existing.Fork, input.Fork) &&
 		bytes.Equal(existing.CapsuleDSSE, input.CapsuleDSSE) &&
 		bytes.Equal(existing.DelegationDSSE, input.DelegationDSSE)
+}
+
+func deploymentDelegationRenewalEqual(
+	existing Deployment,
+	input DeploymentApply,
+	replacement admission.CommandDelegation,
+) bool {
+	if existing.Rollout != nil || existing.DesiredState != DeploymentRunning ||
+		existing.Generation != input.Generation || existing.AgentName != input.AgentName ||
+		existing.BundleDigest != input.BundleDigest ||
+		existing.DisruptionBudget != effectiveDeploymentDisruptionBudget(input) ||
+		!deploymentForkEqual(existing.Fork, input.Fork) ||
+		!bytes.Equal(existing.CapsuleDSSE, input.CapsuleDSSE) {
+		return false
+	}
+	current, err := admission.InspectCommandDelegation(existing.DelegationDSSE, time.Time{})
+	if err != nil {
+		return false
+	}
+	currentExpiry, currentExpiryErr := time.Parse(time.RFC3339Nano, current.ExpiresAt)
+	replacementExpiry, replacementExpiryErr := time.Parse(time.RFC3339Nano, replacement.ExpiresAt)
+	currentIssued, currentIssuedErr := time.Parse(time.RFC3339Nano, current.IssuedAt)
+	replacementIssued, replacementIssuedErr := time.Parse(time.RFC3339Nano, replacement.IssuedAt)
+	if currentExpiryErr != nil || replacementExpiryErr != nil ||
+		currentIssuedErr != nil || replacementIssuedErr != nil ||
+		!replacementExpiry.After(currentExpiry) || !replacementIssued.After(currentIssued) {
+		return false
+	}
+	current.IssuedAt, current.ExpiresAt = "", ""
+	replacement.IssuedAt, replacement.ExpiresAt = "", ""
+	return reflect.DeepEqual(current, replacement)
 }
 
 func deploymentForkEqual(left, right *DeploymentFork) bool {

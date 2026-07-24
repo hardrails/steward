@@ -33,6 +33,7 @@ const (
 	evidenceChallengeLifetime = 2 * time.Minute
 	maxEvidenceExportAttempts = 3
 	evidenceExportRetryAfter  = 1
+	strictTransportSecurity   = "max-age=31536000"
 )
 
 // AuthorityMode defines whether Control may mint lifecycle commands under a
@@ -117,6 +118,9 @@ func New(config Config) (*Server, error) {
 }
 
 func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.TLS != nil {
+		writer.Header().Set("Strict-Transport-Security", strictTransportSecurity)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			server.logger.Error("control HTTP panic recovered", "panic", recovered, "method", request.Method, "path", request.URL.Path)

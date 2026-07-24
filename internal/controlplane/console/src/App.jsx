@@ -550,7 +550,7 @@ function Airlock({authenticating, error, onUnlock}) {
       </div>
       <div className="airlock-panel">
         <div className="panel-index" aria-hidden="true">01 / AUTHORITY</div>
-        <label htmlFor="operator-token">Operator bearer credential</label>
+        <label htmlFor="operator-token">Operator access token</label>
         <div className="credential-entry">
           <input
             ref={inputRef}
@@ -571,13 +571,14 @@ function Airlock({authenticating, error, onUnlock}) {
             }}
           />
           <button className="button button-primary" type="button" disabled={authenticating} onClick={submit}>
-            {authenticating ? "Authenticating…" : "Enter control room"}
+            {authenticating ? "Checking access…" : "Open console"}
           </button>
         </div>
         <p id="credential-note" className="microcopy">
-          The credential is held only in this tab's JavaScript memory. Locking,
-          navigating away, 15 minutes of inactivity, or eight hours of use clears
-          it. Browser extensions may still read page content; use a hardened
+          Paste the token created when your Steward operator was connected. It
+          stays only in this tab's memory and is cleared when you lock or leave
+          the page, after 15 minutes of inactivity, or after eight hours.
+          Browser extensions may still read the page, so use a dedicated
           operator profile.
         </p>
         <p id="login-error" className="error-message" role="alert">{error}</p>
@@ -586,20 +587,28 @@ function Airlock({authenticating, error, onUnlock}) {
   );
 }
 
-const views = [
-  ["overview", "01", "Fleet health"],
-  ["inbox", "02", "Agent inbox"],
-  ["workrooms", "03", "Workrooms"],
-  ["schedules", "04", "Schedules"],
-  ["attention", "05", "Needs review"],
-  ["incident", "06", "Incident view"],
-  ["nodes", "07", "Agent nodes"],
-  ["pools", "08", "Node pools"],
-  ["commands", "09", "Signed activity"],
-  ["credentials", "10", "Access records"],
-  ["agents", "11", "Agents"],
-  ["tasks", "12", "Fleet tasks"],
-  ["events", "13", "Agent signals"],
+const navigationGroups = [
+  ["Monitor", [
+    ["overview", "01", "Overview"],
+    ["attention", "02", "Needs review"],
+    ["incident", "03", "Timeline"],
+  ]],
+  ["Agents", [
+    ["agents", "04", "Agents"],
+    ["inbox", "05", "Questions"],
+    ["tasks", "06", "Tasks"],
+    ["workrooms", "07", "Workrooms"],
+    ["schedules", "08", "Schedules"],
+    ["events", "09", "Agent updates"],
+  ]],
+  ["Infrastructure", [
+    ["nodes", "10", "Nodes"],
+    ["pools", "11", "Capacity pools"],
+  ]],
+  ["Security", [
+    ["commands", "12", "Activity"],
+    ["credentials", "13", "Access"],
+  ]],
 ];
 
 function ControlRoom(props) {
@@ -630,18 +639,29 @@ function ControlRoom(props) {
           </span>
         </div>
         <nav>
-          {views.filter(([id]) => id !== "pools" || session.siteAdmin).map(([id, index, label]) => (
-            <button
-              key={id}
-              className={"nav-item" + (view === id ? " is-active" : "")}
-              type="button"
-              aria-current={view === id ? "page" : undefined}
-              onClick={() => props.onView(id)}
-            >
-              <span>{index}</span> {label}
-              {id === "attention" ? <b>{attentionCount}</b> : null}
-            </button>
-          ))}
+          {navigationGroups.map(([group, items]) => {
+            const visibleItems = items.filter(([id]) => id !== "pools" || session.siteAdmin);
+            if (!visibleItems.length) {
+              return null;
+            }
+            return (
+              <div className="nav-group" key={group}>
+                <span className="nav-group-label">{group}</span>
+                {visibleItems.map(([id, index, label]) => (
+                  <button
+                    key={id}
+                    className={"nav-item" + (view === id ? " is-active" : "")}
+                    type="button"
+                    aria-current={view === id ? "page" : undefined}
+                    onClick={() => props.onView(id)}
+                  >
+                    <span>{index}</span> {label}
+                    {id === "attention" ? <b>{attentionCount}</b> : null}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </nav>
         <div className="trust-rail">
           <span>NO CLOUD CALLS</span>
@@ -687,8 +707,8 @@ function ControlRoom(props) {
           </div>
         </div>
         <div className="read-only-boundary">
-          <strong>OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.</strong>
-          <span>This console can transfer an exact command signed elsewhere. Incident freeze changes, private keys, reusable service credentials, and general mutations stay outside the browser.</span>
+          <strong>SAFE BY DEFAULT: MOST ACTIONS STAY IN THE CLI.</strong>
+          <span>Use this console to understand fleet state. Private keys, reusable service credentials, incident controls, and general changes stay outside the browser. The Activity view can transfer one command signed elsewhere.</span>
         </div>
         {snapshot ? <OperationalFreezeBanner status={snapshot.freeze} tenantID={selectedTenant} /> : null}
         {tenantError ? <div className="flash-message is-error" role="alert">{tenantError}</div> : null}
@@ -1177,7 +1197,7 @@ function Overview({snapshot, onAttention}) {
   const capacityWarning = summary.capacity.some((item) => item.warning);
   return (
     <section className="view" aria-labelledby="overview-title">
-      <ViewHeading eyebrow="LIVE FLEET POSTURE" title="What needs your attention?">
+      <ViewHeading id="overview-title" eyebrow="LIVE FLEET POSTURE" title="What needs your attention?">
         Generated {formatTime(summary.generated_at)}
       </ViewHeading>
       <div className="metric-grid">
@@ -1321,7 +1341,7 @@ function AgentApplicationsView({page, tenantID}) {
   const degraded = page.agents.filter((agent) => ["failed", "rejected", "outcome_unknown"].includes(agent.latest_terminal_status)).length;
   return (
     <section className="view" aria-labelledby="agent-applications-title">
-      <ViewHeading eyebrow="SIGNED RUNTIME OBSERVATIONS" title="Your agent fleet, without guesswork.">
+      <ViewHeading id="agent-applications-title" eyebrow="SIGNED RUNTIME OBSERVATIONS" title="Your agent fleet, without guesswork.">
         Last successful workload state and latest signed operation for the {tenant} projection. This is observed state, not desired state.
       </ViewHeading>
       <div className="agent-tally" aria-label="Agent fleet summary">
@@ -1337,17 +1357,24 @@ function AgentApplicationsView({page, tenantID}) {
               <div className="agent-card-head">
                 <div>
                   <span className="panel-index">{agent.service_id || "AGENT RUNTIME"}</span>
-                  <h3>{agent.latest_command_kind || "observed"}</h3>
+                  <h3>{agent.instance_id || "Unnamed runtime"}</h3>
                 </div>
                 <Badge kind={agentStatusKind(agent)}>{agent.observed_status}</Badge>
               </div>
               <dl className="agent-facts">
                 <div><dt>Tenant / node</dt><dd>{agent.tenant_id} / {agent.node_id}</dd></div>
-                <div><dt>Generation</dt><dd>{agent.instance_generation}</dd></div>
-                <div className="agent-runtime"><dt>Runtime</dt><dd>{agent.runtime_ref}</dd></div>
                 <div><dt>Latest signed operation</dt><dd>{agent.latest_command_kind} · {agent.latest_terminal_status || agent.latest_command_state}</dd></div>
                 <div><dt>Last activity</dt><dd>{formatTime(agent.updated_at)}</dd></div>
               </dl>
+              <details className="technical-details">
+                <summary>Technical details</summary>
+                <dl className="agent-facts">
+                  <div><dt>Instance</dt><dd>{agent.instance_id || "not retained by this controller"}</dd></div>
+                  <div><dt>Generation</dt><dd>{agent.instance_generation}</dd></div>
+                  <div className="agent-runtime"><dt>Runtime reference</dt><dd>{agent.runtime_ref}</dd></div>
+                  <div><dt>Service</dt><dd>{agent.service_id || "not reported"}</dd></div>
+                </dl>
+              </details>
               <div className="agent-capabilities">
                 {displayStringList(agent.egress_route_ids).map((route) => <Badge key={`egress-${route}`}>egress:{route}</Badge>)}
                 {displayStringList(agent.connector_ids).map((connector) => <Badge key={`connector-${connector}`}>connector:{connector}</Badge>)}
@@ -1371,7 +1398,7 @@ function AgentApplicationsView({page, tenantID}) {
         <article className="panel">
           <PanelHeading index="01 / DEFINE" title="Create an agent" />
           <p>Choose the reasoning runtime while Steward fixes the image, skills, model route, resources, state, lifetime, and isolation requirements.</p>
-          <pre><code>{`stewardctl agent init -runtime hermes -name my-agent my-agent
+          <pre><code>{`stewardctl agent create my-agent -runtime hermes
 stewardctl agent build -file my-agent/Stewardfile.cue`}</code></pre>
         </article>
         <article className="panel">
@@ -1475,7 +1502,7 @@ function AttentionCard({item}) {
 function AttentionView({page}) {
   return (
     <section className="view" aria-labelledby="attention-title">
-      <ViewHeading eyebrow="DERIVED, NOT MUTABLE" title="Needs review">
+      <ViewHeading id="attention-title" eyebrow="DERIVED, NOT MUTABLE" title="Needs review">
         Findings computed from retained records and current node observations. This view does not change fleet state.
       </ViewHeading>
       <AttentionList items={page.items} />
@@ -1498,7 +1525,7 @@ function IncidentTimelineView({page}) {
   }, {});
   return (
     <section className="view incident-view" aria-labelledby="incident-title">
-      <ViewHeading eyebrow="CURRENT RETAINED FACTS" title="What changed the risk posture?">
+      <ViewHeading id="incident-title" eyebrow="CURRENT RETAINED FACTS" title="What changed the risk posture?">
         One chronology for current containment, evidence, access, and failed-workload facts. Metadata only; no prompts, secrets, bodies, or results.
       </ViewHeading>
       <div className="incident-summary" aria-label="Incident fact summary">
@@ -1857,7 +1884,7 @@ function NodePlacement({placement, drain}) {
 function NodesView({page, tenantID}) {
   return (
     <section className="view" aria-labelledby="nodes-title">
-      <ViewHeading eyebrow="ENROLLED EXECUTORS" title="Agent nodes">
+      <ViewHeading id="nodes-title" eyebrow="ENROLLED EXECUTORS" title="Agent nodes">
         {tenantID ? "Tenant " + tenantID : "Select one tenant to inspect its nodes."}
       </ViewHeading>
       <TableFrame empty={!tenantID ? "Select one tenant to load nodes." : "No nodes in this tenant."} hasRows={page.nodes.length > 0}>
@@ -1985,10 +2012,18 @@ function CommandsView({page, tenantID, onSubmit}) {
 
   return (
     <section className="view" aria-labelledby="commands-title">
-      <ViewHeading eyebrow="OFFLINE-SIGNED COMMAND" title="Transfer a signed action">
-        Load a command signed outside this browser, compare its exact digest with the signing station, and submit the unchanged file.
+      <ViewHeading id="commands-title" eyebrow="RETAINED METADATA" title="Activity">
+        Review signed command state. Command bytes and terminal result text are not returned by this view.
       </ViewHeading>
-      <div className="command-courier">
+      <details className="command-courier-shell">
+        <summary>
+          <span>Submit an offline-signed command</span>
+          <small>Advanced</small>
+        </summary>
+        <p className="command-courier-intro">
+          Load a command signed outside this browser, compare its exact digest with the signing station, and submit the unchanged file.
+        </p>
+        <div className="command-courier">
         <div className="courier-intake">
           <span className="panel-index">01 / LOAD</span>
           <label htmlFor="signed-command-file">Signed Executor command</label>
@@ -2061,10 +2096,8 @@ function CommandsView({page, tenantID, onSubmit}) {
         ) : null}
         {error ? <p className="flash-message is-error" role="alert">{error}</p> : null}
         {result ? <p className="flash-message is-success" role="status">{result}</p> : null}
-      </div>
-      <ViewHeading eyebrow="RETAINED METADATA" title="Signed activity">
-        Signed command bytes and terminal result text are not returned by this view.
-      </ViewHeading>
+        </div>
+      </details>
       <TableFrame empty="No commands in this projection." hasRows={page.commands.length > 0}>
         <table>
           <thead><tr><th>Command</th><th>Tenant / Node</th><th>State</th><th>Created</th></tr></thead>
@@ -2094,7 +2127,7 @@ function CommandsView({page, tenantID, onSubmit}) {
 function CredentialsView({page}) {
   return (
     <section className="view" aria-labelledby="credentials-title">
-      <ViewHeading eyebrow="NON-SECRET RECORDS" title="Access records">
+      <ViewHeading id="credentials-title" eyebrow="NON-SECRET RECORDS" title="Access records">
         Review who can call Steward. Bearer values and token message-authentication codes are never returned.
       </ViewHeading>
       <TableFrame empty="No credentials in this projection." hasRows={page.credentials.length > 0}>

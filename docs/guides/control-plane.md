@@ -85,7 +85,10 @@ client.
 
 When HTTPS is configured, Steward Control accepts TLS 1.3 only. The Steward Control
 client shared by `stewardctl control` and `steward-mcp` also rejects HTTPS servers
-that cannot negotiate TLS 1.3.
+that cannot negotiate TLS 1.3. Responses on a direct TLS listener include
+`Strict-Transport-Security: max-age=31536000`. When a separate proxy terminates
+TLS, that proxy must add the transport-security header because Control does not
+trust forwarded-protocol headers.
 
 To install the strict profile, make the choice explicit:
 
@@ -1031,9 +1034,12 @@ stewardctl control agent list \
 
 Each record separates the last successful workload observation from the latest
 signed operation. A failed stop can therefore appear beside an observed
-`running` status without falsely claiming that the workload stopped. The list is
-read-only and excludes command bodies, task authority, relay endpoints, errors,
-and secret values.
+`running` status without falsely claiming that the workload stopped. Current
+signed commands also identify the logical `instance_id`, so an operator does not
+need to infer the agent from its opaque runtime reference. Older retained records
+that predate that signed identity projection may omit it. The list is read-only
+and excludes command bodies, task authority, relay endpoints, errors, and secret
+values.
 
 Inspect command metadata across a scope without returning signed command bytes,
 terminal result bodies, reported status text, or error codes:

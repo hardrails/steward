@@ -448,7 +448,12 @@ func (store *Store) ObserveDeploymentCommand(
 		return Deployment{}, false, ErrCapacityExceeded
 	}
 	if command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
-		if instance.CommandOperation != "renew" {
+		if instance.CommandOperation == "renew" &&
+			(command.Terminal.Report.ReportedStatus == "stopped" ||
+				command.Terminal.Report.ReportedStatus == "failed") &&
+			deployment.DesiredState == DeploymentRunning {
+			instance.Phase = DeploymentInstanceStarting
+		} else if instance.CommandOperation != "renew" {
 			instance.Phase = deploymentSuccessfulPhase(deployment, instance.CommandOperation)
 		}
 		instance.LastError = ""
