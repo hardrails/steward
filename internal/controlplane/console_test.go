@@ -204,6 +204,7 @@ func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities
 		`CAPACITY IS NOT PERMISSION.`,
 		`Fleet-wide resource quota`,
 		`REPORTED STATE · NOT VERIFIED OUTCOME`,
+		`agent.instance_id || "Unnamed runtime"`,
 		`Existing work is not evicted when a limit is lowered.`,
 		`New command delivery is frozen`,
 		`A command already accepted by a node is not instantly revoked`,

@@ -102,6 +102,7 @@ type AgentInventoryQuery struct {
 type AgentMetadata struct {
 	TenantID             string   `json:"tenant_id"`
 	NodeID               string   `json:"node_id"`
+	InstanceID           string   `json:"instance_id,omitempty"`
 	RuntimeRef           string   `json:"runtime_ref"`
 	InstanceGeneration   uint64   `json:"instance_generation"`
 	ClaimGeneration      uint64   `json:"claim_generation,omitempty"`
@@ -434,6 +435,7 @@ func (store *Store) ListAgentInventory(actor controlauth.Identity, query AgentIn
 		if err != nil {
 			continue
 		}
+		instanceID := commandSignedInstanceID(command)
 		key := agentInventoryKey(
 			command.TenantID, command.NodeID, runtimeRef, command.SignedInstanceGeneration,
 		)
@@ -441,10 +443,16 @@ func (store *Store) ListAgentInventory(actor controlauth.Identity, query AgentIn
 		if !found {
 			agent.metadata = AgentMetadata{
 				TenantID: command.TenantID, NodeID: command.NodeID,
+				InstanceID:         instanceID,
 				RuntimeRef:         runtimeRef,
 				InstanceGeneration: command.SignedInstanceGeneration,
 				ObservedStatus:     "unknown", CreatedAt: command.CreatedAt,
 			}
+		} else if instanceID != "" {
+			if agent.metadata.InstanceID != "" && agent.metadata.InstanceID != instanceID {
+				continue
+			}
+			agent.metadata.InstanceID = instanceID
 		}
 		mergeAgentCommand(&agent, command)
 		byRuntime[key] = agent
@@ -858,6 +866,16 @@ func agentInventoryKey(tenantID, nodeID, runtimeRef string, generation uint64) s
 
 func agentInventorySortKey(agent AgentMetadata) string {
 	return agentInventoryKey(agent.TenantID, agent.NodeID, agent.RuntimeRef, agent.InstanceGeneration)
+}
+
+func commandSignedInstanceID(command Command) string {
+	statement, err := parseCommandStatement(command.CommandDSSE)
+	if err != nil || statement.TenantID != command.TenantID ||
+		statement.NodeID != command.NodeID || statement.RuntimeRef != command.SignedRuntimeRef ||
+		statement.InstanceGeneration != command.SignedInstanceGeneration {
+		return ""
+	}
+	return statement.InstanceID
 }
 
 func mergeAgentCommand(agent *agentInventoryAccumulator, command Command) {

@@ -1337,12 +1337,13 @@ function AgentApplicationsView({page, tenantID}) {
               <div className="agent-card-head">
                 <div>
                   <span className="panel-index">{agent.service_id || "AGENT RUNTIME"}</span>
-                  <h3>{agent.latest_command_kind || "observed"}</h3>
+                  <h3>{agent.instance_id || "Unnamed runtime"}</h3>
                 </div>
                 <Badge kind={agentStatusKind(agent)}>{agent.observed_status}</Badge>
               </div>
               <dl className="agent-facts">
                 <div><dt>Tenant / node</dt><dd>{agent.tenant_id} / {agent.node_id}</dd></div>
+                <div><dt>Instance</dt><dd>{agent.instance_id || "not retained by this controller"}</dd></div>
                 <div><dt>Generation</dt><dd>{agent.instance_generation}</dd></div>
                 <div className="agent-runtime"><dt>Runtime</dt><dd>{agent.runtime_ref}</dd></div>
                 <div><dt>Latest signed operation</dt><dd>{agent.latest_command_kind} · {agent.latest_terminal_status || agent.latest_command_state}</dd></div>

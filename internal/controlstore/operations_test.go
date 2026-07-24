@@ -429,7 +429,7 @@ func TestAgentInventoryCorrelatesSignedRuntimeWithoutInventingDesiredState(t *te
 	}
 	agent := page.Agents[0]
 	if agent.TenantID != "tenant-a" || agent.NodeID != "node-1" ||
-		agent.RuntimeRef != executorRuntimeRef || agent.InstanceGeneration != 11 ||
+		agent.InstanceID != "agent-1" || agent.RuntimeRef != executorRuntimeRef || agent.InstanceGeneration != 11 ||
 		agent.ClaimGeneration != 7 || agent.ObservedStatus != "running" ||
 		agent.LatestCommandID != "agent-stop" || agent.LatestCommandKind != "stop" ||
 		agent.LatestTerminalStatus != controlprotocol.ExecutorStatusFailed ||

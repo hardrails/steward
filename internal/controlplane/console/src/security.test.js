@@ -54,6 +54,7 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     "Fleet-wide resource quota",
     "Existing work is not evicted when a limit is lowered.",
     "This is observed state, not desired state.",
+    'agent.instance_id || "Unnamed runtime"',
     "THIS IS A CURRENT VIEW, NOT A COMPLETE AUDIT LOG.",
     "The status above is the last successful workload observation.",
     "No freeze is active for tenant ",
