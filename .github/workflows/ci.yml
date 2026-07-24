@@ -90,6 +90,9 @@ jobs:
       - name: Bundled controller node enrollment checks
         run: bash scripts/bundled-control-node-test.sh
       - name: Steward Control black-box acceptance
+        env:
+          STEWARD_CONTEXT: ambient-context-must-not-leak
+          STEWARD_CONTEXT_FILE: /tmp/ambient-steward-context-must-not-leak.json
         run: bash scripts/control-acceptance.sh
       - name: Steward Control Terraform module
         run: bash integrations/terraform/modules/steward-control/tests/test.sh

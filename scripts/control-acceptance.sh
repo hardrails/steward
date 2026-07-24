@@ -2,7 +2,7 @@
 # Host-safe, black-box acceptance proof for Steward Control and Executor uplink v3.
 set -euo pipefail
 umask 077
-unset BASH_ENV CDPATH ENV PYTHONHOME PYTHONPATH
+unset BASH_ENV CDPATH ENV PYTHONHOME PYTHONPATH STEWARD_CONTEXT
 export LC_ALL=C
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -16,6 +16,10 @@ command -v python3 >/dev/null 2>&1 || {
 work=$(mktemp -d "${TMPDIR:-/tmp}/steward-control-acceptance.XXXXXX")
 work=$(cd "$work" && pwd -P)
 chmod 0700 "$work"
+# The acceptance process supplies every connection and scope explicitly. Keep a
+# real operator's selected context from silently adding tenant, node, or key
+# flags to those commands.
+export STEWARD_CONTEXT_FILE=$work/cli-contexts.json
 control_pid=
 control_url=
 keep_failed=${STEWARD_CONTROL_ACCEPTANCE_KEEP_FAILED:-NO}
