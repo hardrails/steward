@@ -95,6 +95,12 @@ console can also send one exact offline-signed Executor command to the existing
 bounded command endpoint after local digest review, exact confirmation, and
 re-entry of the current bearer. It cannot sign, edit, or create that authority.
 
+On an operator workstation, `stewardctl console` is the preferred entry point
+for a private-CA listener. It verifies the configured Control origin with the
+selected context's CA, starts a temporary literal-loopback HTTP proxy, prints
+the exact browser URL, and never injects the saved operator token. This avoids
+changing the browser trust store while preserving verified TLS to Control.
+
 The server derives an exact Host-header allowlist automatically. A loopback HTTP
 listener accepts only its actual bound literal IP and port; the default URL is
 `http://127.0.0.1:8443/console/`, not `http://localhost:8443/console/`. A TLS

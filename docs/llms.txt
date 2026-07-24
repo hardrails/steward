@@ -134,7 +134,9 @@ credential remains only in JavaScript memory and is cleared on lock, `pagehide`,
 revoke the server-side bearer. Browser extensions remain trusted. The committed
 bundle uses no CDN or telemetry endpoint, normal and air-gapped Go builds need no
 npm, and maintainers reproduce it with lockfile-pinned React/Vite under Node.js 24
-LTS.
+LTS. `stewardctl console` verifies a selected private-CA Control origin and
+provides a temporary loopback HTTP URL for the browser without injecting the
+saved operator token or requiring browser trust-store changes.
 
 Steward includes a qualified Hermes Agent adapter definition for upstream commit
 `3ef6bbd201263d354fd83ec55b3c306ded2eb72a` on `linux/amd64`; other platforms are

@@ -17,7 +17,33 @@ create, edit, approve, sign, retry, revoke, enroll, acknowledge, dismiss, export
 or delete anything. Private signing keys and secret plaintext never belong in the
 console.
 
-## Open the correct origin
+## Open the console
+
+The simplest path uses the selected CLI context:
+
+```console
+stewardctl console
+```
+
+Keep the command running and open the printed loopback URL. `stewardctl`
+verifies the controller's HTTPS certificate with the context's configured CA,
+then serves the console on a temporary `http://127.0.0.1:PORT/console/` address.
+The local listener accepts only the exact printed Host value and never injects
+the saved operator token. Enter a least-privilege operator token in the page.
+
+This avoids installing a private CA in every browser profile. It also works
+through an SSH tunnel when the context's Control URL points at the tunnel:
+
+```console
+ssh -N -L 8443:127.0.0.1:8443 operator@control-host
+stewardctl console
+```
+
+The first command keeps the remote controller on loopback. The second verifies
+Control through that tunnel and gives the browser a separate loopback-only
+address without a certificate warning.
+
+### Direct browser access
 
 The console has no separate listener, port, account database, or authentication
 mode. It is embedded in `steward-control` and uses the same `-addr`, TLS
@@ -34,17 +60,10 @@ Do not substitute `localhost`. Steward derives an exact Host-header gate
 automatically. Without TLS, it accepts only the actual bound literal IP and port.
 A malformed or different Host value fails before console or API route dispatch.
 
-To keep the controller on loopback while using a separate hardened workstation,
-forward the exact loopback authority:
-
-```console
-ssh -N -L 8443:127.0.0.1:8443 operator@control-host
-```
-
-Then open `http://127.0.0.1:8443/console/` on the workstation. Use a local port
-other than `8443` only behind a trusted local proxy that rewrites the upstream
-Host to the controller's exact bound authority; the automatic gate has no separate
-allowlist setting.
+Direct access is useful when Control uses a certificate already trusted by the
+operator's browser. Use a local port other than the controller's bound port only
+through `stewardctl console` or a trusted proxy that rewrites the upstream Host
+to the controller's exact bound authority.
 
 For a direct TLS listener, use an exact DNS name or IP address from the loaded
 leaf certificate's Subject Alternative Names (SANs):
@@ -56,8 +75,8 @@ https://control.customer.example:8443/console/
 The Host value must match an exact, non-wildcard DNS or IP SAN at the bound port.
 The port may be omitted only for HTTPS port `443`. A wildcard-only certificate
 does not establish an accepted Host value. Install the private certificate
-authority in the hardened browser profile or operating-system trust store; the
-browser console has no `-ca-file` option.
+authority in the hardened browser profile or operating-system trust store, or
+use `stewardctl console` so the browser needs no private-CA configuration.
 
 If an operator-managed reverse proxy fronts a loopback controller, configure the
 proxy to replace the upstream Host header with the controller's exact bound
@@ -84,7 +103,7 @@ Initial authentication has a two-minute hard deadline. Navigation or `pagehide`
 also clears the credential while those first reads are still in flight; a stalled
 response cannot retain pre-session authority indefinitely.
 
-## Read the thirteen views
+## Find the right view
 
 Every view starts with the effective command-delivery state for the selected
 scope. A green banner means Control may deliver new commands. A red striped banner
@@ -97,23 +116,27 @@ The console does not set or clear a freeze. Use the authenticated
 `stewardctl control freeze` workflow described in
 [Freeze new command delivery during an incident]({{ '/guides/control-plane/' | relative_url }}#freeze-new-command-delivery-during-an-incident).
 
-| View | What it shows | What it omits |
-| --- | --- | --- |
-| Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, active schedules, open agent questions, retained-state capacity, and the selected tenant's fleet-wide resource quota and usage | Mutation controls, workflow content, and raw evidence frames |
-| Workrooms | Tenant-scoped projects, sessions, linked signed task IDs, external artifact digests, selected memory, open questions, and recent scheduled runs | Prompts, task bodies, result bytes, artifact bytes, storage credentials, signing, or project mutation |
-| Schedules | Finite signed schedule metadata, next run, recent run states, overlap policy, and a copyable cancellation command | Request bodies, permit bytes, result bodies, private keys, schedule creation, or browser-side cancellation |
-| Questions | Bounded agent questions, allowed choices, expiry, workload identity, and response state | Private keys, response signing, response text entry, or proof that agent-authored text is trustworthy |
-| Attention | Deterministic findings derived from retained facts and current process observations, including the bounded cause, impact, safest next step, and a copyable `stewardctl explain` command; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, direct remediation, or incident workflow |
-| Incident view | Current containment, evidence divergence, access revocation, and failed-workload facts in newest-first order, with site or tenant scope and bounded reasons | Complete history, overwritten transitions, command or result bodies, credentials, prompts, logs, acknowledgement, or remediation |
-| Nodes | Node state, placement mode, durable drain state and request ID, failed drain instance when applicable, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
-| Node pools | Site-wide provider-neutral capacity intent, registered and ready counts, exact scale-out deficits, conditions, and exact post-drain empty-node scale-in candidates | Cloud credentials, provider mutations, enrollment authority, or permission to place a workload; this site-admin-only view remains site-wide when a tenant projection is selected |
-| Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
-| Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
-| Agents | One card per signed runtime identity and instance generation with its last successful workload status, latest signed operation, node, logical egress routes, and connector IDs | Desired state, automatic recovery promises, command bytes, task authorities, relay endpoints, free-form errors, and secrets |
-| Fleet tasks | Bounded task-correlated progress, findings, reported lifecycle, and preserved conflicts for one selected tenant | Task submission, verified result claims, retries, or cross-tenant content |
-| Agent signals | Identity-stamped bounded status and finding events from running instances for one selected tenant | Proof that agent-authored content is correct, desired-state changes, or action authority |
+The navigation groups everyday fleet monitoring first and keeps infrastructure
+and security records separate. Start with **Overview**, then open **Needs
+review** when the console reports a finding.
 
-The Incident view is a retained chronology, not an append-only audit log. A later
+| Group | View | What it shows | What it omits |
+| --- | --- | --- | --- |
+| Monitor | Overview | Fleet health, capacity, evidence posture, failures, schedules, and open questions | Mutation controls, workflow content, and raw evidence frames |
+| Monitor | Needs review | Deterministic findings with cause, impact, and safest next step | Acknowledgement, retry, or direct remediation |
+| Monitor | Timeline | Current containment, evidence divergence, revocation, and failed-workload facts | Complete history, prompts, logs, and result bodies |
+| Agents | Agents | Last successful workload status, latest signed operation, node, and delegated routes; low-level identities are under **Technical details** | Desired state, command bytes, task authorities, and secrets |
+| Agents | Questions | Bounded agent questions, choices, expiry, workload identity, and response state | Private keys, browser-side signing, or proof that agent-authored text is trustworthy |
+| Agents | Tasks | Bounded task progress, findings, reported lifecycle, and preserved conflicts | Task submission, verified result claims, and retries |
+| Agents | Workrooms | Projects, sessions, task links, external artifact digests, selected memory, and recent work | Prompts, result bytes, artifact bytes, and storage credentials |
+| Agents | Schedules | Finite schedule metadata, next run, recent states, overlap policy, and a cancellation command | Request bodies, private keys, or browser-side cancellation |
+| Agents | Agent updates | Identity-stamped bounded status and finding events | Proof that agent-authored content is correct or action authority |
+| Infrastructure | Nodes | State, placement, drain progress, last observation, capacity, and capabilities | Node credentials and direct node actions |
+| Infrastructure | Capacity pools | Provider-neutral capacity intent, deficits, conditions, and scale-in candidates | Cloud credentials, provider mutations, and enrollment authority |
+| Security | Activity | Retained command state and an advanced courier for one offline-signed command | Command creation, signature verification, private keys, and result text |
+| Security | Access | Credential identity, kind, role, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
+
+The Timeline view is a retained chronology, not an append-only audit log. A later
 transition replaces the earlier retained state, and bounded records can disappear.
 Use the CLI support bundle to preserve the current metadata snapshot, and preserve
 signed evidence or export events to your own SIEM when historical reconstruction
@@ -169,7 +192,8 @@ Then use the console:
 
 1. Sign in with the least-privilege tenant operator. A site administrator must
    select one tenant; command transfer is disabled for the site-wide projection.
-2. Open **Commands** and choose the DSSE JSON file. The file must be no larger
+2. Open **Activity**, expand **Submit an offline-signed command**, and choose the
+   DSSE JSON file. The file must be no larger
    than 750 KiB so its Base64-wrapped API request remains inside the controller's
    one-mebibyte body limit.
 3. Compare the displayed `sha256:` digest with the digest calculated on the

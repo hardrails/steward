@@ -14,6 +14,19 @@ to the task.
 The context stores **paths** to token and key files, not their values. Private
 signing keys and bearer values are never copied into the context file.
 
+## Open the console without changing browser trust
+
+After selecting a context, run:
+
+```console
+stewardctl console
+```
+
+Open the printed URL and keep the command running. The CLI verifies Control with
+the context's private CA, exposes only a temporary loopback HTTP listener, and
+does not place the saved operator token in the browser. This is the preferred
+way to open a private-CA console from an operator workstation.
+
 ## Check health before changing anything
 
 Once a context contains a Control or local node connection, start with:
