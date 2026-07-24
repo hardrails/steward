@@ -123,6 +123,30 @@ func TestConsoleHeadErrorsAndSecurityBoundary(t *testing.T) {
 	}
 }
 
+func TestControlTLSResponsesRequireFutureHTTPS(t *testing.T) {
+	fixture := newServerFixture(t)
+
+	secureRequest := httptest.NewRequest(http.MethodGet, "https://control.example/console/", nil)
+	secureResponse := httptest.NewRecorder()
+	fixture.server.ServeHTTP(secureResponse, secureRequest)
+	if secureResponse.Code != http.StatusOK {
+		t.Fatalf("HTTPS console status=%d body=%q", secureResponse.Code, secureResponse.Body.String())
+	}
+	if secureResponse.Header().Get("Strict-Transport-Security") != strictTransportSecurity {
+		t.Fatalf("Strict-Transport-Security=%q want %q", secureResponse.Header().Get("Strict-Transport-Security"), strictTransportSecurity)
+	}
+
+	plainRequest := httptest.NewRequest(http.MethodGet, "http://control.example/console/", nil)
+	plainResponse := httptest.NewRecorder()
+	fixture.server.ServeHTTP(plainResponse, plainRequest)
+	if plainResponse.Code != http.StatusOK {
+		t.Fatalf("HTTP console status=%d body=%q", plainResponse.Code, plainResponse.Body.String())
+	}
+	if plainResponse.Header().Get("Strict-Transport-Security") != "" {
+		t.Fatalf("HTTP response unexpectedly emitted Strict-Transport-Security: %v", plainResponse.Header())
+	}
+}
+
 func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities(t *testing.T) {
 	var source strings.Builder
 	for _, name := range []string{"console/src/App.jsx", "console/src/command-courier.js", "console/src/session.js", "console/src/main.jsx"} {
