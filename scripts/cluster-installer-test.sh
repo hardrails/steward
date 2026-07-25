@@ -29,6 +29,11 @@ go build -o "$work/stewardctl" "$root/cmd/stewardctl"
 grep -Fq 'Operation:     init' "$work/plan"
 grep -Fq 'No host changes were made.' "$work/plan"
 
+lock_version=$("$work/stewardctl" cluster plan init \
+	-cluster research -node server-1 -arch amd64 -output json |
+	sed -n 's/^[[:space:]]*"version": "\([^"]*\)",*$/\1/p')
+[[ $lock_version == v1.35.6+rke2r1 ]]
+
 for unsafe in \
 	'init --cluster Bad_Name --node server-1 --dry-run' \
 	'join-worker --cluster research --node worker-1 --server http://server:9345 --token-file /tmp/token --dry-run' \

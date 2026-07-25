@@ -419,7 +419,7 @@ extracted_size=$(find "$extract" -type f -printf '%s\n' | awk '{ total += $1 } E
 	die "RKE2 extracted payload exceeds its bound"
 version=$("$extract/bin/rke2" --version | awk 'NR==1 {print $3}')
 lock_version=$("$ctl" cluster plan init -cluster "$cluster" -node "$node" -arch "$arch" -output json |
-	sed -n 's/^[[:space:]]*"version": "\\([^"]*\\)",*$/\\1/p')
+	sed -n 's/^[[:space:]]*"version": "\([^"]*\)",*$/\1/p')
 [[ -n $lock_version && $version == "$lock_version" ]] ||
 	die "RKE2 binary version '$version' differs from Steward's lock '$lock_version'"
 
