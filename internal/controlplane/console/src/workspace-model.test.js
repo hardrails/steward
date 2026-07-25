@@ -33,7 +33,18 @@ test("workspace projection joins only exact tenant and instance observations", (
         source_lineage_id: "lineage-a",
         expires_at: "2026-08-01T00:00:00Z",
       },
-      instances: [{instance_id: "worker-a", phase: "running"}],
+      instances: [{
+        instance_id: "worker-a",
+        generation: 2,
+        node_id: "node-a",
+        phase: "running",
+        admission: {
+          runtime_ref: "executor-worker-a",
+          connector_ids: ["web-search", "web-search"],
+          egress_route_ids: ["browser"],
+          service_id: "hermes",
+        },
+      }],
     }],
   };
   const agents = {
@@ -45,10 +56,34 @@ test("workspace projection joins only exact tenant and instance observations", (
         node_id: "node-a",
         observed_status: "running",
         runtime_ref: "executor-worker-a",
-        connector_ids: ["web-search", "web-search"],
-        egress_route_ids: ["browser"],
-        service_id: "hermes",
         updated_at: "2026-07-25T12:00:00Z",
+      },
+      {
+        tenant_id: "tenant-a",
+        instance_id: "worker-a",
+        instance_generation: 3,
+        node_id: "node-a",
+        observed_status: "running",
+        runtime_ref: "executor-worker-new-generation",
+        updated_at: "2026-07-25T13:00:00Z",
+      },
+      {
+        tenant_id: "tenant-a",
+        instance_id: "worker-a",
+        instance_generation: 2,
+        node_id: "node-b",
+        observed_status: "running",
+        runtime_ref: "executor-worker-moved",
+        updated_at: "2026-07-25T14:00:00Z",
+      },
+      {
+        tenant_id: "tenant-a",
+        instance_id: "worker-a",
+        instance_generation: 2,
+        node_id: "node-a",
+        observed_status: "running",
+        runtime_ref: "executor-worker-recreated",
+        updated_at: "2026-07-25T15:00:00Z",
       },
       {
         tenant_id: "tenant-b",
@@ -56,6 +91,7 @@ test("workspace projection joins only exact tenant and instance observations", (
         instance_generation: 99,
         node_id: "node-b",
         observed_status: "running",
+        runtime_ref: "executor-tenant-b",
       },
       {
         tenant_id: "tenant-a",
@@ -63,6 +99,7 @@ test("workspace projection joins only exact tenant and instance observations", (
         instance_generation: 1,
         node_id: "node-a",
         observed_status: "stopped",
+        runtime_ref: "executor-direct-a",
       },
     ],
   };
@@ -73,10 +110,14 @@ test("workspace projection joins only exact tenant and instance observations", (
   assert.deepEqual(projection.workspaces[0].node_ids, ["node-a"]);
   assert.deepEqual(projection.workspaces[0].connector_ids, ["web-search"]);
   assert.equal(projection.workspaces[0].members[0].runtime_ref, "executor-worker-a");
-  assert.deepEqual(
-    projection.directInstances.map((agent) => `${agent.tenant_id}/${agent.instance_id}`),
-    ["tenant-b/worker-a", "tenant-a/direct-a"],
-  );
+  assert.equal(projection.workspaces[0].members[0].observed_status, "running");
+  assert.deepEqual(projection.directInstances.map((agent) => agent.runtime_ref), [
+    "executor-worker-new-generation",
+    "executor-worker-moved",
+    "executor-worker-recreated",
+    "executor-tenant-b",
+    "executor-direct-a",
+  ]);
 });
 
 test("workspace search covers identity, placement, and delegated capabilities", () => {

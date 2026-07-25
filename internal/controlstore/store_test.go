@@ -557,3 +557,59 @@ func TestWALCompactsBeforeItsHardLimit(t *testing.T) {
 		t.Fatalf("reopened compacted state generation=%d sequence=%d tenants=%d", store.generation, store.sequence, len(store.current.tenants))
 	}
 }
+
+func TestOpenDefersFailedRecoveredWALCompaction(t *testing.T) {
+	initialLimits := DefaultLimits()
+	initialLimits.MaxCommandBytes = 128
+	initialLimits.MaxReportBytes = 128
+	initialLimits.MaxRecordBytes = 512
+	initialLimits.MaxStateBytes = 1 << 20
+	initialLimits.MaxWALBytes = 64 << 20
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := Initialize(directory, initialLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := canonicalTimestamp(time.Now())
+	tenant := Tenant{ID: "tenant-a", CreatedAt: now, Active: true}
+	const frameCount = 1024
+	for range frameCount {
+		if err := store.applyMutations(mutation{Kind: mutationTenant, Tenant: &tenant}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	walPath := filepath.Join(directory, generationName("wal", store.generation))
+	info, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recoveryLimits := initialLimits
+	recoveryLimits.MaxWALBytes = info.Size() + 4096
+	if info.Size() <= walCompactionTarget(recoveryLimits) {
+		t.Fatalf("test WAL size %d did not exceed recovery target %d", info.Size(), walCompactionTarget(recoveryLimits))
+	}
+	compactionAttempted := false
+	store, err = openRecoveredStore(directory, recoveryLimits, func(*Store) error {
+		compactionAttempted = true
+		return errors.New("injected compaction failure")
+	})
+	if err != nil {
+		t.Fatalf("replayable store rejected after maintenance failure: %v", err)
+	}
+	defer store.Close()
+	if !compactionAttempted || store.sequence != frameCount || len(store.current.tenants) != 1 {
+		t.Fatalf(
+			"recovered state compaction=%t sequence=%d tenants=%d",
+			compactionAttempted, store.sequence, len(store.current.tenants),
+		)
+	}
+	if err := store.applyMutations(mutation{Kind: mutationTenant, Tenant: &tenant}); err != nil {
+		t.Fatalf("next mutation did not retry deferred compaction: %v", err)
+	}
+	if store.generation <= 1 {
+		t.Fatal("next mutation did not complete deferred compaction")
+	}
+}

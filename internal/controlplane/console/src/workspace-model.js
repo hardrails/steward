@@ -6,8 +6,11 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort();
 }
 
-function observationKey(tenantID, instanceID) {
-  return `${tenantID}\u0000${instanceID}`;
+function observationKey(tenantID, nodeID, instanceID, generation, runtimeRef) {
+  if (!tenantID || !nodeID || !instanceID || !generation || !runtimeRef) {
+    return "";
+  }
+  return `${tenantID}\u0000${nodeID}\u0000${instanceID}\u0000${generation}\u0000${runtimeRef}`;
 }
 
 function newestObservation(current, candidate) {
@@ -38,27 +41,42 @@ export function deriveWorkspaceProjection(deploymentsPage, agentsPage) {
   const agents = list(agentsPage?.agents);
   const observations = new Map();
   for (const agent of agents) {
-    if (!agent?.tenant_id || !agent?.instance_id) {
+    const key = observationKey(
+      agent?.tenant_id,
+      agent?.node_id,
+      agent?.instance_id,
+      agent?.instance_generation,
+      agent?.runtime_ref,
+    );
+    if (!key) {
       continue;
     }
-    const key = observationKey(agent.tenant_id, agent.instance_id);
     observations.set(key, newestObservation(observations.get(key), agent));
   }
 
   const claimed = new Set();
   const workspaces = deployments.map((deployment) => {
     const members = list(deployment.instances).map((instance) => {
-      const key = observationKey(deployment.tenant_id, instance.instance_id);
+      const admission = instance.admission || null;
+      const key = observationKey(
+        deployment.tenant_id,
+        instance.node_id,
+        instance.instance_id,
+        instance.generation,
+        admission?.runtime_ref,
+      );
       const observation = observations.get(key) || null;
-      claimed.add(key);
+      if (key) {
+        claimed.add(key);
+      }
       return {
         ...instance,
-        node_id: instance.node_id || observation?.node_id || "",
+        node_id: instance.node_id || "",
         observed_status: observation?.observed_status || "not observed",
-        runtime_ref: observation?.runtime_ref || "",
-        service_id: observation?.service_id || "",
-        connector_ids: list(observation?.connector_ids),
-        egress_route_ids: list(observation?.egress_route_ids),
+        runtime_ref: admission?.runtime_ref || "",
+        service_id: admission?.service_id || "",
+        connector_ids: list(admission?.connector_ids),
+        egress_route_ids: list(admission?.egress_route_ids),
         last_activity_at: observation?.updated_at || instance.transitioned_at || "",
         latest_terminal_status: observation?.latest_terminal_status || "",
       };
@@ -93,10 +111,17 @@ export function deriveWorkspaceProjection(deploymentsPage, agentsPage) {
   });
 
   const directInstances = agents.filter((agent) => {
-    if (!agent?.tenant_id || !agent?.instance_id) {
+    const key = observationKey(
+      agent?.tenant_id,
+      agent?.node_id,
+      agent?.instance_id,
+      agent?.instance_generation,
+      agent?.runtime_ref,
+    );
+    if (!key) {
       return true;
     }
-    return !claimed.has(observationKey(agent.tenant_id, agent.instance_id));
+    return !claimed.has(key);
   });
 
   return {workspaces, directInstances};

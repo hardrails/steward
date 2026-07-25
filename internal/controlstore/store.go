@@ -137,6 +137,14 @@ func Initialize(directory string, limits Limits) (*Store, error) {
 // Open acquires the exclusive writer lock, verifies the manifest and snapshot,
 // replays complete WAL frames, and truncates only an incomplete final frame.
 func Open(directory string, limits Limits) (*Store, error) {
+	return openRecoveredStore(directory, limits, (*Store).compactLocked)
+}
+
+func openRecoveredStore(
+	directory string,
+	limits Limits,
+	compactRecovered func(*Store) error,
+) (*Store, error) {
 	directory, err := prepareDirectory(directory, false)
 	if err != nil {
 		return nil, err
@@ -238,9 +246,10 @@ func Open(directory string, limits Limits) (*Store, error) {
 		syncFile:            func(file *os.File) error { return file.Sync() },
 	}
 	if size > walCompactionTarget(limits) {
-		if err := store.compactLocked(); err != nil {
-			return nil, fmt.Errorf("compact recovered control WAL: %w", err)
-		}
+		// Recovery established one valid writable state before this maintenance
+		// step. A failed compaction must not turn that replayable state into an
+		// outage; the next mutation retries compaction before appending.
+		_ = compactRecovered(store)
 	}
 	keepLock, keepWAL = true, true
 	return store, nil
