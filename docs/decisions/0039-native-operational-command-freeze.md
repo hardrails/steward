@@ -9,6 +9,7 @@ section: Decisions
 - Status: Accepted
 - Date: 2026-07-20
 - Rung: in-house
+- Console surface updated by: ADR 0065
 
 ## Context
 
@@ -48,8 +49,9 @@ durable command queue while preserving its observation channels.
   different or new work fails closed.
 - Existing delivery leases and running workloads remain bounded by their original
   signed authority and lease. Operators use quarantine and revocation separately.
-- The console displays the effective freeze but does not mutate it, keeping the
-  browser outside incident authority.
+- The console displays and changes the effective freeze through the same scoped,
+  revision-protected API. It does not gain authority beyond the active operator
+  bearer.
 
 Revisit this decision if Steward supports a transactional external controller that
 can preserve the same tenant projection, command-boundary atomicity, offline

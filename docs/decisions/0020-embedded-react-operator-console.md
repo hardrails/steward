@@ -1,10 +1,10 @@
 ---
-title: Embed an observation-first React operator console
+title: Embed a React operator console
 description: Why Steward commits and embeds a React SPA while keeping frontend dependencies outside its runtime and ordinary air-gapped build.
 section: Architecture decision
 ---
 
-# Embed an observation-first React operator console
+# Embed a React operator console
 
 - Status: Accepted
 - Date: 2026-07-16
@@ -15,8 +15,8 @@ section: Architecture decision
 Operators need a fast way to inspect fleet posture without reconstructing
 multiple bounded API responses by hand. The interface must work on a disconnected
 management host, preserve existing site and tenant authorization, avoid a second
-server or identity store, and expose no new mutation, signing, secret-retrieval,
-or approval path.
+server or identity store, and preserve the existing Control API's signing,
+secret-retrieval, and approval boundaries.
 
 Steward's Go module intentionally uses only the standard library. Adding a
 JavaScript dependency to the running controller or to ordinary Go builds would
@@ -38,7 +38,7 @@ tree, runs source-level security and session tests, rebuilds the production
 distribution, and rejects any generated diff.
 
 The console uses the existing control origin and operator Bearer identity. It
-performs only same-origin `GET` requests for bounded operations data. The bearer
+performs only same-origin requests against the bounded Control API. The bearer
 stays in a JavaScript memory reference and is cleared with displayed state on
 lock, navigation, inactivity, or the absolute session deadline. A separate Host
 gate covers both API and console routes, and restrictive response headers deny
@@ -51,9 +51,9 @@ chain that maintainers must audit and reproduce.
 
 **Rejected:** hand-built DOM state management, because the apparent dependency
 savings would move more browser lifecycle and rendering code into Steward without
-improving the runtime trust boundary. Server-rendered mutation pages were also
-rejected because this surface is deliberately observation-only and already consumes
-the bounded JSON operations API.
+improving the runtime trust boundary. Server-rendered pages were also rejected
+because the console already consumes the bounded JSON Control API and needs
+stateful projection, review, and session fencing.
 
 ## Consequences
 
@@ -62,12 +62,12 @@ operator credential and fleet metadata. Content Security Policy cannot protect
 against a privileged extension. Operators need a dedicated hardened browser
 profile, and browser-side timeouts do not revoke the server credential.
 
-Keep the application read-only unless a later threat model defines trusted
-semantic approval, cross-site request protections, reauthentication, audit, and
-server-side authority constraints for a specific mutation. [The signed-command
-courier](0023-native-signed-command-console-courier.md) satisfies those conditions
-for one exact command that was already authorized and signed outside the browser;
-it does not permit other mutations. Revisit React if
+The original observation-only mutation constraint was superseded by
+[ADR 0065](0065-primary-console-operations.md) after the existing Control API's
+bounded mutations, role checks, optimistic revisions, and signed-artifact
+boundaries were exposed through an explicit browser allowlist. The React
+embedding, reproducible build, ephemeral credential, and hardened browser
+decisions remain unchanged. Revisit React if
 reproducible builds become unreliable, the dependency audit cannot be kept clean,
 or a substantially smaller maintained option can satisfy the same tested session
 and accessibility boundary.

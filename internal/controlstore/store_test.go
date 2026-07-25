@@ -109,6 +109,52 @@ func TestWALRecoveryRepairsOnlyIncompleteTail(t *testing.T) {
 	}
 }
 
+func TestWALRecoveryValidatesBoundedBatches(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := Initialize(directory, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := canonicalTimestamp(time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC))
+	tenant := Tenant{ID: "tenant-a", CreatedAt: created, Active: true}
+	frameCount := walRecoveryBatchFrames*2 + 1
+	for range frameCount {
+		if err := store.applyMutations(mutation{Kind: mutationTenant, Tenant: &tenant}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	walPath := filepath.Join(directory, generationName("wal", store.generation))
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.Open(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wal.Close()
+	info, err := wal.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validations := 0
+	validate := func(current state, limits Limits) error {
+		validations++
+		return validateState(current, limits)
+	}
+	recovered, sequence, _, err := recoverWALReaderValidated(
+		wal, info.Size(), emptyState(), 0, [32]byte{}, DefaultLimits(), nil, validate,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sequence != uint64(frameCount) || len(recovered.tenants) != 1 {
+		t.Fatalf("recovered sequence=%d tenants=%d", sequence, len(recovered.tenants))
+	}
+	if validations != 3 {
+		t.Fatalf("recovery validations = %d, want 3 bounded batches", validations)
+	}
+}
+
 func TestInspectRootRejectsIncompleteTailWithoutRepair(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "control")
 	store, err := Initialize(directory, DefaultLimits())
@@ -509,5 +555,61 @@ func TestWALCompactsBeforeItsHardLimit(t *testing.T) {
 	defer store.Close()
 	if store.generation != wantGeneration || store.sequence != wantSequence || len(store.current.tenants) != 4 {
 		t.Fatalf("reopened compacted state generation=%d sequence=%d tenants=%d", store.generation, store.sequence, len(store.current.tenants))
+	}
+}
+
+func TestOpenDefersFailedRecoveredWALCompaction(t *testing.T) {
+	initialLimits := DefaultLimits()
+	initialLimits.MaxCommandBytes = 128
+	initialLimits.MaxReportBytes = 128
+	initialLimits.MaxRecordBytes = 512
+	initialLimits.MaxStateBytes = 1 << 20
+	initialLimits.MaxWALBytes = 64 << 20
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := Initialize(directory, initialLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := canonicalTimestamp(time.Now())
+	tenant := Tenant{ID: "tenant-a", CreatedAt: now, Active: true}
+	const frameCount = 1024
+	for range frameCount {
+		if err := store.applyMutations(mutation{Kind: mutationTenant, Tenant: &tenant}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	walPath := filepath.Join(directory, generationName("wal", store.generation))
+	info, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recoveryLimits := initialLimits
+	recoveryLimits.MaxWALBytes = info.Size() + 4096
+	if info.Size() <= walCompactionTarget(recoveryLimits) {
+		t.Fatalf("test WAL size %d did not exceed recovery target %d", info.Size(), walCompactionTarget(recoveryLimits))
+	}
+	compactionAttempted := false
+	store, err = openRecoveredStore(directory, recoveryLimits, func(*Store) error {
+		compactionAttempted = true
+		return errors.New("injected compaction failure")
+	})
+	if err != nil {
+		t.Fatalf("replayable store rejected after maintenance failure: %v", err)
+	}
+	defer store.Close()
+	if !compactionAttempted || store.sequence != frameCount || len(store.current.tenants) != 1 {
+		t.Fatalf(
+			"recovered state compaction=%t sequence=%d tenants=%d",
+			compactionAttempted, store.sequence, len(store.current.tenants),
+		)
+	}
+	if err := store.applyMutations(mutation{Kind: mutationTenant, Tenant: &tenant}); err != nil {
+		t.Fatalf("next mutation did not retry deferred compaction: %v", err)
+	}
+	if store.generation <= 1 {
+		t.Fatal("next mutation did not complete deferred compaction")
 	}
 }

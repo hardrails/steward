@@ -6,6 +6,8 @@ section: Architecture decision
 
 # Build actionable diagnostics and bounded recovery on retained Steward facts
 
+- Console surface updated by: ADR 0065
+
 ## Decision
 
 Decision: use `in-house` for stable reason guidance and recovery eligibility,
@@ -45,8 +47,9 @@ another runtime or weakening its customer-held authority boundary.
 - The CLI can summarize both Control and a local node through one selected context.
 - Human output explains cause, impact, and next step; JSON keeps stable codes for
   automation.
-- The console remains observation-first and only copies a validated diagnostic
-  command. It does not execute recovery.
+- The console explains retained findings and links operators to the bounded
+  Control-owned recovery surface. Authority-bearing recovery still requires the
+  exact public signed artifact or remains outside the browser.
 - Adding a new reason requires bounded guidance and tests.
 - Recovery coverage grows only when Executor can define and prove exact monotonic
   preconditions for another state.
@@ -55,4 +58,3 @@ Revisit polling only if measured fleet size or latency makes bounded refresh
 materially inadequate. Revisit a recovery case only after its external result,
 replay safety, retained evidence, and generation transition can be proven without
 an operator-specific guess.
-

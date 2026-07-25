@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 
-test("the React source keeps credentials ephemeral and limits mutation to signed command couriering", async () => {
+test("the React console keeps credentials ephemeral and routes mutations through an explicit allowlist", async () => {
   const source = await readFile(new URL("./App.jsx", import.meta.url), "utf8");
   for (const forbidden of [
     "localStorage",
@@ -13,11 +13,9 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     "outerHTML",
     "insertAdjacentHTML",
     "window.open",
-    'method: "PUT"',
-    'method: "PATCH"',
-    'method: "DELETE"',
-    "/v1/enrollments",
-    "/v1/operators",
+    "crypto.subtle.sign",
+    "crypto.subtle.generateKey",
+    "privateKey",
   ]) {
     assert.equal(source.includes(forbidden), false, `forbidden browser boundary: ${forbidden}`);
   }
@@ -36,7 +34,9 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     "More nodes exist.",
     "tenantPage.next_after",
     "Load 500 more",
-    "SAFE BY DEFAULT: MOST ACTIONS STAY IN THE CLI.",
+    "OPERATE HERE. SIGNING KEYS STAY OUTSIDE THE BROWSER.",
+    "consoleMutationAllowed(method, url.pathname)",
+    "Control-owned desired state, capacity, access, containment, and enrollment",
     'projectedPath("/v1/operations/agents"',
     'projectedPath("/v1/operations/timeline"',
     'api("/v1/tenants/" + encodeURIComponent(tenantID) + "/instance-events?limit=100"',
@@ -49,16 +49,17 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     "READ AS A CLAIM, NOT AS PROOF.",
     "REPORTED STATE · NOT VERIFIED OUTCOME",
     "THE PROMPT IS UNTRUSTED. YOUR RESPONSE IS EXACTLY BOUND.",
-    "SIGN OUTSIDE THE BROWSER",
+    "USE AN APPROVED SIGNER",
     'encodeURIComponent(tenantID) + "/quota"',
     "Fleet-wide resource quota",
     "Existing work is not evicted when a limit is lowered.",
     "This is observed state, not desired state.",
-    'agent.instance_id || "Unnamed runtime"',
+    "A COMPUTER, WITH A BOUNDARY.",
+    "Gateway injects credentials only at the trusted outbound boundary",
+    "These observations do not match a retained deployment.",
     "THIS IS A CURRENT VIEW, NOT A COMPLETE AUDIT LOG.",
-    "The status above is the last successful workload observation.",
+    "A workspace combines signed desired state with the latest exact Executor observation",
     "No freeze is active for tenant ",
-    'method !== "GET" && !commandSubmission',
     "The console attempted an unsupported mutation.",
     'method: "POST"',
     "reenteredCredential !== credentialRef.current",
@@ -68,8 +69,7 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
   ]) {
     assert.equal(source.includes(required), true, `missing browser boundary: ${required}`);
   }
-  const explicitMutations = Array.from(source.matchAll(/method:\s*"(POST|PUT|PATCH|DELETE)"/gu), (match) => match[1]);
-  assert.deepEqual(explicitMutations, ["POST"]);
+  assert.equal(source.includes('method: "PATCH"'), false);
 });
 
 test("every labelled console section points at a real heading", async () => {
@@ -111,6 +111,9 @@ test("source assets do not depend on a network-served asset", async () => {
     readFile(new URL("./command-courier.js", import.meta.url), "utf8"),
     readFile(new URL("./interaction-guidance.js", import.meta.url), "utf8"),
     readFile(new URL("./operator-guidance.js", import.meta.url), "utf8"),
+    readFile(new URL("./operations-console.jsx", import.meta.url), "utf8"),
+    readFile(new URL("./console-api.js", import.meta.url), "utf8"),
+    readFile(new URL("./workspace-model.js", import.meta.url), "utf8"),
   ]);
   const source = files.join("\n");
   assert.equal(/https?:\/\//u.test(source), false);
