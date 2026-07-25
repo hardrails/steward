@@ -465,6 +465,9 @@ if [[ $operation != init ]]; then
 	[[ $token_uid == 0 && $token_mode == 600 && $token_links == 1 ]] ||
 		die "join token must be root-owned, mode 0600, with one link"
 	((token_size > 20 && token_size <= max_token_bytes)) || die "join token size is invalid"
+	[[ $(wc -l <"$token_source") -eq 1 ]] || die "join token must contain exactly one line"
+	grep -Eq '^[A-Za-z0-9:._-]+$' "$token_source" ||
+		die "join token contains invalid characters"
 fi
 
 target="$substrate_root/$lock_version"
@@ -566,9 +569,12 @@ systemctl daemon-reload
 if [[ $start == true ]]; then
 	sysctl --system >/dev/null
 	systemctl enable "$service.service" >/dev/null
-	systemctl start "$service.service"
+	systemctl start --no-block "$service.service"
 	active_deadline=$((SECONDS + 300))
 	until systemctl is-active --quiet "$service.service"; do
+		if systemctl is-failed --quiet "$service.service"; then
+			die "$service failed during startup; inspect journalctl -u $service"
+		fi
 		((SECONDS < active_deadline)) ||
 			die "$service did not become active within five minutes; inspect journalctl -u $service"
 		sleep 2

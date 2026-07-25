@@ -19,6 +19,9 @@ grep -Fq 'RKE2 bundle contains a link or special file' "$installer"
 grep -Fq 'existing Kubernetes configuration is not owned by this installer' "$installer"
 grep -Fq 'active firewalld conflicts' "$installer"
 grep -Fq 'runtime_type = "io.containerd.runsc.v1"' "$installer"
+grep -Fq 'join token must contain exactly one line' "$installer"
+# shellcheck disable=SC2016 # Match the literal reviewed shell expression.
+grep -Fq 'systemctl start --no-block "$service.service"' "$installer"
 grep -Fq 'kubeconfig=/var/lib/rancher/rke2/agent/kubelet.kubeconfig' "$installer"
 # shellcheck disable=SC2016 # Match the literal reviewed shell expression.
 grep -Fq 'get node "$node" -o '\''jsonpath={.status.conditions[?(@.type=="Ready")].status}' "$installer"
