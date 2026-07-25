@@ -3,6 +3,7 @@ package executoruplink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,20 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/executor"
 )
+
+func TestLocalHTTPStatusErrorClassifiesOnlyCompleteClientRejectionsAsDefinitive(t *testing.T) {
+	cause := errors.New("local executor rejected command")
+
+	if got := localHTTPStatusError(http.MethodPost, http.StatusConflict, cause); got != cause {
+		t.Fatalf("POST 409 error = %T %v, want original definitive rejection", got, got)
+	}
+	if got := localHTTPStatusError(http.MethodGet, http.StatusBadGateway, cause); got != cause {
+		t.Fatalf("GET 502 error = %T %v, want original read-only failure", got, got)
+	}
+	if got := localHTTPStatusError(http.MethodPost, http.StatusBadGateway, cause); !effectMayHaveOccurred(got) {
+		t.Fatalf("POST 502 error = %T %v, want uncertain effect", got, got)
+	}
+}
 
 func TestDispatcherOverridesTenantAndInstanceAndFencesReplay(t *testing.T) {
 	var provisions int

@@ -156,6 +156,13 @@ func TestInferenceTokenCapOnlyReducesPositiveIntegerRequests(t *testing.T) {
 	}
 }
 
+func TestSkipJSONValueRejectsUnexpectedClosingDelimiter(t *testing.T) {
+	decoder := json.NewDecoder(strings.NewReader(""))
+	if err := skipJSONValue(decoder, json.Delim('}')); err == nil {
+		t.Fatal("unexpected closing delimiter was accepted")
+	}
+}
+
 func TestInferenceProvidersUsePinnedProtocolPathAndCredentials(t *testing.T) {
 	t.Run("OpenRouter OpenAI-compatible prefix", func(t *testing.T) {
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
