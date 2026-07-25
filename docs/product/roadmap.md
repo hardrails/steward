@@ -6,7 +6,7 @@ section: Product
 
 # Product roadmap
 
-> Research note: Reviewed 2026-07-21 against the linked public primary sources.
+> Research note: Reviewed 2026-07-25 against the linked public primary sources.
 > Project capabilities and maturity can change. This roadmap describes direction,
 > not a support commitment for unfinished work. See the
 > [market analysis]({{ '/product/market-analysis/' | relative_url }}) for the
@@ -75,6 +75,10 @@ Steward should connect those boundaries. Recent work supports that choice:
 - [Kubernetes Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
   treats isolated, stateful, singleton workloads, claims, snapshots, and warm pools
   as a distinct infrastructure shape.
+- [Fly.io's Sprites direction](https://fly.io/blog/kurt-scott-money-sprites/)
+  argues that agents need ordinary, persistent computers that can be created,
+  suspended, checkpointed, forked, and safely connected to external services,
+  rather than a collection of short-lived code-execution endpoints.
 
 The missing record is the connection among one user's intent, one application
 digest, one instance generation, one state lineage, one external action, and one
@@ -144,6 +148,7 @@ They should not be prerequisites for the first useful task.
 | [Agyn](https://github.com/agynio/platform) | Terraform-defined agents, Kubernetes-native scale-to-zero execution, separately isolated MCP tools, zero-trust service access, and per-organization observability | Steward must remain useful without Kubernetes and must prevent Control from inventing authority rather than relying only on central policy and telemetry |
 | [OpenClaw Machines](https://github.com/mathaix/OpenClawMachines) | A self-hosted mini-cloud experience: host enrollment, placement, machine lifecycle, backups, separate browser machines, chat, terminal, and workspace MCP integration | No mandatory Cloudflare data plane, no OpenClaw-only contract, no KVM-only installation, and no ambient workspace credential authority |
 | [Kubernetes Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) | `Sandbox`, `Template`, `Claim`, snapshot, stable identity, persistent storage, scheduled shutdown, and warm-pool semantics | Steward remains useful on one ordinary Linux host and carries its authority and evidence contract across the Kubernetes substrate |
+| [Fly.io Sprites](https://fly.io/sprites) | A normal Linux-computer abstraction, fast checkpoint and fork workflows, idle suspension, wake-on-request, and credential-withholding connectors | Hosted convenience is not a sovereign trust boundary; Steward must keep customer-held authority, air-gapped operation, explicit backend assurance, and Control-compromise containment |
 | [Sandbox0](https://github.com/sandbox0-ai/sandbox0) and [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) | Clear backend protocols, SDK and CLI ergonomics, Docker and Kubernetes execution, snapshots, forks, warm pools, credential projection, MCP access, and multiple isolation technologies | Steward is an agent authority product, not a generic remote shell, file API, code interpreter, desktop, or training service |
 | [Google AX](https://github.com/google/ax) | Durable event logging, isolated actors, recovery, and resumable distributed agent execution | Steward needs an equally credible task, event, result, and recovery contract while keeping external effects under customer-held authority |
 | [WSO2 Agent Manager](https://wso2.github.io/agent-manager/docs/cloud/overview/what-is-amp/) | Enterprise lifecycle, identity, governance, evaluation, and OpenTelemetry observability for internal and external agents | Central governance and telemetry do not replace node-local enforcement, replay protection, or portable signed authorization-to-outcome evidence |
@@ -219,6 +224,32 @@ Steward must publish two explicit control-compromise profiles:
 Neither profile can promise availability after Control compromise. Executor must
 reject every transition that falls outside the signed desired state and active
 delegation.
+
+### Agent computers and isolated workers
+
+The user-facing unit is an agent computer: normal Linux behavior inside an exact
+image, resource, network, credential, state, lifetime, and tenant boundary.
+Deployments remain the signed desired-state contract. The console can project
+managed instances, replicated fleets, resumable forks, and temporary workers
+without creating another mutable lifecycle resource.
+
+Steward should support two operating patterns:
+
+- a managed Hermes computer that receives tasks and retains only the state its
+  signed application declares; and
+- a durable coordinating agent that creates separately identified temporary or
+  resumable workers for hostile web content, coding, browser use, and other risky
+  execution.
+
+This follows the useful
+[brains-and-hands separation](https://fly.io/blog/building-agents-that-dont-break-themselves/)
+without copying a hosted trust model. A worker never inherits a parent's runtime
+identity, reusable credential, live permit, or evidence key. Results return
+through the bounded task, event, result, or artifact path.
+
+Checkpoint creation may be self-service under finite authority. Restore,
+promotion, and destructive replacement remain separately authorized because
+they can replay state or discard evidence.
 
 ### Task, event, result, and artifact plane
 
@@ -520,7 +551,11 @@ The roadmap starts from working primitives rather than a blank design:
 - explicit `strict-sovereign` and `bounded-autonomous` Control authority modes;
   strict mode refuses accessible controller signing-key files, never starts the
   reconciler, and rejects desired-state mutations, while bounded mode preserves
-  tenant-delegated reconciliation.
+  tenant-delegated reconciliation; and
+- an **Agent computers** console projection that joins signed deployments to
+  exact tenant-and-instance observations, distinguishes managed, fleet,
+  resumable-fork, and temporary-worker shapes, and shows delegated connector and
+  route identifiers without claiming secret possession.
 
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and
@@ -608,6 +643,11 @@ supportable through one coherent operational surface.
   authorization, source-node binding, and descendant ceiling with quiesce,
   controller-owned snapshot catalogs, archive, cross-node restore, retained-byte
   accounting, idle expiry, and garbage collection.
+- Add explicit active, warm, paused, and cold lifecycle observations, idle
+  suspension, wake-on-task, and private wake-on-request. Publish measured
+  readiness targets for clean creation, warm wake, cold wake, and snapshot fork;
+  never describe a deployment as persistent unless its signed state contract
+  proves it.
 - Add fork-on-task and clean warm pools. A warm pool contains unprivileged
   application state, never reusable agent authority or a live authorized session.
 - Qualify an Incus virtual-machine backend and a Kubernetes Agent Sandbox backend
@@ -651,6 +691,9 @@ Acceptance gates:
   capacity or state.
 - A fork contains declared durable state but no credential, task permit, runtime
   reference, evidence key, or live session from its parent.
+- A suspended computer releases its configured compute reservation without
+  weakening its storage quota, expiry, network, or authority fences; a wake
+  cannot resurrect an expired generation.
 - TTL cleanup survives restart and never deletes a referenced parent snapshot.
 - A seven-day mixed-workload soak and documented chaos suite pass.
 - A malicious skill or MCP server cannot choose its upstream origin, receive the
@@ -881,6 +924,7 @@ Reliability:
 - node-loss detection and replacement time;
 - upgrade and rollback success under injected crashes;
 - cold and warm fork readiness latency;
+- active-to-idle reclamation time and warm and cold wake latency;
 - store and evidence recovery success; and
 - tested recovery point and recovery time by deployment profile.
 
