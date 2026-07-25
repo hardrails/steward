@@ -249,9 +249,14 @@ if [[ $operation == doctor ]]; then
 	[[ $service == rke2-server || $service == rke2-agent ]] || die "cluster installation record is invalid"
 	systemctl is-active --quiet "$service.service" || die "$service is not active; inspect journalctl -u $service"
 	kubectl=/var/lib/rancher/rke2/bin/kubectl
-	kubeconfig=/etc/rancher/rke2/rke2.yaml
+	if [[ $service == rke2-server ]]; then
+		kubeconfig=/etc/rancher/rke2/rke2.yaml
+	else
+		kubeconfig=/var/lib/rancher/rke2/agent/kubelet.kubeconfig
+	fi
 	[[ -x $kubectl && -f $kubectl ]] || die "RKE2 kubectl is unavailable"
-	[[ -f $kubeconfig && ! -L $kubeconfig ]] || die "RKE2 kubeconfig is unavailable"
+	[[ -f $kubeconfig && ! -L $kubeconfig ]] ||
+		die "$service health credential is unavailable"
 	ready=$(KUBECONFIG="$kubeconfig" timeout --signal=TERM --kill-after=5 30 "$kubectl" \
 		get node "$node" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}') ||
 		die "Kubernetes node status is unavailable"
