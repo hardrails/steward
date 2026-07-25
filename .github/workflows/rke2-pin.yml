@@ -1,0 +1,105 @@
+name: RKE2 pin refresh
+
+on:
+  schedule:
+    - cron: "43 9 * * 2"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: rke2-pin-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Propose current stable RKE2 release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve stable channel and verify release assets
+        id: rke2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          channels=$(mktemp)
+          curl -q --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            --connect-timeout 15 --max-time 30 --max-filesize 1048576 \
+            https://update.rke2.io/v1-release/channels >"$channels"
+          version=$(python3 -I - "$channels" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          document = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          matches = [
+              entry.get("latest")
+              for entry in document.get("data", [])
+              if isinstance(entry, dict) and entry.get("id") == "stable"
+          ]
+          if len(matches) != 1 or not isinstance(matches[0], str) or re.fullmatch(
+              r"v[1-9][0-9]*\.[0-9]+\.[0-9]+\+rke2r[1-9][0-9]*", matches[0]
+          ) is None:
+              raise SystemExit("RKE2 stable channel response is invalid")
+          print(matches[0])
+          PY
+          )
+          release=$(mktemp)
+          encoded=${version//+/%2B}
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/rancher/rke2/releases/tags/$encoded" >"$release"
+          python3 -I scripts/update-rke2-pin.py \
+            --lock internal/clustersubstrate/source-lock.json \
+            --release-json "$release" \
+            --version "$version"
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+
+      - name: Open qualification-gated update pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RKE2_VERSION: ${{ steps.rke2.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "RKE2 is already pinned to $RKE2_VERSION."
+            exit 0
+          fi
+          branch="automation/rke2-${RKE2_VERSION//+/-}"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git add internal/clustersubstrate/source-lock.json
+          git diff --cached --check
+          git commit -m "Pin RKE2 $RKE2_VERSION"
+          git push --force-with-lease origin "$branch"
+          gh workflow run ci.yml --ref "$branch"
+          existing=$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // ""')
+          if [[ -n $existing ]]; then
+            echo "Updated $existing"
+            exit 0
+          fi
+          body=$(mktemp)
+          printf '%s\n' \
+            '## RKE2 stable-channel refresh' \
+            '' \
+            "- Upstream release: \`$RKE2_VERSION\`" \
+            '' \
+            'This PR updates exact RKE2 asset URLs, lengths, and SHA-256 values only. It must not merge until the Linux VM cluster matrix qualifies these exact bytes.' \
+            '' \
+            'Do not bypass failing cluster qualification checks.' >"$body"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Pin RKE2 $RKE2_VERSION" \
+            --body-file "$body"
