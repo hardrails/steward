@@ -61,6 +61,9 @@ recovery, private-key signing, host-local secret materialization, or direct
 provider API calls. Those remain separate trust domains so compromise of the
 console or Control bearer cannot become host or cloud-account administration.
 
+Agent computers are a projection over deployments and observations, not a new
+mutable resource. ADR 0066 records that boundary.
+
 Adding a new console mutation requires all of:
 
 1. an existing bounded Control handler and documented OpenAPI contract;

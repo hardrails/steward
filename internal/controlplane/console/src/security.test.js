@@ -54,9 +54,11 @@ test("the React console keeps credentials ephemeral and routes mutations through
     "Fleet-wide resource quota",
     "Existing work is not evicted when a limit is lowered.",
     "This is observed state, not desired state.",
-    'agent.instance_id || "Unnamed runtime"',
+    "A COMPUTER, WITH A BOUNDARY.",
+    "Gateway injects credentials only at the trusted outbound boundary",
+    "These observations do not match a retained deployment.",
     "THIS IS A CURRENT VIEW, NOT A COMPLETE AUDIT LOG.",
-    "The status above is the last successful workload observation.",
+    "A workspace combines signed desired state with the latest exact Executor observation",
     "No freeze is active for tenant ",
     "The console attempted an unsupported mutation.",
     'method: "POST"',
@@ -111,6 +113,7 @@ test("source assets do not depend on a network-served asset", async () => {
     readFile(new URL("./operator-guidance.js", import.meta.url), "utf8"),
     readFile(new URL("./operations-console.jsx", import.meta.url), "utf8"),
     readFile(new URL("./console-api.js", import.meta.url), "utf8"),
+    readFile(new URL("./workspace-model.js", import.meta.url), "utf8"),
   ]);
   const source = files.join("\n");
   assert.equal(/https?:\/\//u.test(source), false);

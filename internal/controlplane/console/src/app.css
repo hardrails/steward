@@ -1737,6 +1737,278 @@ progress::-moz-progress-bar {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.workspace-principle {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(112deg, rgb(200 255 67 / 0.06), transparent 45%),
+    var(--panel);
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+}
+
+.workspace-principle > span {
+  display: grid;
+  min-height: 142px;
+  place-items: center;
+  border-right: 1px solid var(--line);
+  color: var(--signal);
+  font-family: var(--display);
+  font-size: 62px;
+}
+
+.workspace-principle > div {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 22px 26px;
+}
+
+.workspace-principle strong {
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+}
+
+.workspace-principle p {
+  max-width: 820px;
+  margin: 9px 0 0;
+  color: var(--paper-muted);
+  font-family: var(--display);
+  font-size: 18px;
+  line-height: 1.45;
+}
+
+.workspace-primary-actions {
+  min-width: 190px;
+  border-left: 1px solid var(--line);
+  gap: 9px;
+}
+
+.workspace-filter {
+  display: grid;
+  align-items: end;
+  margin-top: 24px;
+  border: 1px solid var(--line);
+  background: var(--ink-soft);
+  grid-template-columns: minmax(260px, 1fr) minmax(190px, 0.35fr) auto;
+  padding: 14px;
+  gap: 12px;
+}
+
+.workspace-filter label {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.workspace-filter input,
+.workspace-filter select {
+  min-height: 42px;
+  margin-top: 6px;
+}
+
+.workspace-filter > span {
+  padding: 0 4px 13px;
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.workspace-board {
+  display: grid;
+  margin-top: 16px;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workspace-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(142deg, rgb(200 255 67 / 0.04), transparent 38%),
+    var(--panel);
+  padding: 22px;
+}
+
+.workspace-card::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  background: var(--signal);
+  content: "";
+}
+
+.workspace-card.lifecycle-temporary::before {
+  background: var(--warning);
+}
+
+.workspace-card.lifecycle-resumable::before {
+  background: var(--blue);
+}
+
+.workspace-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  gap: 16px;
+  padding: 8px 0 17px;
+}
+
+.workspace-card-head h3 {
+  margin: 6px 0 2px;
+  font-family: var(--display);
+  font-size: 34px;
+  font-weight: 500;
+}
+
+.workspace-card-head code {
+  color: var(--paper-dim);
+  font-size: 9px;
+}
+
+.workspace-facts {
+  display: grid;
+  margin: 0;
+  grid-template-columns: 0.55fr 1.45fr;
+}
+
+.workspace-facts div {
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 11px 12px 11px 0;
+}
+
+.workspace-facts div:nth-child(even) {
+  border-right: 0;
+  padding-left: 12px;
+}
+
+.workspace-facts .workspace-expiry {
+  grid-column: 1 / -1;
+  border-right: 0;
+  color: var(--warning);
+}
+
+.workspace-facts dt,
+.workspace-capabilities > strong {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.workspace-facts dd {
+  overflow-wrap: anywhere;
+  margin: 5px 0 0;
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.workspace-members {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.workspace-members > div {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: 12px minmax(120px, 1fr) auto minmax(90px, auto);
+  padding: 9px 2px;
+  gap: 8px;
+}
+
+.workspace-members strong {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-members span:not(.signal),
+.workspace-members small {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.workspace-members small {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-capabilities {
+  margin-top: 17px;
+}
+
+.workspace-capabilities > div {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  color: var(--paper-dim);
+  gap: 6px;
+}
+
+.workspace-card footer {
+  display: flex;
+  justify-content: space-between;
+  margin: 20px -22px -22px;
+  border-top: 1px solid var(--line);
+  background: rgb(0 0 0 / 0.13);
+  padding: 13px 22px;
+  gap: 16px;
+}
+
+.direct-instances {
+  margin-top: 22px;
+  border: 1px solid var(--line);
+  background: var(--ink-soft);
+  padding: 16px 18px;
+}
+
+.direct-instances summary {
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.direct-instances p {
+  max-width: 860px;
+  color: var(--paper-dim);
+  font-size: 12px;
+}
+
+.direct-instances > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.direct-instances code {
+  border: 1px solid var(--line);
+  padding: 5px 7px;
+  color: var(--paper-muted);
+  font-size: 9px;
+}
+
 .pool-board {
   display: grid;
   margin-top: 24px;
@@ -3278,6 +3550,7 @@ td small {
   }
 
   .agent-board,
+  .workspace-board,
   .pool-board,
   .workroom-board,
   .schedule-board {
@@ -3480,6 +3753,29 @@ td small {
 
   .agent-tally {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .workspace-principle {
+    grid-template-columns: 68px minmax(0, 1fr);
+  }
+
+  .workspace-principle > span {
+    min-height: 120px;
+  }
+
+  .workspace-primary-actions {
+    grid-column: 1 / -1;
+    min-width: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .workspace-filter {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-filter > span {
+    padding-bottom: 2px;
   }
 
   .pool-capacity,

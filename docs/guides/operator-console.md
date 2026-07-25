@@ -15,6 +15,8 @@ surface for day-to-day fleet operations:
 - cordon, quarantine, drain, and revoke nodes;
 - inspect and export witnessed evidence, capture incident evidence, and quarantine
   an exact snapshot;
+- understand managed agents, replicated fleets, resumable forks, and temporary
+  workers as agent computers;
 - create, scale, roll out, pause, and remove signed agent deployments;
 - set tenant resource ceilings;
 - freeze command delivery during an incident;
@@ -123,6 +125,34 @@ and remove** marks the deployment absent and preserves its evidence linkage.
 This desired-state workflow is available when Control runs in
 `bounded-autonomous` mode. A `strict-sovereign` controller rejects it and accepts
 only exact externally signed Executor commands through **Activity**.
+
+### Agent computers
+
+Select one tenant, then open **Agent computers**. This is the workspace view for
+people operating agents. It joins each retained signed deployment with the
+latest Executor observation for the exact tenant and instance identity.
+
+The lifecycle label explains how the existing deployment is shaped:
+
+| Lifecycle | Meaning |
+| --- | --- |
+| Managed instance | One managed agent computer without snapshot ancestry; persistence is not implied |
+| Replicated fleet | Several signed instance identities managed together |
+| Resumable fork | One new identity created from an immutable snapshot, with no automatic cleanup time |
+| Temporary worker | One snapshot-backed identity with a finite cleanup time |
+
+Use the search field to find a workspace by deployment, instance, node,
+connector, or egress route. **Create or scale** opens the signed deployment
+surface. **Give work** opens finite task dispatch.
+
+Connector and route badges mean that Executor observed those delegated paths.
+They do not mean the agent received an upstream credential. Gateway keeps the
+secret at the trusted outbound boundary and restricts the destination.
+
+An observation that does not match a retained deployment appears under
+**directly managed or historical runtimes**. This is expected for
+strict-sovereign commands, older instances, and migration evidence. Steward
+does not pretend those observations are managed workspaces.
 
 ### Capacity pools
 
@@ -267,4 +297,6 @@ For the underlying API and authority details, see
 The frontend dependency decision is recorded in
 [Embed a React operator console]({{ '/decisions/0020-embedded-react-operator-console/' | relative_url }});
 the operational mutation boundary is recorded in
-[Use the console as the primary fleet surface]({{ '/decisions/0065-primary-console-operations/' | relative_url }}).
+[Use the console as the primary fleet surface]({{ '/decisions/0065-primary-console-operations/' | relative_url }});
+the workspace projection is recorded in
+[Project agent computers from existing signed state]({{ '/decisions/0066-project-agent-computers-from-existing-state/' | relative_url }}).

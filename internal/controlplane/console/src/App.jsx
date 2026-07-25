@@ -16,6 +16,7 @@ import {
 } from "./session.js";
 import {attentionGuidance} from "./operator-guidance.js";
 import {consoleMutationAllowed, consoleReadAllowed} from "./console-api.js";
+import {deriveWorkspaceProjection, workspaceMatches} from "./workspace-model.js";
 import {
   AdministrationView,
   CreateScheduleControls,
@@ -629,7 +630,7 @@ const navigationGroups = [
     ["incident", "03", "Timeline"],
   ]],
   ["Agents", [
-    ["agents", "04", "Agents"],
+    ["agents", "04", "Agent computers"],
     ["deployments", "05", "Deployments"],
     ["inbox", "06", "Questions"],
     ["tasks", "07", "Tasks"],
@@ -794,7 +795,15 @@ function ControlRoom(props) {
               />
             ) : null}
             {view === "credentials" ? <CredentialsView page={snapshot.credentials} siteAdmin={session.siteAdmin} onMutation={props.onMutation} /> : null}
-            {view === "agents" ? <AgentApplicationsView page={snapshot.agents} tenantID={selectedTenant} onManage={() => props.onView("deployments")} /> : null}
+            {view === "agents" ? (
+              <AgentComputersView
+                agents={snapshot.agents}
+                deployments={snapshot.deployments}
+                tenantID={selectedTenant}
+                onManage={() => props.onView("deployments")}
+                onTasks={() => props.onView("tasks")}
+              />
+            ) : null}
             {view === "deployments" ? <DeploymentsView page={snapshot.deployments} tenantID={selectedTenant} onMutation={props.onMutation} /> : null}
             {view === "tasks" ? <TaskProjectionsView page={snapshot.tasks} tenantID={selectedTenant} onMutation={props.onMutation} /> : null}
             {view === "events" ? <InstanceEventsView page={snapshot.events} tenantID={selectedTenant} /> : null}
@@ -1329,91 +1338,163 @@ function EvidenceValue({label, value}) {
   return <div><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
-function agentStatusKind(agent) {
-  if (["failed", "rejected", "outcome_unknown"].includes(agent.latest_terminal_status)) {
+const lifecycleLabels = {
+  managed: "managed instance",
+  fleet: "replicated fleet",
+  resumable: "resumable fork",
+  temporary: "temporary worker",
+};
+
+function workspaceStatusKind(workspace) {
+  if (workspace.phase === "degraded" || workspace.members.some((member) =>
+    ["failed", "rejected", "outcome_unknown"].includes(member.latest_terminal_status))) {
     return "is-danger";
   }
-  if (["pending", "leased"].includes(agent.latest_command_state) || agent.observed_status === "unknown") {
-    return "is-warning";
+  if (workspace.phase === "ready") {
+    return "is-ok";
   }
-  return agent.observed_status === "running" ? "is-ok" : "";
+  return "is-warning";
 }
 
-function AgentApplicationsView({page, tenantID, onManage}) {
+function AgentComputersView({agents, deployments, tenantID, onManage, onTasks}) {
   const tenant = tenantID || "site-wide";
-  const running = page.agents.filter((agent) => agent.observed_status === "running").length;
-  const inFlight = page.agents.filter((agent) => ["pending", "leased"].includes(agent.latest_command_state)).length;
-  const degraded = page.agents.filter((agent) => ["failed", "rejected", "outcome_unknown"].includes(agent.latest_terminal_status)).length;
+  const [query, setQuery] = useState("");
+  const [lifecycle, setLifecycle] = useState("all");
+  const projection = deriveWorkspaceProjection(deployments, agents);
+  const visible = projection.workspaces.filter((workspace) => workspaceMatches(workspace, query, lifecycle));
+  const running = projection.workspaces.reduce((total, workspace) =>
+    total + (workspace.phase_counts.running || 0), 0);
+  const temporary = projection.workspaces.filter((workspace) => workspace.lifecycle === "temporary").length;
+  const delegatedCapabilities = new Set(projection.workspaces.flatMap((workspace) => [
+    ...workspace.connector_ids.map((id) => `connector:${id}`),
+    ...workspace.egress_route_ids.map((id) => `route:${id}`),
+  ]));
   return (
-    <section className="view" aria-labelledby="agent-applications-title">
-      <ViewHeading id="agent-applications-title" eyebrow="SIGNED RUNTIME OBSERVATIONS" title="Your agent fleet, without guesswork.">
-        Last successful workload state and latest signed operation for the {tenant} projection. This is observed state, not desired state.
+    <section className="view workspace-view" aria-labelledby="agent-computers-title">
+      <ViewHeading id="agent-computers-title" eyebrow="SOVEREIGN AGENT COMPUTERS" title="Give every agent a safe place to work.">
+        A workspace combines signed desired state with the latest exact Executor observation for the {tenant} projection. This is observed state, not desired state.
       </ViewHeading>
-      <div className="agent-tally" aria-label="Agent fleet summary">
-        <div><strong>{page.agents.length}</strong><span>observed runtimes</span></div>
-        <div><strong>{running}</strong><span>running</span></div>
-        <div><strong>{inFlight}</strong><span>operations in flight</span></div>
-        <div className={degraded ? "is-degraded" : ""}><strong>{degraded}</strong><span>latest operations failed</span></div>
+      <aside className="workspace-principle">
+        <span aria-hidden="true">W</span>
+        <div>
+          <strong>A COMPUTER, WITH A BOUNDARY.</strong>
+          <p>Each workspace gets normal Linux behavior inside an exact image, resource, network, secret, lifetime, and tenant boundary. Forks can preserve useful state without sharing the parent workload's identity or authority.</p>
+        </div>
+        <div className="workspace-primary-actions">
+          <button className="button button-primary" type="button" onClick={onManage}>Create or scale</button>
+          <button className="button button-quiet" type="button" onClick={onTasks}>Give work</button>
+        </div>
+      </aside>
+      <div className="agent-tally" aria-label="Agent computer summary">
+        <div><strong>{projection.workspaces.length}</strong><span>managed workspaces</span></div>
+        <div><strong>{running}</strong><span>running computers</span></div>
+        <div><strong>{temporary}</strong><span>temporary workers</span></div>
+        <div><strong>{delegatedCapabilities.size}</strong><span>delegated capabilities</span></div>
       </div>
-      {page.agents.length ? (
-        <div className="agent-board">
-          {page.agents.map((agent) => (
-            <article className="agent-card" key={`${agent.tenant_id}/${agent.node_id}/${agent.runtime_ref}/${agent.instance_generation}`}>
-              <div className="agent-card-head">
+      <div className="workspace-filter" role="search" aria-label="Filter agent computers">
+        <label>
+          Find a workspace
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Name, node, connector, route…"
+          />
+        </label>
+        <label>
+          Lifecycle
+          <select value={lifecycle} onChange={(event) => setLifecycle(event.target.value)}>
+            <option value="all">All lifecycles</option>
+            <option value="managed">Managed instance</option>
+            <option value="fleet">Replicated fleet</option>
+            <option value="resumable">Resumable fork</option>
+            <option value="temporary">Temporary worker</option>
+          </select>
+        </label>
+        <span>{visible.length} of {projection.workspaces.length} shown</span>
+      </div>
+      {visible.length ? (
+        <div className="workspace-board">
+          {visible.map((workspace) => (
+            <article className={"workspace-card lifecycle-" + workspace.lifecycle} key={`${workspace.tenant_id}/${workspace.id}`}>
+              <div className="workspace-card-head">
                 <div>
-                  <span className="panel-index">{agent.service_id || "AGENT RUNTIME"}</span>
-                  <h3>{agent.instance_id || "Unnamed runtime"}</h3>
+                  <span className="panel-index">{lifecycleLabels[workspace.lifecycle]} · generation {workspace.generation}</span>
+                  <h3>{workspace.id}</h3>
+                  <code>{workspace.agent_name}</code>
                 </div>
-                <Badge kind={agentStatusKind(agent)}>{agent.observed_status}</Badge>
+                <Badge kind={workspaceStatusKind(workspace)}>{workspace.phase}</Badge>
               </div>
-              <dl className="agent-facts">
-                <div><dt>Tenant / node</dt><dd>{agent.tenant_id} / {agent.node_id}</dd></div>
-                <div><dt>Latest signed operation</dt><dd>{agent.latest_command_kind} · {agent.latest_terminal_status || agent.latest_command_state}</dd></div>
-                <div><dt>Last activity</dt><dd>{formatTime(agent.updated_at)}</dd></div>
+              <dl className="workspace-facts">
+                <div><dt>Computers</dt><dd>{workspace.members.length}</dd></div>
+                <div><dt>Nodes</dt><dd>{workspace.node_ids.join(", ") || "placement pending"}</dd></div>
+                <div><dt>Desired state</dt><dd>{workspace.desired_state}</dd></div>
+                <div><dt>Tenant</dt><dd>{workspace.tenant_id}</dd></div>
+                {workspace.expires_at ? <div className="workspace-expiry"><dt>Automatic cleanup</dt><dd>{formatTime(workspace.expires_at)}</dd></div> : null}
               </dl>
-              <details className="technical-details">
-                <summary>Technical details</summary>
-                <dl className="agent-facts">
-                  <div><dt>Instance</dt><dd>{agent.instance_id || "not retained by this controller"}</dd></div>
-                  <div><dt>Generation</dt><dd>{agent.instance_generation}</dd></div>
-                  <div className="agent-runtime"><dt>Runtime reference</dt><dd>{agent.runtime_ref}</dd></div>
-                  <div><dt>Service</dt><dd>{agent.service_id || "not reported"}</dd></div>
-                </dl>
-              </details>
-              <div className="agent-capabilities">
-                {displayStringList(agent.egress_route_ids).map((route) => <Badge key={`egress-${route}`}>egress:{route}</Badge>)}
-                {displayStringList(agent.connector_ids).map((connector) => <Badge key={`connector-${connector}`}>connector:{connector}</Badge>)}
-                {!agent.egress_route_ids?.length && !agent.connector_ids?.length ? <span>No delegated routes observed</span> : null}
+              <section className="workspace-members" aria-label={`${workspace.id} computers`}>
+                {workspace.members.map((member) => (
+                  <div key={member.instance_id}>
+                    <span className={"signal signal-" + (member.observed_status === "running" ? "ok" : member.phase === "failed" ? "error" : "pending")} />
+                    <strong>{member.instance_id}</strong>
+                    <span>{member.observed_status}</span>
+                    <small>{member.node_id || "awaiting placement"}</small>
+                  </div>
+                ))}
+              </section>
+              <div className="workspace-capabilities">
+                <strong>Delegated paths</strong>
+                <div>
+                  {workspace.connector_ids.map((connector) => <Badge key={`connector-${connector}`}>connector · {connector}</Badge>)}
+                  {workspace.egress_route_ids.map((route) => <Badge key={`egress-${route}`}>route · {route}</Badge>)}
+                  {!workspace.egress_route_ids.length && !workspace.connector_ids.length ? <span>No outbound capability observed</span> : null}
+                </div>
               </div>
-              {["failed", "rejected", "outcome_unknown"].includes(agent.latest_terminal_status) ? (
-                <p className="agent-warning">The latest {agent.latest_command_kind} operation {humanize(agent.latest_terminal_status)}. The status above is the last successful workload observation.</p>
-              ) : null}
+              <footer>
+                <button className="text-button" type="button" onClick={onTasks}>Give work →</button>
+                <button className="text-button" type="button" onClick={onManage}>Manage lifecycle →</button>
+              </footer>
             </article>
           ))}
         </div>
       ) : (
         <article className="agent-empty">
-          <span className="panel-index">NO SIGNED RUNTIMES OBSERVED</span>
-          <h3>Deploy the first signed agent generation.</h3>
-          <p>Use Deployments to upload an approved capsule and controller delegation. Steward shows the agent here after Executor verifies admission.</p>
+          <span className="panel-index">{projection.workspaces.length ? "NO FILTER MATCH" : "NO MANAGED WORKSPACES"}</span>
+          <h3>{projection.workspaces.length ? "No workspace matches that filter." : "Create the first safe computer for an agent."}</h3>
+          <p>{projection.workspaces.length
+            ? "Search by workspace, instance, node, connector, or route, or choose another lifecycle."
+            : "Use Deployments to upload an approved capsule and finite controller delegation. Steward will converge the exact computers named by that authority."}</p>
           <button className="button button-primary" type="button" onClick={onManage}>Open Deployments</button>
         </article>
       )}
-      {page.next_cursor ? <p className="truncation-note">More agents exist. Narrow the tenant projection or use the API continuation cursor.</p> : null}
+      {projection.directInstances.length ? (
+        <details className="direct-instances">
+          <summary>{projection.directInstances.length} directly managed or historical runtime{projection.directInstances.length === 1 ? "" : "s"}</summary>
+          <p>These observations do not match a retained deployment. They remain visible for migration, strict-sovereign operation, and incident review, but are not presented as managed workspaces.</p>
+          <div>
+            {projection.directInstances.map((agent) => (
+              <code key={`${agent.tenant_id}/${agent.node_id}/${agent.runtime_ref}/${agent.instance_generation}`}>
+                {agent.instance_id || agent.runtime_ref} · {agent.observed_status}
+              </code>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      {agents.next_cursor || deployments.next_after ? <p className="truncation-note">More runtime or deployment records exist. Narrow the tenant projection or use the API continuation cursor.</p> : null}
       <div className="overview-grid">
         <article className="panel">
-          <PanelHeading index="01 / DESIRE" title="Manage agent generations" />
-          <p>Deployments fixes the image, skills, model route, resources, state, lifetime, replica identities, and isolation requirements in signed public artifacts.</p>
+          <PanelHeading index="01 / LIFECYCLE" title="One truth, two views" />
+          <p>Agent computers is the human workspace view. Deployments remains the signed desired-state contract that fixes image, skills, resources, identity, network paths, and lifetime.</p>
           <button className="button button-quiet" type="button" onClick={onManage}>Manage deployments</button>
         </article>
         <article className="panel">
-          <PanelHeading index="02 / PLACE" title="Understand placement" />
-          <p>The scheduler rejects ineligible nodes first, then considers topology spread, tenant-signed label preferences, exact image locality, and current load. Open a deployment to inspect each retained placement decision for <strong>{tenant}</strong>.</p>
+          <PanelHeading index="02 / HANDS" title="Use temporary workers for risky work" />
+          <p>Fork a clean, signed baseline for browsing, coding, or untrusted inputs. Give the fork a finite expiry so useful state can return as evidence while the worker's authority disappears.</p>
         </article>
       </div>
       <article className="panel recent-attention-panel">
-        <PanelHeading index="03 / AUTHORITY" title="Placement is not permission" />
-        <p>A bundle and placement decision cannot start a workload. Tenant-signed commands and Executor admission still verify the exact node, image, generation, policy, and capability boundary. Private keys and reusable credentials never enter this console.</p>
+        <PanelHeading index="03 / CAPABILITIES" title="Credentials stay outside the computer" />
+        <p>Connector and route badges describe delegated paths, not secret possession. Gateway injects credentials only at the trusted outbound boundary; the agent receives neither provider tokens nor permission to choose a different destination.</p>
       </article>
     </section>
   );
