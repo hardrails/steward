@@ -76,6 +76,7 @@ func TestBuildPlanRendersHardenedServerAndWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if worker.Service != "rke2-agent" || worker.Baseline != "" ||
+		!strings.Contains(worker.Config, "profile: cis") ||
 		!strings.Contains(worker.Config, `token-file: "/run/steward/join-token"`) ||
 		strings.Contains(worker.Config, "secrets-encryption") {
 		t.Fatalf("unexpected worker plan: %#v", worker)

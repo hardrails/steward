@@ -155,12 +155,12 @@ func renderConfig(request PlanRequest) string {
 	fmt.Fprintf(&builder, "node-name: %q\n", request.NodeName)
 	fmt.Fprintln(&builder, "node-label:")
 	fmt.Fprintf(&builder, "  - %q\n", "steward.io/cluster="+request.ClusterName)
+	fmt.Fprintln(&builder, "profile: cis")
 	if request.Operation != OperationInit {
 		fmt.Fprintf(&builder, "server: %q\n", request.ServerURL)
 		fmt.Fprintf(&builder, "token-file: %q\n", request.TokenFile)
 	}
 	if request.Operation != OperationJoinWorker {
-		fmt.Fprintln(&builder, "profile: cis")
 		fmt.Fprintln(&builder, "write-kubeconfig-mode: \"0600\"")
 		fmt.Fprintln(&builder, "secrets-encryption: true")
 		fmt.Fprintln(&builder, "cni: canal")
