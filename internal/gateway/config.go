@@ -112,6 +112,7 @@ type Route struct {
 	BaseURL          string            `json:"base_url"`
 	Protocol         InferenceProtocol `json:"protocol,omitempty"`
 	UpstreamModel    string            `json:"upstream_model,omitempty"`
+	MaxTokensCap     int               `json:"max_tokens_cap,omitempty"`
 	CredentialFile   string            `json:"credential_file,omitempty"`
 	CredentialMode   CredentialMode    `json:"credential_mode,omitempty"`
 	AnthropicVersion string            `json:"anthropic_version,omitempty"`
@@ -747,6 +748,9 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 		if route.UpstreamModel != "" &&
 			(!bounded(route.UpstreamModel, 256) || strings.TrimSpace(route.UpstreamModel) != route.UpstreamModel) {
 			return nil, fmt.Errorf("gateway route %q upstream_model must be a bounded exact model identifier", route.ID)
+		}
+		if route.MaxTokensCap < 0 || route.MaxTokensCap > 1_000_000 {
+			return nil, fmt.Errorf("gateway route %q max_tokens_cap must be zero or at most 1000000", route.ID)
 		}
 		if _, exists := loaded[route.ID]; exists {
 			return nil, fmt.Errorf("duplicate gateway route %q", route.ID)

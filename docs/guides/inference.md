@@ -168,14 +168,17 @@ sudo stewardctl gateway inference set \
   -provider openai \
   -id local \
   -upstream-model gpt-4.1-mini \
+  -max-tokens-cap 32768 \
   -credential-file /etc/steward/openai.key
 ```
 
 Gateway validates the agent's signed alias before rewriting only the top-level
 `model` field. The configured provider model is part of the route-policy digest,
-so changing it requires replacing active grants. Omit `-upstream-model` when the
-signed alias is already the provider's real model identifier or an upstream
-gateway performs its own alias mapping.
+so changing it requires replacing active grants. `-max-tokens-cap` optionally
+reduces an agent's top-level `max_tokens` to a provider-supported limit; it never
+increases the request. The cap is evidence-bound with the model mapping. Omit
+`-upstream-model` when the signed alias is already the provider's real model
+identifier or an upstream gateway performs its own alias mapping.
 
 ## Allowed inference calls
 

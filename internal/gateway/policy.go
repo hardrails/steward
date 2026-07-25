@@ -55,6 +55,7 @@ type inferenceRoutePolicy struct {
 	ID                   string `json:"id"`
 	ModelAlias           string `json:"model_alias"`
 	UpstreamModel        string `json:"upstream_model,omitempty"`
+	MaxTokensCap         int    `json:"max_tokens_cap,omitempty"`
 	BaseURL              string `json:"base_url"`
 	Protocol             string `json:"protocol,omitempty"`
 	CredentialFile       string `json:"credential_file,omitempty"`
@@ -246,11 +247,11 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 	if grant.RouteID != "" {
 		route := routes[grant.RouteID]
 		document.Inference = &inferenceRoutePolicy{
-			ID: route.ID, ModelAlias: grant.ModelAlias, UpstreamModel: route.UpstreamModel,
+			ID: route.ID, ModelAlias: grant.ModelAlias, UpstreamModel: route.UpstreamModel, MaxTokensCap: route.MaxTokensCap,
 			BaseURL: routeBaseURL(route.base), CredentialFile: route.CredentialFile,
 			CredentialConfigured: route.credential != "", MaxConcurrent: route.MaxConcurrent,
 		}
-		if route.UpstreamModel != "" && document.Version < 11 {
+		if (route.UpstreamModel != "" || route.MaxTokensCap != 0) && document.Version < 11 {
 			document.Version = 11
 		}
 		if route.Protocol != "" || route.CredentialMode != "" || route.AnthropicVersion != "" {

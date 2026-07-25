@@ -408,6 +408,14 @@ func TestConfigSeparatesInferenceCredentialsFromAllAuthority(t *testing.T) {
 			t.Fatalf("ambiguous upstream model accepted: %v", err)
 		}
 	})
+	t.Run("token cap must be bounded", func(t *testing.T) {
+		config := base
+		config.Routes = append([]Route(nil), base.Routes...)
+		config.Routes[0].MaxTokensCap = 1_000_001
+		if _, err := config.validateAndLoadRoutes(); err == nil || !strings.Contains(err.Error(), "max_tokens_cap") {
+			t.Fatalf("oversized token cap accepted: %v", err)
+		}
+	})
 	for name, path := range map[string]string{
 		"service token": serviceToken, "receipt key": receiptKey, "connector credential": connectorCredential,
 		"state": base.StateFile, "grant descendant": filepath.Join(base.GrantRoot, "grant-a", "secret"),

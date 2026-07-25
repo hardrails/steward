@@ -118,7 +118,7 @@ func TestInferenceRouteMapsSignedAliasToPinnedUpstreamModel(t *testing.T) {
 	route := loadedRoute{
 		Route: Route{
 			ID: "openai", BaseURL: base.String(), Protocol: InferenceProtocolOpenAI,
-			UpstreamModel: "gpt-4.1-mini", MaxConcurrent: 1,
+			UpstreamModel: "gpt-4.1-mini", MaxTokensCap: 32768, MaxConcurrent: 1,
 		},
 		base: base,
 	}
@@ -126,7 +126,7 @@ func TestInferenceRouteMapsSignedAliasToPinnedUpstreamModel(t *testing.T) {
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"http://relay/v1/chat/completions",
-		strings.NewReader(`{"model":"default","messages":[{"role":"user","content":{"model":"preserved"}}]}`),
+		strings.NewReader(`{"model":"default","max_tokens":65536,"messages":[{"role":"user","content":{"model":"preserved"}}]}`),
 	)
 	recorder := httptest.NewRecorder()
 	server.proxyInference(recorder, request, Grant{ModelAlias: "default"}, route)
@@ -134,8 +134,25 @@ func TestInferenceRouteMapsSignedAliasToPinnedUpstreamModel(t *testing.T) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if string(forwarded["model"]) != `"gpt-4.1-mini"` ||
+		string(forwarded["max_tokens"]) != `32768` ||
 		!bytes.Contains(forwarded["messages"], []byte(`"model":"preserved"`)) {
 		t.Fatalf("forwarded request = %#v", forwarded)
+	}
+}
+
+func TestInferenceTokenCapOnlyReducesPositiveIntegerRequests(t *testing.T) {
+	unchanged, err := rewriteInferenceRequest([]byte(`{"model":"default","max_tokens":1024}`), "", 32768)
+	if err != nil || !bytes.Contains(unchanged, []byte(`"max_tokens":1024`)) {
+		t.Fatalf("smaller request = %s err=%v", unchanged, err)
+	}
+	for _, raw := range []string{
+		`{"model":"default","max_tokens":0}`,
+		`{"model":"default","max_tokens":"65536"}`,
+		`{"model":"default","max_tokens":1.5}`,
+	} {
+		if _, err := rewriteInferenceRequest([]byte(raw), "", 32768); err == nil {
+			t.Fatalf("invalid max_tokens accepted: %s", raw)
+		}
 	}
 }
 
@@ -239,6 +256,7 @@ func TestInferenceProviderProtocolIsPinnedIntoRoutePolicy(t *testing.T) {
 		func(route *loadedRoute) { route.Protocol = InferenceProtocolAnthropic },
 		func(route *loadedRoute) { route.CredentialMode = CredentialModeXAPIKey },
 		func(route *loadedRoute) { route.UpstreamModel = "provider/model-v2" },
+		func(route *loadedRoute) { route.MaxTokensCap = 8192 },
 		func(route *loadedRoute) {
 			route.Protocol = InferenceProtocolAnthropic
 			route.AnthropicVersion = "2024-01-01"
