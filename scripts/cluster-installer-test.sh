@@ -19,6 +19,12 @@ grep -Fq 'RKE2 bundle contains a link or special file' "$installer"
 grep -Fq 'existing Kubernetes configuration is not owned by this installer' "$installer"
 grep -Fq 'active firewalld conflicts' "$installer"
 grep -Fq 'runtime_type = "io.containerd.runsc.v1"' "$installer"
+# shellcheck disable=SC2016 # Match the literal reviewed shell expression.
+grep -Fq 'get node "$node" -o '\''jsonpath={.status.conditions[?(@.type=="Ready")].status}' "$installer"
+if grep -Fq '/usr/local/bin/rke2 kubectl' "$installer"; then
+	echo "cluster-installer-test: doctor delegates kubectl to an unsupported RKE2 subcommand" >&2
+	exit 1
+fi
 grep -Fq 'profile: cis' "$root/internal/clustersubstrate/plan.go"
 grep -Fq 'secrets-encryption: true' "$root/internal/clustersubstrate/plan.go"
 grep -Fq 'name: default-deny' "$root/internal/clustersubstrate/plan.go"

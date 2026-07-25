@@ -248,14 +248,22 @@ if [[ $operation == doctor ]]; then
 	service=$(sed -n 's/^service=//p' "$cluster_state_root/installed")
 	[[ $service == rke2-server || $service == rke2-agent ]] || die "cluster installation record is invalid"
 	systemctl is-active --quiet "$service.service" || die "$service is not active; inspect journalctl -u $service"
-	timeout --signal=TERM --kill-after=5 30 /usr/local/bin/rke2 kubectl get node "$node" >/dev/null ||
-		die "Kubernetes does not report this node ready"
+	kubectl=/var/lib/rancher/rke2/bin/kubectl
+	kubeconfig=/etc/rancher/rke2/rke2.yaml
+	[[ -x $kubectl && -f $kubectl ]] || die "RKE2 kubectl is unavailable"
+	[[ -f $kubeconfig && ! -L $kubeconfig ]] || die "RKE2 kubeconfig is unavailable"
+	ready=$(KUBECONFIG="$kubeconfig" timeout --signal=TERM --kill-after=5 30 "$kubectl" \
+		get node "$node" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}') ||
+		die "Kubernetes node status is unavailable"
+	[[ $ready == True ]] || die "Kubernetes reports node '$node' Ready=$ready; inspect journalctl -u $service"
 	if [[ $service == rke2-server ]]; then
 		timeout --signal=TERM --kill-after=5 30 /usr/local/bin/rke2 secrets-encrypt status >/dev/null ||
 			die "Kubernetes secret encryption status is unavailable"
-		timeout --signal=TERM --kill-after=5 30 /usr/local/bin/rke2 kubectl get runtimeclass runsc >/dev/null ||
+		KUBECONFIG="$kubeconfig" timeout --signal=TERM --kill-after=5 30 "$kubectl" \
+			get runtimeclass runsc >/dev/null ||
 			die "runsc RuntimeClass is unavailable"
-		timeout --signal=TERM --kill-after=5 30 /usr/local/bin/rke2 kubectl get namespace steward-agents >/dev/null ||
+		KUBECONFIG="$kubeconfig" timeout --signal=TERM --kill-after=5 30 "$kubectl" \
+			get namespace steward-agents >/dev/null ||
 			die "steward-agents namespace is unavailable"
 	fi
 	echo "install-cluster: $service is healthy on $node"
