@@ -1,0 +1,51 @@
+{
+  "schema_version": "steward.cluster-substrate-lock.v1",
+  "provider": "rke2",
+  "channel": "stable",
+  "version": "v1.35.6+rke2r1",
+  "observed_at": "2026-07-25T00:00:00Z",
+  "repository": "https://github.com/rancher/rke2",
+  "license": "Apache-2.0",
+  "architectures": {
+    "amd64": {
+      "bundle": {
+        "name": "rke2.linux-amd64.tar.gz",
+        "url": "https://github.com/rancher/rke2/releases/download/v1.35.6%2Brke2r1/rke2.linux-amd64.tar.gz",
+        "size": 40463856,
+        "sha256": "110c1170861635f55857ee50422fecdbf5d24b49e089fccc397a04419db59497"
+      },
+      "images": {
+        "name": "rke2-images.linux-amd64.tar.zst",
+        "url": "https://github.com/rancher/rke2/releases/download/v1.35.6%2Brke2r1/rke2-images.linux-amd64.tar.zst",
+        "size": 805280211,
+        "sha256": "31f9af940b2feff1203fa12d91a355bddb32484509df8f2a7ef96c3eb0a6e46f"
+      },
+      "checksums": {
+        "name": "sha256sum-amd64.txt",
+        "url": "https://github.com/rancher/rke2/releases/download/v1.35.6%2Brke2r1/sha256sum-amd64.txt",
+        "size": 3540,
+        "sha256": "53050436fb666fa956785a61b6ba878d112809ceb7a5f24ee23e719b6c5ec7fb"
+      }
+    },
+    "arm64": {
+      "bundle": {
+        "name": "rke2.linux-arm64.tar.gz",
+        "url": "https://github.com/rancher/rke2/releases/download/v1.35.6%2Brke2r1/rke2.linux-arm64.tar.gz",
+        "size": 36237481,
+        "sha256": "9ad3f472ed0a0ffc282fbe374dddd51409b9c4b99a217787a516108ced7dc215"
+      },
+      "images": {
+        "name": "rke2-images.linux-arm64.tar.zst",
+        "url": "https://github.com/rancher/rke2/releases/download/v1.35.6%2Brke2r1/rke2-images.linux-arm64.tar.zst",
+        "size": 745246836,
+        "sha256": "c35917050461999b633b5796c10a1cd1d192654dd23a285068371e7fa0fdf824"
+      },
+      "checksums": {
+        "name": "sha256sum-arm64.txt",
+        "url": "https://github.com/rancher/rke2/releases/download/v1.35.6%2Brke2r1/sha256sum-arm64.txt",
+        "size": 3046,
+        "sha256": "138daa84437b11bbd1a48acf4c6d71cc6927625f00eb6d8d5c572947d84c643b"
+      }
+    }
+  }
+}
