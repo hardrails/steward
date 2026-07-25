@@ -142,6 +142,74 @@ func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testi
 	}
 }
 
+func TestWaitForTaskRunServiceReportsEachReadinessBoundary(t *testing.T) {
+	directory := t.TempDir()
+	deploymentPath := filepath.Join(directory, "deployment.json")
+	tokenPath := filepath.Join(directory, "gateway.token")
+	if err := os.WriteFile(tokenPath, []byte("gateway-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servicePath := "/v1/services/grant-" + strings.Repeat("d", 64) + "/"
+	writeDeployment := func(serviceID string) {
+		t.Helper()
+		raw, err := json.Marshal(agentDeployResult{
+			SchemaVersion: agentDeploymentSchema,
+			Admission: controlprotocol.ExecutorAdmissionProjectionV1{
+				ServiceID: serviceID, ServicePath: servicePath,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(deploymentPath, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := waitForTaskRunService(filepath.Join(directory, "missing.json"), "http://gateway", tokenPath, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "read task-ready deployment") {
+		t.Fatalf("missing deployment error = %v", err)
+	}
+	if err := os.WriteFile(deploymentPath, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForTaskRunService(deploymentPath, "http://gateway", tokenPath, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "decode task-ready deployment") {
+		t.Fatalf("malformed deployment error = %v", err)
+	}
+
+	writeDeployment("other-service")
+	if err := waitForTaskRunService(deploymentPath, "http://gateway", tokenPath, time.Second); err != nil {
+		t.Fatalf("non-Hermes deployment readiness = %v", err)
+	}
+	writeDeployment("hermes-api")
+	if err := waitForTaskRunService(deploymentPath, "http://gateway", filepath.Join(directory, "missing.token"), time.Second); err == nil ||
+		!strings.Contains(err.Error(), "read Gateway token") {
+		t.Fatalf("missing token error = %v", err)
+	}
+	if err := waitForTaskRunService(deploymentPath, "://invalid", tokenPath, time.Second); err == nil {
+		t.Fatal("invalid Gateway URL was accepted")
+	}
+
+	unauthorized := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusUnauthorized)
+	}))
+	if err := waitForTaskRunService(deploymentPath, unauthorized.URL, tokenPath, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("unauthorized readiness error = %v", err)
+	}
+	unauthorized.Close()
+
+	unavailable := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer unavailable.Close()
+	if err := waitForTaskRunService(deploymentPath, unavailable.URL, tokenPath, time.Millisecond); err == nil ||
+		!strings.Contains(err.Error(), "wait for Hermes task service readiness") {
+		t.Fatalf("readiness timeout error = %v", err)
+	}
+}
+
 func TestTaskRunPromptCreatesPrivateRecoverableArtifacts(t *testing.T) {
 	fixture := newTaskCLIFixture(t)
 	if err := os.Chmod(fixture.directory, 0o700); err != nil {

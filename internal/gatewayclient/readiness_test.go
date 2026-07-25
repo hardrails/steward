@@ -2,12 +2,30 @@ package gatewayclient
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type readinessRoundTripper func(*http.Request) (*http.Response, error)
+
+func (transport readinessRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+type readinessErrorBody struct{}
+
+func (readinessErrorBody) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (readinessErrorBody) Close() error {
+	return nil
+}
 
 func TestHermesReadyUsesOnlyFixedBoundedHealthRequest(t *testing.T) {
 	var observedPath string
@@ -71,5 +89,78 @@ func TestHermesReadyRejectsNonReadyAndOversizedResponses(t *testing.T) {
 	if err := client.HermesReady(context.Background(), servicePath); err == nil ||
 		!strings.Contains(err.Error(), "16 KiB") {
 		t.Fatalf("oversized response = %v", err)
+	}
+}
+
+func TestHermesReadyReportsTransportAndResponseBoundaryFailures(t *testing.T) {
+	servicePath := "/v1/services/grant-" + strings.Repeat("c", 64) + "/"
+	transportErr := errors.New("transport unavailable")
+
+	tests := []struct {
+		name   string
+		client *Client
+		want   string
+	}{
+		{
+			name: "invalid request URL",
+			client: &Client{
+				baseURL: "://invalid",
+				token:   "gateway-token",
+				http:    http.DefaultClient,
+			},
+			want: "missing protocol scheme",
+		},
+		{
+			name: "transport error",
+			client: &Client{
+				baseURL: "http://gateway",
+				token:   "gateway-token",
+				http: &http.Client{Transport: readinessRoundTripper(func(*http.Request) (*http.Response, error) {
+					return nil, transportErr
+				})},
+			},
+			want: "call Gateway Hermes readiness",
+		},
+		{
+			name: "declared oversized response",
+			client: &Client{
+				baseURL: "http://gateway",
+				token:   "gateway-token",
+				http: &http.Client{Transport: readinessRoundTripper(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						ContentLength: maxServiceReadinessBytes + 1,
+						Body:          http.NoBody,
+						Header:        make(http.Header),
+					}, nil
+				})},
+			},
+			want: "exceeds 16 KiB",
+		},
+		{
+			name: "response read error",
+			client: &Client{
+				baseURL: "http://gateway",
+				token:   "gateway-token",
+				http: &http.Client{Transport: readinessRoundTripper(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						ContentLength: -1,
+						Body:          readinessErrorBody{},
+						Header:        make(http.Header),
+					}, nil
+				})},
+			},
+			want: "read Gateway Hermes readiness response",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.client.HermesReady(context.Background(), servicePath)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("readiness error = %v, want substring %q", err, test.want)
+			}
+		})
 	}
 }

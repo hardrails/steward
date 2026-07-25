@@ -1022,6 +1022,9 @@ func TestDeploymentStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 	if _, _, err := unavailable.RemovePendingDeploymentInstance("a", "b", "c", 1, time.Now()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("nil remove pending error = %v", err)
 	}
+	if _, _, err := unavailable.RemoveRejectedAdmissionInstance("a", "b", "c", 1, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil remove rejected admission error = %v", err)
+	}
 	if _, _, err := unavailable.RecordDeploymentBlocked(
 		"a", "b", "c", 1, DeploymentBlockedNoEligibleNode, time.Now(),
 	); !errors.Is(err, ErrUnavailable) {
@@ -1139,6 +1142,31 @@ func TestDeploymentStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 		"tenant-a", "deployment-a", "missing", created.Revision, fixture.now,
 	); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing pending instance error = %v", err)
+	}
+	if _, _, err := fixture.store.RemoveRejectedAdmissionInstance(
+		"tenant-a", "missing", instanceID, created.Revision, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing rejected admission deployment error = %v", err)
+	}
+	if _, _, err := fixture.store.RemoveRejectedAdmissionInstance(
+		"tenant-a", "deployment-a", instanceID, 0, fixture.now,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("invalid rejected admission revision error = %v", err)
+	}
+	if _, _, err := fixture.store.RemoveRejectedAdmissionInstance(
+		"tenant-a", "deployment-a", instanceID, created.Revision+1, fixture.now,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale rejected admission revision error = %v", err)
+	}
+	if _, _, err := fixture.store.RemoveRejectedAdmissionInstance(
+		"tenant-a", "deployment-a", "missing", created.Revision, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing rejected admission instance error = %v", err)
+	}
+	if _, _, err := fixture.store.RemoveRejectedAdmissionInstance(
+		"tenant-a", "deployment-a", instanceID, created.Revision, fixture.now,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("running rejected admission removal error = %v", err)
 	}
 	absent, _, err := fixture.store.SetDeploymentDesiredState(
 		fixture.admin, "tenant-a", "deployment-a", created.Revision,

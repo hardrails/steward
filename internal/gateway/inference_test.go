@@ -14,6 +14,25 @@ import (
 	"time"
 )
 
+type inferenceReadCloser struct {
+	reader   io.Reader
+	closeErr error
+}
+
+func (body *inferenceReadCloser) Read(buffer []byte) (int, error) {
+	return body.reader.Read(buffer)
+}
+
+func (body *inferenceReadCloser) Close() error {
+	return body.closeErr
+}
+
+type inferenceErrorReader struct{}
+
+func (inferenceErrorReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
 func TestInferenceGrantEnforcesModelAndSynthesizesModels(t *testing.T) {
 	var upstreamRequests atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +173,46 @@ func TestInferenceTokenCapOnlyReducesPositiveIntegerRequests(t *testing.T) {
 		if _, err := rewriteInferenceRequest([]byte(raw), "", 32768); err == nil {
 			t.Fatalf("invalid max_tokens accepted: %s", raw)
 		}
+	}
+}
+
+func TestInspectInferenceModelReportsEachBodyBoundary(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "http://gateway/v1/chat/completions", strings.NewReader(`{}`))
+	request.ContentLength = maxProxyBody + 1
+	if _, _, err := inspectInferenceModel(recorder, request); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("declared oversized body error = %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "http://gateway/v1/chat/completions", nil)
+	request.Body = &inferenceReadCloser{reader: inferenceErrorReader{}}
+	request.ContentLength = -1
+	if _, _, err := inspectInferenceModel(recorder, request); err == nil ||
+		!strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("body read error = %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "http://gateway/v1/chat/completions", nil)
+	request.Body = &inferenceReadCloser{
+		reader:   strings.NewReader(`{"model":"default"}`),
+		closeErr: io.ErrClosedPipe,
+	}
+	request.ContentLength = -1
+	if _, _, err := inspectInferenceModel(recorder, request); err == nil ||
+		!strings.Contains(err.Error(), "could not be closed") {
+		t.Fatalf("body close error = %v", err)
+	}
+}
+
+func TestRewriteInferenceRequestNoopAndInvalidInput(t *testing.T) {
+	raw := []byte(`{"model":"default"}`)
+	unchanged, err := rewriteInferenceRequest(raw, "", 0)
+	if err != nil || !bytes.Equal(unchanged, raw) {
+		t.Fatalf("no-op rewrite = %s err=%v", unchanged, err)
+	}
+	if _, err := rewriteInferenceRequest([]byte(`[`), "pinned", 0); err == nil {
+		t.Fatal("invalid JSON accepted for model mapping")
 	}
 }
 
