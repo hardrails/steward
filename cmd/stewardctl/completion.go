@@ -104,7 +104,7 @@ var completionFlags = map[string][]string{
 	"agent validate":                      {"-file", "-cue"},
 	"agent build":                         {"-file", "-out", "-cue", "-opa", "-policy-bundle", "-policy-query"},
 	"agent publish":                       {"-bundle", "-archive", "-out", "-capsule-id", "-site-root-public-key"},
-	"agent authorize":                     {"-bundle", "-capsule", "-controller-public-key", "-controller-key-id", "-node-ids", "-deployment", "-instance-id", "-lineage-id", "-generation", "-claim-generation", "-valid-for", "-fork-plan", "-out", "-site-root-public-key"},
+	"agent authorize":                     {"-bundle", "-capsule", "-controller-public-key", "-controller-key-id", "-node-ids", "-deployment", "-instance-id", "-lineage-id", "-generation", "-claim-generation", "-resume-state", "-valid-for", "-fork-plan", "-out", "-site-root-public-key"},
 	"agent service activate":              {"-bundle", "-config", "-tenant-id", "-node-id", "-tenant-budget-bytes", "-trust-out"},
 	"agent plan":                          {"-bundle", "-nodes", "-tenant", "-out"},
 	"agent apply":                         {"-bundle", "-capsule", "-policy", "-site-root-public-key", "-site-root-key-id", "-nodes", "-tenant", "-node-id", "-instance-id", "-lineage-id", "-generation", "-node-url", "-token-file", "-timeout", "-plan-only", "-no-context", "-delegation", "-tenant-id", "-revision", "-max-unavailable", "-control-url", "-ca-file"},
@@ -184,7 +184,7 @@ var completionFlags = map[string][]string{
 	"node":                                {"-node-url", "-token-file", "-no-context", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation", "-reason", "-apply"},
 	"gateway":                             {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
 	"gateway identity set":                {"-config", "-node-id"},
-	"gateway inference set":               {"-config", "-provider", "-id", "-base-url", "-protocol", "-credential-file", "-credential-mode", "-anthropic-version", "-max-concurrent"},
+	"gateway inference set":               {"-config", "-provider", "-id", "-base-url", "-protocol", "-upstream-model", "-max-tokens-cap", "-credential-file", "-credential-mode", "-anthropic-version", "-max-concurrent"},
 	"capsule check-profile":               {"-in"},
 	"gateway connector set":               {"-preset", "-repository", "-id", "-base-url", "-credential-file", "-credential-mode", "-credential-epoch", "-allow-cidr", "-operation", "-tenant-budget", "-action-authority", "-action-authority-tenant", "-action-node-id", "-max-action-permit-seconds", "-max-concurrent", "-max-request-bytes", "-max-response-bytes", "-max-seconds", "-max-calls-per-grant"},
 }

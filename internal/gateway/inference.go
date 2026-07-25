@@ -99,6 +99,52 @@ func topLevelModel(raw []byte) (string, error) {
 	return model, nil
 }
 
+func rewriteInferenceRequest(raw []byte, upstreamModel string, maxTokensCap int) ([]byte, error) {
+	if upstreamModel == "" && maxTokensCap == 0 {
+		return raw, nil
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	if upstreamModel != "" {
+		model, err := json.Marshal(upstreamModel)
+		if err != nil {
+			return nil, err
+		}
+		document["model"] = model
+	}
+	if maxTokensCap > 0 {
+		if encoded, exists := document["max_tokens"]; exists {
+			decoder := json.NewDecoder(bytes.NewReader(encoded))
+			decoder.UseNumber()
+			var rawValue any
+			if err := decoder.Decode(&rawValue); err != nil {
+				return nil, errors.New("top-level max_tokens must be a positive integer")
+			}
+			requested, ok := rawValue.(json.Number)
+			if !ok {
+				return nil, errors.New("top-level max_tokens must be a positive integer")
+			}
+			value, err := requested.Int64()
+			if err != nil || value < 1 {
+				return nil, errors.New("top-level max_tokens must be a positive integer")
+			}
+			if value > int64(maxTokensCap) {
+				document["max_tokens"] = json.RawMessage(fmt.Sprintf("%d", maxTokensCap))
+			}
+		}
+	}
+	rewritten, err := json.Marshal(document)
+	if err != nil {
+		return nil, err
+	}
+	if len(rewritten) > maxProxyBody {
+		return nil, errors.New("inference request exceeds the byte limit after model mapping")
+	}
+	return rewritten, nil
+}
+
 func skipJSONValue(decoder *json.Decoder, first json.Token) error {
 	delimiter, composite := first.(json.Delim)
 	if !composite {

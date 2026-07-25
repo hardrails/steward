@@ -47,9 +47,27 @@ func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testi
 	result := []byte(`{"run_id":"run_0123456789abcdef0123456789abcdef","status":"completed","result":{"changed":true}}`)
 	var mu sync.Mutex
 	var taskDigest, permitDigest string
+	readinessAttempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer gateway-secret" {
 			t.Errorf("authorization=%q", request.Header.Get("Authorization"))
+		}
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/health") {
+			mu.Lock()
+			readinessAttempts++
+			attempt := readinessAttempts
+			mu.Unlock()
+			if _, err := os.Stat(fixture.bundlePath); !os.IsNotExist(err) {
+				t.Errorf("signed authority existed before readiness: %v", err)
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			if attempt < 3 {
+				writer.WriteHeader(http.StatusBadGateway)
+				_, _ = io.WriteString(writer, `{"error":"upstream_unavailable"}`)
+				return
+			}
+			_, _ = io.WriteString(writer, `{"status":"ok"}`)
+			return
 		}
 		if strings.HasPrefix(request.URL.Path, "/v1/services/") {
 			bundle, err := readHistoricalLifecycleTaskBundle(fixture.bundlePath)
@@ -96,7 +114,7 @@ func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testi
 	var output bytes.Buffer
 	err := run([]string{
 		"task", "run", "auditor", "-tenant", "tenant-a",
-		"-control-url", controlServer.URL, "-control-token-file", controlTokenPath, "-deployment-timeout", "1s",
+		"-control-url", controlServer.URL, "-control-token-file", controlTokenPath, "-deployment-timeout", "2s",
 		"-trust", fixture.trustPath, "-request", fixture.requestPath,
 		"-operation-id", fixture.operation.ID, "-task-id", "task.fixed", "-key", fixture.privatePath, "-key-id", fixture.keyID,
 		"-bundle-out", fixture.bundlePath, "-result-out", resultPath,
@@ -118,6 +136,77 @@ func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testi
 	}
 	if bytes.Contains(output.Bytes(), result) || bytes.Contains(output.Bytes(), fixture.request) {
 		t.Fatalf("task run exposed task content: %s", output.Bytes())
+	}
+	if readinessAttempts != 3 {
+		t.Fatalf("readiness attempts=%d want 3", readinessAttempts)
+	}
+}
+
+func TestWaitForTaskRunServiceReportsEachReadinessBoundary(t *testing.T) {
+	directory := t.TempDir()
+	deploymentPath := filepath.Join(directory, "deployment.json")
+	tokenPath := filepath.Join(directory, "gateway.token")
+	if err := os.WriteFile(tokenPath, []byte("gateway-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servicePath := "/v1/services/grant-" + strings.Repeat("d", 64) + "/"
+	writeDeployment := func(serviceID string) {
+		t.Helper()
+		raw, err := json.Marshal(agentDeployResult{
+			SchemaVersion: agentDeploymentSchema,
+			Admission: controlprotocol.ExecutorAdmissionProjectionV1{
+				ServiceID: serviceID, ServicePath: servicePath,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(deploymentPath, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := waitForTaskRunService(filepath.Join(directory, "missing.json"), "http://gateway", tokenPath, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "read task-ready deployment") {
+		t.Fatalf("missing deployment error = %v", err)
+	}
+	if err := os.WriteFile(deploymentPath, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForTaskRunService(deploymentPath, "http://gateway", tokenPath, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "decode task-ready deployment") {
+		t.Fatalf("malformed deployment error = %v", err)
+	}
+
+	writeDeployment("other-service")
+	if err := waitForTaskRunService(deploymentPath, "http://gateway", tokenPath, time.Second); err != nil {
+		t.Fatalf("non-Hermes deployment readiness = %v", err)
+	}
+	writeDeployment("hermes-api")
+	if err := waitForTaskRunService(deploymentPath, "http://gateway", filepath.Join(directory, "missing.token"), time.Second); err == nil ||
+		!strings.Contains(err.Error(), "read Gateway token") {
+		t.Fatalf("missing token error = %v", err)
+	}
+	if err := waitForTaskRunService(deploymentPath, "://invalid", tokenPath, time.Second); err == nil {
+		t.Fatal("invalid Gateway URL was accepted")
+	}
+
+	unauthorized := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusUnauthorized)
+	}))
+	if err := waitForTaskRunService(deploymentPath, unauthorized.URL, tokenPath, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("unauthorized readiness error = %v", err)
+	}
+	unauthorized.Close()
+
+	unavailable := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer unavailable.Close()
+	if err := waitForTaskRunService(deploymentPath, unavailable.URL, tokenPath, time.Millisecond); err == nil ||
+		!strings.Contains(err.Error(), "wait for Hermes task service readiness") {
+		t.Fatalf("readiness timeout error = %v", err)
 	}
 }
 
@@ -147,6 +236,11 @@ func TestTaskRunPromptCreatesPrivateRecoverableArtifacts(t *testing.T) {
 	var mu sync.Mutex
 	var taskDigest, permitDigest string
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/health") {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"status":"ok"}`)
+			return
+		}
 		if strings.HasPrefix(request.URL.Path, "/v1/services/") {
 			bundle, err := readHistoricalLifecycleTaskBundle(bundlePath)
 			if err != nil {
@@ -341,7 +435,12 @@ func TestTaskRunRetainsSignedBundleWhenDispatchFails(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("gateway-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/health") {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"status":"ok"}`)
+			return
+		}
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(writer, `{"error":"gateway_unavailable","message":"temporary failure"}`)
@@ -373,6 +472,11 @@ func TestTaskRunRetainsSignedBundleWhenWaitFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/health") {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"status":"ok"}`)
+			return
+		}
 		if strings.HasPrefix(request.URL.Path, "/v1/services/") {
 			writeTaskSubmitCLIResponse(writer, "run_0123456789abcdef0123456789abcdef", gatewayclient.TaskReceiptRecorded)
 			return

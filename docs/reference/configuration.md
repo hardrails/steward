@@ -564,8 +564,12 @@ and cannot rewrite the live Executor environment.
 state, token, and audit paths; numeric Executor and relay GIDs; an explicit loopback
 service address with a port from 1 through 65535; and at most 128 inference routes.
 Each inference route defines an ID, exact HTTP(S) base URL with an optional canonical
-path prefix, `openai` or `anthropic` protocol, optional owner-only credential file,
-`bearer`, `x-api-key`, or `api-key` credential mode, and concurrency limit.
+path prefix, `openai` or `anthropic` protocol, optional exact `upstream_model`,
+optional `max_tokens_cap`, optional owner-only credential file, `bearer`,
+`x-api-key`, or `api-key` credential mode, and concurrency limit. `upstream_model`
+maps the signed agent-facing alias to one provider model. `max_tokens_cap` only
+reduces an agent's top-level output-token request. Both values are included in the
+grant's route-policy digest.
 `anthropic_version` is allowed only for Anthropic routes and defaults to
 `2023-06-01`. Existing routes that omit `protocol` and `credential_mode` retain
 OpenAI and bearer behavior. Use `stewardctl gateway inference set -provider …` for

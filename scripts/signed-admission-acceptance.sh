@@ -15,12 +15,28 @@ if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
 	echo 'Docker runtime runsc is required' >&2
 	exit 2
 fi
+command -v python3 >/dev/null || {
+	echo 'python3 is required' >&2
+	exit 2
+}
+executor_addr=${STEWARD_ACCEPTANCE_EXECUTOR_ADDR:-127.0.0.1:8090}
+if [[ ! $executor_addr =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]] ||
+	(( 10#${BASH_REMATCH[1]:-0} < 1 || 10#${BASH_REMATCH[1]:-0} > 65535 )); then
+	echo 'STEWARD_ACCEPTANCE_EXECUTOR_ADDR must be a 127.0.0.1 TCP address' >&2
+	exit 2
+fi
+executor_url=http://$executor_addr
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 executor_bin=${EXECUTOR_BIN:-$work/steward-executor}
 ctl_bin=${STEWARDCTL_BIN:-$work/stewardctl}
 runtime_ref=
+keep_failed=${STEWARD_SIGNED_ADMISSION_KEEP_FAILED:-NO}
+[[ $keep_failed == YES || $keep_failed == NO ]] || {
+	echo 'STEWARD_SIGNED_ADMISSION_KEEP_FAILED must be YES or NO' >&2
+	exit 2
+}
 run_id=${STEWARD_ACCEPTANCE_RUN_ID:-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}
 [[ $run_id =~ ^[a-f0-9]{16}$ ]] || { echo 'STEWARD_ACCEPTANCE_RUN_ID must be 16 lowercase hexadecimal characters' >&2; exit 2; }
 tenant_id="acceptance-$run_id"
@@ -29,12 +45,19 @@ lineage_id="lineage-$run_id"
 node_id="node-$run_id"
 
 cleanup() {
+	local status=$?
+	trap - EXIT
 	if [[ -n ${runtime_ref:-} && -n ${token:-} ]]; then
-		curl -sS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" \
+		curl -sS -X DELETE "$executor_url/v1/workloads/$runtime_ref" \
 			-H "Authorization: Bearer $token" >/dev/null || true
 	fi
 	if [[ -n ${executor_pid:-} ]]; then kill "$executor_pid" 2>/dev/null || true; fi
-	rm -rf "$work"
+	if (( status != 0 )) && [[ $keep_failed == YES ]]; then
+		echo "signed-admission-acceptance: retained owner-only diagnostics at $work" >&2
+	else
+		rm -rf "$work"
+	fi
+	exit "$status"
 }
 trap cleanup EXIT
 
@@ -100,7 +123,7 @@ chmod 0600 "$work/token" "$work/receipts.private"
 
 "$executor_bin" -initialize-admission-fence -admission-fence-file "$work/fences.bin" >/dev/null
 
-"$executor_bin" -token-file "$work/token" -docker-socket /var/run/docker.sock \
+"$executor_bin" -addr "$executor_addr" -token-file "$work/token" -docker-socket /var/run/docker.sock \
 	-admission-policy-file "$work/policy.dsse.json" \
 	-admission-site-root-public-key-file "$work/site.public" \
 	-admission-site-root-key-id site-root -admission-node-id "$node_id" \
@@ -114,10 +137,10 @@ for _ in $(seq 1 30); do
 		echo 'Executor exited during startup' >&2
 		exit 1
 	fi
-	if curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >/dev/null 2>&1; then break; fi
+	if curl -fsS -H "Authorization: Bearer $token" "$executor_url/v1/readiness" >/dev/null 2>&1; then break; fi
 	sleep 1
 done
-curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >/dev/null
+curl -fsS -H "Authorization: Bearer $token" "$executor_url/v1/readiness" >/dev/null
 
 capsule_base64=$(base64 -w0 "$work/capsule.dsse.json")
 printf '%s\n' "{
@@ -131,7 +154,7 @@ printf '%s\n' "{
   }
 }" >"$work/request.json"
 
-response=$(curl -fsS -X POST http://127.0.0.1:8090/v1/admissions \
+response=$(curl -fsS -X POST "$executor_url/v1/admissions" \
 	-H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
 	--data-binary @"$work/request.json")
 runtime_ref=$(sed -n 's/.*"runtime_ref":"\([^"]*\)".*/\1/p' <<<"$response")
@@ -144,24 +167,52 @@ test -z "$(docker inspect --format '{{.HostConfig.PidMode}}' "$runtime_ref")"
 test -z "$(docker inspect --format '{{.HostConfig.UTSMode}}' "$runtime_ref")"
 test "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$runtime_ref")" = no
 test "$(docker inspect --format '{{.Config.User}}' "$runtime_ref")" = 65532:65532
-curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" \
+curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" \
 	-H "Authorization: Bearer $token" >/dev/null
-curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/stop" \
+curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/stop" \
 	-H "Authorization: Bearer $token" >/dev/null
-curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" \
+curl -fsS -X DELETE "$executor_url/v1/workloads/$runtime_ref" \
 	-H "Authorization: Bearer $token" >/dev/null
 "$ctl_bin" evidence verify -in "$work/evidence.bin" -public-key "$work/receipts.public" \
-	-node-id "$node_id" -epoch 1 | grep -q 'sequence=8'
+	-node-id "$node_id" -epoch 1 -expected-sequence 9 >/dev/null
+"$ctl_bin" evidence export -in "$work/evidence.bin" -public-key "$work/receipts.public" \
+	-node-id "$node_id" -epoch 1 >"$work/evidence.ndjson"
+python3 -I - "$work/evidence.ndjson" <<'PY'
+import json
+import pathlib
+import sys
+
+records = [
+    json.loads(line)
+    for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line
+]
+events = [record for record in records if isinstance(record.get("sequence"), int)]
+expected = [
+    ("admission_allow", "allowed"),
+    ("journal_prepare", "allowed"),
+    ("journal_commit", "committed"),
+    ("journal_prepare", "allowed"),
+    ("lifecycle_start", "committed"),
+    ("journal_prepare", "allowed"),
+    ("lifecycle_stop", "committed"),
+    ("journal_prepare", "allowed"),
+    ("lifecycle_destroy", "committed"),
+]
+observed = [(record.get("event"), record.get("outcome")) for record in events]
+if [record.get("sequence") for record in events] != list(range(1, 10)) or observed != expected:
+    raise SystemExit("signed-admission-acceptance: evidence lifecycle is incomplete or out of order")
+PY
 
 # A tombstone prevents replaying the consumed generation after destroy.
-status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8090/v1/admissions \
+status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$executor_url/v1/admissions" \
 	-H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
 	--data-binary @"$work/request.json")
 test "$status" = 409
 
 # Equal-generation tampering cannot adopt a different signed artifact or identity.
 status=$(sed "s/\"tenant_id\":\"$tenant_id\"/\"tenant_id\":\"unauthorized-$run_id\"/" "$work/request.json" | \
-	curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8090/v1/admissions \
+	curl -sS -o /dev/null -w '%{http_code}' -X POST "$executor_url/v1/admissions" \
 		-H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data-binary @-)
 test "$status" = 403
 

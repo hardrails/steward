@@ -598,6 +598,67 @@ func (store *Store) RemovePendingDeploymentInstance(
 	return cloneDeployment(deployment), true, nil
 }
 
+// RemoveRejectedAdmissionInstance completes an absent instance only when the
+// retained Executor report proves that admission was rejected. A failed or
+// outcome-unknown admission may have created an effect and must never use this
+// path.
+func (store *Store) RemoveRejectedAdmissionInstance(
+	tenantID, deploymentID, instanceID string,
+	expectedRevision uint64,
+	now time.Time,
+) (Deployment, bool, error) {
+	if store == nil {
+		return Deployment{}, false, ErrUnavailable
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return Deployment{}, false, err
+	}
+	deployment, exists := store.current.deployments[deploymentKey(tenantID, deploymentID)]
+	if !exists {
+		return Deployment{}, false, ErrNotFound
+	}
+	if now.IsZero() || expectedRevision == 0 || deployment.Revision != expectedRevision {
+		return Deployment{}, false, ErrConflict
+	}
+	index := deploymentInstanceIndex(deployment.Instances, instanceID)
+	if index < 0 {
+		return Deployment{}, false, ErrNotFound
+	}
+	instance := deployment.Instances[index]
+	if deployment.DesiredState != DeploymentAbsent ||
+		instance.Phase != DeploymentInstanceFailed ||
+		instance.CommandOperation != "admit" ||
+		instance.CommandID == "" ||
+		instance.NodeID == "" {
+		return Deployment{}, false, ErrConflict
+	}
+	command, exists := store.current.commands[commandKey(tenantID, instance.NodeID, instance.CommandID)]
+	if !exists ||
+		command.CommandKind != "admit" ||
+		command.State != CommandTerminal ||
+		command.Terminal == nil ||
+		command.Terminal.Report.Status != controlprotocol.ExecutorStatusRejected ||
+		command.Terminal.Admission != nil {
+		return Deployment{}, false, ErrConflict
+	}
+	if deployment.Revision == math.MaxUint64 {
+		return Deployment{}, false, ErrCapacityExceeded
+	}
+	instance.Phase = DeploymentInstanceRemoved
+	instance.Drain = nil
+	instance.TransitionedAt = canonicalTimestamp(now)
+	deployment.Instances[index] = instance
+	deployment.Revision++
+	deployment.UpdatedAt = canonicalTimestamp(now)
+	deployment.Phase = deploymentAggregatePhase(deployment)
+	if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+		return Deployment{}, false, err
+	}
+	return cloneDeployment(deployment), true, nil
+}
+
 // ReplaceDeploymentInstance advances a stateless instance only after the last
 // lease that the old node could have accepted is outside its clock-skew safety
 // window. The tenant-signed delegation remains the generation and node ceiling.

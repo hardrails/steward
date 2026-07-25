@@ -176,6 +176,8 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	id := flags.String("id", "", "stable inference route ID")
 	baseURL := flags.String("base-url", "", "exact provider API base URL")
 	protocol := flags.String("protocol", "", "openai or anthropic request protocol")
+	upstreamModel := flags.String("upstream-model", "", "exact provider model ID used for the signed agent alias")
+	maxTokensCap := flags.Int("max-tokens-cap", 0, "optional upper bound for an agent's top-level max_tokens")
 	credentialFile := flags.String("credential-file", "", "owner-only provider credential file")
 	credentialMode := flags.String("credential-mode", "", "bearer, x-api-key, or api-key")
 	anthropicVersion := flags.String("anthropic-version", "", "fixed Anthropic API version")
@@ -234,7 +236,8 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	}
 	route := gateway.Route{
 		ID: *id, BaseURL: *baseURL, Protocol: gateway.InferenceProtocol(*protocol), CredentialFile: *credentialFile,
-		CredentialMode: gateway.CredentialMode(*credentialMode), AnthropicVersion: *anthropicVersion, MaxConcurrent: *maxConcurrent,
+		UpstreamModel: *upstreamModel, MaxTokensCap: *maxTokensCap, CredentialMode: gateway.CredentialMode(*credentialMode),
+		AnthropicVersion: *anthropicVersion, MaxConcurrent: *maxConcurrent,
 	}
 	replaced := false
 	for index := range config.Routes {

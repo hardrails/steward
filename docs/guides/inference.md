@@ -60,6 +60,7 @@ sudo install -o steward-gateway -g steward-gateway -m 0600 \
 
 sudo stewardctl gateway inference set \
   -provider openrouter \
+  -upstream-model openai/gpt-4.1-mini \
   -credential-file /etc/steward/openrouter.key
 
 sudo systemctl reload steward-gateway.service
@@ -78,6 +79,7 @@ sudo install -o steward-gateway -g steward-gateway -m 0600 \
 
 sudo stewardctl gateway inference set \
   -provider anthropic \
+  -upstream-model claude-sonnet-4-20250514 \
   -credential-file /etc/steward/anthropic.key
 
 sudo systemctl reload steward-gateway.service
@@ -158,8 +160,25 @@ removes it before dispatch. The real credential never enters the agent container
 
 The signed tenant policy must allow the route ID and model alias, and the instance
 intent must select both. The request's top-level `model` must exactly equal that
-alias. Use the provider's real model identifier as the alias unless an upstream
-gateway already maps aliases.
+alias. A new site uses the stable alias `default`. Set `-upstream-model` to map
+that alias to one exact provider model without changing the agent or site policy:
+
+```console
+sudo stewardctl gateway inference set \
+  -provider openai \
+  -id local \
+  -upstream-model gpt-4.1-mini \
+  -max-tokens-cap 32768 \
+  -credential-file /etc/steward/openai.key
+```
+
+Gateway validates the agent's signed alias before rewriting only the top-level
+`model` field. The configured provider model is part of the route-policy digest,
+so changing it requires replacing active grants. `-max-tokens-cap` optionally
+reduces an agent's top-level `max_tokens` to a provider-supported limit; it never
+increases the request. The cap is evidence-bound with the model mapping. Omit
+`-upstream-model` when the signed alias is already the provider's real model
+identifier or an upstream gateway performs its own alias mapping.
 
 ## Allowed inference calls
 

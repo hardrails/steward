@@ -224,6 +224,25 @@ absent, then switches that replica to the target delegation and issues `admit`,
 `renew`, and `start`. The old authority is never overwritten while it may still own
 a runtime.
 
+If the agent has persistent state and the replacement should keep the same lineage,
+authorize the new generation with `-resume-state`:
+
+```console
+stewardctl agent authorize SITE_DIRECTORY \
+  -controller-public-key controller.public.pem \
+  -node-ids node-1,node-2 \
+  -deployment auditor \
+  -instance-id auditor \
+  -lineage-id LINEAGE \
+  -generation 2 \
+  -resume-state
+```
+
+Without `-resume-state`, the signed admission requires a new empty lineage and
+Executor refuses an existing state volume. The flag does not restore a snapshot or
+create a fork; it only permits the named generation to reattach the exact existing
+lineage. Use `agent fork` for a new lineage copied from an immutable snapshot.
+
 `max_unavailable` bounds rollout and node-drain disruption in the same atomic store
 transaction. The default is one, so a multi-replica deployment replaces one agent
 at a time. Steward currently retains the assigned node and does not create surge
@@ -478,9 +497,10 @@ stewardctl task run auditor "Review the workspace and report one concrete issue"
 ```
 
 This waits for the deployment, checks the exact admitted service and task key,
-persists the signed bundle before dispatch, submits through the node-local Gateway,
-and saves verified terminal bytes. Steward infers only the qualified Hermes task
-operation and stores the generated request, bundle, and result in a
+and waits for the fixed Hermes health endpoint before it creates one-use authority.
+It then persists the signed bundle before dispatch, submits through the node-local
+Gateway, and saves verified terminal bytes. Steward infers only the qualified
+Hermes task operation and stores the generated request, bundle, and result in a
 new owner-only run directory. The bundle remains the recovery handle after a
 timeout or interrupted terminal. Resume it instead of minting replacement
 authority. The explicit artifact flags remain the stable automation surface.

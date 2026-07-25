@@ -814,6 +814,49 @@ func TestReconcilerDegradesAmbiguousOutcomeWithoutRetry(t *testing.T) {
 		getControlDeployment(t, fixture).Instances[0].Attempts != 1 {
 		t.Fatalf("ambiguous outcome retried = (%+v, %v)", report, err)
 	}
+	deployment = getControlDeployment(t, fixture)
+	if _, changed, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, deployment.TenantID, deployment.ID, deployment.Revision,
+		controlstore.DeploymentAbsent, fixture.now,
+	); err != nil || !changed {
+		t.Fatalf("set ambiguous deployment absent = (%v, %v)", changed, err)
+	}
+	report, err = reconciler.Reconcile(context.Background())
+	deployment = getControlDeployment(t, fixture)
+	if err != nil || report.Removed != 0 ||
+		deployment.Instances[0].Phase != controlstore.DeploymentInstanceFailed {
+		t.Fatalf("ambiguous admission was removed without absence proof = (%+v, %+v, %v)", report, deployment, err)
+	}
+}
+
+func TestReconcilerRemovesOnlyDefinitivelyRejectedAdmission(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusRejected)
+	assertReconcileCount(t, reconciler, "observe rejection", 1, 0)
+	deployment := getControlDeployment(t, fixture)
+	if deployment.Phase != controlstore.DeploymentDegraded ||
+		deployment.Instances[0].Phase != controlstore.DeploymentInstanceFailed {
+		t.Fatalf("rejected deployment = %+v", deployment)
+	}
+	if _, changed, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, deployment.TenantID, deployment.ID, deployment.Revision,
+		controlstore.DeploymentAbsent, fixture.now,
+	); err != nil || !changed {
+		t.Fatalf("set rejected deployment absent = (%v, %v)", changed, err)
+	}
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Removed != 1 || report.Enqueued != 0 {
+		t.Fatalf("remove rejected admission = (%+v, %v)", report, err)
+	}
+	deployment = getControlDeployment(t, fixture)
+	if deployment.Phase != controlstore.DeploymentRemoved ||
+		deployment.Instances[0].Phase != controlstore.DeploymentInstanceRemoved ||
+		!strings.Contains(deployment.Instances[0].LastError, "executor_command_rejected") {
+		t.Fatalf("removed rejected deployment = %+v", deployment)
+	}
 }
 
 func TestConcurrentReconcilersCannotDoubleEnqueueOrWidenAuthority(t *testing.T) {
@@ -1598,6 +1641,11 @@ func completeDeploymentCommandNamed(t *testing.T, fixture *reconcileFixture, dep
 		report.ReportedStatus = "failed"
 		report.ErrorCode = "local_outcome_unknown"
 		report.Result.Error = "executor response was lost after dispatch"
+	}
+	if status == controlprotocol.ExecutorStatusRejected {
+		report.ReportedStatus = "failed"
+		report.ErrorCode = "executor_command_rejected"
+		report.Result.Error = "executor rejected command before applying an effect"
 	}
 	if operation == "destroy" && status == controlprotocol.ExecutorStatusDone {
 		report.Result.Absent = true

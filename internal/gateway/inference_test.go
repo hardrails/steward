@@ -7,11 +7,31 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type inferenceReadCloser struct {
+	reader   io.Reader
+	closeErr error
+}
+
+func (body *inferenceReadCloser) Read(buffer []byte) (int, error) {
+	return body.reader.Read(buffer)
+}
+
+func (body *inferenceReadCloser) Close() error {
+	return body.closeErr
+}
+
+type inferenceErrorReader struct{}
+
+func (inferenceErrorReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
 
 func TestInferenceGrantEnforcesModelAndSynthesizesModels(t *testing.T) {
 	var upstreamRequests atomic.Int64
@@ -101,6 +121,155 @@ func TestInferenceGrantEnforcesModelAndSynthesizesModels(t *testing.T) {
 	_ = response.Body.Close()
 	if upstreamRequests.Load() != beforeDenied {
 		t.Fatal("denied model request reached upstream")
+	}
+}
+
+func TestInferenceRouteMapsSignedAliasToPinnedUpstreamModel(t *testing.T) {
+	var forwarded map[string]json.RawMessage
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&forwarded); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	base, _ := url.Parse(upstream.URL + "/v1")
+	route := loadedRoute{
+		Route: Route{
+			ID: "openai", BaseURL: base.String(), Protocol: InferenceProtocolOpenAI,
+			UpstreamModel: "gpt-4.1-mini", MaxTokensCap: 32768, MaxConcurrent: 1,
+		},
+		base: base,
+	}
+	server := &Server{client: upstream.Client()}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"http://relay/v1/chat/completions",
+		strings.NewReader(`{"model":"default","max_tokens":65536,"messages":[{"role":"user","content":{"model":"preserved"}}]}`),
+	)
+	recorder := httptest.NewRecorder()
+	server.proxyInference(recorder, request, Grant{ModelAlias: "default"}, route)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if string(forwarded["model"]) != `"gpt-4.1-mini"` ||
+		string(forwarded["max_tokens"]) != `32768` ||
+		!bytes.Contains(forwarded["messages"], []byte(`"model":"preserved"`)) {
+		t.Fatalf("forwarded request = %#v", forwarded)
+	}
+}
+
+func TestInferenceTokenCapOnlyReducesPositiveIntegerRequests(t *testing.T) {
+	unchanged, err := rewriteInferenceRequest([]byte(`{"model":"default","max_tokens":1024}`), "", 32768)
+	if err != nil || !bytes.Contains(unchanged, []byte(`"max_tokens":1024`)) {
+		t.Fatalf("smaller request = %s err=%v", unchanged, err)
+	}
+	for _, raw := range []string{
+		`{"model":"default","max_tokens":0}`,
+		`{"model":"default","max_tokens":"65536"}`,
+		`{"model":"default","max_tokens":1.5}`,
+	} {
+		if _, err := rewriteInferenceRequest([]byte(raw), "", 32768); err == nil {
+			t.Fatalf("invalid max_tokens accepted: %s", raw)
+		}
+	}
+}
+
+func TestInspectInferenceModelReportsEachBodyBoundary(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "http://gateway/v1/chat/completions", strings.NewReader(`{}`))
+	request.ContentLength = maxProxyBody + 1
+	if _, _, err := inspectInferenceModel(recorder, request); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("declared oversized body error = %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "http://gateway/v1/chat/completions", nil)
+	request.Body = &inferenceReadCloser{reader: inferenceErrorReader{}}
+	request.ContentLength = -1
+	if _, _, err := inspectInferenceModel(recorder, request); err == nil ||
+		!strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("body read error = %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "http://gateway/v1/chat/completions", nil)
+	request.Body = &inferenceReadCloser{
+		reader:   strings.NewReader(`{"model":"default"}`),
+		closeErr: io.ErrClosedPipe,
+	}
+	request.ContentLength = -1
+	if _, _, err := inspectInferenceModel(recorder, request); err == nil ||
+		!strings.Contains(err.Error(), "could not be closed") {
+		t.Fatalf("body close error = %v", err)
+	}
+}
+
+func TestRewriteInferenceRequestNoopAndInvalidInput(t *testing.T) {
+	raw := []byte(`{"model":"default"}`)
+	unchanged, err := rewriteInferenceRequest(raw, "", 0)
+	if err != nil || !bytes.Equal(unchanged, raw) {
+		t.Fatalf("no-op rewrite = %s err=%v", unchanged, err)
+	}
+	if _, err := rewriteInferenceRequest([]byte(`[`), "pinned", 0); err == nil {
+		t.Fatal("invalid JSON accepted for model mapping")
+	}
+}
+
+func TestSkipJSONValueRejectsUnexpectedClosingDelimiter(t *testing.T) {
+	decoder := json.NewDecoder(strings.NewReader(""))
+	if err := skipJSONValue(decoder, json.Delim('}')); err == nil {
+		t.Fatal("unexpected closing delimiter was accepted")
+	}
+}
+
+func TestTopLevelModelRejectsMalformedAndExcessiveDocuments(t *testing.T) {
+	for _, raw := range []string{
+		`{"input":`,
+		`{"input":[`,
+		`{"input":1`,
+	} {
+		if _, err := topLevelModel([]byte(raw)); err == nil {
+			t.Fatalf("malformed inference document accepted: %q", raw)
+		}
+	}
+
+	var document strings.Builder
+	document.WriteByte('{')
+	for member := 0; member <= maxInferenceTopLevelMembers; member++ {
+		if member > 0 {
+			document.WriteByte(',')
+		}
+		document.WriteString(strconv.Quote(strconv.Itoa(member)))
+		document.WriteString(`:0`)
+	}
+	document.WriteByte('}')
+	if _, err := topLevelModel([]byte(document.String())); err == nil ||
+		!strings.Contains(err.Error(), "too many top-level members") {
+		t.Fatalf("excessive inference document error = %v", err)
+	}
+}
+
+func TestSkipJSONValueBoundsNestingAndTruncation(t *testing.T) {
+	nested := strings.Repeat("[", maxInferenceJSONDepth+1) +
+		strings.Repeat("]", maxInferenceJSONDepth+1)
+	decoder := json.NewDecoder(strings.NewReader(nested))
+	first, err := decoder.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := skipJSONValue(decoder, first); err == nil ||
+		!strings.Contains(err.Error(), "nesting exceeds limit") {
+		t.Fatalf("nested JSON error = %v", err)
+	}
+
+	decoder = json.NewDecoder(strings.NewReader("["))
+	first, err = decoder.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := skipJSONValue(decoder, first); err == nil {
+		t.Fatal("truncated composite JSON value was accepted")
 	}
 }
 
@@ -203,6 +372,8 @@ func TestInferenceProviderProtocolIsPinnedIntoRoutePolicy(t *testing.T) {
 	mutations := []func(*loadedRoute){
 		func(route *loadedRoute) { route.Protocol = InferenceProtocolAnthropic },
 		func(route *loadedRoute) { route.CredentialMode = CredentialModeXAPIKey },
+		func(route *loadedRoute) { route.UpstreamModel = "provider/model-v2" },
+		func(route *loadedRoute) { route.MaxTokensCap = 8192 },
 		func(route *loadedRoute) {
 			route.Protocol = InferenceProtocolAnthropic
 			route.AnthropicVersion = "2024-01-01"

@@ -10,6 +10,14 @@ set -euo pipefail
 }
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || { echo "runsc is required" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
+command -v timeout >/dev/null || { echo "timeout is required" >&2; exit 2; }
+executor_addr=${STEWARD_ACCEPTANCE_EXECUTOR_ADDR:-127.0.0.1:8090}
+if [[ ! $executor_addr =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]] ||
+	(( 10#${BASH_REMATCH[1]:-0} < 1 || 10#${BASH_REMATCH[1]:-0} > 65535 )); then
+	echo "STEWARD_ACCEPTANCE_EXECUTOR_ADDR must be a 127.0.0.1 TCP address" >&2
+	exit 2
+fi
+executor_url=http://$executor_addr
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d)
@@ -20,6 +28,11 @@ ctl_bin=${STEWARDCTL_BIN:-$work/stewardctl}
 mcp_bin=${MCP_BIN:-$work/steward-mcp}
 runtime_ref=
 state_volume=
+keep_failed=${STEWARD_POSITIVE_CAPABILITIES_KEEP_FAILED:-NO}
+[[ $keep_failed == YES || $keep_failed == NO ]] || {
+	echo "STEWARD_POSITIVE_CAPABILITIES_KEEP_FAILED must be YES or NO" >&2
+	exit 2
+}
 run_id=${STEWARD_ACCEPTANCE_RUN_ID:-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}
 [[ $run_id =~ ^[a-f0-9]{16}$ ]] || { echo "STEWARD_ACCEPTANCE_RUN_ID must be 16 lowercase hexadecimal characters" >&2; exit 2; }
 tenant_id="acceptance-$run_id"
@@ -37,8 +50,28 @@ assert_private_namespaces() {
 }
 
 cleanup() {
+	local status=$?
+	trap - EXIT
+	if (( status != 0 )) && [[ $keep_failed == YES ]]; then
+		if [[ -n ${runtime_ref:-} ]]; then
+			timeout 5 docker logs "$runtime_ref" >"$work/agent.log" 2>&1 || true
+			timeout 5 docker inspect --format '{{json .State}}' "$runtime_ref" \
+				>"$work/agent-state.json" 2>/dev/null || true
+		fi
+		mapfile -t failed_relays < <(
+			docker ps -aq \
+				--filter label=io.hardrails.relay.managed=true \
+				--filter "label=io.hardrails.tenant=$tenant_id" \
+				--filter "label=io.hardrails.instance=$instance_id"
+		)
+		for relay in "${failed_relays[@]}"; do
+			timeout 5 docker logs "$relay" >>"$work/relay.log" 2>&1 || true
+			timeout 5 docker inspect --format '{{json .State}}' "$relay" \
+				>>"$work/relay-state.json" 2>/dev/null || true
+		done
+	fi
 	if [[ -n ${runtime_ref:-} && -n ${token:-} ]]; then
-		curl -sS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null || true
+		curl -sS -X DELETE "$executor_url/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null || true
 	fi
 	[[ -n ${state_volume:-} ]] && docker volume rm "$state_volume" >/dev/null 2>&1 || true
 	[[ -n ${executor_pid:-} ]] && kill "$executor_pid" 2>/dev/null || true
@@ -53,7 +86,12 @@ cleanup() {
 		--filter "label=io.hardrails.tenant=$tenant_id" \
 		--filter "label=io.hardrails.instance=$instance_id" | xargs -r docker network rm >/dev/null 2>&1 || true
 	[[ -n ${relay_tag:-} ]] && docker image rm "$relay_tag" >/dev/null 2>&1 || true
-	rm -rf "$work"
+	if (( status != 0 )) && [[ $keep_failed == YES ]]; then
+		echo "positive-capabilities-acceptance: retained owner-only diagnostics at $work" >&2
+	else
+		rm -rf "$work"
+	fi
+	exit "$status"
 }
 trap cleanup EXIT
 
@@ -126,7 +164,7 @@ token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' "$token" >"$work/token"
 chmod 0600 "$work/token" "$work/receipts.private"
 "$executor_bin" -initialize-admission-fence -admission-fence-file "$work/fences.bin" >/dev/null
-"$executor_bin" -token-file "$work/token" -admission-policy-file "$work/policy.dsse.json" \
+"$executor_bin" -addr "$executor_addr" -token-file "$work/token" -admission-policy-file "$work/policy.dsse.json" \
 	-admission-site-root-public-key-file "$work/site.public" -admission-site-root-key-id site-root \
 	-admission-node-id "$node_id" -admission-allow-host-admin-intent -admission-fence-file "$work/fences.bin" \
 	-admission-journal-file "$work/journal.bin" -admission-evidence-file "$work/evidence.bin" \
@@ -136,15 +174,15 @@ chmod 0600 "$work/token" "$work/receipts.private"
 executor_pid=$!
 for _ in $(seq 1 30); do
 	kill -0 "$executor_pid" 2>/dev/null || { echo "Executor exited during startup" >&2; exit 1; }
-	curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >/dev/null 2>&1 && break
+	curl -fsS -H "Authorization: Bearer $token" "$executor_url/v1/readiness" >/dev/null 2>&1 && break
 	sleep 1
 done
-curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >/dev/null
+curl -fsS -H "Authorization: Bearer $token" "$executor_url/v1/readiness" >/dev/null
 
 admit() {
 	local generation=$1 disposition=$2
 	printf '%s\n' "{\"capsule_dsse_base64\":\"$capsule_base64\",\"intent\":{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"instance_id\":\"$instance_id\",\"lineage_id\":\"$lineage_id\",\"generation\":$generation,\"capsule_digest\":\"$capsule_digest\",\"resources\":{\"memory_bytes\":67108864,\"cpu_millis\":100,\"pids\":32},\"capabilities\":{\"state\":true,\"inference\":true,\"service\":true},\"state_disposition\":\"$disposition\",\"inference_route_id\":\"local-openai\",\"model_alias\":\"approved-model\",\"service_id\":\"api\"}}" | \
-		curl -sS -X POST http://127.0.0.1:8090/v1/admissions -H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data-binary @-
+		curl -sS -X POST "$executor_url/v1/admissions" -H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data-binary @-
 }
 
 response=$(admit 1 new)
@@ -153,13 +191,27 @@ runtime_ref=$(sed -n 's/.*"runtime_ref":"\([^"]*\)".*/\1/p' <<<"$response")
 grant_id=$(sed -n 's/.*"grant_id":"\([^"]*\)".*/\1/p' <<<"$response")
 [[ -n $runtime_ref && -n $grant_id ]]
 state_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/state"}}{{.Name}}{{end}}{{end}}' "$runtime_ref")
-curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 assert_private_namespaces "$runtime_ref"
 relay_ref=$(docker ps -q --filter label=io.hardrails.relay.managed=true \
 	--filter "label=io.hardrails.tenant=$tenant_id" --filter "label=io.hardrails.instance=$instance_id")
 test -n "$relay_ref"
 assert_private_namespaces "$relay_ref"
 docker exec "$runtime_ref" sh -c 'echo durable > /state/index.html'
+
+service_ready=false
+for _ in $(seq 1 60); do
+	if docker exec "$runtime_ref" wget -qO- http://127.0.0.1:8080/index.html 2>/dev/null | grep -q '^durable$'; then
+		service_ready=true
+		break
+	fi
+	sleep 1
+done
+if [[ $service_ready != true ]]; then
+	echo "agent service did not become ready on 127.0.0.1:8080 within 60 seconds" >&2
+	exit 1
+fi
+
 docker exec "$runtime_ref" wget -qO- http://steward-relay:8080/v1/models | grep -q approved-model
 curl -fsS -H 'Authorization: Bearer service-secret' "http://127.0.0.1:18091/v1/services/$grant_id/" | grep -q durable
 printf '%s\n' \
@@ -167,16 +219,30 @@ printf '%s\n' \
 	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
 	"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"steward_status\",\"arguments\":{\"runtime_ref\":\"$runtime_ref\"}}}" | \
 	"$mcp_bin" -token-file "$work/token" | grep -q '"id":2'
-curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
+curl -fsS -X DELETE "$executor_url/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 
 response=$(admit 2 resume)
 if [[ $response == *'"error"'* ]]; then echo "$response" >&2; exit 1; fi
 runtime_ref=$(sed -n 's/.*"runtime_ref":"\([^"]*\)".*/\1/p' <<<"$response")
-curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
-docker exec "$runtime_ref" grep -q durable /state/index.html
-curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
+grant_id=$(sed -n 's/.*"grant_id":"\([^"]*\)".*/\1/p' <<<"$response")
+[[ -n $runtime_ref && -n $grant_id ]]
+curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+state_ready=false
+for _ in $(seq 1 60); do
+	if curl -fsS -H 'Authorization: Bearer service-secret' \
+		"http://127.0.0.1:18091/v1/services/$grant_id/index.html" 2>/dev/null | grep -q '^durable$'; then
+		state_ready=true
+		break
+	fi
+	sleep 1
+done
+if [[ $state_ready != true ]]; then
+	echo "resumed agent did not serve its durable state within 60 seconds" >&2
+	exit 1
+fi
+curl -fsS -X DELETE "$executor_url/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
-curl -fsS -X POST http://127.0.0.1:8090/v1/state/purge -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
+curl -fsS -X POST "$executor_url/v1/state/purge" -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
 	--data "{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"lineage_id\":\"$lineage_id\",\"generation\":2}" >/dev/null
 "$ctl_bin" evidence verify -in "$work/evidence.bin" -public-key "$work/receipts.public" -node-id "$node_id" -epoch 1 | grep -q 'valid evidence chain'
 echo "positive-capability acceptance passed: gVisor, persistent state, inference, service ingress, MCP, lifecycle, purge, and receipts verified."

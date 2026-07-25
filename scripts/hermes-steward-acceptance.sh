@@ -36,6 +36,13 @@ build_attestation=${HERMES_BUILD_ATTESTATION:-}
 for command in base64 curl docker python3; do
 	command -v "$command" >/dev/null 2>&1 || { echo "hermes-steward-acceptance: $command is required" >&2; exit 2; }
 done
+executor_addr=${STEWARD_ACCEPTANCE_EXECUTOR_ADDR:-127.0.0.1:8090}
+if [[ ! $executor_addr =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]] ||
+	(( 10#${BASH_REMATCH[1]:-0} < 1 || 10#${BASH_REMATCH[1]:-0} > 65535 )); then
+	echo "hermes-steward-acceptance: STEWARD_ACCEPTANCE_EXECUTOR_ADDR must be a 127.0.0.1 TCP address" >&2
+	exit 2
+fi
+executor_url=http://$executor_addr
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || {
 	echo "hermes-steward-acceptance: Docker runtime runsc is required" >&2
 	exit 2
@@ -46,6 +53,8 @@ docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || {
 }
 
 work=$(mktemp -d /tmp/steward-hermes-integration.XXXXXX)
+unset STEWARD_CONTEXT
+export STEWARD_CONTEXT_FILE=$work/cli-contexts.json
 executor_bin=${EXECUTOR_BIN:-${release_root:+$release_root/steward-executor}}
 gateway_bin=${GATEWAY_BIN:-${release_root:+$release_root/steward-gateway}}
 relay_bin=${RELAY_BIN:-${release_root:+$release_root/steward-relay}}
@@ -475,7 +484,7 @@ cleanup() {
 		done
 	fi
 	if [[ -n ${runtime_ref:-} && -n ${token:-} ]]; then
-		curl -sS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null 2>&1 || true
+		curl -sS -X DELETE "$executor_url/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null 2>&1 || true
 	fi
 	[[ -n ${executor_pid:-} ]] && kill "$executor_pid" 2>/dev/null || true
 	[[ -n ${gateway_pid:-} ]] && kill "$gateway_pid" 2>/dev/null || true
@@ -675,7 +684,7 @@ mark image_imported
 token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' "$token" >"$work/token"
 "$executor_bin" -initialize-admission-fence -admission-fence-file "$work/fences.bin" >/dev/null
-"$executor_bin" -token-file "$work/token" -admission-policy-file "$work/policy.dsse.json" \
+"$executor_bin" -addr "$executor_addr" -token-file "$work/token" -admission-policy-file "$work/policy.dsse.json" \
 	-admission-site-root-public-key-file "$work/site.public" -admission-site-root-key-id site-root \
 	-admission-node-id "$node_id" -admission-allow-host-admin-intent -admission-fence-file "$work/fences.bin" \
 	-admission-journal-file "$work/journal.bin" -admission-evidence-file "$work/evidence.bin" \
@@ -685,10 +694,10 @@ printf '%s\n' "$token" >"$work/token"
 executor_pid=$!
 for _ in $(seq 1 30); do
 	kill -0 "$executor_pid" 2>/dev/null || { echo "hermes-steward-acceptance: Executor exited" >&2; exit 1; }
-	curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >/dev/null 2>&1 && break
+	curl -fsS -H "Authorization: Bearer $token" "$executor_url/v1/readiness" >/dev/null 2>&1 && break
 	sleep 1
 done
-curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >/dev/null
+curl -fsS -H "Authorization: Bearer $token" "$executor_url/v1/readiness" >/dev/null
 mark executor_ready
 
 admit() {
@@ -705,7 +714,7 @@ import sys
 intent = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 print(json.dumps({"capsule_dsse_base64": sys.argv[2], "intent": intent}, separators=(",", ":")))
 PY
-	curl -sS -X POST http://127.0.0.1:8090/v1/admissions -H 'Content-Type: application/json' \
+	curl -sS -X POST "$executor_url/v1/admissions" -H 'Content-Type: application/json' \
 		-H "Authorization: Bearer $token" --data-binary "@$request_path" >"$response_path"
 	cat "$response_path"
 }
@@ -1034,7 +1043,7 @@ connector_route_policy_digest=${connector_bindings[1]}
 	exit 1
 }
 mark generation_1_admitted
-curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 mark generation_1_started
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
@@ -1103,7 +1112,7 @@ canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_key
 print("sha256:" + hashlib.sha256(b"steward.workspace-audit.manifest.v1\x00" + canonical).hexdigest())
 PY
 )
-curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
+curl -fsS -X DELETE "$executor_url/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
 mark generation_1_destroyed
 
@@ -1113,7 +1122,7 @@ mapfile -t admission < <(extract_admission <<<"$admission_response")
 runtime_ref=${admission[0]}
 grant_id=${admission[1]}
 mark generation_2_admitted
-curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 mark generation_2_started
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
@@ -1122,10 +1131,10 @@ mark generation_2_ready
 run_workspace_audit 2 "$generation_2_workspace_digest" "steward-integration-$run_id-generation-2"
 mark generation_2_skill_passed
 assert_agent_excludes_sensitive_material "$runtime_ref"
-curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
+curl -fsS -X DELETE "$executor_url/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
 mark generation_2_destroyed
-curl -fsS -X POST http://127.0.0.1:8090/v1/state/purge -H 'Content-Type: application/json' \
+curl -fsS -X POST "$executor_url/v1/state/purge" -H 'Content-Type: application/json' \
 	-H "Authorization: Bearer $token" \
 	--data-binary "{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"lineage_id\":\"$lineage_id\",\"generation\":2}" >/dev/null
 volume_inventory=$(docker volume ls --quiet)

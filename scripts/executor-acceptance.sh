@@ -12,6 +12,13 @@ if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
   echo 'Docker runtime runsc is required; refusing an ordinary-Docker proof' >&2
   exit 2
 fi
+executor_addr=${STEWARD_ACCEPTANCE_EXECUTOR_ADDR:-127.0.0.1:8090}
+if [[ ! $executor_addr =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]] ||
+  (( 10#${BASH_REMATCH[1]:-0} < 1 || 10#${BASH_REMATCH[1]:-0} > 65535 )); then
+  echo 'STEWARD_ACCEPTANCE_EXECUTOR_ADDR must be a 127.0.0.1 TCP address' >&2
+  exit 2
+fi
+executor_url=http://$executor_addr
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
@@ -19,10 +26,16 @@ token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 printf '%s\n' "$token" >"$work/token"
 chmod 600 "$work/token"
 refs=()
+mapfile -t baseline_refs < <(docker ps -aq --filter label=io.hardrails.executor.managed=true)
+(( ${#baseline_refs[@]} <= 1024 )) || {
+  echo 'Executor acceptance refuses an unbounded managed-workload baseline' >&2
+  exit 2
+}
+max_workloads=$((${#baseline_refs[@]} + 2))
 
 cleanup() {
   for ref in "${refs[@]}"; do
-    curl -sS -X DELETE "http://127.0.0.1:8090/v1/workloads/$ref" \
+    curl -sS -X DELETE "$executor_url/v1/workloads/$ref" \
       -H "Authorization: Bearer $token" >/dev/null || true
   done
   if [[ -n "${executor_pid:-}" ]]; then kill "$executor_pid" 2>/dev/null || true; fi
@@ -43,21 +56,21 @@ else
   docker cp "$build_container:/usr/local/bin/steward-executor" "$work/steward-executor"
   docker rm "$build_container" >/dev/null
 fi
-"$work/steward-executor" -token-file "$work/token" \
-  -max-workloads 2 -max-workloads-per-tenant 1 >"$work/executor.log" 2>&1 &
+"$work/steward-executor" -addr "$executor_addr" -token-file "$work/token" \
+  -max-workloads "$max_workloads" -max-workloads-per-tenant 1 >"$work/executor.log" 2>&1 &
 executor_pid=$!
 for _ in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8090/v1/healthz >/dev/null 2>&1; then break; fi
+  if curl -fsS "$executor_url/v1/healthz" >/dev/null 2>&1; then break; fi
   sleep 1
 done
-curl -fsS http://127.0.0.1:8090/v1/healthz >/dev/null
+curl -fsS "$executor_url/v1/healthz" >/dev/null
 
 payload() {
   printf '{"instance_id":"%s","tenant_id":"%s","profile_id":"acceptance","image":"%s","command":["sleep","300"],"resources":{"memory_bytes":67108864,"cpu_millis":100,"pids":32},"egress":{}}' "$2" "$1" "$V1_IMAGE"
 }
 
 provision() {
-  curl -fsS -X POST http://127.0.0.1:8090/v1/workloads \
+  curl -fsS -X POST "$executor_url/v1/workloads" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
     --data "$(payload "$1" "$2")"
 }
@@ -79,14 +92,14 @@ expect_status() {
 first_ref="$(provision tenant-a shared-id | runtime_ref)"
 refs+=("$first_ref")
 # Exact replay is idempotent; mutable/unknown configuration is not admitted.
-expect_status 200 -X POST http://127.0.0.1:8090/v1/workloads \
+expect_status 200 -X POST "$executor_url/v1/workloads" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
   --data "$(payload tenant-a shared-id)"
-expect_status 400 -X POST http://127.0.0.1:8090/v1/workloads \
+expect_status 400 -X POST "$executor_url/v1/workloads" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
   --data '{"privileged":true}'
 # A second workload for one tenant is rejected before Docker creation.
-expect_status 503 -X POST http://127.0.0.1:8090/v1/workloads \
+expect_status 503 -X POST "$executor_url/v1/workloads" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
   --data "$(payload tenant-a tenant-capacity-denied)"
 
@@ -94,7 +107,7 @@ second_ref="$(provision tenant-b shared-id | runtime_ref)"
 refs+=("$second_ref")
 test "$first_ref" != "$second_ref"
 # The global host budget is now full.
-expect_status 503 -X POST http://127.0.0.1:8090/v1/workloads \
+expect_status 503 -X POST "$executor_url/v1/workloads" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
   --data "$(payload tenant-c host-capacity-denied)"
 
@@ -117,9 +130,9 @@ for ref in "$first_ref" "$second_ref"; do
   docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$ref" | grep -q 'no-new-privileges:true'
   docker inspect --format '{{json .HostConfig.Tmpfs}}' "$ref" | grep -q '"/workspace"'
   docker inspect --format '{{json .HostConfig.Tmpfs}}' "$ref" | grep -q '"/tmp"'
-  curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$ref/start" \
+  curl -fsS -X POST "$executor_url/v1/workloads/$ref/start" \
     -H "Authorization: Bearer $token" >/dev/null
-  curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$ref/stop" \
+  curl -fsS -X POST "$executor_url/v1/workloads/$ref/stop" \
     -H "Authorization: Bearer $token" >/dev/null
 done
 

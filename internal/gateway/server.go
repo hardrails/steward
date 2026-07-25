@@ -1395,6 +1395,11 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 		writeGatewayError(w, http.StatusForbidden, "model_denied", "request model does not match the active inference grant")
 		return
 	}
+	raw, err = rewriteInferenceRequest(raw, route.UpstreamModel, route.MaxTokensCap)
+	if err != nil {
+		writeGatewayError(w, http.StatusBadRequest, "invalid_request", "inference request model mapping failed")
+		return
+	}
 	incoming.Body = io.NopCloser(bytes.NewReader(raw))
 	incoming.ContentLength = int64(len(raw))
 	fixedHeaders := make(http.Header)

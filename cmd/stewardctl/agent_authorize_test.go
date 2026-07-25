@@ -110,6 +110,35 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 		t.Fatalf("summary digest = %q, want %q", summary.DelegationDigest, dsse.Digest(raw))
 	}
 
+	resumeDelegationPath := filepath.Join(directory, "resume.delegation.dsse.json")
+	if err := agentAuthorize([]string{
+		siteDirectory, "-bundle", bundlePath, "-capsule", capsulePath,
+		"-controller-public-key", controllerPath, "-node-ids", "node-a",
+		"-deployment", summary.Deployment, "-instance-id", summary.InstanceID,
+		"-lineage-id", summary.LineageID, "-generation", "2", "-resume-state",
+		"-out", resumeDelegationPath,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	resumeDelegationRaw, err := os.ReadFile(resumeDelegationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedResume, err := admission.VerifyCommandDelegation(resumeDelegationRaw, verifiedSite.policy, timeNow().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeStatement := verifiedResume.Statement
+	if !slices.Equal(resumeStatement.Operations, []string{"admit", "destroy", "renew", "start", "stop"}) ||
+		resumeStatement.Admission == nil || resumeStatement.Admission.StateDisposition != "resume" ||
+		len(resumeStatement.Instances) != 1 ||
+		resumeStatement.Instances[0].InstanceID != summary.InstanceID ||
+		resumeStatement.Instances[0].LineageID != summary.LineageID ||
+		resumeStatement.Instances[0].MinInstanceGeneration != 2 ||
+		resumeStatement.Instances[0].MaxInstanceGeneration != 2 {
+		t.Fatalf("resume delegation = %+v", resumeStatement)
+	}
+
 	forkPlan := agentapp.ForkPlan{
 		Schema: agentapp.ForkSchema, DeploymentID: "workspace-auditor-fork",
 		SnapshotID: "snapshot-a", BundleDigest: bundleDigest,

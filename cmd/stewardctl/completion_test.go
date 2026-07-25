@@ -102,6 +102,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-credential-mode", "x"}); !slices.Equal(candidates, []string{"x-api-key"}) {
 		t.Fatalf("inference credential candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-up"}); !slices.Equal(candidates, []string{"-upstream-model"}) {
+		t.Fatalf("inference upstream model candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-max-t"}); !slices.Equal(candidates, []string{"-max-tokens-cap"}) {
+		t.Fatalf("inference token cap candidates=%v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"site", "init", "new-site", "-authorized-effects", "r"}); !slices.Equal(candidates, []string{"required"}) {
 		t.Fatalf("site effects candidates=%v", candidates)
 	}
@@ -152,6 +158,10 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 		if flags := stewardctlCompletionCandidates(arguments); !slices.Contains(flags, expected) {
 			t.Fatalf("agent %s flags %v missing %s", command, flags, expected)
 		}
+	}
+	authorizeFlags := stewardctlCompletionCandidates([]string{"agent", "authorize", "-"})
+	if !slices.Contains(authorizeFlags, "-resume-state") {
+		t.Fatalf("agent authorize flags %v missing -resume-state", authorizeFlags)
 	}
 	deploymentFlags := stewardctlCompletionCandidates([]string{"agent", "deployment", "apply", "-"})
 	for _, expected := range []string{"-bundle", "-capsule", "-delegation", "-revision", "-tenant"} {
