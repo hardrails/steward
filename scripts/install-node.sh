@@ -950,6 +950,7 @@ release_files=(
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
+	integration/scripts/install-cluster.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
@@ -1266,7 +1267,7 @@ for file in deploy/config/executor-gateway.env deploy/config/executor.env \
 	install -o root -g root -m 0644 "$root/$file" "$incoming/integration/$file"
 done
 for script in activate-node-release.sh build-hermes-adapter.sh build-relay-image.sh configure-admission.sh \
-	configure-node.sh hermes-feasibility.sh hermes-steward-acceptance.sh install-node.sh node-doctor.sh node-preflight.sh node-removal-guard.sh \
+	configure-node.sh hermes-feasibility.sh hermes-steward-acceptance.sh install-cluster.sh install-node.sh node-doctor.sh node-preflight.sh node-removal-guard.sh \
 	uninstall-node.sh; do
 	install -o root -g root -m 0755 "$root/scripts/$script" "$incoming/integration/scripts/$script"
 done
@@ -1413,6 +1414,7 @@ if [[ $reconcile_selected_release == true ]]; then
 		node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 		configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 		configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
+		install-cluster:/opt/steward/current/integration/scripts/install-cluster.sh \
 		uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 		node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 		build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
@@ -1464,6 +1466,7 @@ if [[ $reconcile_selected_release == true ]]; then
 		node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 		configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 		configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
+		install-cluster:/opt/steward/current/integration/scripts/install-cluster.sh \
 		uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 		node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 		build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \

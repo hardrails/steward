@@ -181,7 +181,7 @@ jobs:
           grep -Fxq '  "os": "linux",' <<<"$manifest"
           grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
           grep -Fq '    "steward-control": "' <<<"$manifest"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 82
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 83
           grep -Fq '    "integration/adapters/hermes-agent/profiles/research/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/workers/coding/package-lock.json": "' <<<"$manifest"
           grep -Fq '    "integration/workers/research/research_worker.py": "' <<<"$manifest"
@@ -192,6 +192,7 @@ jobs:
           grep -Fq '    "integration/scripts/build-hermes-adapter.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/hermes-feasibility.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/hermes-steward-acceptance.sh": "' <<<"$manifest"
+          grep -Fq '    "integration/scripts/install-cluster.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/node-doctor.sh": "' <<<"$manifest"
           grep -Fq '    "integration/examples/agents/hermes/agent.json": "' <<<"$manifest"
           grep -Fq '    "integration/schemas/agent.cue": "' <<<"$manifest"
@@ -306,6 +307,7 @@ jobs:
           grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$deb_contents"
+          grep -q './usr/lib/steward-node/release/scripts/install-cluster.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/node-doctor.sh' "$deb_contents"
           rpm -qpl "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.rpm" >"$rpm_contents"
           grep -q '/usr/lib/steward-node/release/steward-control' "$rpm_contents"
@@ -319,11 +321,12 @@ jobs:
           grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$rpm_contents"
+          grep -q '/usr/lib/steward-node/release/scripts/install-cluster.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/node-doctor.sh' "$rpm_contents"
 
       - name: Keep one architecture-independent asset copy
         if: matrix.goarch == 'arm64'
-        run: rm dist/install-steward.sh dist/install-control.sh dist/install-macos.sh dist/steward-support_${STEWARD_RELEASE_VERSION}.json
+        run: rm dist/install-steward.sh dist/install-control.sh dist/install-macos.sh dist/install-cluster.sh dist/steward-support_${STEWARD_RELEASE_VERSION}.json
 
       # Hand this architecture's packages to the combine job. The per-runner
       # checksums are deliberately excluded: combine writes one manifest over
@@ -341,6 +344,7 @@ jobs:
             dist/install-steward.sh
             dist/install-control.sh
             dist/install-macos.sh
+            dist/install-cluster.sh
             dist/steward-support_*.json
           retention-days: 7
           if-no-files-found: error
@@ -381,6 +385,7 @@ jobs:
             "install-steward.sh"
             "install-control.sh"
             "install-macos.sh"
+            "install-cluster.sh"
             "steward-support_${STEWARD_RELEASE_VERSION}.json"
           )
           for artifact in "${expected[@]}"; do
@@ -480,5 +485,6 @@ jobs:
             dist/install-steward.sh \
             dist/install-control.sh \
             dist/install-macos.sh \
+            dist/install-cluster.sh \
             dist/steward-support_*.json \
             dist/checksums.txt

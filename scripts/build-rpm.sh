@@ -29,7 +29,7 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service deploy/systemd/steward-storage-zfs.service \
 	deploy/config/gateway.json.in deploy/config/storage-zfs.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-doctor.sh scripts/node-preflight.sh \
-	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
+	scripts/configure-node.sh scripts/configure-admission.sh scripts/install-cluster.sh scripts/uninstall-node.sh \
 	scripts/node-removal-guard.sh scripts/build-hermes-adapter.sh scripts/build-relay-image.sh \
 	scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh \
 	adapters/hermes-agent/Dockerfile adapters/hermes-agent/README.md \

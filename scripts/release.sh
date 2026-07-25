@@ -233,6 +233,7 @@ for target in "${targets[@]}"; do
 			"${stage}/deploy/systemd/steward-control.service"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
 			scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
+			scripts/install-cluster.sh \
 			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
 			scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
 			scripts/hermes-steward-acceptance.sh \
@@ -280,6 +281,7 @@ done
 install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 install -m 0755 scripts/install-control.sh "${dist}/install-control.sh"
 install -m 0755 scripts/install-macos.sh "${dist}/install-macos.sh"
+install -m 0755 scripts/install-cluster.sh "${dist}/install-cluster.sh"
 
 # Version-assertion gate. Build every host-native binary and require each one to
 # report the exact VERSION stamped into the artifacts. This runs for tag builds,
@@ -337,7 +339,7 @@ rm -rf "$native_dir"
 (
 	cd "$dist"
 	shopt -s nullglob
-	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh ./install-macos.sh ./steward-support_*.json)
+	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh ./install-macos.sh ./install-cluster.sh ./steward-support_*.json)
 	if (( ${#artifacts[@]} == 0 )); then
 		echo "release: no artifacts were built" >&2
 		exit 1

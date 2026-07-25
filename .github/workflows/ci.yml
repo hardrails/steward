@@ -64,6 +64,9 @@ jobs:
           scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh
           scripts/write-release-manifest.sh scripts/check-release-inventory.sh
           scripts/node-upgrade-smoke.sh scripts/privileged-shell-test.sh
+          scripts/install-cluster.sh scripts/cluster-installer-test.sh
+          scripts/repository-independence-test.sh
+          scripts/update-rke2-pin.py scripts/update-rke2-pin-test.py
           scripts/node-installer-security-test.sh scripts/configure-input-boundary-test.sh
           scripts/node-control-plane-conflict-test.sh
           scripts/check-docs-consistency.sh scripts/check-cli-docs-contract.sh
@@ -79,6 +82,10 @@ jobs:
         run: bash scripts/check-release-inventory.sh
       - name: Node privileged shell boundary
         run: bash scripts/privileged-shell-test.sh
+      - name: Cluster installer and repository independence
+        run: |
+          bash scripts/cluster-installer-test.sh
+          bash scripts/repository-independence-test.sh
       - name: Node installer hostile inputs
         run: bash scripts/node-installer-security-test.sh
       - name: Node configuration input boundary
@@ -110,6 +117,8 @@ jobs:
           bash scripts/check-agent-workflow-boundaries-test.sh
       - name: Hermes pin updater
         run: python3 -I scripts/update-hermes-pin-test.py
+      - name: RKE2 pin updater
+        run: python3 -I scripts/update-rke2-pin-test.py
       - name: Buzz pin updater
         run: python3 -I scripts/update-buzz-pin-test.py
       - name: Playwright pin updater
@@ -231,7 +240,8 @@ jobs:
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 9, "write": 9},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 82
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 83
+          grep -Fq '    "integration/scripts/install-cluster.sh": "' "$stage/release.json"
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
