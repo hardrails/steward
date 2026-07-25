@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -160,6 +161,56 @@ func TestSkipJSONValueRejectsUnexpectedClosingDelimiter(t *testing.T) {
 	decoder := json.NewDecoder(strings.NewReader(""))
 	if err := skipJSONValue(decoder, json.Delim('}')); err == nil {
 		t.Fatal("unexpected closing delimiter was accepted")
+	}
+}
+
+func TestTopLevelModelRejectsMalformedAndExcessiveDocuments(t *testing.T) {
+	for _, raw := range []string{
+		`{"input":`,
+		`{"input":[`,
+		`{"input":1`,
+	} {
+		if _, err := topLevelModel([]byte(raw)); err == nil {
+			t.Fatalf("malformed inference document accepted: %q", raw)
+		}
+	}
+
+	var document strings.Builder
+	document.WriteByte('{')
+	for member := 0; member <= maxInferenceTopLevelMembers; member++ {
+		if member > 0 {
+			document.WriteByte(',')
+		}
+		document.WriteString(strconv.Quote(strconv.Itoa(member)))
+		document.WriteString(`:0`)
+	}
+	document.WriteByte('}')
+	if _, err := topLevelModel([]byte(document.String())); err == nil ||
+		!strings.Contains(err.Error(), "too many top-level members") {
+		t.Fatalf("excessive inference document error = %v", err)
+	}
+}
+
+func TestSkipJSONValueBoundsNestingAndTruncation(t *testing.T) {
+	nested := strings.Repeat("[", maxInferenceJSONDepth+1) +
+		strings.Repeat("]", maxInferenceJSONDepth+1)
+	decoder := json.NewDecoder(strings.NewReader(nested))
+	first, err := decoder.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := skipJSONValue(decoder, first); err == nil ||
+		!strings.Contains(err.Error(), "nesting exceeds limit") {
+		t.Fatalf("nested JSON error = %v", err)
+	}
+
+	decoder = json.NewDecoder(strings.NewReader("["))
+	first, err = decoder.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := skipJSONValue(decoder, first); err == nil {
+		t.Fatal("truncated composite JSON value was accepted")
 	}
 }
 
