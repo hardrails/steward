@@ -247,6 +247,17 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "replaced"}, err
 	}
+	if deployment.DesiredState == controlstore.DeploymentAbsent &&
+		instance.Phase == controlstore.DeploymentInstanceFailed &&
+		instance.CommandOperation == "admit" {
+		_, changed, err := reconciler.store.RemoveRejectedAdmissionInstance(
+			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
+		)
+		if errors.Is(err, controlstore.ErrConflict) {
+			return instanceResult{}, nil
+		}
+		return instanceResult{changed: changed, kind: "removed"}, err
+	}
 	if instance.Phase == controlstore.DeploymentInstanceFailed ||
 		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain == nil {
 		return instanceResult{}, nil
