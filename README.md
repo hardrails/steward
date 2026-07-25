@@ -381,10 +381,13 @@ zero-downtime rollout, and automatic rollback remain explicit gaps.
 
 Its embedded React console is available at `/console/`. The console keeps the
 operator bearer only in tab memory, loads no remote assets, and never receives
-private signing keys or secret plaintext. It shows each observed agent runtime's
-last successful workload status separately from its latest signed operation.
-Mutating Executor commands are signed outside the browser; the console reviews
-and transfers the unchanged envelope. On an operator workstation,
+private signing keys, cloud credentials, or stored secret plaintext. It manages
+tenants, access, enrollment, quotas, freezes, nodes, capacity pools, signed
+deployments, Workrooms, tasks, schedules, and agent responses through the same
+scoped Control API. Authority-bearing actions upload public signed artifacts;
+the browser never becomes a signing station. It also shows each observed agent
+runtime's last successful workload status separately from its latest signed
+operation. On an operator workstation,
 `stewardctl console` verifies the selected private-CA Control connection and
 prints a temporary loopback URL, so the browser needs no private-CA setup.
 

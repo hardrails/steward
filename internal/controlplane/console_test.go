@@ -147,9 +147,16 @@ func TestControlTLSResponsesRequireFutureHTTPS(t *testing.T) {
 	}
 }
 
-func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities(t *testing.T) {
+func TestConsoleSourceRestrictsMutationsAndUnsafeBrowserCapabilities(t *testing.T) {
 	var source strings.Builder
-	for _, name := range []string{"console/src/App.jsx", "console/src/command-courier.js", "console/src/session.js", "console/src/main.jsx"} {
+	for _, name := range []string{
+		"console/src/App.jsx",
+		"console/src/command-courier.js",
+		"console/src/console-api.js",
+		"console/src/operations-console.jsx",
+		"console/src/session.js",
+		"console/src/main.jsx",
+	} {
 		content, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
@@ -168,11 +175,9 @@ func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities
 		"eval" + "(",
 		"new " + "Function",
 		"window." + "open",
-		`method: "PUT"`,
 		`method: "PATCH"`,
-		`method: "DELETE"`,
-		"/v1/enrollments",
-		"/v1/operators",
+		"/executor-uplink/",
+		"/evidence-uplink/",
 		"crypto.subtle.sign",
 		"crypto.subtle.generateKey",
 		"crypto.subtle.importKey",
@@ -180,9 +185,6 @@ func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities
 		if strings.Contains(script, forbidden) {
 			t.Fatalf("console JavaScript contains forbidden persistence or code sink %q", forbidden)
 		}
-	}
-	if count := strings.Count(script, `method: "POST"`); count != 1 {
-		t.Fatalf("console JavaScript contains %d explicit POST call sites, want exactly one", count)
 	}
 	for _, required := range []string{
 		`headers.set("Authorization", "Bearer " + (options.credential || credentialRef.current))`,
@@ -208,8 +210,12 @@ func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities
 		`Existing work is not evicted when a limit is lowered.`,
 		`New command delivery is frozen`,
 		`A command already accepted by a node is not instantly revoked`,
-		`SAFE BY DEFAULT: MOST ACTIONS STAY IN THE CLI.`,
-		`method !== "GET" && !commandSubmission`,
+		`OPERATE HERE. SIGNING KEYS STAY OUTSIDE THE BROWSER.`,
+		`consoleMutationAllowed(method, url.pathname)`,
+		`/^\/v1\/enrollments$/u`,
+		`/^\/v1\/operators$/u`,
+		`nodePoolItem`,
+		`deploymentItem`,
 		`reenteredCredential !== credentialRef.current`,
 		`command_dsse_base64: preview.envelopeBase64`,
 		`crypto.subtle.digest("SHA-256", bytes)`,

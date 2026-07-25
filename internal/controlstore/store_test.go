@@ -109,6 +109,52 @@ func TestWALRecoveryRepairsOnlyIncompleteTail(t *testing.T) {
 	}
 }
 
+func TestWALRecoveryValidatesBoundedBatches(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := Initialize(directory, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := canonicalTimestamp(time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC))
+	tenant := Tenant{ID: "tenant-a", CreatedAt: created, Active: true}
+	frameCount := walRecoveryBatchFrames*2 + 1
+	for range frameCount {
+		if err := store.applyMutations(mutation{Kind: mutationTenant, Tenant: &tenant}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	walPath := filepath.Join(directory, generationName("wal", store.generation))
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.Open(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wal.Close()
+	info, err := wal.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validations := 0
+	validate := func(current state, limits Limits) error {
+		validations++
+		return validateState(current, limits)
+	}
+	recovered, sequence, _, err := recoverWALReaderValidated(
+		wal, info.Size(), emptyState(), 0, [32]byte{}, DefaultLimits(), nil, validate,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sequence != uint64(frameCount) || len(recovered.tenants) != 1 {
+		t.Fatalf("recovered sequence=%d tenants=%d", sequence, len(recovered.tenants))
+	}
+	if validations != 3 {
+		t.Fatalf("recovery validations = %d, want 3 bounded batches", validations)
+	}
+}
+
 func TestInspectRootRejectsIncompleteTailWithoutRepair(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "control")
 	store, err := Initialize(directory, DefaultLimits())

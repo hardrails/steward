@@ -877,8 +877,9 @@ Use the narrower control that matches the incident:
 - Preserve evidence before destructive recovery work.
 
 The React console shows the effective site or tenant freeze at the top of every
-view. Freeze changes remain CLI/API operations so the browser does not gain a new
-incident-response mutation path.
+view. A scoped operator can freeze or unfreeze delivery in **Administration**.
+The console uses the same revision-protected API and does not gain authority
+beyond the active operator bearer.
 
 ### Prevent new forks from a suspect snapshot
 
@@ -895,11 +896,12 @@ stewardctl control snapshot quarantine \
   -reason "untrusted content may have entered agent state"
 ```
 
-The CLI reads the retained revision before changing the record. A new fork from
-that exact snapshot then fails with `snapshot_quarantined`. Existing forks and
-running workloads are unchanged because their admission and cloned state already
-exist. Preserve evidence and use node quarantine, freeze, revocation, or workload
-cleanup separately when the incident is broader.
+The CLI and **Nodes → Evidence and snapshot containment** console action read the
+retained revision before changing the record. A new fork from that exact snapshot
+then fails with `snapshot_quarantined`. Existing forks and running workloads are
+unchanged because their admission and cloned state already exist. Preserve
+evidence and use node quarantine, freeze, revocation, or workload cleanup
+separately when the incident is broader.
 
 After investigation, clear the gate explicitly:
 

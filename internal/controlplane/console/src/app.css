@@ -3696,3 +3696,420 @@ td small {
     border: 1px solid CanvasText;
   }
 }
+
+/* Primary operator controls. These reuse the console's existing visual system
+   and remain dependency-free so the committed air-gapped bundle is auditable. */
+.read-only-boundary.is-operational {
+  border-color: color-mix(in srgb, var(--signal) 46%, var(--line));
+  background:
+    linear-gradient(90deg, rgb(200 255 67 / 0.09), transparent 45%),
+    var(--ink-soft);
+}
+
+.read-only-boundary.is-operational strong {
+  color: var(--signal);
+}
+
+.administration-grid {
+  display: grid;
+  margin-top: 28px;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.management-card {
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background:
+    linear-gradient(145deg, rgb(255 255 255 / 0.025), transparent 56%),
+    var(--panel);
+  padding: 24px;
+}
+
+.management-card-wide {
+  grid-column: 1 / -1;
+}
+
+.management-card h2,
+.deployment-card h2 {
+  margin: 6px 0 8px;
+  font-family: var(--display);
+  font-size: clamp(24px, 2vw, 34px);
+  line-height: 1;
+}
+
+.management-card > p,
+.deployment-toolbar > span,
+.view-primary-action > span {
+  max-width: 68ch;
+  color: var(--paper-muted);
+}
+
+.operator-action {
+  position: relative;
+  margin-top: 14px;
+}
+
+.operator-action > .button {
+  min-height: 38px;
+}
+
+.action-form {
+  position: relative;
+  z-index: 3;
+  display: grid;
+  width: min(620px, 100%);
+  margin-top: 10px;
+  border: 1px solid var(--line-bright);
+  border-top: 3px solid var(--signal);
+  background: var(--ink-soft);
+  box-shadow: 0 18px 60px rgb(0 0 0 / 0.32);
+  gap: 14px;
+  padding: 20px;
+}
+
+.operator-action.is-danger .action-form {
+  border-top-color: var(--danger);
+}
+
+.action-form > strong {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.action-form > p {
+  margin: -6px 0 2px;
+  color: var(--paper-muted);
+}
+
+.action-form label {
+  display: grid;
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  gap: 6px;
+  letter-spacing: 0.04em;
+}
+
+.action-form input,
+.action-form select,
+.action-form textarea,
+.one-time-secret textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line-bright);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font: 13px/1.4 var(--mono);
+  padding: 10px 11px;
+}
+
+.action-form input[type="file"] {
+  padding: 8px;
+}
+
+.action-form input:focus,
+.action-form select:focus,
+.action-form textarea:focus {
+  border-color: var(--signal);
+}
+
+.action-form-buttons,
+.management-actions-row,
+.view-primary-action,
+.deployment-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.action-form-buttons {
+  margin-top: 4px;
+}
+
+.action-feedback {
+  width: fit-content;
+  max-width: 70ch;
+  margin: 8px 0 0;
+  border-left: 3px solid var(--signal);
+  background: rgb(200 255 67 / 0.08);
+  color: var(--paper);
+  padding: 8px 11px;
+}
+
+.action-feedback.is-error {
+  border-left-color: var(--danger);
+  background: rgb(255 91 55 / 0.09);
+}
+
+.one-time-secret {
+  display: grid;
+  margin-top: 28px;
+  border: 2px solid var(--warning);
+  background:
+    repeating-linear-gradient(135deg, rgb(255 194 71 / 0.06) 0 8px, transparent 8px 16px),
+    var(--ink-soft);
+  gap: 10px;
+  padding: 20px;
+}
+
+.one-time-secret > span {
+  color: var(--warning);
+  font: 800 11px var(--mono);
+  letter-spacing: 0.14em;
+}
+
+.one-time-secret textarea {
+  resize: vertical;
+}
+
+.one-time-secret dl,
+.resource-usage {
+  display: grid;
+  margin: 0;
+  gap: 4px 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.one-time-secret dl div,
+.resource-usage div {
+  display: grid;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 7px 0;
+  grid-template-columns: minmax(90px, auto) 1fr;
+}
+
+.one-time-secret dt,
+.resource-usage dt {
+  color: var(--paper-dim);
+  font: 10px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.one-time-secret dd,
+.resource-usage dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.form-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.view-primary-action,
+.deployment-toolbar {
+  justify-content: space-between;
+  margin: 22px 0;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 14px 16px;
+}
+
+.view-primary-action .operator-action,
+.deployment-toolbar .operator-action,
+.management-actions-row .operator-action,
+.node-actions .operator-action {
+  margin-top: 0;
+}
+
+.deployment-board {
+  display: grid;
+  margin-top: 20px;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.deployment-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(135deg, rgb(122 200 255 / 0.04), transparent 45%),
+    var(--panel);
+  padding: 22px;
+}
+
+.deployment-card > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.deployment-scale {
+  display: flex;
+  align-items: baseline;
+  margin: 18px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--paper-dim);
+  gap: 12px;
+  padding: 14px 0;
+}
+
+.deployment-scale strong {
+  color: var(--paper);
+  font: 800 34px/1 var(--mono);
+}
+
+.deployment-scale small {
+  display: block;
+  margin-top: 5px;
+  color: var(--paper-dim);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.deployment-instances {
+  display: grid;
+  margin: 16px 0;
+  gap: 5px;
+}
+
+.deployment-instances > div {
+  display: grid;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: var(--ink-soft);
+  gap: 8px;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  padding: 8px 10px;
+}
+
+.deployment-instances strong {
+  overflow: hidden;
+  font: 11px var(--mono);
+  text-overflow: ellipsis;
+}
+
+.deployment-instances span:last-child {
+  color: var(--paper-dim);
+  font-size: 11px;
+}
+
+.pool-controls {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.node-actions {
+  display: grid;
+  min-width: 150px;
+  gap: 5px;
+}
+
+.node-actions .button {
+  width: 100%;
+  justify-content: center;
+}
+
+.node-actions .action-form {
+  width: min(420px, 78vw);
+}
+
+.node-evidence-controls {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  background: var(--ink-soft);
+  min-width: 220px;
+}
+
+.node-evidence-controls > summary {
+  cursor: pointer;
+  color: var(--blue);
+  font: 800 9px var(--mono);
+  letter-spacing: 0.08em;
+  padding: 10px 12px;
+  text-transform: uppercase;
+}
+
+.node-evidence-controls > .management-actions-row {
+  border-top: 1px solid var(--line);
+  align-items: stretch;
+  padding: 10px;
+}
+
+.node-evidence-controls .action-form {
+  width: min(640px, 78vw);
+}
+
+.evidence-inspection {
+  max-width: min(760px, 78vw);
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  border-top: 1px solid var(--line);
+  color: var(--paper-muted);
+  background: var(--ink);
+  font: 10px/1.5 var(--mono);
+  padding: 14px;
+  white-space: pre-wrap;
+}
+
+.table-frame {
+  overflow: visible;
+}
+
+.table-frame table {
+  min-width: 920px;
+}
+
+.schedule-card footer {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+@media (max-width: 1100px) {
+  .deployment-board {
+    grid-template-columns: 1fr;
+  }
+
+  .form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .administration-grid,
+  .deployment-board {
+    grid-template-columns: 1fr;
+  }
+
+  .management-card-wide {
+    grid-column: auto;
+  }
+
+  .form-grid,
+  .one-time-secret dl,
+  .resource-usage {
+    grid-template-columns: 1fr;
+  }
+
+  .action-form-buttons,
+  .management-actions-row,
+  .view-primary-action,
+  .deployment-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .action-form-buttons .button,
+  .management-actions-row > .operator-action,
+  .view-primary-action > .operator-action,
+  .deployment-toolbar > .operator-action {
+    width: 100%;
+  }
+}

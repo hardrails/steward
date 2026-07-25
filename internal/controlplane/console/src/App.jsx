@@ -14,8 +14,24 @@ import {
   displayStringList,
   sessionExpired,
 } from "./session.js";
-import {attentionCommand, attentionGuidance} from "./operator-guidance.js";
-import {interactionResponseCommand} from "./interaction-guidance.js";
+import {attentionGuidance} from "./operator-guidance.js";
+import {consoleMutationAllowed, consoleReadAllowed} from "./console-api.js";
+import {
+  AdministrationView,
+  CreateScheduleControls,
+  CreateNodePool,
+  CreateWorkroom,
+  CredentialControls,
+  DeploymentsView,
+  InteractionResponseControls,
+  NodeControls,
+  NodeEvidenceControls,
+  NodePoolControls,
+  ScheduleControls,
+  SubmitTaskControls,
+  WorkroomProjectControls,
+  WorkroomSessionControls,
+} from "./operations-console.jsx";
 
 const idleTimeoutMilliseconds = 15 * 60 * 1000;
 const absoluteTimeoutMilliseconds = 8 * 60 * 60 * 1000;
@@ -174,24 +190,25 @@ export default function App() {
     const fence = fenceRef.current;
     const signal = fence.signal(epoch);
     const url = new URL(path, window.location.origin);
-    if (url.origin !== window.location.origin || !url.pathname.startsWith("/v1/")) {
+    if (url.origin !== window.location.origin || !consoleReadAllowed(url.pathname)) {
       throw new Error("Console API path escaped the local control origin.");
     }
     const method = options.method || "GET";
-    const commandSubmission = method === "POST" && url.search === "" &&
-      /^\/v1\/tenants\/[^/]+\/nodes\/[^/]+\/commands$/u.test(url.pathname);
-    if (method !== "GET" && !commandSubmission) {
+    if (method !== "GET" && (url.search !== "" || !consoleMutationAllowed(method, url.pathname))) {
       throw new Error("The console attempted an unsupported mutation.");
     }
+    const mutation = method !== "GET";
     const headers = new Headers();
     headers.set("Authorization", "Bearer " + (options.credential || credentialRef.current));
-    if (commandSubmission) {
+    if (mutation && options.body !== undefined) {
       headers.set("Content-Type", "application/json");
     }
     const response = await fetch(url, {
       method,
       headers,
-      body: commandSubmission ? options.body : undefined,
+      body: mutation && options.body !== undefined
+        ? (typeof options.body === "string" ? options.body : JSON.stringify(options.body))
+        : undefined,
       cache: "no-store",
       credentials: "omit",
       redirect: "error",
@@ -250,13 +267,16 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/schedules?limit=100", epoch)
         : Promise.resolve({schedules: []}),
+      tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/deployments?limit=500", epoch)
+        : Promise.resolve({deployments: []}),
       includeSiteResources
         ? api("/v1/node-pools?limit=500", epoch)
         : Promise.resolve({node_pools: []}),
     ];
-    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, schedules, nodePools] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, schedules, deployments, nodePools] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, schedules, nodePools};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota, events, tasks, projects, interactions, schedules, deployments, nodePools};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -466,6 +486,20 @@ export default function App() {
     return command;
   }, [api, refresh, selectedTenant, session]);
 
+  const mutate = useCallback(async (path, options) => {
+    if (!session) {
+      throw new Error("The operator session is locked.");
+    }
+    const result = await api(path, session.epoch, options);
+    if (options.method === "POST" && path === "/v1/tenants" && result?.tenant_id) {
+      setTenants((current) => current.some((tenant) => tenant.tenant_id === result.tenant_id)
+        ? current
+        : current.concat(result).sort((left, right) => left.tenant_id.localeCompare(right.tenant_id)));
+    }
+    await refresh(selectedTenant);
+    return result;
+  }, [api, refresh, selectedTenant, session]);
+
   return (
     <>
       <a className="skip-link" href="#main-content">Skip to control room</a>
@@ -495,6 +529,7 @@ export default function App() {
               onProjection={changeProjection}
               onLoadMoreTenants={loadMoreTenants}
               onRefresh={() => refresh()}
+              onMutation={mutate}
               onSubmitSignedCommand={submitSignedCommand}
               onLock={() => lock("")}
             />
@@ -595,19 +630,21 @@ const navigationGroups = [
   ]],
   ["Agents", [
     ["agents", "04", "Agents"],
-    ["inbox", "05", "Questions"],
-    ["tasks", "06", "Tasks"],
-    ["workrooms", "07", "Workrooms"],
-    ["schedules", "08", "Schedules"],
-    ["events", "09", "Agent updates"],
+    ["deployments", "05", "Deployments"],
+    ["inbox", "06", "Questions"],
+    ["tasks", "07", "Tasks"],
+    ["workrooms", "08", "Workrooms"],
+    ["schedules", "09", "Schedules"],
+    ["events", "10", "Agent updates"],
   ]],
   ["Infrastructure", [
-    ["nodes", "10", "Nodes"],
-    ["pools", "11", "Capacity pools"],
+    ["nodes", "11", "Nodes"],
+    ["pools", "12", "Capacity pools"],
+    ["administration", "13", "Administration"],
   ]],
   ["Security", [
-    ["commands", "12", "Activity"],
-    ["credentials", "13", "Access"],
+    ["commands", "14", "Activity"],
+    ["credentials", "15", "Access"],
   ]],
 ];
 
@@ -706,9 +743,9 @@ function ControlRoom(props) {
             <button className="button button-danger" type="button" onClick={props.onLock}>Lock</button>
           </div>
         </div>
-        <div className="read-only-boundary">
-          <strong>SAFE BY DEFAULT: MOST ACTIONS STAY IN THE CLI.</strong>
-          <span>Use this console to understand fleet state. Private keys, reusable service credentials, incident controls, and general changes stay outside the browser. The Activity view can transfer one command signed elsewhere.</span>
+        <div className="read-only-boundary is-operational">
+          <strong>OPERATE HERE. SIGNING KEYS STAY OUTSIDE THE BROWSER.</strong>
+          <span>The console can manage Control-owned desired state, capacity, access, containment, and enrollment. Authority-bearing agent changes accept public signed files; private keys and cloud credentials remain in their dedicated trust domains.</span>
         </div>
         {snapshot ? <OperationalFreezeBanner status={snapshot.freeze} tenantID={selectedTenant} /> : null}
         {tenantError ? <div className="flash-message is-error" role="alert">{tenantError}</div> : null}
@@ -722,7 +759,7 @@ function ControlRoom(props) {
           <>
             {view === "overview" ? <Overview snapshot={snapshot} onAttention={() => props.onView("attention")} /> : null}
             {view === "inbox" ? (
-              <AgentInboxView page={snapshot.interactions} tenantID={selectedTenant} />
+              <AgentInboxView page={snapshot.interactions} tenantID={selectedTenant} onMutation={props.onMutation} />
             ) : null}
             {view === "workrooms" ? (
               <WorkroomsView
@@ -731,13 +768,24 @@ function ControlRoom(props) {
                 interactions={snapshot.interactions}
                 schedules={snapshot.schedules}
                 tenantID={selectedTenant}
+                onMutation={props.onMutation}
               />
             ) : null}
-            {view === "schedules" ? <SchedulesView page={snapshot.schedules} tenantID={selectedTenant} /> : null}
+            {view === "schedules" ? <SchedulesView page={snapshot.schedules} tenantID={selectedTenant} onMutation={props.onMutation} /> : null}
             {view === "attention" ? <AttentionView page={snapshot.attention} /> : null}
             {view === "incident" ? <IncidentTimelineView page={snapshot.timeline} /> : null}
-            {view === "nodes" ? <NodesView page={snapshot.nodes} tenantID={selectedTenant} /> : null}
-            {view === "pools" ? <NodePoolsView page={snapshot.nodePools} /> : null}
+            {view === "nodes" ? <NodesView page={snapshot.nodes} tenantID={selectedTenant} siteAdmin={session.siteAdmin} onMutation={props.onMutation} /> : null}
+            {view === "pools" ? <NodePoolsView page={snapshot.nodePools} selectedTenant={selectedTenant} siteAdmin={session.siteAdmin} onMutation={props.onMutation} /> : null}
+            {view === "administration" ? (
+              <AdministrationView
+                siteAdmin={session.siteAdmin}
+                tenantID={selectedTenant}
+                tenants={tenants}
+                freeze={snapshot.freeze}
+                quota={snapshot.quota}
+                onMutation={props.onMutation}
+              />
+            ) : null}
             {view === "commands" ? (
               <CommandsView
                 page={snapshot.commands}
@@ -745,9 +793,10 @@ function ControlRoom(props) {
                 onSubmit={props.onSubmitSignedCommand}
               />
             ) : null}
-            {view === "credentials" ? <CredentialsView page={snapshot.credentials} /> : null}
-            {view === "agents" ? <AgentApplicationsView page={snapshot.agents} tenantID={selectedTenant} /> : null}
-            {view === "tasks" ? <TaskProjectionsView page={snapshot.tasks} tenantID={selectedTenant} /> : null}
+            {view === "credentials" ? <CredentialsView page={snapshot.credentials} siteAdmin={session.siteAdmin} onMutation={props.onMutation} /> : null}
+            {view === "agents" ? <AgentApplicationsView page={snapshot.agents} tenantID={selectedTenant} onManage={() => props.onView("deployments")} /> : null}
+            {view === "deployments" ? <DeploymentsView page={snapshot.deployments} tenantID={selectedTenant} onMutation={props.onMutation} /> : null}
+            {view === "tasks" ? <TaskProjectionsView page={snapshot.tasks} tenantID={selectedTenant} onMutation={props.onMutation} /> : null}
             {view === "events" ? <InstanceEventsView page={snapshot.events} tenantID={selectedTenant} /> : null}
           </>
         )}
@@ -756,7 +805,7 @@ function ControlRoom(props) {
   );
 }
 
-function AgentInboxView({page, tenantID}) {
+function AgentInboxView({page, tenantID, onMutation}) {
   const interactions = Array.isArray(page?.interactions) ? page.interactions : [];
   const open = interactions.filter((interaction) => interaction.state === "open").length;
   const waiting = interactions.filter((interaction) => interaction.state === "response_queued").length;
@@ -788,7 +837,7 @@ function AgentInboxView({page, tenantID}) {
             <ol className="interaction-list">
               {interactions.map((interaction) => (
                 <li key={interaction.interaction_id}>
-                  <InteractionCard interaction={interaction} />
+                  <InteractionCard interaction={interaction} tenantID={tenantID} onMutation={onMutation} />
                 </li>
               ))}
             </ol>
@@ -801,34 +850,15 @@ function AgentInboxView({page, tenantID}) {
           )}
         </>
       )}
-      {page?.next_after ? <p className="truncation-note">More questions are retained. Continue with stewardctl or the MCP interaction cursor.</p> : null}
+      {page?.next_after ? <p className="truncation-note">More questions are retained. Narrow the active tenant or continue with the bounded API cursor.</p> : null}
     </section>
   );
 }
 
-function InteractionCard({interaction}) {
+function InteractionCard({interaction, tenantID, onMutation}) {
   const options = Array.isArray(interaction.options) ? interaction.options : [];
-  const [choice, setChoice] = useState("");
-  const [text, setText] = useState("");
-  const [copyState, setCopyState] = useState("idle");
-  const [commandError, setCommandError] = useState("");
   const open = interaction.state === "open" &&
     Date.parse(interaction.expires_at) > Date.now();
-  const copyCommand = async () => {
-    setCommandError("");
-    try {
-      const command = interactionResponseCommand(interaction, choice, text);
-      await navigator.clipboard.writeText(command);
-      setCopyState("copied");
-      window.setTimeout(() => setCopyState("idle"), 2000);
-    } catch (error) {
-      if (error instanceof Error && error.name !== "NotAllowedError") {
-        setCommandError(error.message);
-      } else {
-        setCopyState("failed");
-      }
-    }
-  };
   return (
     <article className={"interaction-card is-" + interaction.state}>
       <header>
@@ -855,53 +885,17 @@ function InteractionCard({interaction}) {
       {open ? (
         <div className="interaction-response">
           {options.length ? (
-            <fieldset>
-              <legend>Choose an offered response</legend>
-              <div className="interaction-options">
-                {options.map((option) => (
-                  <label key={option}>
-                    <input
-                      type="radio"
-                      name={"choice-" + interaction.interaction_id}
-                      value={option}
-                      checked={choice === option}
-                      onChange={(event) => setChoice(event.target.value)}
-                    />
-                    <span>{option}</span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          ) : null}
-          {interaction.allow_text ? (
-            <label className="interaction-text">
-              <span>{options.length ? "Optional note" : "Your response"}</span>
-              <input
-                type="text"
-                value={text}
-                maxLength="2048"
-                autoComplete="off"
-                spellCheck="true"
-                placeholder="One bounded line; never paste a secret"
-                onChange={(event) => setText(event.target.value)}
-              />
-            </label>
+            <div className="interaction-options" aria-label="Offered responses">
+              {options.map((option) => <span key={option}>{option}</span>)}
+            </div>
           ) : null}
           <div className="interaction-signing-step">
             <div>
-              <strong>SIGN OUTSIDE THE BROWSER</strong>
-              <span>The command includes only this answer and public workload bindings. Replace the two key placeholders in a trusted terminal.</span>
+              <strong>USE AN APPROVED SIGNER</strong>
+              <span>Select the answer in your signing service, then upload its exact public permit and signed response here. No terminal or browser-held private key is required.</span>
             </div>
-            <button
-              className="button button-primary"
-              type="button"
-              disabled={!choice && !text}
-              onClick={copyCommand}
-            >
-              {copyState === "copied" ? "Command copied" : copyState === "failed" ? "Copy failed" : "Copy signed-response command"}
-            </button>
+            <InteractionResponseControls interaction={interaction} tenantID={tenantID} onMutation={onMutation} />
           </div>
-          {commandError ? <p className="error-message" role="alert">{commandError}</p> : null}
         </div>
       ) : (
         <div className="interaction-terminal">
@@ -913,7 +907,7 @@ function InteractionCard({interaction}) {
   );
 }
 
-function WorkroomsView({page, tasks, interactions, schedules, tenantID}) {
+function WorkroomsView({page, tasks, interactions, schedules, tenantID, onMutation}) {
   const projects = Array.isArray(page?.projects) ? page.projects : [];
   const taskByID = new Map((tasks?.tasks || []).map((task) => [task.task_id, task]));
   const interactionItems = Array.isArray(interactions?.interactions) ? interactions.interactions : [];
@@ -951,6 +945,12 @@ function WorkroomsView({page, tasks, interactions, schedules, tenantID}) {
         <div className={openQuestions ? "is-live" : ""}><dt>Open questions</dt><dd>{openQuestions}</dd></div>
         <div className={activeSchedules ? "is-live" : ""}><dt>Active schedules</dt><dd>{activeSchedules}</dd></div>
       </dl>
+      {tenantID ? (
+        <div className="view-primary-action">
+          <CreateWorkroom tenantID={tenantID} onMutation={onMutation} />
+          <span>Create project structure here; attach only signed task authority and references to external evidence.</span>
+        </div>
+      ) : null}
       {!tenantID ? (
         <article className="workroom-empty">
           <span className="panel-index">TENANT PROJECT SPACE</span>
@@ -1051,8 +1051,11 @@ function WorkroomsView({page, tasks, interactions, schedules, tenantID}) {
                 ) : <p className="workroom-muted">No retained task questions or schedule runs yet.</p>}
               </section>
               <footer>
-                <span>CREATE THE NEXT SESSION</span>
-                <code>stewardctl workroom session create {project.id} -tenant-id {tenantID} -id SESSION -title &quot;Research question&quot;</code>
+                <span>MANAGE PROJECT</span>
+                <div className="management-actions-row">
+                  <WorkroomSessionControls project={project} tenantID={tenantID} onMutation={onMutation} />
+                  <WorkroomProjectControls project={project} tenantID={tenantID} onMutation={onMutation} />
+                </div>
               </footer>
             </article>
             );
@@ -1062,16 +1065,15 @@ function WorkroomsView({page, tasks, interactions, schedules, tenantID}) {
         <article className="workroom-empty">
           <span className="panel-index">FIRST PROJECT / TENANT {tenantID}</span>
           <h3>Give long-running work a place to land.</h3>
-          <p>Create one project, open a session, then attach signed research tasks. The browser never receives a task-signing key.</p>
-          <pre><code>stewardctl workroom create research -tenant-id {tenantID} -description &quot;Evidence-backed market research&quot;</code></pre>
+          <p>Use <strong>Create Workroom</strong> above, open a session, then attach signed research tasks. The browser never receives a task-signing key.</p>
         </article>
       )}
-      {page?.next_after ? <p className="truncation-note">More projects exist. Continue with the API or stewardctl workroom cursor.</p> : null}
+      {page?.next_after ? <p className="truncation-note">More projects exist. Continue with the bounded API cursor.</p> : null}
     </section>
   );
 }
 
-function SchedulesView({page, tenantID}) {
+function SchedulesView({page, tenantID, onMutation}) {
   const schedules = Array.isArray(page?.schedules) ? page.schedules : [];
   const active = schedules.filter((schedule) => schedule.state === "active").length;
   const queued = schedules.reduce((total, schedule) => (
@@ -1091,6 +1093,12 @@ function SchedulesView({page, tenantID}) {
         <div className={active ? "is-live" : ""}><dt>Active</dt><dd>{active}</dd></div>
         <div className={queued ? "is-live" : ""}><dt>Runs in flight</dt><dd>{queued}</dd></div>
       </dl>
+      {tenantID ? (
+        <div className="view-primary-action">
+          <CreateScheduleControls tenantID={tenantID} onMutation={onMutation} />
+          <span>Upload a signer-approved finite envelope; Control cannot extend its schedule or run count.</span>
+        </div>
+      ) : null}
       {!tenantID ? (
         <article className="workroom-empty">
           <span className="panel-index">TENANT-SCOPED AUTHORITY</span>
@@ -1130,12 +1138,10 @@ function SchedulesView({page, tenantID}) {
                     </div>
                   )) : <p className="workroom-muted">Waiting for the first signed due time.</p>}
                 </section>
-                {item.state === "active" ? (
-                  <footer>
-                    <span>STOP FUTURE RUNS</span>
-                    <code>stewardctl task schedule cancel {schedule.schedule_id} -tenant-id {tenantID}</code>
-                  </footer>
-                ) : null}
+                <footer>
+                  <span>{item.state === "active" ? "STOP FUTURE RUNS" : "SCHEDULE CONTROL"}</span>
+                  <ScheduleControls schedule={item} tenantID={tenantID} onMutation={onMutation} />
+                </footer>
               </article>
             );
           })}
@@ -1144,11 +1150,10 @@ function SchedulesView({page, tenantID}) {
         <article className="workroom-empty">
           <span className="panel-index">FIRST FINITE SCHEDULE / TENANT {tenantID}</span>
           <h3>Turn a proven prompt into bounded recurring work.</h3>
-          <p>The current CLI context supplies Control, trust, and signing paths. You choose the deployment, frequency, and finite run count.</p>
-          <pre><code>stewardctl task schedule researcher -every 1h -runs 24 &quot;Check primary sources and report material changes&quot;</code></pre>
+          <p>Use <strong>Create finite schedule</strong> above after your approved signer fixes the deployment, frequency, and finite run count.</p>
         </article>
       )}
-      {page?.next_after ? <p className="truncation-note">More schedules exist. Continue with stewardctl task schedule list -after.</p> : null}
+      {page?.next_after ? <p className="truncation-note">More schedules exist. Continue with the bounded API cursor.</p> : null}
     </section>
   );
 }
@@ -1305,7 +1310,7 @@ function TenantQuotaPanel({status}) {
         <div className="quota-unset">
           <strong>No tenant-wide ceiling is active.</strong>
           <p>Executor still enforces each node's workload and tenant limits, but this tenant can consume capacity across multiple nodes until a site administrator sets a fleet-wide quota.</p>
-          <code>stewardctl control quota set -tenant-id {status.tenant_id} …</code>
+          <span>Open <strong>Administration</strong> to set the ceiling.</span>
         </div>
       )}
     </article>
@@ -1334,7 +1339,7 @@ function agentStatusKind(agent) {
   return agent.observed_status === "running" ? "is-ok" : "";
 }
 
-function AgentApplicationsView({page, tenantID}) {
+function AgentApplicationsView({page, tenantID, onManage}) {
   const tenant = tenantID || "site-wide";
   const running = page.agents.filter((agent) => agent.observed_status === "running").length;
   const inFlight = page.agents.filter((agent) => ["pending", "leased"].includes(agent.latest_command_state)).length;
@@ -1389,23 +1394,21 @@ function AgentApplicationsView({page, tenantID}) {
       ) : (
         <article className="agent-empty">
           <span className="panel-index">NO SIGNED RUNTIMES OBSERVED</span>
-          <h3>Deploy the first agent from a trusted terminal.</h3>
-          <p>Steward will show it here after Executor verifies signed admission and reports a bounded runtime observation.</p>
+          <h3>Deploy the first signed agent generation.</h3>
+          <p>Use Deployments to upload an approved capsule and controller delegation. Steward shows the agent here after Executor verifies admission.</p>
+          <button className="button button-primary" type="button" onClick={onManage}>Open Deployments</button>
         </article>
       )}
       {page.next_cursor ? <p className="truncation-note">More agents exist. Narrow the tenant projection or use the API continuation cursor.</p> : null}
       <div className="overview-grid">
         <article className="panel">
-          <PanelHeading index="01 / DEFINE" title="Create an agent" />
-          <p>Choose the reasoning runtime while Steward fixes the image, skills, model route, resources, state, lifetime, and isolation requirements.</p>
-          <pre><code>{`stewardctl agent create my-agent -runtime hermes
-stewardctl agent build -file my-agent/Stewardfile.cue`}</code></pre>
+          <PanelHeading index="01 / DESIRE" title="Manage agent generations" />
+          <p>Deployments fixes the image, skills, model route, resources, state, lifetime, replica identities, and isolation requirements in signed public artifacts.</p>
+          <button className="button button-quiet" type="button" onClick={onManage}>Manage deployments</button>
         </article>
         <article className="panel">
-          <PanelHeading index="02 / PLACE" title="Explain placement" />
-          <p>The scheduler rejects ineligible nodes first, then considers topology spread, tenant-signed label preferences, exact image locality, and current load. A fork stays on the node that owns its snapshot. The selected tenant projection is <strong>{tenant}</strong>.</p>
-          <pre><code>{`stewardctl agent plan -bundle agent.bundle.json \\
-  -nodes nodes.json -tenant ${tenant}`}</code></pre>
+          <PanelHeading index="02 / PLACE" title="Understand placement" />
+          <p>The scheduler rejects ineligible nodes first, then considers topology spread, tenant-signed label preferences, exact image locality, and current load. Open a deployment to inspect each retained placement decision for <strong>{tenant}</strong>.</p>
         </article>
       </div>
       <article className="panel recent-attention-panel">
@@ -1459,18 +1462,7 @@ function AttentionList({items}) {
 }
 
 function AttentionCard({item}) {
-  const [copyState, setCopyState] = useState("idle");
   const guidance = attentionGuidance(item);
-  const command = attentionCommand(item);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopyState("copied");
-      window.setTimeout(() => setCopyState("idle"), 2000);
-    } catch {
-      setCopyState("failed");
-    }
-  };
   return (
     <article className={"attention-item" + (item.severity === "critical" ? " is-critical" : "")}>
       <div className="attention-card-head">
@@ -1489,12 +1481,7 @@ function AttentionCard({item}) {
         <div><dt>What it affects</dt><dd>{guidance.impact}</dd></div>
         <div><dt>Safest next step</dt><dd>{guidance.nextStep}</dd></div>
       </dl>
-      <div className="attention-command">
-        <code>{command}</code>
-        <button className="button button-quiet" type="button" onClick={copy}>
-          {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy diagnostic command"}
-        </button>
-      </div>
+      <p className="attention-console-path">Use the matching Nodes, Deployments, Capacity pools, Administration, or Access view to apply the bounded recovery action.</p>
     </article>
   );
 }
@@ -1645,7 +1632,7 @@ function InstanceEventsView({page, tenantID}) {
           <p>Enable the controller-events capability for an agent that needs to publish progress or research results.</p>
         </article>
       )}
-      {page?.next_after ? <p className="truncation-note">More signals are retained. Continue with the HTTP API, MCP tool, or stewardctl event cursor.</p> : null}
+      {page?.next_after ? <p className="truncation-note">More signals are retained than this bounded live view can display.</p> : null}
     </section>
   );
 }
@@ -1656,7 +1643,7 @@ const terminalTaskStates = new Set([
   "agent_reported_cancelled",
 ]);
 
-function TaskProjectionsView({page, tenantID}) {
+function TaskProjectionsView({page, tenantID, onMutation}) {
   const tasks = Array.isArray(page?.tasks) ? page.tasks : [];
   const running = tasks.filter((task) => task.state === "agent_reported_running").length;
   const terminal = tasks.filter((task) => terminalTaskStates.has(task.state)).length;
@@ -1670,6 +1657,12 @@ function TaskProjectionsView({page, tenantID}) {
         <strong>REPORTED STATE · NOT VERIFIED OUTCOME</strong>
         <span>Steward binds every projection to one workload lineage and preserves conflicts. The agent still authored the lifecycle claims and summary.</span>
       </aside>
+      {tenantID ? (
+        <div className="view-primary-action">
+          <SubmitTaskControls tenantID={tenantID} onMutation={onMutation} />
+          <span>Submit an exact request under finite signed authority without placing a task-signing key in this browser.</span>
+        </div>
+      ) : null}
       {!tenantID ? (
         <article className="incident-empty">
           <span className="panel-index">TENANT PROJECTION REQUIRED</span>
@@ -1740,7 +1733,7 @@ function TaskProjectionsView({page, tenantID}) {
           <p>Agents can report bounded progress and findings through the controller-events capability.</p>
         </article>
       )}
-      {page?.next_after ? <p className="truncation-note">More task projections are retained. Continue with the HTTP API, MCP tool, or stewardctl task cursor.</p> : null}
+      {page?.next_after ? <p className="truncation-note">More task projections are retained than this bounded live view can display.</p> : null}
     </section>
   );
 }
@@ -1755,7 +1748,7 @@ function nodePoolConditionKind(condition) {
   return "";
 }
 
-function NodePoolsView({page}) {
+function NodePoolsView({page, selectedTenant, siteAdmin, onMutation}) {
   const pools = Array.isArray(page?.node_pools) ? page.node_pools : [];
   const registered = pools.reduce((total, status) => total + status.registered_nodes, 0);
   const eligible = pools.reduce((total, status) => total + status.eligible_nodes, 0);
@@ -1777,6 +1770,17 @@ function NodePoolsView({page}) {
         <div><dt>Eligible / ready</dt><dd>{eligible} / {ready}</dd></div>
         <div className={scaleOut ? "has-conflict" : ""}><dt>Scale out needed</dt><dd>{scaleOut}</dd></div>
       </dl>
+      {siteAdmin ? (
+        <div className="view-primary-action">
+          <CreateNodePool tenantID={selectedTenant} onMutation={onMutation} />
+          <span>Desired count drives the provider-neutral scale signal. Cloud credentials never enter Control.</span>
+        </div>
+      ) : (
+        <aside className="signal-boundary">
+          <strong>SITE ADMINISTRATOR SCOPE</strong>
+          <span>Tenant operators cannot change shared machine capacity. Ask a site administrator to create or resize a pool.</span>
+        </aside>
+      )}
       {pools.length ? (
         <div className="pool-board">
           {pools.map((status) => {
@@ -1825,6 +1829,7 @@ function NodePoolsView({page}) {
                     {candidates.map((nodeID) => <code key={nodeID}>{nodeID}</code>)}
                   </div>
                 ) : null}
+                {siteAdmin ? <NodePoolControls status={status} onMutation={onMutation} /> : null}
               </article>
             );
           })}
@@ -1832,12 +1837,11 @@ function NodePoolsView({page}) {
       ) : (
         <article className="incident-empty">
           <span className="panel-index">NO CAPACITY INTENT RETAINED</span>
-          <h3>Define a provider-neutral node pool from a trusted terminal.</h3>
-          <p>Control will report creation deficits and only post-drain, empty-node scale-in candidates. It will not receive cloud credentials.</p>
-          <pre><code>stewardctl control node-pool apply -pool-id agents -tenant-ids TENANT -min-nodes 1 -desired-nodes 2 -max-nodes 10</code></pre>
+          <h3>Create the first provider-neutral capacity pool above.</h3>
+          <p>Control will report creation deficits and only post-drain, empty-node scale-in candidates. It never receives cloud credentials.</p>
         </article>
       )}
-      {page?.next_after ? <p className="truncation-note">More node pools exist. Continue with the HTTP API or stewardctl node-pool cursor.</p> : null}
+      {page?.next_after ? <p className="truncation-note">More node pools exist than this bounded live view can display.</p> : null}
       {scaleIn ? <p className="truncation-note">{scaleIn} drained, empty node{scaleIn === 1 ? " is" : "s are"} eligible for exact provider removal.</p> : null}
     </section>
   );
@@ -1881,7 +1885,7 @@ function NodePlacement({placement, drain}) {
   );
 }
 
-function NodesView({page, tenantID}) {
+function NodesView({page, tenantID, siteAdmin, onMutation}) {
   return (
     <section className="view" aria-labelledby="nodes-title">
       <ViewHeading id="nodes-title" eyebrow="ENROLLED EXECUTORS" title="Agent nodes">
@@ -1889,7 +1893,7 @@ function NodesView({page, tenantID}) {
       </ViewHeading>
       <TableFrame empty={!tenantID ? "Select one tenant to load nodes." : "No nodes in this tenant."} hasRows={page.nodes.length > 0}>
         <table>
-          <thead><tr><th>Node</th><th>State</th><th>Placement</th><th>Last seen</th><th>Capacity</th><th>Capabilities</th></tr></thead>
+          <thead><tr><th>Node</th><th>State</th><th>Placement</th><th>Last seen</th><th>Capacity</th><th>Capabilities</th><th>Manage</th></tr></thead>
           <tbody>
             {page.nodes.map((node) => (
               <tr key={node.node_id}>
@@ -1906,6 +1910,10 @@ function NodesView({page, tenantID}) {
                       </Badge>
                     ))}
                   </div>
+                </td>
+                <td>
+                  <NodeControls node={node} siteAdmin={siteAdmin} onMutation={onMutation} />
+                  <NodeEvidenceControls node={node} tenantID={tenantID} siteAdmin={siteAdmin} onMutation={onMutation} />
                 </td>
               </tr>
             ))}
@@ -2124,7 +2132,7 @@ function CommandsView({page, tenantID, onSubmit}) {
   );
 }
 
-function CredentialsView({page}) {
+function CredentialsView({page, siteAdmin, onMutation}) {
   return (
     <section className="view" aria-labelledby="credentials-title">
       <ViewHeading id="credentials-title" eyebrow="NON-SECRET RECORDS" title="Access records">
@@ -2132,7 +2140,7 @@ function CredentialsView({page}) {
       </ViewHeading>
       <TableFrame empty="No credentials in this projection." hasRows={page.credentials.length > 0}>
         <table>
-          <thead><tr><th>Credential</th><th>Kind / Role</th><th>Scope</th><th>State</th></tr></thead>
+          <thead><tr><th>Credential</th><th>Kind / Role</th><th>Scope</th><th>State</th><th>Manage</th></tr></thead>
           <tbody>
             {page.credentials.map((credential) => {
               const scope = credential.tenant_id ||
@@ -2143,6 +2151,7 @@ function CredentialsView({page}) {
                   <td><strong>{credential.kind}</strong><small>{credential.role || credential.node_id || "—"}</small></td>
                   <td>{scope}</td>
                   <td><Badge kind={credential.revoked ? "is-danger" : "is-ok"}>{credential.revoked ? "revoked" : "active"}</Badge></td>
+                  <td><CredentialControls credential={credential} siteAdmin={siteAdmin} onMutation={onMutation} /></td>
                 </tr>
               );
             })}

@@ -81,11 +81,12 @@ request-bound authority.
 
 ## Consequences
 
-The console is observation-first, not observation-only. Command submission is
-the single mutation exposed in the browser, and only for an already signed,
-immutable command. Private keys, command construction, policy changes, secret
-retrieval, enrollment, operator administration, and every other mutation remain
-outside the console.
+At acceptance, exact command submission was the console's only mutation. ADR
+0065 supersedes that general mutation constraint: the console now exposes
+explicitly allowlisted Control-owned operations, including enrollment and
+operator administration. This decision still governs exact signed-command
+couriering. Private keys, command construction, secret retrieval, and
+unrestricted policy authority remain outside the console.
 
 The local preview is a safety aid, not a signature verifier. A malformed or
 unauthorized envelope can pass part of the preview but will fail closed at the

@@ -19,10 +19,12 @@ Gateway verifies that binding before the instance can collect the answer.
 ## Review open questions
 
 The React console shows open questions in the **Workrooms** view and a complete
-bounded inbox in **Questions**. The console is read-only for interactions because
-a private task key does not belong in browser memory.
+bounded inbox in **Questions**. To answer from the console, create the response
+with a trusted signer, then choose **Submit signed answer** and upload the public
+response permit and signed answer. The private response key never enters browser
+memory.
 
-Use the trusted CLI to inspect the exact record:
+The trusted CLI remains available for automation or direct inspection:
 
 ```console
 stewardctl control interaction list

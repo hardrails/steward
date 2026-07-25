@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	currentName = "CURRENT"
-	lockName    = "LOCK"
+	currentName                  = "CURRENT"
+	lockName                     = "LOCK"
+	walRecoveryBatchFrames       = 128
+	walRecoveryBatchPayloadBytes = 4 << 20
+	walCompactionTargetBytes     = 8 << 20
 )
 
 // Store is a single-writer durable control-plane state machine. A successful
@@ -228,13 +231,19 @@ func Open(directory string, limits Limits) (*Store, error) {
 	if _, err := wal.Seek(0, io.SeekEnd); err != nil {
 		return nil, fmt.Errorf("seek control WAL: %w", err)
 	}
-	keepLock, keepWAL = true, true
-	return &Store{
+	store := &Store{
 		dir: directory, limits: limits, lock: lock, wal: wal, generation: selected.Generation,
 		sequence: sequence, lastHash: lastHash, current: current,
 		evidenceLastReports: make(map[string]time.Time),
 		syncFile:            func(file *os.File) error { return file.Sync() },
-	}, nil
+	}
+	if size > walCompactionTarget(limits) {
+		if err := store.compactLocked(); err != nil {
+			return nil, fmt.Errorf("compact recovered control WAL: %w", err)
+		}
+	}
+	keepLock, keepWAL = true, true
+	return store, nil
 }
 
 // InspectRoot validates read-only Control state beneath a retained directory
@@ -426,7 +435,7 @@ func (store *Store) applyMutationsLocked(mutations ...mutation) error {
 		store.poisoned = true
 		return fmt.Errorf("stat control WAL before append: %w", err)
 	}
-	if info.Size()+int64(len(frame)) > store.limits.MaxWALBytes {
+	if info.Size()+int64(len(frame)) > walCompactionTarget(store.limits) {
 		if err := store.compactLocked(); err != nil {
 			store.poisoned = true
 			return fmt.Errorf("compact control WAL: %w", err)
@@ -517,7 +526,36 @@ func recoverWAL(file *os.File, size int64, current state, sequence uint64, lastH
 }
 
 func recoverWALReader(file io.ReaderAt, size int64, current state, sequence uint64, lastHash [sha256.Size]byte, limits Limits, repair func(int64) error) (state, uint64, [sha256.Size]byte, error) {
+	return recoverWALReaderValidated(file, size, current, sequence, lastHash, limits, repair, validateState)
+}
+
+func recoverWALReaderValidated(file io.ReaderAt, size int64, current state, sequence uint64, lastHash [sha256.Size]byte, limits Limits, repair func(int64) error, validate func(state, Limits) error) (state, uint64, [sha256.Size]byte, error) {
 	offset := int64(walHeaderBytes)
+	readSequence, readHash := sequence, lastHash
+	// Every frame is decoded, hash-chained, and applied in exact order. Full
+	// state validation runs at bounded batch boundaries because validating all
+	// retained records after every historical frame makes recovery quadratic.
+	// Normal writes validated each committed frame before it entered this WAL.
+	batch := transaction{}
+	batchFrames, batchPayloadBytes := 0, 0
+	batchSequence, batchStartSequence := sequence, sequence
+	batchHash := lastHash
+	flush := func() error {
+		if batchFrames == 0 {
+			return nil
+		}
+		next, err := applyTransaction(current, batch)
+		if err != nil {
+			return fmt.Errorf("apply control WAL transactions %d-%d: %w", batchStartSequence, batchSequence, err)
+		}
+		if err := validate(next, limits); err != nil {
+			return formatStateError(err)
+		}
+		current, sequence, lastHash = next, batchSequence, batchHash
+		batch = transaction{}
+		batchFrames, batchPayloadBytes = 0, 0
+		return nil
+	}
 	for offset < size {
 		start := offset
 		if size-offset < 4 {
@@ -569,24 +607,52 @@ func recoverWALReader(file io.ReaderAt, size int64, current state, sequence uint
 		if err != nil {
 			return state{}, 0, [sha256.Size]byte{}, fmt.Errorf("verify control WAL frame at %d: %w", start, err)
 		}
-		if sequence == math.MaxUint64 || record.Sequence != sequence+1 || !bytes.Equal(record.Previous[:], lastHash[:]) {
+		if readSequence == math.MaxUint64 || record.Sequence != readSequence+1 || !bytes.Equal(record.Previous[:], readHash[:]) {
 			return state{}, 0, [sha256.Size]byte{}, errors.New("control WAL hash chain or sequence is discontinuous")
 		}
 		transaction, err := decodeTransaction(record.Payload, limits.MaxRecordBytes)
 		if err != nil {
 			return state{}, 0, [sha256.Size]byte{}, fmt.Errorf("decode control WAL transaction: %w", err)
 		}
-		next, err := applyTransaction(current, transaction)
-		if err != nil {
-			return state{}, 0, [sha256.Size]byte{}, fmt.Errorf("apply control WAL transaction: %w", err)
+		if batchFrames > 0 && (transaction.Version != batch.Version ||
+			batchFrames >= walRecoveryBatchFrames ||
+			batchPayloadBytes+len(record.Payload) > walRecoveryBatchPayloadBytes) {
+			if err := flush(); err != nil {
+				return state{}, 0, [sha256.Size]byte{}, err
+			}
 		}
-		if err := validateState(next, limits); err != nil {
-			return state{}, 0, [sha256.Size]byte{}, formatStateError(err)
+		if batchFrames == 0 {
+			batch.Version = transaction.Version
+			batchStartSequence = record.Sequence
 		}
-		current, sequence, lastHash = next, record.Sequence, record.Hash
+		batch.Mutations = append(batch.Mutations, transaction.Mutations...)
+		batchFrames++
+		batchPayloadBytes += len(record.Payload)
+		batchSequence, batchHash = record.Sequence, record.Hash
+		readSequence, readHash = record.Sequence, record.Hash
 		offset += length
 	}
+	if err := flush(); err != nil {
+		return state{}, 0, [sha256.Size]byte{}, err
+	}
 	return current, sequence, lastHash, nil
+}
+
+func walCompactionTarget(limits Limits) int64 {
+	// MaxWALBytes remains the corruption/resource hard limit. This lower target
+	// keeps routine restart work bounded and compacts legacy WALs after recovery.
+	target := limits.MaxWALBytes / 4
+	if target > walCompactionTargetBytes {
+		target = walCompactionTargetBytes
+	}
+	minimum := int64(limits.MaxRecordBytes) + walHeaderBytes + 4
+	if target < minimum {
+		target = minimum
+	}
+	if target > limits.MaxWALBytes {
+		return limits.MaxWALBytes
+	}
+	return target
 }
 
 func openRootArtifact(root *os.Root, name string, limit int64) (*os.File, int64, error) {
