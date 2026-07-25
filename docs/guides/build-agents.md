@@ -497,9 +497,10 @@ stewardctl task run auditor "Review the workspace and report one concrete issue"
 ```
 
 This waits for the deployment, checks the exact admitted service and task key,
-persists the signed bundle before dispatch, submits through the node-local Gateway,
-and saves verified terminal bytes. Steward infers only the qualified Hermes task
-operation and stores the generated request, bundle, and result in a
+and waits for the fixed Hermes health endpoint before it creates one-use authority.
+It then persists the signed bundle before dispatch, submits through the node-local
+Gateway, and saves verified terminal bytes. Steward infers only the qualified
+Hermes task operation and stores the generated request, bundle, and result in a
 new owner-only run directory. The bundle remains the recovery handle after a
 timeout or interrupted terminal. Resume it instead of minting replacement
 authority. The explicit artifact flags remain the stable automation surface.

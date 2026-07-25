@@ -8,15 +8,19 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/gatewayclient"
+	"github.com/hardrails/steward/internal/nodeclient"
 )
 
 const taskRunSchema = "steward.task-run.v1"
+const maxHermesTaskReadinessWait = 2 * time.Minute
 
 type taskRunResult struct {
 	SchemaVersion string          `json:"schema_version"`
@@ -80,6 +84,11 @@ func runTask(arguments []string, stdout io.Writer) error {
 		(*resultPath != "") == *discardResult {
 		return errors.New("task run expert mode requires request, operation, bundle output, and exactly one result disposition; -run-dir is only for prompt mode")
 	}
+	if !promptMode {
+		if _, err := readCLIArtifact(*requestPath); err != nil {
+			return fmt.Errorf("read task request: %w", err)
+		}
+	}
 	if leadingDeployment != "" && (tenantID == "" || *controlTokenPath == "") {
 		return errors.New("task run with a durable deployment requires a tenant and Control operator token")
 	}
@@ -116,6 +125,14 @@ func runTask(arguments []string, stdout io.Writer) error {
 		*operationID = artifacts.OperationID
 		*bundlePath = artifacts.Bundle
 		*resultPath = artifacts.Result
+	}
+	if err := waitForTaskRunService(
+		resolvedDeploymentPath,
+		*gatewayURL,
+		*gatewayTokenPath,
+		min(*deploymentTimeout, maxHermesTaskReadinessWait),
+	); err != nil {
+		return err
 	}
 
 	issueArguments := []string{
@@ -160,6 +177,49 @@ func runTask(arguments []string, stdout io.Writer) error {
 		Submission: json.RawMessage(bytes.TrimSpace(submissionOutput.Bytes())),
 		Status:     json.RawMessage(bytes.TrimSpace(statusOutput.Bytes())),
 	})
+}
+
+func waitForTaskRunService(deploymentPath, gatewayURL, tokenPath string, timeout time.Duration) error {
+	raw, err := readCLIArtifact(deploymentPath)
+	if err != nil {
+		return fmt.Errorf("read task-ready deployment: %w", err)
+	}
+	var deployment agentDeployResult
+	if err := dsse.DecodeStrictInto(raw, maxArtifactBytes, &deployment); err != nil {
+		return fmt.Errorf("decode task-ready deployment: %w", err)
+	}
+	if deployment.Admission.ServiceID != "hermes-api" {
+		return nil
+	}
+	token, err := nodeclient.ReadToken(tokenPath)
+	if err != nil {
+		return fmt.Errorf("read Gateway token: %w", err)
+	}
+	client, err := gatewayclient.New(gatewayURL, token)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		lastErr = client.HermesReady(ctx, deployment.Admission.ServicePath)
+		if lastErr == nil {
+			return nil
+		}
+		var responseError *gatewayclient.ServiceReadinessError
+		if errors.As(lastErr, &responseError) &&
+			(responseError.Status == http.StatusUnauthorized || responseError.Status == http.StatusForbidden) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for Hermes task service readiness: %w (last check: %v)", ctx.Err(), lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 type promptTaskArtifacts struct {
