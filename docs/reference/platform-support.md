@@ -70,6 +70,13 @@ The optional cluster installer supports clean systemd Linux hosts on `amd64` and
 either a bounded TLS download or exact locally staged bundle and image archives.
 RKE2 supplies containerd; a cluster-only node does not require Docker.
 
+The AWS Terraform cluster module supports Amazon Linux 2023 on `amd64` and
+`arm64`. It creates one evaluation server or three server nodes, requires IMDSv2,
+encrypts root volumes, opens RKE2 ports only between cluster members, and uses
+Session Manager instead of public SSH. Its connected quick start uses temporary
+public addresses for outbound downloads; the reusable module defaults to private
+addresses for existing networks.
+
 The following disposable AWS acceptance ran on 2026-07-26:
 
 | Host image | Architecture | Observed path |

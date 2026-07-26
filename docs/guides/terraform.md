@@ -6,11 +6,79 @@ section: How-to
 
 # Bootstrap Steward with Terraform
 
-For a private multi-node deployment, start with
-[Deploy Steward node pools in the cloud]({{ '/guides/cloud-fleets/' | relative_url }}).
-It provides supported AWS Auto Scaling Group, Google Cloud regional Managed
-Instance Group, and Azure Virtual Machine Scale Set modules. This page explains
-the lower-level provider-neutral bootstrap and its authority boundaries.
+Use the AWS quick start when you want Steward to create and form a management
+cluster for you. It creates the network, three availability-zone subnets, a KMS
+key, least-privilege instance roles, Session Manager access, and either one
+evaluation server or three highly available servers. It opens no public inbound
+port and requires no SSH key.
+
+You need Terraform 1.5 or later, the AWS CLI, working AWS credentials, and a
+selected region:
+
+```console
+git clone https://github.com/hardrails/steward.git
+cd steward/integrations/terraform/examples/aws-cluster-quickstart
+export AWS_REGION=us-west-2
+./up.sh
+```
+
+The command shows the Terraform plan, asks before creating billable resources,
+waits for first boot, and runs Steward's real cluster doctor. For a three-server
+etcd quorum across three availability zones:
+
+```console
+./up.sh --ha
+```
+
+Use `./up.sh --yes` only in automation where plan approval already occurs
+elsewhere. Remove the example with `./down.sh`; it deletes the encrypted
+rendezvous without reading it, then shows the Terraform destroy plan.
+
+The default example gives instances temporary public addresses for outbound
+downloads, but its security group still has no public ingress. For production,
+call `integrations/terraform/modules/aws-steward-cluster` from private subnets
+with reviewed NAT, proxy, mirror, or VPC endpoint paths. The module defaults to
+no public address.
+
+## What Terraform does—and does not hold
+
+Terraform owns durable infrastructure: instances, disks, security groups, IAM
+roles, and the KMS key reference. It never generates, reads, outputs, or stores
+the RKE2 server token.
+
+The first instance obtains that token from RKE2 and writes it to one encrypted,
+expiring AWS Systems Manager Parameter Store value. Joining instances can read
+only that exact parameter. The bootstrap passes the value through root-only
+files rather than command arguments, and the parameter expires automatically.
+AWS IAM, KMS, the instance identities, and the first server are therefore part of
+the bootstrap trust boundary. Compromise of any of them during formation may
+expose cluster-administrator authority.
+
+Terraform state can still reveal infrastructure topology and rendered user data.
+Protect it with encryption, access control, locking, retention limits, and audit
+logs. Do not add private keys, API tokens, secret-manager results, authenticated
+URLs, or enrollment bundles to module variables, data sources, outputs,
+provisioners, or cloud-init.
+
+## Choose the module that matches the job
+
+| Goal | Start here |
+| --- | --- |
+| Create and form an AWS management cluster | `examples/aws-cluster-quickstart` |
+| Form a cluster in an existing AWS network | `modules/aws-steward-cluster` |
+| Create elastic Executor node pools | [Deploy Steward node pools in the cloud]({{ '/guides/cloud-fleets/' | relative_url }}) |
+| Render bootstrap for any Terraform provider | `modules/steward-node` |
+| Bootstrap one Steward Control host | `modules/steward-control` |
+
+The cluster module creates the RKE2 management substrate. It does not move agent
+workloads into Kubernetes: current agents still run through Steward Executor
+with Docker and gVisor. The cloud node-pool modules create replaceable Executor
+capacity but do not form the RKE2 cluster.
+
+## Provider-neutral node bootstrap
+
+The remaining sections describe lower-level building blocks and their authority
+boundaries.
 
 The provider-neutral module at `integrations/terraform/modules/steward-node`
 generates cloud-init that pins the installer by SHA-256 and Steward by exact release

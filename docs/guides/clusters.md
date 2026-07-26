@@ -17,6 +17,29 @@ gVisor. That separation matters: Kubernetes administrators normally have host-le
 authority over Kubernetes worker nodes, while Steward Control is intentionally
 unable to mint tenant-signed agent authority.
 
+## Fastest path on AWS
+
+If you have Terraform, the AWS CLI, and working AWS credentials, Steward can
+create the infrastructure, form the cluster, wait for first boot, and run the
+doctor:
+
+```console
+git clone https://github.com/hardrails/steward.git
+cd steward/integrations/terraform/examples/aws-cluster-quickstart
+export AWS_REGION=us-west-2
+./up.sh
+```
+
+Use `./up.sh --ha` for three server nodes across three availability zones. The
+quick start creates no SSH key and no public ingress. It transfers the RKE2
+server token between EC2 identities through an encrypted, expiring Systems
+Manager value, so the token never enters Terraform state.
+
+Read [Bootstrap Steward with Terraform]({{ '/guides/terraform/' | relative_url }})
+for the trust boundary, private-subnet production pattern, outputs, and cleanup.
+Continue below when you are using existing Linux hosts, preparing an air-gapped
+site, or need to inspect the exact manual operations.
+
 ## What the installer configures
 
 - the exact RKE2 release pinned by the installed Steward binary;

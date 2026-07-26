@@ -13,3 +13,10 @@
 # React control-console build dependencies. The audited production bundle is
 # committed so normal and air-gapped Go builds never require Node or npm.
 /internal/controlplane/console/node_modules/
+
+# Terraform working directories and local state. Example dependency lock files
+# remain committed so provider selection is repeatable.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log

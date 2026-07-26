@@ -1,0 +1,22 @@
+{
+  "schema_version": "steward.aws-cluster-source-lock.v1",
+  "steward": {
+    "version": "v3.7.0",
+    "installer_sha256": "5375921d12599a094e3f6d018b3405c75ef94a7ecf7aeeb52112a6e72fd62660"
+  },
+  "gvisor": {
+    "version": "20260721.0",
+    "archives": {
+      "amd64": {
+        "upstream_arch": "x86_64",
+        "size": 142601855,
+        "sha512": "1e951f8d9dd2198e16ad66066fac0db42943ac8e8ca35c7173a20f0fbc859b8185c33c478ae0dc3c4e76b8c06d99ed118286caf43ad207c96578b42af62cae72"
+      },
+      "arm64": {
+        "upstream_arch": "aarch64",
+        "size": 131637510,
+        "sha512": "27a6d5103c36ef11c7e8c6158b7039ac43623d77147227d4e6d083835d0cd20fe3b100680ffeca9e6691ee7ba31de19b613c10ef860771e861e7971b24bc2947"
+      }
+    }
+  }
+}
