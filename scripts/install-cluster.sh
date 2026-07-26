@@ -562,7 +562,7 @@ if [[ -n $offline_dir ]]; then
 		die "installed air-gap image archive drift detected"
 	fi
 	registry_tmp="$work/registries.yaml"
-	printf 'mirrors:\n  "*":\n' >"$registry_tmp"
+	printf 'mirrors:\n  "*":\n    endpoint:\n      - "https://127.0.0.1:65535"\n' >"$registry_tmp"
 	if [[ ! -f $registries_config ]]; then
 		install -o root -g root -m 0600 "$registry_tmp" "$registries_config"
 	elif [[ -L $registries_config ]] || ! cmp -s "$registry_tmp" "$registries_config"; then

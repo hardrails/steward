@@ -22,7 +22,7 @@ grep -Fq 'active firewalld conflicts' "$installer"
 grep -Fq 'runtime_type = "io.containerd.runsc.v1"' "$installer"
 grep -Fq 'join token must contain exactly one line' "$installer"
 grep -Fq 'disable-default-registry-endpoint: true' "$root/internal/clustersubstrate/plan.go"
-grep -Fq 'printf '\''mirrors:\n  "*":\n'\''' "$installer"
+grep -Fq 'https://127.0.0.1:65535' "$installer"
 # shellcheck disable=SC2016 # Match the literal reviewed shell expression.
 grep -Fq 'systemctl start --no-block "$service.service"' "$installer"
 grep -Fq 'kubeconfig=/var/lib/rancher/rke2/agent/kubelet.kubeconfig' "$installer"
