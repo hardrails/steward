@@ -9,6 +9,11 @@ locals {
   gvisor_version = local.source_lock.gvisor.version
   gvisor_url     = "https://storage.googleapis.com/gvisor/releases/release/${local.gvisor_version}/${local.gvisor_lock.upstream_arch}/gvisor.tar.bz2"
 
+  requested_release_contract = {
+    steward_release_version  = local.steward_version
+    steward_installer_sha256 = local.installer_sha
+  }
+
   ami_architecture = var.architecture == "amd64" ? "x86_64" : "arm64"
   instance_type    = coalesce(var.instance_type, var.architecture == "amd64" ? "m7i.large" : "m7g.large")
 
@@ -21,7 +26,7 @@ locals {
 
   common_tags = merge(var.tags, {
     "steward.io/cluster" = var.name
-    "steward.io/release" = local.steward_version
+    "steward.io/release" = terraform_data.release_contract.output.steward_release_version
     "steward.io/role"    = "management-cluster"
   })
 
@@ -58,6 +63,37 @@ locals {
     runcmd:
       - [ /usr/local/sbin/steward-cluster-bootstrap ]
   CLOUD
+}
+
+resource "terraform_data" "topology_contract" {
+  input = var.server_count
+
+  lifecycle {
+    ignore_changes = [input]
+
+    postcondition {
+      condition     = self.output == var.server_count
+      error_message = "server_count is immutable after cluster formation. Terraform cannot safely add or remove embedded-etcd members. Follow a reviewed RKE2 membership procedure, or destroy and recreate the cluster."
+    }
+  }
+}
+
+resource "terraform_data" "release_contract" {
+  input = local.requested_release_contract
+
+  lifecycle {
+    ignore_changes = [input]
+
+    postcondition {
+      condition = alltrue([
+        for key in [
+          "steward_release_version",
+          "steward_installer_sha256",
+        ] : self.output[key] == local.requested_release_contract[key]
+      ])
+      error_message = "the pinned Steward release changed. EC2 user data is not an upgrade channel. Upgrade and verify every server first, then reconcile the recorded release contract as documented; otherwise destroy and recreate the cluster."
+    }
+  }
 }
 
 data "aws_ami" "amazon_linux_2023" {

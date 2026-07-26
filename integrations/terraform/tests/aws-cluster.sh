@@ -56,6 +56,12 @@ require_text "$module/main.tf" 'Action   = ["ssm:PutParameter"]'
 require_text "$module/main.tf" 'Action   = ["ssm:GetParameter"]'
 require_text "$module/main.tf" 'http_tokens                 = "required"'
 require_text "$module/main.tf" 'ignore_changes = [user_data]'
+require_text "$module/main.tf" 'resource "terraform_data" "topology_contract"'
+require_text "$module/main.tf" 'resource "terraform_data" "release_contract"'
+require_text "$module/main.tf" 'server_count is immutable after cluster formation'
+require_text "$module/main.tf" 'EC2 user data is not an upgrade channel'
+require_text "$module/outputs.tf" 'terraform_data.release_contract.output.steward_release_version'
+require_text "$module/README.md" '-replace=module.steward_cluster.terraform_data.release_contract'
 require_text "$module/bootstrap.sh.tftpl" 'ssm put-parameter --cli-input-json'
 require_text "$module/bootstrap.sh.tftpl" '"Tier":"Advanced"'
 require_text "$module/bootstrap.sh.tftpl" '"Type\\":\\"Expiration\\"'
@@ -97,15 +103,36 @@ provider "aws" {
   skip_requesting_account_id  = true
 }
 
+variable "server_count" {
+  type    = number
+  default = 1
+}
+
+variable "steward_release_version" {
+  type    = string
+  default = null
+}
+
+variable "steward_installer_sha256" {
+  type    = string
+  default = null
+}
+
 module "cluster" {
   source = "$module"
 
   name         = "fixture"
   vpc_id       = "vpc-0123456789abcdef0"
-  subnet_ids   = ["subnet-0123456789abcdef0"]
-  server_count = 1
+  subnet_ids = [
+    "subnet-0123456789abcdef0",
+    "subnet-1123456789abcdef0",
+    "subnet-2123456789abcdef0",
+  ]
+  server_count             = var.server_count
   ami_id       = "ami-0123456789abcdef0"
   kms_key_arn  = "arn:aws:kms:us-west-2:123456789012:key/12345678-1234-1234-1234-123456789012"
+  steward_release_version  = var.steward_release_version
+  steward_installer_sha256 = var.steward_installer_sha256
 }
 EOF
 
@@ -143,5 +170,63 @@ assert "set -x" not in script
 assert 'gvisor_version="20260721.0"' in script
 assert "v3.7.0" in script
 PY
+
+terraform -chdir="$work" apply \
+  -refresh=false \
+  -input=false \
+  -auto-approve \
+  -target=module.cluster.terraform_data.topology_contract \
+  -target=module.cluster.terraform_data.release_contract >/dev/null
+
+if terraform -chdir="$work" plan \
+  -refresh=false \
+  -input=false \
+  -var=server_count=3 >"$work/topology-drift.log" 2>&1; then
+	echo "aws cluster test: unsafe server_count change unexpectedly planned" >&2
+	exit 1
+fi
+grep -F -- "server_count is immutable after cluster formation" "$work/topology-drift.log" >/dev/null || {
+	cat "$work/topology-drift.log" >&2
+	echo "aws cluster test: topology drift did not fail at the formation contract" >&2
+	exit 1
+}
+
+if terraform -chdir="$work" plan \
+  -refresh=false \
+  -input=false \
+  -var=steward_release_version=v9.9.9 \
+  -var=steward_installer_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  >"$work/release-drift.log" 2>&1; then
+	echo "aws cluster test: unapplied Steward release change unexpectedly planned" >&2
+	exit 1
+fi
+grep -F -- "the pinned Steward release changed" "$work/release-drift.log" >/dev/null || {
+	cat "$work/release-drift.log" >&2
+	echo "aws cluster test: release drift did not fail at the formation contract" >&2
+	exit 1
+}
+
+terraform -chdir="$work" apply \
+  -refresh=false \
+  -input=false \
+  -auto-approve \
+  -target=module.cluster.terraform_data.release_contract \
+  -replace=module.cluster.terraform_data.release_contract \
+  -var=steward_release_version=v9.9.9 \
+  -var=steward_installer_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  >/dev/null
+terraform -chdir="$work" state show module.cluster.terraform_data.release_contract |
+	grep -F -- '"v9.9.9"' >/dev/null
+
+terraform -chdir="$work" destroy \
+  -refresh=false \
+  -input=false \
+  -auto-approve \
+  -target=module.cluster.terraform_data.topology_contract \
+  -target=module.cluster.terraform_data.release_contract \
+  -var=server_count=3 \
+  -var=steward_release_version=v9.9.9 \
+  -var=steward_installer_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  >/dev/null
 
 echo "aws cluster test: secret-free Terraform plan and rendered bootstrap passed"

@@ -27,7 +27,17 @@ output "selected_ami_id" {
 }
 
 output "steward_release_version" {
-  value = local.steward_version
+  description = "Steward release recorded for the running cluster."
+  value       = terraform_data.release_contract.output.steward_release_version
+}
+
+output "formation_contract" {
+  description = "Non-secret topology and Steward release identity recorded for the running cluster."
+  value = {
+    server_count             = terraform_data.topology_contract.output
+    steward_release_version  = terraform_data.release_contract.output.steward_release_version
+    steward_installer_sha256 = terraform_data.release_contract.output.steward_installer_sha256
+  }
 }
 
 output "bootstrap_completion_marker" {

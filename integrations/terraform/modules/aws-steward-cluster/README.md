@@ -48,6 +48,31 @@ The rendezvous is for initial formation. After it expires, replacing a server
 requires the documented RKE2 backup/recovery or secure join procedure. First-boot
 user data is intentionally ignored after creation and is not an upgrade channel.
 
+The module records `server_count` and the exact Steward release identity in
+Terraform state on the first apply. Later plans fail before changing
+infrastructure if those values differ. This prevents Terraform from terminating
+embedded-etcd members without coordinated removal, adding members after the
+short-lived join rendezvous has expired, or changing release tags and outputs
+without upgrading the hosts.
+
+Do not scale this management cluster by changing `server_count`, and do not
+upgrade it by changing `steward_release_version`. Use a reviewed RKE2 membership
+procedure for topology changes.
+
+For a software upgrade, first follow Steward's documented node upgrade procedure
+on every server and verify the cluster. Then update the pinned version and hash
+and reconcile Terraform's non-secret record:
+
+```console
+terraform apply \
+  -replace=module.steward_cluster.terraform_data.release_contract
+```
+
+Review the complete plan before approving it. The separate topology contract
+still rejects a `server_count` change. When retaining the existing cluster is
+unnecessary, `terraform destroy` remains available even if the requested
+formation values have changed; recreate the cluster from reviewed inputs.
+
 ## Costs and prerequisites
 
 The module creates EC2 instances and one short-lived Advanced Parameter Store
