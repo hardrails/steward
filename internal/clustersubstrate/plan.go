@@ -193,6 +193,20 @@ metadata:
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: steward-system
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: steward-agents
+automountServiceAccountToken: false
+---
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:

@@ -65,7 +65,10 @@ func TestClusterBaselineIsDefaultDenyRunsc(t *testing.T) {
 	if err := run([]string{"cluster", "baseline"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"name: runsc", "name: steward-agents", "name: default-deny"} {
+	for _, want := range []string{
+		"name: runsc", "name: steward-agents", "name: default-deny",
+		"automountServiceAccountToken: false",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("baseline is missing %q", want)
 		}

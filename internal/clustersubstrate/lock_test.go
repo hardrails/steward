@@ -63,7 +63,8 @@ func TestBuildPlanRendersHardenedServerAndWorker(t *testing.T) {
 		}
 	}
 	if server.Images == nil || !strings.Contains(server.Baseline, "kind: RuntimeClass") ||
-		!strings.Contains(server.Baseline, "kind: NetworkPolicy") {
+		!strings.Contains(server.Baseline, "kind: NetworkPolicy") ||
+		strings.Count(server.Baseline, "automountServiceAccountToken: false") != 2 {
 		t.Fatal("server plan lacks the air-gap artifact or baseline")
 	}
 
