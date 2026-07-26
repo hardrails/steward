@@ -5,6 +5,8 @@
     "installer_sha256": "5375921d12599a094e3f6d018b3405c75ef94a7ecf7aeeb52112a6e72fd62660"
   },
   "gvisor": {
+    "repository": "https://github.com/google/gvisor",
+    "license": "Apache-2.0",
     "version": "20260721.0",
     "archives": {
       "amd64": {

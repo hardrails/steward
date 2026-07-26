@@ -83,7 +83,7 @@ The following disposable AWS acceptance ran on 2026-07-26:
 | --- | --- | --- |
 | Ubuntu 24.04 | `amd64` | Connected server and worker, three-server embedded-etcd quorum and failover write, network-closed air-gap install, reboot recovery, gVisor, and default-deny egress |
 | Ubuntu 24.04 | `arm64` | Connected server, doctor, and real gVisor workload |
-| Amazon Linux 2023 | `amd64` | Connected server and doctor |
+| Amazon Linux 2023 | `amd64` | Terraform one-server and three-server formation across three availability zones; encrypted expiring join rendezvous; all nodes Ready; three running etcd members; gVisor; doctor; wrapper teardown |
 
 These are cluster-substrate results, not full Executor package acceptance on every
 row. The current release does not run Steward agent workloads through Kubernetes;

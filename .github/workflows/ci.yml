@@ -67,6 +67,8 @@ jobs:
           scripts/install-cluster.sh scripts/cluster-installer-test.sh
           scripts/repository-independence-test.sh
           scripts/update-rke2-pin.py scripts/update-rke2-pin-test.py
+          scripts/update-aws-cluster-gvisor-pin.py
+          scripts/update-aws-cluster-gvisor-pin-test.py
           scripts/node-installer-security-test.sh scripts/configure-input-boundary-test.sh
           scripts/node-control-plane-conflict-test.sh
           scripts/check-docs-consistency.sh scripts/check-cli-docs-contract.sh
@@ -121,6 +123,8 @@ jobs:
         run: python3 -I scripts/update-hermes-pin-test.py
       - name: RKE2 pin updater
         run: python3 -I scripts/update-rke2-pin-test.py
+      - name: AWS cluster gVisor pin updater
+        run: python3 -I scripts/update-aws-cluster-gvisor-pin-test.py
       - name: Buzz pin updater
         run: python3 -I scripts/update-buzz-pin-test.py
       - name: Playwright pin updater

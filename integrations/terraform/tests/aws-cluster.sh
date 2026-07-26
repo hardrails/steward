@@ -42,6 +42,8 @@ match = re.search(r'const Version = "([^"]+)"', version_source)
 assert match and f"v{match.group(1)}" == lock["steward"]["version"]
 installer = (root / "scripts/install-steward.sh").read_bytes()
 assert hashlib.sha256(installer).hexdigest() == lock["steward"]["installer_sha256"]
+assert lock["gvisor"]["repository"] == "https://github.com/google/gvisor"
+assert lock["gvisor"]["license"] == "Apache-2.0"
 assert re.fullmatch(r"20[0-9]{6}(?:\.[0-9]+)?", lock["gvisor"]["version"])
 for architecture in ("amd64", "arm64"):
     archive = lock["gvisor"]["archives"][architecture]
