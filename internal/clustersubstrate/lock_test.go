@@ -57,6 +57,7 @@ func TestBuildPlanRendersHardenedServerAndWorker(t *testing.T) {
 	for _, want := range []string{
 		"profile: cis", "secrets-encryption: true", "cni: canal",
 		"rke2-ingress-nginx", "etcd-snapshot-retention: 12",
+		"disable-default-registry-endpoint: true",
 	} {
 		if !strings.Contains(server.Config, want) {
 			t.Fatalf("server config is missing %q:\n%s", want, server.Config)

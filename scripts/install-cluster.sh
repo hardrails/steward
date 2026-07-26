@@ -22,6 +22,7 @@ readonly substrate_root=/opt/steward/substrates/rke2
 readonly cluster_state_root=/var/lib/steward-cluster
 readonly cluster_config=/etc/rancher/rke2/config.yaml
 readonly canonical_join_token=/etc/rancher/rke2/steward-join-token
+readonly registries_config=/etc/rancher/rke2/registries.yaml
 readonly baseline_manifest=/var/lib/rancher/rke2/server/manifests/steward-baseline.yaml
 readonly containerd_template=/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.tmpl
 
@@ -446,6 +447,10 @@ fi
 if [[ -e /etc/kubernetes || -L /etc/kubernetes ]] && [[ ! -f $cluster_state_root/installed ]]; then
 	die "existing Kubernetes configuration is not owned by this installer"
 fi
+if [[ -e /etc/rancher/rke2 || -L /etc/rancher/rke2 ]] &&
+	[[ ! -f $cluster_state_root/installed ]]; then
+	die "existing RKE2 configuration is not owned by this installer"
+fi
 if [[ -e /var/lib/rancher/rke2 || -L /var/lib/rancher/rke2 ]] &&
 	[[ ! -f $cluster_state_root/installed ]]; then
 	die "existing RKE2 state is not owned by this installer"
@@ -556,6 +561,13 @@ if [[ -n $offline_dir ]]; then
 	elif ! verify_file "/var/lib/rancher/rke2/agent/images/$images_name" "$images_size" "$images_sha"; then
 		die "installed air-gap image archive drift detected"
 	fi
+	registry_tmp="$work/registries.yaml"
+	printf 'mirrors:\n  "*":\n' >"$registry_tmp"
+	if [[ ! -f $registries_config ]]; then
+		install -o root -g root -m 0600 "$registry_tmp" "$registries_config"
+	elif [[ -L $registries_config ]] || ! cmp -s "$registry_tmp" "$registries_config"; then
+		die "air-gap registry policy drift detected"
+	fi
 fi
 
 service=rke2-server
@@ -570,13 +582,15 @@ if [[ $start == true ]]; then
 	sysctl --system >/dev/null
 	systemctl enable "$service.service" >/dev/null
 	systemctl start --no-block "$service.service"
-	active_deadline=$((SECONDS + 300))
+	startup_seconds=300
+	[[ -z $offline_dir ]] || startup_seconds=600
+	active_deadline=$((SECONDS + startup_seconds))
 	until systemctl is-active --quiet "$service.service"; do
 		if systemctl is-failed --quiet "$service.service"; then
 			die "$service failed during startup; inspect journalctl -u $service"
 		fi
 		((SECONDS < active_deadline)) ||
-			die "$service did not become active within five minutes; inspect journalctl -u $service"
+			die "$service did not become active within $startup_seconds seconds; inspect journalctl -u $service"
 		sleep 2
 	done
 fi

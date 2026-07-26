@@ -156,6 +156,9 @@ func renderConfig(request PlanRequest) string {
 	fmt.Fprintln(&builder, "node-label:")
 	fmt.Fprintf(&builder, "  - %q\n", "steward.io/cluster="+request.ClusterName)
 	fmt.Fprintln(&builder, "profile: cis")
+	if request.AirGap {
+		fmt.Fprintln(&builder, "disable-default-registry-endpoint: true")
+	}
 	if request.Operation != OperationInit {
 		fmt.Fprintf(&builder, "server: %q\n", request.ServerURL)
 		fmt.Fprintf(&builder, "token-file: %q\n", request.TokenFile)
