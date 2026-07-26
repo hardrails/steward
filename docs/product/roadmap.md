@@ -555,7 +555,12 @@ The roadmap starts from working primitives rather than a blank design:
 - an **Agent computers** console projection that joins signed deployments to
   exact tenant-and-instance observations, distinguishes managed, fleet,
   resumable-fork, and temporary-worker shapes, and shows delegated connector and
-  route identifiers without claiming secret possession.
+  route identifiers without claiming secret possession; and
+- a pinned RKE2 management-cluster foundation with deterministic CIS
+  configuration, exact connected and air-gapped artifacts, secure three-server
+  and expiring worker joins, gVisor RuntimeClass registration, restricted
+  namespaces, fail-closed registry behavior, and real multi-architecture,
+  network-closed, reboot, and etcd-quorum qualification.
 
 This foundation is not yet the complete product workflow above. The normal site,
 node, publication, finite authorization, service activation, durable apply, and
@@ -566,6 +571,9 @@ authenticated, Gateway is restarted, or non-secret service trust moves between
 machines. The controller also
 does not yet join continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
+The RKE2 foundation also does not place agents under Kubernetes. Existing agents
+remain behind Docker and gVisor Executor until a backend can preserve the same
+authority boundary under a hostile cluster administrator.
 
 ### Remaining product outcomes
 
@@ -653,6 +661,11 @@ supportable through one coherent operational surface.
 - Qualify an Incus virtual-machine backend and a Kubernetes Agent Sandbox backend
   after the local backend contract passes conformance; reject silent assurance
   downgrade across all three profiles.
+- Package Steward management services onto the pinned RKE2 substrate without
+  placing tenant private keys in Kubernetes. Treat RKE2 compromise separately from
+  Steward Control compromise, and keep agent execution outside Kubernetes until a
+  hostile-control-plane conformance test proves that cluster authority cannot
+  bypass node-local Steward admission.
 - Add an agent-facing MCP broker distinct from the operator MCP server.
 - Pin MCP server identity, tool schema, version, and requested capabilities; run
   untrusted MCP servers as separately admitted workloads.
@@ -860,9 +873,12 @@ cloud service catalogs.
 ### Why not Kubernetes or Nomad directly?
 
 They already solve broad scheduling and workload lifecycle. Steward should not
-rebuild those systems. Its small scheduler serves one secure site without another
-control plane; existing clusters remain reusable backends. Steward adds the
-agent-specific authority and evidence contract above placement.
+rebuild those systems. Steward now reuses pinned RKE2 for optional management
+clustering while preserving its portable scheduling and authority contracts.
+Existing clusters remain future reusable backends. Steward adds the agent-specific
+delegation, exact-effect, replay, and evidence boundary above placement; it does
+not claim that a Kubernetes administrator is harmless to pods scheduled directly
+onto that administrator's workers.
 
 ### Why should Control be trusted at all?
 

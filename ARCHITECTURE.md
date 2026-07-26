@@ -20,6 +20,7 @@ an untrusted containerized AI agent and managed external authority. It owns:
 - credential injection outside the workload;
 - signed Executor and Gateway evidence;
 - outbound node control through public protocols; and
+- pinned, hardened bootstrap of an optional management-cluster substrate; and
 - offline verification.
 
 Steward does not own model serving, agent reasoning or prompt graphs,
@@ -144,6 +145,26 @@ Executor's signed command uplink.
 
 Do not add product features to this compatibility path. New workload execution,
 authority, and evidence behavior belongs in Executor and Gateway.
+
+## Cluster substrate
+
+Steward reuses pinned RKE2 for optional management-cluster formation. The
+integration owns artifact identity, deterministic CIS configuration, clean-host
+installation, secure node joins, gVisor RuntimeClass registration, restricted
+namespace defaults, and connected or air-gapped verification. RKE2 owns
+Kubernetes, etcd, containerd, CNI, and membership.
+
+The RKE2 control plane is not Steward Control. RKE2 administrators normally have
+runtime authority over Kubernetes workers. Steward Control carries application
+desired state but cannot mint tenant signatures, and Executor revalidates its
+delegated authority. Keep these trust domains explicit in code, docs, and tests.
+
+Existing agent workloads remain on the Docker and gVisor Executor. Do not place an
+agent under Kubernetes until that backend passes the existing admission, isolation,
+egress, secret, replay, recovery, and evidence conformance suite, including a
+hostile RKE2-control-plane test. RKE2 must not become a shortcut around Executor.
+
+See [ADR 0067](docs/decisions/0067-reuse-rke2-as-the-cluster-substrate.md).
 
 ## Public protocols
 
@@ -316,9 +337,9 @@ Steward uses these ownership rungs:
 - `native-platform`: Docker, gVisor, systemd, Linux users, filesystem permissions,
   TLS primitives, HTTP, JSON, and cryptography supplied by Go and the operating
   system.
-- `open-source`: CUE, OPA, and operator-selected identity, secret storage,
-  telemetry, provenance, and model-serving systems connected through narrow
-  contracts.
+- `open-source`: RKE2 for optional management clustering; CUE, OPA, and
+  operator-selected identity, secret storage, telemetry, provenance, and
+  model-serving systems connected through narrow contracts.
 - `do-nothing`: general-purpose scheduling, visual workflow builders, agent
   catalogs, release promotion
   coordinators, secret vaults, and workflow engines until a demonstrated customer

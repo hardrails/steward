@@ -63,6 +63,24 @@ create a shared-host storage-isolation claim. See
 [Configure quota-enforced persistent state]({{ '/guides/persistent-state/' |
 relative_url }}).
 
+## The RKE2 cluster is management infrastructure, not an agent backend
+
+Steward can install a pinned, hardened RKE2 cluster, but current agents still run
+through Docker and gVisor Executor. The cluster baseline, namespaces, and
+`runsc` RuntimeClass do not constitute Kubernetes workload-backend support.
+
+This separation preserves an important trust distinction. A compromised Steward
+Control cannot create tenant signatures; Executor can reject work outside its
+signed delegation. A compromised Kubernetes control plane normally can schedule
+privileged workloads onto its worker nodes and must be treated as part of those
+nodes' trusted computing base. Do not place agent workloads directly in the
+Steward namespaces and assume they have the Executor compromise boundary.
+
+A future Kubernetes backend must pass hostile-control-plane, runtime-class,
+admission, egress, secret, replay, recovery, and evidence conformance. Until then,
+RKE2 may host replaceable management services, while agent execution remains
+outside its scheduling authority.
+
 ## Gateway is trusted
 
 Gateway reads reusable inference and connector credentials, chooses configured
@@ -499,6 +517,7 @@ Steward is not:
 - an agent reasoning framework, prompt graph, or planner;
 - a model scheduler or inference server;
 - a general container orchestrator;
+- a supported Kubernetes agent workload backend;
 - a secret manager;
 - an identity provider or single sign-on system;
 - a software supply-chain provenance service;
