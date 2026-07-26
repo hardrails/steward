@@ -164,12 +164,19 @@ init | join-server | join-worker | token | doctor) ;;
 *) die "operation must be init, join-server, join-worker, token create, or doctor" ;;
 esac
 
+trusted_root_executable() {
+	local candidate=$1 metadata uid mode links
+	[[ -x $candidate && -f $candidate && ! -L $candidate ]] || return 1
+	metadata=$(stat -c '%u:%a:%h' -- "$candidate" 2>/dev/null) || return 1
+	IFS=: read -r uid mode links <<<"$metadata"
+	[[ $uid == 0 && $links == 1 ]] || return 1
+	(( (8#$mode & 022) == 0 ))
+}
+
 find_stewardctl() {
-	local candidate metadata
+	local candidate
 	for candidate in /opt/steward/current/stewardctl /usr/local/bin/stewardctl /usr/bin/stewardctl; do
-		[[ -x $candidate && -f $candidate && ! -L $candidate ]] || continue
-		metadata=$(stat -c '%u:%a:%h' -- "$candidate" 2>/dev/null) || continue
-		if [[ $metadata == 0:*:1 && ${metadata#*:} != 777:1 ]]; then
+		if trusted_root_executable "$candidate"; then
 			printf '%s\n' "$candidate"
 			return 0
 		fi
@@ -295,11 +302,10 @@ command -v tar >/dev/null || die "tar is required"
 command -v sha256sum >/dev/null || die "sha256sum is required"
 command -v timeout >/dev/null || die "timeout is required"
 command -v flock >/dev/null || die "flock is required"
-[[ -x /usr/local/bin/runsc && -f /usr/local/bin/runsc && ! -L /usr/local/bin/runsc ]] ||
-	die "gVisor runsc must be installed as /usr/local/bin/runsc"
-[[ -x /usr/local/bin/containerd-shim-runsc-v1 && -f /usr/local/bin/containerd-shim-runsc-v1 &&
-	! -L /usr/local/bin/containerd-shim-runsc-v1 ]] ||
-	die "gVisor containerd-shim-runsc-v1 must be installed as a regular executable"
+trusted_root_executable /usr/local/bin/runsc ||
+	die "gVisor runsc must be root-owned, single-link, and not writable by group or other users"
+trusted_root_executable /usr/local/bin/containerd-shim-runsc-v1 ||
+	die "gVisor containerd-shim-runsc-v1 must be root-owned, single-link, and not writable by group or other users"
 if systemctl is-active --quiet firewalld.service; then
 	die "active firewalld conflicts with RKE2's default Canal network; apply a reviewed Calico firewall design or disable firewalld explicitly"
 fi

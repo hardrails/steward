@@ -20,6 +20,9 @@ grep -Fq 'existing Kubernetes configuration is not owned by this installer' "$in
 grep -Fq 'existing RKE2 configuration is not owned by this installer' "$installer"
 grep -Fq 'active firewalld conflicts' "$installer"
 grep -Fq 'runtime_type = "io.containerd.runsc.v1"' "$installer"
+grep -Fq 'trusted_root_executable /usr/local/bin/runsc' "$installer"
+# shellcheck disable=SC2016 # Match the literal permission check.
+grep -Fq '(( (8#$mode & 022) == 0 ))' "$installer"
 grep -Fq 'join token must contain exactly one line' "$installer"
 grep -Fq 'disable-default-registry-endpoint: true' "$root/internal/clustersubstrate/plan.go"
 grep -Fq 'https://127.0.0.1:65535' "$installer"
