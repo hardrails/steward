@@ -23,6 +23,8 @@ grep -Fq 'runtime_type = "io.containerd.runsc.v1"' "$installer"
 grep -Fq 'trusted_root_executable /usr/local/bin/runsc' "$installer"
 # shellcheck disable=SC2016 # Match the literal permission check.
 grep -Fq '(( (8#$mode & 022) == 0 ))' "$installer"
+grep -Fq 'offline artifact directory must be root-owned' "$installer"
+grep -Fq 'join token directory must be root-owned' "$installer"
 grep -Fq 'join token must contain exactly one line' "$installer"
 grep -Fq 'disable-default-registry-endpoint: true' "$root/internal/clustersubstrate/plan.go"
 grep -Fq 'https://127.0.0.1:65535' "$installer"

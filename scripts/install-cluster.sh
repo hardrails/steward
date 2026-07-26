@@ -165,8 +165,10 @@ init | join-server | join-worker | token | doctor) ;;
 esac
 
 trusted_root_executable() {
-	local candidate=$1 metadata uid mode links
+	local candidate=$1 metadata uid mode links parent
 	[[ -x $candidate && -f $candidate && ! -L $candidate ]] || return 1
+	parent=$(readlink -e -- "$(dirname -- "$candidate")" 2>/dev/null) || return 1
+	trusted_root_directory_chain "$parent" || return 1
 	metadata=$(stat -c '%u:%a:%h' -- "$candidate" 2>/dev/null) || return 1
 	IFS=: read -r uid mode links <<<"$metadata"
 	[[ $uid == 0 && $links == 1 ]] || return 1
@@ -392,6 +394,8 @@ bundle="$work/$bundle_name"
 if [[ -n $offline_dir ]]; then
 	[[ $offline_dir == /* && -d $offline_dir && ! -L $offline_dir ]] ||
 		die "--offline-dir must be a root-staged absolute directory"
+	trusted_root_directory_chain "$offline_dir" ||
+		die "offline artifact directory must be root-owned and not writable by group or other users"
 	copy_offline "$offline_dir/$bundle_name" "$bundle" "$max_bundle_bytes"
 else
 	command -v curl >/dev/null || die "curl is required for a connected install"
@@ -471,6 +475,8 @@ fi
 if [[ $operation != init ]]; then
 	[[ $token_source == /* && -f $token_source && ! -L $token_source ]] ||
 		die "join token must be an absolute regular file"
+	trusted_root_directory_chain "$(dirname -- "$token_source")" ||
+		die "join token directory must be root-owned and not writable by group or other users"
 	token_metadata=$(stat -c '%u:%a:%h:%s' -- "$token_source")
 	IFS=: read -r token_uid token_mode token_links token_size <<<"$token_metadata"
 	[[ $token_uid == 0 && $token_mode == 600 && $token_links == 1 ]] ||
