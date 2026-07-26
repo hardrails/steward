@@ -176,10 +176,12 @@ Run `stewardctl agent doctor` after installation. Use a hardened Linux node for
 sensitive production workloads until the report identifies a hardened execution
 profile.
 
-Start with the [installation tutorial](https://hardrails.github.io/steward/getting-started/)
-or use the [private cloud node-pool path](https://hardrails.github.io/steward/guides/cloud-fleets/)
-and its [lower-level Terraform bootstrap](https://hardrails.github.io/steward/guides/terraform/)
-for repeatable infrastructure.
+Start with the [installation tutorial](https://hardrails.github.io/steward/getting-started/).
+For a fleet, the [Terraform quick start](https://hardrails.github.io/steward/guides/terraform/)
+creates and verifies a one- or three-server AWS management cluster without an SSH
+key or public inbound port. The
+[private cloud node-pool path](https://hardrails.github.io/steward/guides/cloud-fleets/)
+adds elastic Executor capacity.
 
 ## Run an agent
 

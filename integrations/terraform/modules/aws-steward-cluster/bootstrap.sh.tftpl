@@ -1,0 +1,217 @@
+#!/bin/bash -p
+# shellcheck disable=SC2154 # Terraform replaces template variables before execution.
+set -Eeuo pipefail
+set +x
+if ! shopt -qo privileged; then
+  echo 'steward-cluster-bootstrap: invoke with /bin/bash -p' >&2
+  exit 2
+fi
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH LC_ALL=C LANG=C
+unset BASH_ENV ENV CDPATH GLOBIGNORE CURL_HOME XDG_CONFIG_HOME
+unset CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+unset TAR_OPTIONS GZIP POSIXLY_CORRECT TMPDIR
+IFS=$' \t\n'
+umask 077
+ulimit -c 0
+
+decode() {
+  printf '%s' "$1" | base64 -d
+}
+
+operation=$(decode "${operation_b64}")
+cluster=$(decode "${cluster_name_b64}")
+node=$(decode "${node_name_b64}")
+server=$(decode "${server_url_b64}")
+region=$(decode "${aws_region_b64}")
+parameter=$(decode "${token_parameter_name_b64}")
+kms_key=$(decode "${kms_key_arn_b64}")
+installer_url=$(decode "${installer_url_b64}")
+gvisor_url=$(decode "${gvisor_url_b64}")
+readonly expected_installer_sha="${installer_sha256}"
+readonly steward_version="${steward_version}"
+readonly gvisor_sha512="${gvisor_sha512}"
+readonly gvisor_size="${gvisor_size}"
+readonly gvisor_version="${gvisor_version}"
+readonly timeout_seconds="${timeout_seconds}"
+readonly rendezvous_ttl_hours="${rendezvous_ttl_hours}"
+readonly expected_server_count="${expected_server_count}"
+readonly publish_token="${publish_token}"
+readonly state_dir=/var/lib/steward-cluster-bootstrap
+readonly marker=$state_dir/complete
+
+die() {
+  echo "steward-cluster-bootstrap: $*" >&2
+  exit 1
+}
+
+install -d -o root -g root -m 0700 "$state_dir"
+if [[ -e $marker || -L $marker ]]; then
+  [[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a:%h' "$marker") == 0:0:600:1 ]] ||
+    die "completion marker is unsafe"
+  if ! grep -Fxq "version=$steward_version" "$marker" ||
+    ! grep -Fxq "operation=$operation" "$marker" ||
+    ! grep -Fxq "cluster=$cluster" "$marker" ||
+    ! grep -Fxq "node=$node" "$marker"; then
+    die "completion marker does not match this bootstrap"
+  fi
+  /usr/local/libexec/steward/install-cluster doctor --node "$node"
+  echo "steward-cluster-bootstrap: $node is already healthy"
+  exit 0
+fi
+
+work=$(mktemp -d /run/steward-cluster-bootstrap.XXXXXX)
+cleanup() {
+  rm -rf -- "$work"
+}
+trap cleanup EXIT HUP INT TERM
+[[ -d $work && ! -L $work && $(stat -c '%u:%g:%a' "$work") == 0:0:700 ]] ||
+  die "could not create a trusted work directory"
+
+for attempt in 1 2 3; do
+  # Amazon Linux provides curl-minimal in the base image. Asking DNF for the
+  # mutually exclusive full curl package can make an otherwise healthy first
+  # boot fail.
+  if dnf install -y awscli-2 bzip2 docker tar; then
+    break
+  fi
+  (( attempt < 3 )) || die "Amazon Linux package installation failed"
+  sleep $((attempt * 5))
+done
+for command in aws base64 bzip2 curl docker sha256sum sha512sum stat systemctl tar timeout; do
+  command -v "$command" >/dev/null || die "required command is unavailable: $command"
+done
+getent group docker >/dev/null || die "Docker package did not create its system group"
+if systemctl list-unit-files amazon-ssm-agent.service >/dev/null 2>&1; then
+  systemctl enable --now amazon-ssm-agent.service
+fi
+
+fetch() {
+  local url=$1 output=$2 limit=$3 blocks size
+  if [[ ! $limit =~ ^[0-9]+$ ]] || (( limit <= 0 || limit % 1024 != 0 )); then
+    die "invalid download bound"
+  fi
+  blocks=$((limit / 1024))
+  rm -f -- "$output"
+  (
+    ulimit -f "$blocks"
+    exec timeout --signal=TERM --kill-after=5 300 \
+      curl -q --fail --silent --show-error --location --proto '=https' \
+      --tlsv1.2 --retry 3 --retry-connrefused --connect-timeout 15 \
+      --max-time 290 --max-filesize "$limit" --output "$output" "$url"
+  ) || {
+    rm -f -- "$output"
+    die "bounded download failed: $url"
+  }
+  [[ -f $output && ! -L $output ]] || die "download output is unsafe"
+  size=$(stat -c '%s' "$output")
+  (( size > 0 && size <= limit )) || die "download output size is invalid"
+  [[ $(stat -c '%u:%g:%a:%h' "$output") == 0:0:600:1 ]] ||
+    die "download output permissions are unsafe"
+}
+
+if command -v runsc >/dev/null 2>&1 || command -v containerd-shim-runsc-v1 >/dev/null 2>&1; then
+  [[ -x /usr/local/bin/runsc && -x /usr/local/bin/containerd-shim-runsc-v1 ]] ||
+    die "partial or noncanonical gVisor installation exists"
+  /usr/local/bin/runsc --version | grep -Fq "release-$gvisor_version" ||
+    die "installed gVisor differs from the module lock"
+else
+  gvisor_archive=$work/gvisor.tar.bz2
+  fetch "$gvisor_url" "$gvisor_archive" 209715200
+  [[ $(stat -c '%s' "$gvisor_archive") == "$gvisor_size" ]] ||
+    die "gVisor archive size differs from the module lock"
+  printf '%s  %s\n' "$gvisor_sha512" "$gvisor_archive" | sha512sum -c - >/dev/null ||
+    die "gVisor archive SHA-512 differs from the module lock"
+  inventory=$(tar -tjf "$gvisor_archive")
+  expected_inventory=$'containerd-shim-runsc-v1\ngvisor-bin/\ngvisor-bin/checkpointgofer\ngvisor-bin/runsc-metric-server\nrunsc'
+  [[ $(printf '%s\n' "$inventory" | sort) == "$expected_inventory" ]] ||
+    die "gVisor archive inventory is unexpected"
+  extract=$work/gvisor
+  install -d -o root -g root -m 0700 "$extract"
+  tar --no-same-owner --no-same-permissions -xjf "$gvisor_archive" -C "$extract"
+  find "$extract" -type l -o -type b -o -type c -o -type p -o -type s | grep -q . &&
+    die "gVisor archive contains a link or special file"
+  [[ -x $extract/runsc && -x $extract/containerd-shim-runsc-v1 ]] ||
+    die "gVisor archive is missing required executables"
+  install -o root -g root -m 0755 "$extract/runsc" /usr/local/bin/runsc
+  install -o root -g root -m 0755 "$extract/containerd-shim-runsc-v1" \
+    /usr/local/bin/containerd-shim-runsc-v1
+  install -d -o root -g root -m 0755 /usr/local/bin/gvisor-bin
+  install -o root -g root -m 0755 "$extract/gvisor-bin/checkpointgofer" \
+    "$extract/gvisor-bin/runsc-metric-server" /usr/local/bin/gvisor-bin/
+fi
+
+installer=$work/install-steward.sh
+fetch "$installer_url" "$installer" 4194304
+[[ $(sha256sum "$installer" | awk '{print $1}') == "$expected_installer_sha" ]] ||
+  die "Steward installer SHA-256 differs from the module lock"
+chmod 0700 "$installer"
+/bin/bash -p "$installer" --non-interactive --yes --version "$steward_version" --stage-only
+
+cluster_installer=/usr/local/libexec/steward/install-cluster
+[[ -x $cluster_installer && -f $cluster_installer ]] ||
+  die "installed Steward release does not provide the cluster installer"
+
+token_file=$work/rke2-server.token
+if [[ $operation == join-server ]]; then
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    if aws --region "$region" ssm get-parameter --name "$parameter" \
+      --with-decryption --query 'Parameter.Value' --output text >"$token_file" 2>"$work/ssm.stderr"; then
+      break
+    fi
+    rm -f -- "$token_file"
+    sleep 10
+  done
+  [[ -f $token_file && ! -L $token_file ]] ||
+    die "timed out waiting for the encrypted RKE2 server token"
+  chmod 0600 "$token_file"
+  /bin/bash -p "$cluster_installer" join-server \
+    --cluster "$cluster" --node "$node" --server "$server" --token-file "$token_file"
+else
+  [[ $operation == init ]] || die "unsupported operation: $operation"
+  /bin/bash -p "$cluster_installer" init --cluster "$cluster" --node "$node"
+fi
+
+doctor_log=$work/doctor.log
+deadline=$((SECONDS + timeout_seconds))
+while ! /bin/bash -p "$cluster_installer" doctor --node "$node" >"$doctor_log" 2>&1; do
+  if (( SECONDS >= deadline )); then
+    tail -n 80 "$doctor_log" >&2
+    die "cluster doctor did not pass within ${timeout_seconds}s"
+  fi
+  sleep 10
+done
+cat "$doctor_log"
+
+if [[ $publish_token == true ]]; then
+  source_token=/var/lib/rancher/rke2/server/token
+  [[ -f $source_token && ! -L $source_token ]] ||
+    die "RKE2 did not create its server token"
+  token_size=$(stat -c '%s' "$source_token")
+  (( token_size > 20 && token_size <= 4096 )) ||
+    die "RKE2 server token size is invalid"
+  [[ $(wc -l <"$source_token") -eq 1 ]] ||
+    die "RKE2 server token contains more than one line"
+  grep -Eq '^[A-Za-z0-9:._-]+$' "$source_token" ||
+    die "RKE2 server token format is invalid"
+  expiration=$(date -u -d "+$rendezvous_ttl_hours hours" '+%Y-%m-%dT%H:%M:%SZ')
+  request=$work/put-parameter.json
+  token=$(<"$source_token")
+  printf '{"Name":"%s","Description":"Expiring Steward RKE2 server bootstrap token","Value":"%s","Type":"SecureString","KeyId":"%s","Tier":"Advanced","Policies":"[{\\"Type\\":\\"Expiration\\",\\"Version\\":\\"1.0\\",\\"Attributes\\":{\\"Timestamp\\":\\"%s\\"}}]","Overwrite":true}\n' \
+    "$parameter" "$token" "$kms_key" "$expiration" >"$request"
+  unset token
+  chmod 0600 "$request"
+  aws --region "$region" ssm put-parameter --cli-input-json "file://$request" \
+    >"$work/put-parameter.stdout"
+  rm -f -- "$request"
+  echo "steward-cluster-bootstrap: published an encrypted token rendezvous expiring at $expiration"
+fi
+
+marker_tmp=$(mktemp "$state_dir/.complete.XXXXXX")
+printf 'version=%s\noperation=%s\ncluster=%s\nnode=%s\nservers=%s\n' \
+  "$steward_version" "$operation" "$cluster" "$node" "$expected_server_count" >"$marker_tmp"
+chmod 0600 "$marker_tmp"
+mv -T "$marker_tmp" "$marker"
+echo "steward-cluster-bootstrap: $node is healthy"

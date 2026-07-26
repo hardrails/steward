@@ -1,0 +1,112 @@
+name: AWS cluster gVisor pin refresh
+
+on:
+  schedule:
+    - cron: "17 10 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: aws-cluster-gvisor-pin-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Propose current gVisor release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and verify official archives
+        id: gvisor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release=$(mktemp)
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            repos/google/gvisor/releases/latest >"$release"
+          version=$(python3 -I - "$release" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = release.get("tag_name")
+          match = re.fullmatch(r"release-(20[0-9]{6}(?:\.[0-9]+)?)", tag or "")
+          if (
+              match is None
+              or release.get("draft") is not False
+              or release.get("prerelease") is not False
+          ):
+              raise SystemExit("latest gVisor release metadata is invalid")
+          print(match.group(1))
+          PY
+          )
+          work=$(mktemp -d)
+          trap 'rm -rf "$work" "$release"' EXIT
+          for pair in amd64:x86_64 arm64:aarch64; do
+            architecture=${pair%%:*}
+            upstream_arch=${pair#*:}
+            (
+              ulimit -f 204800
+              curl -q --proto '=https' --tlsv1.2 --fail --silent --show-error \
+                --location --connect-timeout 15 --max-time 600 \
+                --max-filesize 209715200 \
+                --output "$work/$architecture.tar.bz2" \
+                "https://storage.googleapis.com/gvisor/releases/release/$version/$upstream_arch/gvisor.tar.bz2"
+            )
+          done
+          python3 -I scripts/update-aws-cluster-gvisor-pin.py \
+            --lock integrations/terraform/modules/aws-steward-cluster/source-lock.json \
+            --version "$version" \
+            --amd64-archive "$work/amd64.tar.bz2" \
+            --arm64-archive "$work/arm64.tar.bz2"
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+
+      - name: Open qualification-gated update pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GVISOR_VERSION: ${{ steps.gvisor.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "AWS cluster bootstrap already pins gVisor $GVISOR_VERSION."
+            exit 0
+          fi
+          branch="automation/aws-cluster-gvisor-$GVISOR_VERSION"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git add integrations/terraform/modules/aws-steward-cluster/source-lock.json
+          git diff --cached --check
+          git commit -m "Pin AWS cluster gVisor $GVISOR_VERSION"
+          git push --force-with-lease origin "$branch"
+          existing=$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // ""')
+          if [[ -n $existing ]]; then
+            echo "Updated $existing"
+            exit 0
+          fi
+          body=$(mktemp)
+          printf '%s\n' \
+            '## AWS cluster gVisor refresh' \
+            '' \
+            "- Upstream release: \`release-$GVISOR_VERSION\`" \
+            '' \
+            'This PR records exact official archive lengths and SHA-512 values for both supported architectures. It must not merge until CI and disposable-VM cluster qualification accept these exact bytes.' \
+            '' \
+            'Do not bypass failing cluster qualification checks.' >"$body"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Pin AWS cluster gVisor $GVISOR_VERSION" \
+            --body-file "$body"
