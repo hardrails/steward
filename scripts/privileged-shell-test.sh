@@ -23,6 +23,7 @@ root_helpers=(
 	scripts/build-relay-image.sh
 	scripts/preprovision-feasibility-handle.sh
 	scripts/node-doctor.sh
+	scripts/install-cluster.sh
 )
 for relative in "${root_helpers[@]}"; do
 	read -r shebang <"$root/$relative"
@@ -43,6 +44,7 @@ hardened_environment_helpers=(
 	scripts/node-removal-guard.sh
 	scripts/build-relay-image.sh
 	scripts/preprovision-feasibility-handle.sh
+	scripts/install-cluster.sh
 )
 for relative in "${hardened_environment_helpers[@]}"; do
 	target="$root/$relative"
@@ -147,6 +149,8 @@ run_supported_failure "$root/scripts/configure-node.sh" explicit explicit-config
 run_supported_failure "$root/scripts/configure-node.sh" direct direct-configure-node
 run_supported_failure "$root/scripts/configure-admission.sh" explicit explicit-configure-admission
 run_supported_failure "$root/scripts/configure-admission.sh" direct direct-configure-admission
+run_supported_failure "$root/scripts/install-cluster.sh" explicit explicit-cluster
+run_supported_failure "$root/scripts/install-cluster.sh" direct direct-cluster
 unset -f echo
 
 grep -Fq $'\t/etc/steward/gateway.json' "$root/scripts/configure-node.sh"

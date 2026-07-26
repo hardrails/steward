@@ -166,6 +166,7 @@ release_files=(
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
+	integration/scripts/install-cluster.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
@@ -819,6 +820,7 @@ for mapping in \
 	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
+	install-cluster:/opt/steward/current/integration/scripts/install-cluster.sh \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
@@ -880,6 +882,7 @@ for mapping in \
 	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
+	install-cluster:/opt/steward/current/integration/scripts/install-cluster.sh \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \

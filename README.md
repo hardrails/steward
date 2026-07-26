@@ -39,6 +39,7 @@ they can verify without a vendor service.
 | Recurring agent work | A tenant can sign one finite schedule for one exact Hermes request. Control materializes only the authorized run numbers and stops at the signed count, deadline, concurrency, and overlap limits. |
 | An agent needs a human decision | A running instance can open one bounded question. Control carries it to an operator and returns only a response signed against that exact question and workload generation. |
 | Disconnected and sovereign sites | Uses local keys, static Go binaries, local state, offline OCI archives, and customer-operated control services. No hosted service is required after transfer. |
+| Bring clean Linux servers into one management cluster | Installs the exact pinned RKE2 substrate from connected or locally staged artifacts, applies CIS and default-deny defaults, and supports secure server and expiring worker joins. Agent workloads remain behind the existing Executor boundary. |
 | Controller disaster recovery | Creates one bounded state-and-identity checkpoint under the stopped controller's writer lock, verifies it without extraction, and applies a restore only after the normal state and key readers accept it. |
 | Incident review and audit | Writes signed, hash-linked Executor and Gateway receipts. Receipt exports can be verified offline and omit prompt, request, response, and secret plaintext. |
 
@@ -397,6 +398,7 @@ credentials are privileged and must never be given to the untrusted agent whose
 authority Steward is meant to constrain.
 
 - [Operate Steward Control](https://hardrails.github.io/steward/guides/control-plane/)
+- [Build a Steward management cluster](https://hardrails.github.io/steward/guides/clusters/)
 - [Back up and restore Steward Control](https://hardrails.github.io/steward/guides/control-backup/)
 - [Use the operator console](https://hardrails.github.io/steward/guides/operator-console/)
 - [Configure MCP](https://hardrails.github.io/steward/guides/mcp/)

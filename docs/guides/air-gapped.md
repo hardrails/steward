@@ -33,6 +33,18 @@ If gVisor is not already installed, also download the official `runsc` and
 `containerd-shim-runsc-v1` binaries for the host architecture plus each matching
 `.sha512` file.
 
+To form an offline management cluster, also include `install-cluster.sh` and the
+exact RKE2 bundle and image archive reported by:
+
+```console
+stewardctl cluster artifact bundle -arch amd64
+stewardctl cluster artifact images -arch amd64
+```
+
+The [management-cluster guide]({{ '/guides/clusters/#install-without-public-network-access' |
+relative_url }}) covers staging, fail-closed image resolution, internal ports, and
+server versus worker join credentials.
+
 ## Authenticate before transfer
 
 `checksums.txt` detects altered files only after independent manifest

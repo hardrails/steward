@@ -125,6 +125,7 @@ release_files=(
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
+	integration/scripts/install-cluster.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh

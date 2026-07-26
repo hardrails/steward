@@ -26,6 +26,7 @@ installer, and a SHA-256 manifest.
 | `steward-buzz_<version>_<os>_<arch>.tar.gz` | Optional Buzz integration recipe, target-native bridge and CLI, exact source lock, reviewed patch, and service/configuration examples |
 | `install-steward.sh` | Interactive and unattended top-level installer |
 | `install-control.sh` | Interactive and unattended controller installer for systemd Linux |
+| `install-cluster.sh` | Pinned connected or air-gapped RKE2 management-cluster installer |
 | `install-macos.sh` | Native macOS operator and development installer |
 | `steward-support_<version>.json` | Supported platforms, runtime, isolation requirements, compatibility boundary, and known limits emitted by the stamped binary |
 | `checksums.txt` | SHA-256 values for every other release asset |

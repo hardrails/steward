@@ -63,6 +63,27 @@ unit directive as an unsupported hardening gap, not a harmless warning.
 With explicit approval, the guided installer can install and register the official
 gVisor runtime. It never installs Docker.
 
+## Management-cluster substrate
+
+The optional cluster installer supports clean systemd Linux hosts on `amd64` and
+`arm64`. It installs the RKE2 release pinned by the matching `stewardctl`, using
+either a bounded TLS download or exact locally staged bundle and image archives.
+RKE2 supplies containerd; a cluster-only node does not require Docker.
+
+The following disposable AWS acceptance ran on 2026-07-26:
+
+| Host image | Architecture | Observed path |
+| --- | --- | --- |
+| Ubuntu 24.04 | `amd64` | Connected server and worker, three-server embedded-etcd quorum and failover write, network-closed air-gap install, reboot recovery, gVisor, and default-deny egress |
+| Ubuntu 24.04 | `arm64` | Connected server, doctor, and real gVisor workload |
+| Amazon Linux 2023 | `amd64` | Connected server and doctor |
+
+These are cluster-substrate results, not full Executor package acceptance on every
+row. The current release does not run Steward agent workloads through Kubernetes;
+agents continue through the Docker and gVisor Executor. See
+[Build a Steward management cluster]({{ '/guides/clusters/' | relative_url }})
+for prerequisites, ports, exact commands, and the tested security boundary.
+
 ## Published release artifacts
 
 | Target | `steward-control` | `steward` | `steward-executor` | Service packaging |
