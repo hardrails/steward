@@ -839,9 +839,11 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 		RelayGID: 1234, Inference: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
 		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
+	networkCreates, networkRemoves := 0, 0
 	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1.41/networks/create":
+			networkCreates++
 			var create map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&create); err != nil {
 				t.Fatal(err)
@@ -850,17 +852,23 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 				create["Options"].(map[string]any)[isolatedGatewayOption] != isolatedGatewayMode {
 				t.Fatalf("network create=%#v", create)
 			}
-			ipam, ok := create["IPAM"].(map[string]any)
-			if !ok || len(ipam) != 2 || ipam["Driver"] != defaultIPAMDriver {
-				t.Fatalf("network create does not explicitly select Docker's default IPAM: %#v", create)
-			}
-			config, ok := ipam["Config"].([]any)
-			if !ok || len(config) != 1 {
-				t.Fatalf("network create does not request one Docker-selected user-configured subnet: %#v", create)
-			}
-			allocation, ok := config[0].(map[string]any)
-			if !ok || len(allocation) != 0 {
-				t.Fatalf("network create does not request one Docker-selected user-configured subnet: %#v", create)
+			if networkCreates == 1 {
+				if _, ok := create["IPAM"]; ok {
+					t.Fatalf("subnet reservation preempted Docker's allocator: %#v", create)
+				}
+			} else {
+				ipam, ok := create["IPAM"].(map[string]any)
+				if !ok || len(ipam) != 2 || ipam["Driver"] != defaultIPAMDriver {
+					t.Fatalf("network create does not explicitly select Docker's default IPAM: %#v", create)
+				}
+				config, ok := ipam["Config"].([]any)
+				if !ok || len(config) != 1 {
+					t.Fatalf("network create does not bind one Docker-selected subnet: %#v", create)
+				}
+				allocation, ok := config[0].(map[string]any)
+				if !ok || allocation["Subnet"] != network.Subnet || len(allocation) != 1 {
+					t.Fatalf("network create does not bind the Docker-selected subnet exactly: %#v", create)
+				}
 			}
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1.41/networks/"):
@@ -871,6 +879,7 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 				"IPAM":    map[string]any{"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}}},
 			})
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1.41/networks/"):
+			networkRemoves++
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1.41/containers/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -897,6 +906,9 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 	if err := docker.CreateNetwork(ctx, NetworkSpecFor(network.TenantID, network.InstanceID, network.Generation)); err != nil {
 		t.Fatal(err)
 	}
+	if networkCreates != 2 || networkRemoves != 1 {
+		t.Fatalf("network creates=%d removes=%d, want two-phase allocation", networkCreates, networkRemoves)
+	}
 	observedNetwork, err := docker.InspectNetwork(ctx, network.Name)
 	if err != nil || !observedNetwork.Managed || !observedNetwork.Internal || observedNetwork.NetworkSpec != network {
 		t.Fatalf("network=%#v err=%v", observedNetwork, err)
@@ -908,6 +920,9 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 	}
 	if err := docker.RemoveNetwork(ctx, network.Name); err != nil {
 		t.Fatal(err)
+	}
+	if networkRemoves != 2 {
+		t.Fatalf("network removes=%d, want reservation and final network", networkRemoves)
 	}
 }
 

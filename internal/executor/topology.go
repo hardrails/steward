@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
@@ -162,23 +163,37 @@ func (d *DockerHTTP) CreateNetwork(ctx context.Context, spec NetworkSpec) error 
 		!boundedText(spec.TenantID, 128) || !boundedText(spec.InstanceID, 256) || spec.Generation == 0 {
 		return &PolicyError{"internal network specification is invalid"}
 	}
+	if err := d.call(ctx, http.MethodPost, "/v1.41/networks/create", networkCreateBody(spec, nil), http.StatusCreated); err != nil {
+		return err
+	}
+	allocated, err := d.InspectNetwork(ctx, spec.Name)
+	if err != nil {
+		_ = d.RemoveNetwork(ctx, spec.Name)
+		return fmt.Errorf("inspect Docker-selected runtime subnet: %w", err)
+	}
+	if err := d.RemoveNetwork(ctx, spec.Name); err != nil {
+		return fmt.Errorf("release Docker-selected runtime subnet reservation: %w", err)
+	}
+	return d.call(ctx, http.MethodPost, "/v1.41/networks/create", networkCreateBody(spec, &allocated.NetworkSpec), http.StatusCreated)
+}
+
+func networkCreateBody(spec NetworkSpec, allocated *NetworkSpec) map[string]any {
 	body := map[string]any{
 		"Name": spec.Name, "Driver": "bridge", "CheckDuplicate": true, "Internal": true, "Attachable": false,
-		// An explicit empty Config entry asks Docker's default IPAM driver to
-		// select a collision-free subnet while marking the network as
-		// user-configured. Docker requires that marker before it accepts the
-		// fixed relay and agent addresses derived from the observed allocation.
-		"IPAM": map[string]any{
-			"Driver": defaultIPAMDriver,
-			"Config": []map[string]string{{}},
-		},
 		"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
 		"Labels": map[string]string{
 			managedNetworkLabel: "true", "io.hardrails.tenant": spec.TenantID,
 			"io.hardrails.instance": spec.InstanceID, networkGenerationLabel: strconv.FormatUint(spec.Generation, 10),
 		},
 	}
-	return d.call(ctx, http.MethodPost, "/v1.41/networks/create", body, http.StatusCreated)
+	if allocated != nil {
+		config := map[string]string{"Subnet": allocated.Subnet}
+		if allocated.Gateway != "" {
+			config["Gateway"] = allocated.Gateway
+		}
+		body["IPAM"] = map[string]any{"Driver": defaultIPAMDriver, "Config": []map[string]string{config}}
+	}
+	return body
 }
 
 func (d *DockerHTTP) InspectNetwork(ctx context.Context, name string) (ObservedNetwork, error) {
