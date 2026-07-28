@@ -263,10 +263,11 @@ or checkout and the source transfer through your own trust process.
 ## Rerun the end-to-end qualification
 
 Run qualification only on a disposable `linux/amd64` host with Docker, the `runsc`
-gVisor runtime, Python 3, `curl`, `base64`, and standard GNU userland tools. The
-harness uses fixed loopback ports, creates and removes Docker images, networks,
-containers, and volumes, and starts temporary Steward services. Do not run it on a
-production node or alongside another Steward deployment.
+gVisor runtime, Python 3, util-linux `setpriv`, `curl`, `base64`, and standard
+GNU userland tools. The harness uses fixed loopback ports, creates and removes
+Docker images, networks, containers, and volumes, and starts temporary Steward
+services. Do not run it on a production node or alongside another Steward
+deployment.
 
 An installed Linux release includes the exact harness and automatically selects its
 packaged binaries:

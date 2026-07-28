@@ -33,12 +33,16 @@ command -v docker >/dev/null || { echo 'hermes-feasibility: docker is required' 
 command -v python3 >/dev/null || { echo 'hermes-feasibility: python3 is required' >&2; exit 2; }
 command -v sha256sum >/dev/null || { echo 'hermes-feasibility: sha256sum is required' >&2; exit 2; }
 command -v timeout >/dev/null || { echo 'hermes-feasibility: GNU timeout is required' >&2; exit 2; }
+setpriv_path=$(type -P setpriv) || { echo 'hermes-feasibility: util-linux setpriv is required' >&2; exit 2; }
+readonly setpriv_path
+sudo_path=
 privileged=()
 if (( EUID != 0 )); then
-	command -v sudo >/dev/null || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }
-	sudo -n -- true >/dev/null || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }
-	privileged=(sudo -n --)
+	sudo_path=$(type -P sudo) || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }
+	"$sudo_path" -n -- true >/dev/null || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }
+	privileged=("$sudo_path" -n --)
 fi
+readonly sudo_path
 readonly -a privileged
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || {
 	echo 'hermes-feasibility: Docker runtime runsc is required' >&2
@@ -53,8 +57,8 @@ agent=$name_prefix-agent
 model=$name_prefix-model
 mcp=$name_prefix-mcp
 work=$(mktemp -d /tmp/steward-hermes-feasibility.XXXXXX)
+state_root=$(mktemp -d /tmp/steward-hermes-state.XXXXXX)
 checks=$work/checks.tsv
-state_root=$work/state
 readonly work state_root
 source_archive_digest=unavailable
 source_tree_digest=unavailable
@@ -102,11 +106,24 @@ bounded_state_root() {
 	[[ ${work%/*} == /tmp &&
 		${work##*/} == steward-hermes-feasibility.?????? &&
 		-d $work && ! -L $work &&
-		$state_root == "$work/state" && ! -L $state_root ]]
+		${state_root%/*} == /tmp &&
+		${state_root##*/} == steward-hermes-state.?????? &&
+		-d $state_root && ! -L $state_root ]]
 }
 
 privileged_command() {
 	"${privileged[@]}" "$@"
+}
+
+state_owner_command() {
+	bounded_state_root || {
+		echo 'hermes-feasibility: refusing unbounded state-owner command' >&2
+		return 1
+	}
+	privileged_command "$setpriv_path" \
+		--reuid=65532 --regid=65532 --clear-groups \
+		--bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
+		-- "$@"
 }
 
 prepare_state_ownership() {
@@ -118,23 +135,143 @@ prepare_state_ownership() {
 }
 
 state_authority_digest() {
-	bounded_state_root || {
-		echo 'hermes-feasibility: refusing unbounded state inspection' >&2
-		return 1
-	}
-	privileged_command find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 |
-		sort -z |
-		privileged_command xargs -0 sha256sum |
-		sha256sum |
-		awk '{print $1}'
+	state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+max_files = 1024
+max_file_bytes = 1 << 20
+max_total_bytes = 8 << 20
+selected = []
+total = 0
+flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+
+
+def identity(metadata):
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+for directory, _, files, directory_fd in os.fwalk(
+    root, topdown=True, follow_symlinks=False,
+):
+    relative_directory = os.path.relpath(directory, root)
+    for name in files:
+        relative = (
+            name if relative_directory == "."
+            else os.path.join(relative_directory, name)
+        )
+        parts = relative.split(os.sep)
+        is_skill_authority = any(
+            parts[index:index + 2] == ["skills", "steward.workspace-audit"]
+            for index in range(len(parts) - 1)
+        )
+        if name == "config.yaml" or is_skill_authority:
+            encoded = os.fsencode(relative)
+            if len(encoded) > 4096:
+                raise SystemExit("authority path too long")
+            descriptor = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode) or before.st_size > max_file_bytes:
+                    raise SystemExit("invalid authority file")
+                chunks = []
+                remaining = max_file_bytes + 1
+                while remaining:
+                    chunk = os.read(descriptor, min(65536, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                data = b"".join(chunks)
+                after = os.fstat(descriptor)
+                named_after = os.stat(
+                    name, dir_fd=directory_fd, follow_symlinks=False,
+                )
+            finally:
+                os.close(descriptor)
+            if (
+                identity(before) != identity(after)
+                or identity(after) != identity(named_after)
+                or len(data) != before.st_size
+                or len(data) > max_file_bytes
+            ):
+                raise SystemExit("authority file changed during inspection")
+            total += len(data)
+            if total > max_total_bytes:
+                raise SystemExit("authority files too large")
+            selected.append((encoded, data))
+            if len(selected) > max_files:
+                raise SystemExit("too many authority files")
+
+digest = hashlib.sha256()
+for relative, data in sorted(selected):
+    digest.update(len(relative).to_bytes(4, "big"))
+    digest.update(relative)
+    digest.update(len(data).to_bytes(8, "big"))
+    digest.update(data)
+print(digest.hexdigest())
+PY
 }
 
 read_state_probe() {
-	bounded_state_root || {
-		echo 'hermes-feasibility: refusing unbounded state read' >&2
-		return 1
-	}
-	privileged_command cat -- "$state_root/steward/state-write-probe"
+	state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'
+import os
+import stat
+import sys
+
+root_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+root_descriptor = os.open(sys.argv[1], root_flags)
+try:
+    state_descriptor = os.open("steward", root_flags, dir_fd=root_descriptor)
+    try:
+        state_before = os.fstat(state_descriptor)
+        descriptor = os.open(
+            "state-write-probe", file_flags, dir_fd=state_descriptor,
+        )
+        try:
+            before = os.fstat(descriptor)
+            content = os.read(descriptor, 3)
+            after = os.fstat(descriptor)
+            named_after = os.stat(
+                "state-write-probe",
+                dir_fd=state_descriptor,
+                follow_symlinks=False,
+            )
+        finally:
+            os.close(descriptor)
+        state_named_after = os.stat(
+            "steward", dir_fd=root_descriptor, follow_symlinks=False,
+        )
+    finally:
+        os.close(state_descriptor)
+finally:
+    os.close(root_descriptor)
+
+
+def identity(metadata):
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+if not stat.S_ISREG(before.st_mode):
+    raise SystemExit("state probe is not regular")
+if (
+    identity(before) != identity(after)
+    or identity(after) != identity(named_after)
+    or identity(state_before) != identity(state_named_after)
+):
+    raise SystemExit("state probe changed during inspection")
+if before.st_size != 2 or content != b"ok":
+    raise SystemExit("invalid state probe")
+print("ok")
+PY
 }
 
 remove_state_root() {
@@ -142,7 +279,15 @@ remove_state_root() {
 		echo 'hermes-feasibility: refusing unbounded state cleanup' >&2
 		return 1
 	}
-	privileged_command rm -rf -- "$state_root"
+	timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
+	if [[ -e $state_root || -L $state_root ]]; then
+		state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
+	fi
+	timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
+	[[ ! -e $state_root && ! -L $state_root ]] || {
+		echo "hermes-feasibility: failed to remove bounded state root: $state_root" >&2
+		return 1
+	}
 }
 
 stop_gate() {
@@ -245,16 +390,30 @@ PY
 }
 
 cleanup() {
-	docker rm -f "$agent" "$model" "$mcp" >/dev/null 2>&1 || true
+	local container containers_absent=true remaining
+	for container in "$agent" "$model" "$mcp"; do
+		timeout 30 docker rm -f "$container" >/dev/null 2>&1 || true
+	done
+	for container in "$agent" "$model" "$mcp"; do
+		if remaining=$(timeout 15 docker ps -aq --no-trunc --filter "name=^/${container}$"); then
+			[[ -z $remaining ]] || containers_absent=false
+		else
+			containers_absent=false
+		fi
+	done
 	docker network rm "$network" >/dev/null 2>&1 || true
 	for image_digest in "$runtime_image_id" "$image_manifest_digest" "$image_config_digest"; do
 		[[ $image_digest == sha256:* ]] && docker image rm "$image_digest" >/dev/null 2>&1 || true
 	done
 	if [[ $overall == passed || $debug_keep != YES ]]; then
+		if [[ $containers_absent != true ]]; then
+			echo "hermes-feasibility: preserved state because qualification container absence is unverified: $state_root" >&2
+			return 1
+		fi
 		remove_state_root
 		rm -rf -- "$work"
 	else
-		echo "hermes-feasibility: preserved failed diagnostic workspace: $work" >&2
+		echo "hermes-feasibility: preserved failed diagnostic workspaces: $work $state_root" >&2
 	fi
 }
 

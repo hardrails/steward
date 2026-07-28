@@ -1196,9 +1196,21 @@ func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
 		"readonly work state_root",
 		"${work##*/} == steward-hermes-feasibility.??????",
 		"-d $work && ! -L $work",
-		`$state_root == "$work/state" && ! -L $state_root`,
-		"sudo -n -- true",
-		"privileged=(sudo -n --)",
+		"${state_root##*/} == steward-hermes-state.??????",
+		"-d $state_root && ! -L $state_root",
+		`setpriv_path=$(type -P setpriv)`,
+		`sudo_path=$(type -P sudo)`,
+		`"$sudo_path" -n -- true`,
+		`privileged=("$sudo_path" -n --)`,
+		"privileged_command() {\n\t\"${privileged[@]}\" \"$@\"\n}",
+		`state_owner_command timeout 15 python3 -I - "$state_root"`,
+		`flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)`,
+		"dir_fd=directory_fd, follow_symlinks=False",
+		"st_ctime_ns",
+		"--bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs",
+		`[[ ! -e $state_root && ! -L $state_root ]]`,
+		`docker ps -aq --no-trunc --filter "name=^/${container}$"`,
+		"preserved state because qualification container absence is unverified",
 	} {
 		if !strings.Contains(script, contract) {
 			t.Fatalf("Hermes feasibility privilege boundary is missing contract %q", contract)
@@ -1206,16 +1218,20 @@ func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
 	}
 
 	allowed := map[string]bool{
-		`privileged_command chown -hR 65532:65532 -- "$state_root"`:                                                                         true,
-		`privileged_command find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 |`: true,
-		"privileged_command xargs -0 sha256sum |":                                                                                           true,
-		`privileged_command cat -- "$state_root/steward/state-write-probe"`:                                                                 true,
-		`privileged_command rm -rf -- "$state_root"`:                                                                                        true,
+		`privileged_command chown -hR 65532:65532 -- "$state_root"`: true,
+		`privileged_command "$setpriv_path" \`:                      true,
+	}
+	allowedStateOwner := map[string]int{
+		`state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'`:                                 2,
+		`state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true`: 1,
 	}
 	for _, line := range strings.Split(script, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "sudo ") && line != "sudo -n -- true >/dev/null || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }" {
-			t.Fatalf("Hermes feasibility invokes sudo outside its bootstrap probe: %q", line)
+		if strings.Contains(line, `"$sudo_path"`) &&
+			!strings.HasPrefix(line, `sudo_path=$(type -P sudo) ||`) &&
+			!strings.HasPrefix(line, `"$sudo_path" -n -- true`) &&
+			line != `privileged=("$sudo_path" -n --)` {
+			t.Fatalf("Hermes feasibility bypasses its sudo bootstrap allowlist: %q", line)
 		}
 		if strings.Contains(line, "privileged_command ") {
 			if !allowed[line] {
@@ -1223,9 +1239,26 @@ func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
 			}
 			delete(allowed, line)
 		}
+		if strings.Contains(line, `"$setpriv_path"`) && line != `privileged_command "$setpriv_path" \` {
+			t.Fatalf("Hermes feasibility invokes setpriv outside its state-owner wrapper: %q", line)
+		}
+		if strings.Contains(line, "state_owner_command ") {
+			if allowedStateOwner[line] == 0 {
+				t.Fatalf("Hermes feasibility uses the state identity outside its allowlist: %q", line)
+			}
+			allowedStateOwner[line]--
+		}
+		if strings.Contains(line, `"${privileged[@]}"`) && line != `"${privileged[@]}" "$@"` {
+			t.Fatalf("Hermes feasibility bypasses its privileged command wrapper: %q", line)
+		}
 	}
 	if len(allowed) != 0 {
 		t.Fatalf("Hermes feasibility does not exercise every privileged state operation: %#v", allowed)
+	}
+	for line, remaining := range allowedStateOwner {
+		if remaining != 0 {
+			t.Fatalf("Hermes feasibility state-identity operation %q occurs %d fewer times than required", line, remaining)
+		}
 	}
 }
 
