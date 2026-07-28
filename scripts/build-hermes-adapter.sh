@@ -162,15 +162,25 @@ check_free_space() {
 
 # Keep this function self-contained: the focused adapter fixture test executes
 # this exact block against private archive modes produced under umask 077.
-# BEGIN HERMES_READONLY_INPUT_TREE
-hermes_prepare_readonly_input_tree() {
-	python3 -I - "$1" <<'PY'
+# BEGIN HERMES_INPUT_TREE_MODES
+hermes_set_input_tree_modes() {
+	python3 -I - "$@" <<'PY'
 import os
 import pathlib
+import re
 import stat
 import sys
 
 root = pathlib.Path(sys.argv[1])
+mode_values = sys.argv[2:]
+if (
+    len(mode_values) != 3
+    or any(re.fullmatch(r"0[0-7]{3}", value) is None for value in mode_values)
+):
+    raise SystemExit("Hermes build input modes are invalid")
+directory_mode, regular_mode, executable_mode = (
+    int(value, 8) for value in mode_values
+)
 root_info = os.lstat(root)
 if not stat.S_ISDIR(root_info.st_mode):
     raise SystemExit("Hermes build input root is not a directory")
@@ -192,12 +202,12 @@ for current, directories, files in os.walk(
             continue
         if not stat.S_ISREG(info.st_mode):
             raise SystemExit(f"Hermes build input contains a special file: {path}")
-        mode = 0o555 if info.st_mode & 0o111 else 0o444
+        mode = executable_mode if info.st_mode & 0o111 else regular_mode
         os.chmod(path, mode, follow_symlinks=False)
-    os.chmod(current_path, 0o555, follow_symlinks=False)
+    os.chmod(current_path, directory_mode, follow_symlinks=False)
 PY
 }
-# END HERMES_READONLY_INPUT_TREE
+# END HERMES_INPUT_TREE_MODES
 
 # Keep this function self-contained: the focused adapter fixture test executes
 # this exact block to simulate stops at each publication boundary.
@@ -785,6 +795,8 @@ fi
 source_archive_sha256=$(sha256_file "$work/source.tar")
 tar -xf "$work/source.tar" -C "$work/context/upstream"
 tar -xf "$work/adapter.tar" -C "$work/context/adapter"
+hermes_set_input_tree_modes "$work/context/upstream" 0755 0644 0755
+hermes_set_input_tree_modes "$work/context/adapter" 0755 0644 0755
 adapter_file_set_sha256=$(canonical_file_set_digest "$work/context/adapter")
 
 mapfile -t adapter_values < <(python3 -I - "$work/context/adapter/adapter.json" <<'PY'
@@ -829,8 +841,8 @@ fi
 # the private temporary parent and read-only access to the explicit bind roots;
 # all other build state remains owner-only.
 chmod 0711 "$work" "$work/context"
-hermes_prepare_readonly_input_tree "$work/context/upstream"
-hermes_prepare_readonly_input_tree "$work/context/adapter"
+hermes_set_input_tree_modes "$work/context/upstream" 0555 0444 0555
+hermes_set_input_tree_modes "$work/context/adapter" 0555 0444 0555
 
 progress "Planning exact Linux wheel fetches from the verified Hermes lockfile"
 wheel_plan=$work/wheel-plan.json

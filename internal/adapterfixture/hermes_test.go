@@ -683,8 +683,9 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 		"urllib.request.ProxyHandler({})", "RejectRedirects", "files.pythonhosted.org",
 		"qualified only on linux/amd64",
 		"docker build --network=none",
-		`hermes_prepare_readonly_input_tree "$work/context/upstream"`,
-		`hermes_prepare_readonly_input_tree "$work/context/adapter"`,
+		`hermes_set_input_tree_modes "$work/context/adapter" 0755 0644 0755`,
+		`hermes_set_input_tree_modes "$work/context/upstream" 0555 0444 0555`,
+		`hermes_set_input_tree_modes "$work/context/adapter" 0555 0444 0555`,
 		`GIT_NO_REPLACE_OBJECTS=1`, `-c core.fsmonitor=false`,
 	} {
 		if !strings.Contains(builder, required) {
@@ -730,7 +731,7 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	}
 }
 
-func TestHermesBuilderMakesPrivateArchiveInputsSandboxReadable(t *testing.T) {
+func TestHermesBuilderNormalizesPrivateArchiveInputsBeforeSandboxing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX file modes are unavailable")
 	}
@@ -743,14 +744,14 @@ func TestHermesBuilderMakesPrivateArchiveInputsSandboxReadable(t *testing.T) {
 		filepath.Join(hermesAdapterRoot(t), "..", "..", "scripts", "build-hermes-adapter.sh"),
 		2<<20,
 	))
-	start := strings.Index(builder, "hermes_prepare_readonly_input_tree() {")
-	end := strings.Index(builder, "# END HERMES_READONLY_INPUT_TREE")
+	start := strings.Index(builder, "hermes_set_input_tree_modes() {")
+	end := strings.Index(builder, "# END HERMES_INPUT_TREE_MODES")
 	if start < 0 || end <= start {
-		t.Fatal("builder read-only input helper markers are missing")
+		t.Fatal("builder input mode helper markers are missing")
 	}
-	script := filepath.Join(t.TempDir(), "readonly-input-helper.sh")
+	script := filepath.Join(t.TempDir(), "input-mode-helper.sh")
 	program := "#!/usr/bin/env bash\nset -euo pipefail\n" +
-		builder[start:end] + "\nhermes_prepare_readonly_input_tree \"$1\"\n"
+		builder[start:end] + "\nhermes_set_input_tree_modes \"$@\"\n"
 	if err := os.WriteFile(script, []byte(program), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -777,24 +778,40 @@ func TestHermesBuilderMakesPrivateArchiveInputsSandboxReadable(t *testing.T) {
 		t.Skipf("symlinks are unavailable: %v", err)
 	}
 
-	command := exec.Command(bash, script, tree)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("read-only input helper failed: %v\n%s", err, output)
+	assertModes := func(t *testing.T, expected map[string]os.FileMode) {
+		t.Helper()
+		for path, want := range expected {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != want {
+				t.Fatalf("%s mode = %04o, want %04o", path, got, want)
+			}
+		}
 	}
-	for path, want := range map[string]os.FileMode{
+	run := func(t *testing.T, modes ...string) {
+		t.Helper()
+		command := exec.Command(bash, append([]string{script, tree}, modes...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("input mode helper failed: %v\n%s", err, output)
+		}
+	}
+
+	run(t, "0755", "0644", "0755")
+	assertModes(t, map[string]os.FileMode{
+		tree:       0o755,
+		nested:     0o755,
+		regular:    0o644,
+		executable: 0o755,
+	})
+	run(t, "0555", "0444", "0555")
+	assertModes(t, map[string]os.FileMode{
 		tree:       0o555,
 		nested:     0o555,
 		regular:    0o444,
 		executable: 0o555,
-	} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != want {
-			t.Fatalf("%s mode = %04o, want %04o", path, got, want)
-		}
-	}
+	})
 	if info, err := os.Lstat(link); err != nil {
 		t.Fatal(err)
 	} else if info.Mode()&os.ModeSymlink == 0 {
