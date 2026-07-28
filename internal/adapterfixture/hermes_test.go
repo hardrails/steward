@@ -1194,7 +1194,11 @@ func TestHermesAcceptanceReportsBoundedGatewayStartupDiagnostics(t *testing.T) {
 	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
 	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
 	for _, contract := range []string{
-		"Gateway remained running without its control socket",
+		`--unix-socket "$work/gateway/control.sock"`,
+		"http://localhost/v1/healthz",
+		"http://127.0.0.1:18091/v1/services/readiness-probe/health",
+		`kill -0 "$gateway_pid"`,
+		"Gateway remained running without healthy control and service endpoints",
 		"Gateway exited before creating its control socket",
 		`gateway_log_size=$(stat -c '%s' -- "$work/gateway.log")`,
 		"gateway_log_size <= 1048576",
@@ -1203,6 +1207,27 @@ func TestHermesAcceptanceReportsBoundedGatewayStartupDiagnostics(t *testing.T) {
 	} {
 		if !strings.Contains(script, contract) {
 			t.Fatalf("Hermes acceptance startup diagnostics are missing contract %q", contract)
+		}
+	}
+}
+
+func TestHermesAcceptanceReportsBoundedRuntimeReadinessFailures(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	for _, contract := range []string{
+		"steward.hermes-readiness-diagnostic.v1",
+		`"contains_agent_content": False`,
+		"raw = sys.stdin.buffer.read(65537)",
+		"if not raw or len(raw) > 65536:",
+		"if len(raw) > 65536:",
+		`docker logs --tail 100 "$runtime"`,
+		"bounded Hermes readiness logs follow",
+		`report_hermes_readiness_failure "$runtime" exited`,
+		`report_hermes_readiness_failure "$runtime" timeout`,
+		`f"\\x{value:02x}"`,
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes runtime readiness diagnostics are missing contract %q", contract)
 		}
 	}
 }

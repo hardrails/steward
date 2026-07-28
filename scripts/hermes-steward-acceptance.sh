@@ -643,11 +643,24 @@ printf '%s\n' "{
 "$ctl_bin" gateway validate -config "$work/gateway.json" >/dev/null
 "$gateway_bin" -config "$work/gateway.json" >"$work/gateway.log" 2>&1 &
 gateway_pid=$!
-for _ in $(seq 1 30); do [[ -S $work/gateway/control.sock ]] && break; sleep 1; done
-if [[ ! -S $work/gateway/control.sock ]]; then
+gateway_ready=false
+for _ in $(seq 1 30); do
+	if curl --noproxy '*' --max-time 2 --unix-socket "$work/gateway/control.sock" \
+		-fsS http://localhost/v1/healthz >/dev/null 2>&1 &&
+		[[ $(curl --noproxy '*' --max-time 2 -sS -o /dev/null -w '%{http_code}' \
+			-H 'Authorization: Bearer service-secret' \
+			http://127.0.0.1:18091/v1/services/readiness-probe/health 2>/dev/null || true) == 404 ]] &&
+		kill -0 "$gateway_pid" 2>/dev/null; then
+		gateway_ready=true
+		break
+	fi
+	kill -0 "$gateway_pid" 2>/dev/null || break
+	sleep 1
+done
+if ! $gateway_ready; then
 	echo "hermes-steward-acceptance: Gateway did not become ready" >&2
 	if kill -0 "$gateway_pid" 2>/dev/null; then
-		echo "hermes-steward-acceptance: Gateway remained running without its control socket" >&2
+		echo "hermes-steward-acceptance: Gateway remained running without healthy control and service endpoints" >&2
 	else
 		echo "hermes-steward-acceptance: Gateway exited before creating its control socket" >&2
 	fi
@@ -1034,16 +1047,83 @@ PY
 	done
 }
 
+report_hermes_readiness_failure() {
+	local runtime=$1 reason=$2
+	echo "hermes-steward-acceptance: Hermes readiness failed: $reason" >&2
+	if ! docker inspect --format '{{json .State}}' "$runtime" 2>/dev/null | python3 -I -c '
+import json
+import re
+import sys
+
+reason = sys.argv[1]
+raw = sys.stdin.buffer.read(65537)
+if not raw or len(raw) > 65536:
+    raise SystemExit(1)
+try:
+    state = json.loads(raw)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if (
+    not isinstance(state, dict)
+    or reason not in {"exited", "timeout"}
+    or not isinstance(state.get("Status"), str)
+    or re.fullmatch(r"[a-z]+", state["Status"]) is None
+    or type(state.get("Running")) is not bool
+    or type(state.get("Dead")) is not bool
+    or type(state.get("OOMKilled")) is not bool
+    or type(state.get("ExitCode")) is not int
+    or not isinstance(state.get("Error"), str)
+    or len(state["Error"]) > 4096
+):
+    raise SystemExit(1)
+payload = {
+    "contains_agent_content": False,
+    "dead": state["Dead"],
+    "error": state["Error"],
+    "exit_code": state["ExitCode"],
+    "oom_killed": state["OOMKilled"],
+    "reason": reason,
+    "running": state["Running"],
+    "schema_version": "steward.hermes-readiness-diagnostic.v1",
+    "status": state["Status"],
+}
+print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+' "$reason" >&2; then
+		echo "hermes-steward-acceptance: Hermes container state is unavailable or oversized" >&2
+	fi
+	# This harness admits only fixed synthetic fixture tasks. Cap and escape its
+	# startup logs so a failed container cannot inject terminal control bytes.
+	echo "hermes-steward-acceptance: bounded Hermes readiness logs follow" >&2
+	if ! docker logs --tail 100 "$runtime" 2>&1 | python3 -I -c '
+import sys
+
+raw = sys.stdin.buffer.read(65537)
+if len(raw) > 65536:
+    raise SystemExit(1)
+escaped = "".join(
+    chr(value) if value in (9, 10, 13) or 32 <= value <= 126 else f"\\x{value:02x}"
+    for value in raw
+)
+sys.stderr.write(escaped)
+'; then
+		echo "hermes-steward-acceptance: Hermes readiness logs are unavailable or oversized" >&2
+	fi
+}
+
 wait_for_hermes() {
 	local grant=$1 runtime=$2
 	for _ in $(seq 1 120); do
-		if curl -fsS -H 'Authorization: Bearer service-secret' \
+		if curl --noproxy '*' --max-time 2 -fsS -H 'Authorization: Bearer service-secret' \
 			"http://127.0.0.1:18091/v1/services/$grant/health" >/dev/null 2>&1; then
 			return 0
 		fi
-		[[ $(docker inspect --format '{{.State.Running}}' "$runtime" 2>/dev/null) == true ]] || return 1
+		if [[ $(docker inspect --format '{{.State.Running}}' "$runtime" 2>/dev/null || true) != true ]]; then
+			report_hermes_readiness_failure "$runtime" exited
+			return 1
+		fi
 		sleep 1
 	done
+	report_hermes_readiness_failure "$runtime" timeout
 	return 1
 }
 
