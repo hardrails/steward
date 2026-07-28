@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import urllib.parse
 
 MAX_REQUEST = 64 << 10
 MAX_STREAM = 448 << 10
@@ -33,12 +34,26 @@ MAX_CHANGED_FILE_BYTES = 4 << 20
 MAX_CHANGED_TOTAL_BYTES = 8 << 20
 MAX_PROTECTED_SCAN_BYTES = 16 << 20
 MAX_WORKSPACE_ENTRIES = 100_000
+MAX_GIT_METADATA_ENTRIES = 100_000
+MAX_CREDENTIAL_ENTRIES = 512
+MAX_CREDENTIAL_FILES = 64
+MAX_CREDENTIAL_DEPTH = 16
+MAX_CREDENTIAL_FILE_BYTES = 64 << 10
+MAX_CREDENTIAL_VALUE_BYTES = 4 << 20
+MAX_CREDENTIAL_VALUES = 512
+MAX_CREDENTIAL_JSON_NODES = 8192
 MAX_GIT_DIAGNOSTIC = 32 << 10
 MAX_GIT_INVENTORY = 1 << 20
 MAX_TASK = 16 << 10
 MAX_TIMEOUT = 900
 GIT_TIMEOUT = 15
 HANDOFF_TIMEOUT = 45
+CREDENTIAL_SCAN_TIMEOUT = 5
+PREFLIGHT_TIMEOUT = 45
+ENGINE_CLEANUP_TIMEOUT = 20
+RESPONSE_TIMEOUT = 10
+POSTFLIGHT_RESERVE = ENGINE_CLEANUP_TIMEOUT + HANDOFF_TIMEOUT + RESPONSE_TIMEOUT
+REQUEST_OVERHEAD_TIMEOUT = PREFLIGHT_TIMEOUT + POSTFLIGHT_RESERVE
 WORKSPACE = pathlib.Path("/workspace")
 OBJECT_ID_LENGTHS = {"sha1": 40, "sha256": 64}
 PR_SET_CHILD_SUBREAPER = 36
@@ -50,6 +65,25 @@ class WorkerError(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+
+def require_request_time(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise WorkerError(504, "request_timeout", "coding request exceeded its aggregate time limit")
+
+
+def contains_protected(
+    value: bytes,
+    protected_markers: tuple[bytes, ...],
+    *,
+    deadline: float,
+) -> bool:
+    for marker in protected_markers:
+        require_request_time(deadline)
+        if marker and marker in value:
+            return True
+    require_request_time(deadline)
+    return False
 
 
 def read_secret(path_text: str, label: str) -> bytes:
@@ -171,16 +205,21 @@ def reap_process_group_children(group_id: int) -> None:
             return
 
 
-def stop_process(process: subprocess.Popen[bytes]) -> bool:
+def stop_process(
+    process: subprocess.Popen[bytes],
+    *,
+    deadline: float | None = None,
+) -> bool:
     group_id = process.pid
+    cleanup_deadline = deadline if deadline is not None else time.monotonic() + 10
     try:
         os.killpg(group_id, signal.SIGTERM)
     except ProcessLookupError:
         pass
     except PermissionError:
         return False
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
+    graceful_deadline = min(cleanup_deadline, time.monotonic() + 5)
+    while time.monotonic() < graceful_deadline:
         process.poll()
         if process.returncode is not None:
             reap_process_group_children(group_id)
@@ -193,15 +232,18 @@ def stop_process(process: subprocess.Popen[bytes]) -> bool:
         pass
     except PermissionError:
         return False
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
+    force_deadline = min(cleanup_deadline, time.monotonic() + 5)
+    while time.monotonic() < force_deadline:
         process.poll()
         if process.returncode is not None:
             reap_process_group_children(group_id)
         if not process_group_exists(group_id):
             return True
         time.sleep(0.02)
-    return False
+    process.poll()
+    if process.returncode is not None:
+        reap_process_group_children(group_id)
+    return not process_group_exists(group_id)
 
 
 def close_process_streams(process: subprocess.Popen[bytes]) -> None:
@@ -232,7 +274,7 @@ def linux_child_processes() -> set[int] | None:
     return children
 
 
-def prepare_engine_isolation(version: str) -> set[int] | None:
+def prepare_engine_isolation() -> set[int] | None:
     if sys.platform != "linux":
         return None
     if os.getpid() != 1:
@@ -241,21 +283,28 @@ def prepare_engine_isolation(version: str) -> set[int] | None:
             result = libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
         except (AttributeError, OSError):
             result = -1
-        if result != 0 and version == "steward.coding-task.v2":
+        if result != 0:
             raise WorkerError(503, "engine_isolation_unavailable", "coding worker cannot contain engine descendants")
     children = linux_child_processes()
-    if children is None and version == "steward.coding-task.v2":
+    if children is None:
         raise WorkerError(503, "engine_isolation_unavailable", "coding worker cannot inventory engine descendants")
     return children
 
 
-def stop_engine_descendants(baseline: set[int] | None) -> bool:
+def stop_engine_descendants(
+    baseline: set[int] | None,
+    *,
+    deadline: float | None = None,
+) -> bool:
     if baseline is None:
         return True
     quiet_since: float | None = None
-    deadline = time.monotonic() + 5
+    cleanup_deadline = min(
+        deadline if deadline is not None else time.monotonic() + 5,
+        time.monotonic() + 5,
+    )
     force = False
-    while time.monotonic() < deadline:
+    while time.monotonic() < cleanup_deadline:
         current = linux_child_processes()
         if current is None:
             return False
@@ -268,7 +317,7 @@ def stop_engine_descendants(baseline: set[int] | None) -> bool:
             time.sleep(0.02)
             continue
         quiet_since = None
-        if not force and deadline - time.monotonic() < 2:
+        if not force and cleanup_deadline - time.monotonic() < 2:
             force = True
         signal_to_send = signal.SIGKILL if force else signal.SIGTERM
         for child in unexpected:
@@ -296,6 +345,7 @@ def run_bounded_process(
     stdout_limit: int,
     stderr_limit: int,
     input_bytes: bytes | None = None,
+    absolute_deadline: float | None = None,
 ) -> tuple[int, bytes, bytes, bool, bool]:
     try:
         process = subprocess.Popen(
@@ -309,27 +359,33 @@ def run_bounded_process(
         )
     except OSError as error:
         raise WorkerError(400, "invalid_workspace", "workspace command could not start") from error
+    stdout = bytearray()
+    stderr = bytearray()
+    stdout_exceeded = threading.Event()
+    stderr_exceeded = threading.Event()
+    readers = [
+        threading.Thread(
+            target=drain,
+            args=(process.stdout, stdout, stdout_exceeded, stdout_limit),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=drain,
+            args=(process.stderr, stderr, stderr_exceeded, stderr_limit),
+            daemon=True,
+        ),
+    ]
+    started_readers: list[threading.Thread] = []
+    input_writer = None
+    input_writer_started = False
+    timed_out = False
     try:
         deadline = time.monotonic() + timeout_seconds
-        stdout = bytearray()
-        stderr = bytearray()
-        stdout_exceeded = threading.Event()
-        stderr_exceeded = threading.Event()
-        readers = [
-            threading.Thread(
-                target=drain,
-                args=(process.stdout, stdout, stdout_exceeded, stdout_limit),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=drain,
-                args=(process.stderr, stderr, stderr_exceeded, stderr_limit),
-                daemon=True,
-            ),
-        ]
+        if absolute_deadline is not None:
+            deadline = min(deadline, absolute_deadline)
         for reader in readers:
             reader.start()
-        input_writer = None
+            started_readers.append(reader)
         if input_bytes is not None:
             input_writer = threading.Thread(
                 target=feed_process_input,
@@ -337,28 +393,37 @@ def run_bounded_process(
                 daemon=True,
             )
             input_writer.start()
-        timed_out = False
+            input_writer_started = True
         while process.poll() is None:
             if stdout_exceeded.is_set() or stderr_exceeded.is_set() or time.monotonic() >= deadline:
                 timed_out = time.monotonic() >= deadline
                 break
             time.sleep(0.02)
-        stopped = stop_process(process)
-        for reader in readers:
-            reader.join(timeout=2)
-        if input_writer is not None:
-            input_writer.join(timeout=2)
+    finally:
+        cleanup_deadline = absolute_deadline if absolute_deadline is not None else time.monotonic() + 10
+        try:
+            stopped = stop_process(process, deadline=cleanup_deadline)
+        except Exception:
+            stopped = False
+        for reader in started_readers:
+            remaining = cleanup_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            reader.join(timeout=min(2, remaining))
+        if input_writer is not None and input_writer_started:
+            remaining = cleanup_deadline - time.monotonic()
+            if remaining > 0:
+                input_writer.join(timeout=min(2, remaining))
+        close_process_streams(process)
         if (
             not stopped
-            or any(reader.is_alive() for reader in readers)
-            or (input_writer is not None and input_writer.is_alive())
+            or any(reader.is_alive() for reader in started_readers)
+            or (input_writer is not None and input_writer_started and input_writer.is_alive())
         ):
             raise WorkerError(400, "invalid_workspace", "workspace command output did not close")
-        return process.returncode, bytes(stdout), bytes(stderr), (
-            stdout_exceeded.is_set() or stderr_exceeded.is_set()
-        ), timed_out
-    finally:
-        close_process_streams(process)
+    return process.returncode, bytes(stdout), bytes(stderr), (
+        stdout_exceeded.is_set() or stderr_exceeded.is_set()
+    ), timed_out
 
 
 def git_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -401,9 +466,9 @@ def run_git(
     timeout_seconds = float(GIT_TIMEOUT)
     if deadline is not None:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise WorkerError(504, "handoff_timeout", "Git handoff exceeded its aggregate time limit")
-        timeout_seconds = min(timeout_seconds, remaining)
+        if remaining <= 2:
+            raise WorkerError(504, "request_timeout", "coding request exceeded its aggregate time limit")
+        timeout_seconds = min(timeout_seconds, remaining - 2)
     command = [
         "git",
         "--no-pager",
@@ -437,6 +502,7 @@ def run_git(
         stdout_limit=stdout_limit,
         stderr_limit=MAX_GIT_DIAGNOSTIC,
         input_bytes=input_bytes,
+        absolute_deadline=deadline,
     )
     if exceeded:
         raise WorkerError(
@@ -446,7 +512,7 @@ def run_git(
         )
     if timed_out:
         if deadline is not None:
-            raise WorkerError(504, "handoff_timeout", "Git handoff exceeded its aggregate time limit")
+            raise WorkerError(504, "request_timeout", "coding request exceeded its aggregate time limit")
         raise WorkerError(status, code, "workspace Git operation exceeded its time limit")
     if returncode not in acceptable:
         raise WorkerError(status, code, message)
@@ -477,54 +543,270 @@ def decode_nul_values(
     return tuple(values)
 
 
-def git_status() -> tuple[str, ...]:
+def git_status(*, deadline: float | None = None) -> tuple[str, ...]:
     raw = run_git(
         ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"],
         stdout_limit=MAX_GIT_INVENTORY,
+        deadline=deadline,
     )
     return decode_nul_values(raw, label="workspace status", maximum=4096)
 
 
-def secret_markers(worker_token: bytes, environment: dict[str, str]) -> list[bytes]:
-    raw_values = [worker_token]
+def _open_nofollow_credential_root(root: pathlib.Path) -> int | None:
+    if not root.is_absolute() or any(part in {"", ".", ".."} for part in root.parts[1:]):
+        raise WorkerError(500, "credential_store_unsafe", "credential store path is not a safe absolute path")
+    try:
+        named = os.stat(root, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise WorkerError(500, "credential_store_unsafe", "credential store cannot be inspected safely") from error
+    if not stat.S_ISDIR(named.st_mode):
+        raise WorkerError(500, "credential_store_unsafe", "credential store root must be a real directory")
+    flags = (
+        os.O_RDONLY
+        | os.O_CLOEXEC
+        | os.O_NONBLOCK
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open("/", flags)
+    try:
+        for component in root.parts[1:]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            info = os.fstat(descriptor)
+            if not stat.S_ISDIR(info.st_mode):
+                raise OSError("credential path component is not a directory")
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+            raise OSError("credential store changed while being opened")
+        return descriptor
+    except FileNotFoundError as error:
+        os.close(descriptor)
+        raise WorkerError(500, "credential_store_changed", "credential store changed during inventory") from error
+    except OSError as error:
+        os.close(descriptor)
+        raise WorkerError(500, "credential_store_unsafe", "credential store cannot be opened without symlinks") from error
+
+
+def _read_credential_file(directory: int, name: str) -> bytes:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory)
+    except OSError as error:
+        raise WorkerError(500, "credential_store_changed", "credential store changed during inventory") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > MAX_CREDENTIAL_FILE_BYTES
+        ):
+            raise WorkerError(
+                500,
+                "credential_inventory_too_large",
+                "credential store file is unsafe or exceeds its byte limit",
+            )
+        value = bytearray()
+        while len(value) <= before.st_size:
+            chunk = os.read(descriptor, min(65536, before.st_size - len(value) + 1))
+            if not chunk:
+                break
+            value.extend(chunk)
+        after = os.fstat(descriptor)
+        try:
+            named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except OSError as error:
+            raise WorkerError(
+                500,
+                "credential_store_changed",
+                "credential store changed during inventory",
+            ) from error
+        identity = lambda item: (
+            item.st_dev,
+            item.st_ino,
+            item.st_size,
+            item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+        if len(value) != before.st_size or identity(before) != identity(after) or identity(after) != identity(named):
+            raise WorkerError(500, "credential_store_changed", "credential store changed during inventory")
+        return bytes(value)
+    finally:
+        os.close(descriptor)
+
+
+def secret_markers(
+    worker_token: bytes,
+    environment: dict[str, str],
+    *,
+    deadline: float | None = None,
+) -> list[bytes]:
+    scan_deadline = time.monotonic() + CREDENTIAL_SCAN_TIMEOUT
+    if deadline is not None:
+        scan_deadline = min(scan_deadline, deadline)
+    raw_values: list[bytes] = []
+    value_bytes = 0
+
+    def protect(value: bytes) -> None:
+        nonlocal value_bytes
+        if len(value) < 8:
+            return
+        value_bytes += len(value)
+        if len(raw_values) >= MAX_CREDENTIAL_VALUES or value_bytes > MAX_CREDENTIAL_VALUE_BYTES:
+            raise WorkerError(
+                500,
+                "credential_inventory_too_large",
+                "credential material exceeds its marker bound",
+            )
+        raw_values.append(value)
+
+    protect(worker_token)
     for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
-        value = environment.get(name, "").encode()
-        if len(value) >= 8:
-            raw_values.append(value)
+        protect(environment.get(name, "").encode())
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        value = environment.get(name, "")
+        protect(value.encode())
+        if not value:
+            continue
+        try:
+            parsed = urllib.parse.urlsplit(value)
+        except ValueError as error:
+            raise WorkerError(
+                500,
+                "credential_store_unsafe",
+                "proxy credential configuration is malformed",
+            ) from error
+        for component in (parsed.username, parsed.password):
+            if component is not None:
+                protect(urllib.parse.unquote(component).encode())
+
+    seen_roots: set[str] = set()
+    entries = 0
+    files = 0
+    json_nodes = 0
     for root_text in (environment.get("CODEX_HOME", ""), environment.get("CLAUDE_CONFIG_DIR", "")):
-        if not root_text:
+        if not root_text or root_text in seen_roots:
             continue
-        root = pathlib.Path(root_text)
-        if not root.is_dir():
+        seen_roots.add(root_text)
+        require_request_time(scan_deadline)
+        root_descriptor = _open_nofollow_credential_root(pathlib.Path(root_text))
+        if root_descriptor is None:
             continue
-        files = 0
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.is_symlink():
-                continue
-            files += 1
-            if files > 64:
-                raise WorkerError(500, "credential_inventory_too_large", "credential store exceeds the scan file limit")
-            info = path.stat()
-            if info.st_size > 64 << 10:
-                continue
-            value = path.read_bytes()
-            if len(value) >= 8:
-                raw_values.append(value)
-            try:
-                decoded = json.loads(value)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            stack = [decoded]
-            while stack:
-                current = stack.pop()
-                if isinstance(current, dict):
-                    stack.extend(current.values())
-                elif isinstance(current, list):
-                    stack.extend(current)
-                elif isinstance(current, str) and len(current.encode()) >= 8:
-                    raw_values.append(current.encode())
+        pending: list[tuple[int, int]] = [(root_descriptor, 0)]
+        try:
+            while pending:
+                require_request_time(scan_deadline)
+                directory, depth = pending.pop()
+                try:
+                    with os.scandir(directory) as iterator:
+                        for entry in iterator:
+                            require_request_time(scan_deadline)
+                            entries += 1
+                            if entries > MAX_CREDENTIAL_ENTRIES:
+                                raise WorkerError(
+                                    500,
+                                    "credential_inventory_too_large",
+                                    "credential store exceeds its entry-count limit",
+                                )
+                            try:
+                                info = entry.stat(follow_symlinks=False)
+                            except OSError as error:
+                                raise WorkerError(
+                                    500,
+                                    "credential_store_changed",
+                                    "credential store changed during inventory",
+                                ) from error
+                            if stat.S_ISLNK(info.st_mode):
+                                raise WorkerError(
+                                    500,
+                                    "credential_store_unsafe",
+                                    "credential store contains a symlink",
+                                )
+                            if stat.S_ISDIR(info.st_mode):
+                                if depth >= MAX_CREDENTIAL_DEPTH:
+                                    raise WorkerError(
+                                        500,
+                                        "credential_inventory_too_large",
+                                        "credential store exceeds its directory-depth limit",
+                                    )
+                                flags = (
+                                    os.O_RDONLY
+                                    | os.O_CLOEXEC
+                                    | os.O_NONBLOCK
+                                    | getattr(os, "O_DIRECTORY", 0)
+                                    | getattr(os, "O_NOFOLLOW", 0)
+                                )
+                                try:
+                                    child = os.open(entry.name, flags, dir_fd=directory)
+                                except OSError as error:
+                                    raise WorkerError(
+                                        500,
+                                        "credential_store_changed",
+                                        "credential store changed during inventory",
+                                    ) from error
+                                opened = os.fstat(child)
+                                if (
+                                    opened.st_dev != info.st_dev
+                                    or opened.st_ino != info.st_ino
+                                    or not stat.S_ISDIR(opened.st_mode)
+                                ):
+                                    os.close(child)
+                                    raise WorkerError(
+                                        500,
+                                        "credential_store_changed",
+                                        "credential store changed during inventory",
+                                    )
+                                pending.append((child, depth + 1))
+                                continue
+                            if not stat.S_ISREG(info.st_mode):
+                                raise WorkerError(
+                                    500,
+                                    "credential_store_unsafe",
+                                    "credential store contains a special file",
+                                )
+                            files += 1
+                            if files > MAX_CREDENTIAL_FILES:
+                                raise WorkerError(
+                                    500,
+                                    "credential_inventory_too_large",
+                                    "credential store exceeds its file-count limit",
+                                )
+                            value = _read_credential_file(directory, entry.name)
+                            protect(value)
+                            try:
+                                decoded = json.loads(value)
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                continue
+                            stack = [decoded]
+                            while stack:
+                                require_request_time(scan_deadline)
+                                current = stack.pop()
+                                json_nodes += 1
+                                if json_nodes > MAX_CREDENTIAL_JSON_NODES:
+                                    raise WorkerError(
+                                        500,
+                                        "credential_inventory_too_large",
+                                        "credential JSON exceeds its node-count limit",
+                                    )
+                                if isinstance(current, dict):
+                                    stack.extend(current.keys())
+                                    stack.extend(current.values())
+                                elif isinstance(current, list):
+                                    stack.extend(current)
+                                elif isinstance(current, str):
+                                    protect(current.encode())
+                finally:
+                    os.close(directory)
+        except Exception:
+            for descriptor, _ in pending:
+                os.close(descriptor)
+            raise
     markers: set[bytes] = set()
     for value in raw_values:
+        require_request_time(scan_deadline)
         if len(value) < 8:
             continue
         markers.add(value)
@@ -532,6 +814,7 @@ def secret_markers(worker_token: bytes, environment: dict[str, str]) -> list[byt
         markers.add(base64.urlsafe_b64encode(value).rstrip(b"="))
         markers.add(value.hex().encode())
         markers.add(hashlib.sha256(value).hexdigest().encode())
+    require_request_time(scan_deadline)
     return sorted(markers, key=len, reverse=True)
 
 
@@ -599,9 +882,247 @@ def git_text(
 
 def _repository_environment(identity: dict[str, object]) -> dict[str, str]:
     git_dir = identity.get("_git_dir")
-    if not isinstance(git_dir, str) or not pathlib.Path(git_dir).is_absolute():
+    workspace_root = identity.get("_workspace_root")
+    if (
+        not isinstance(git_dir, str)
+        or not pathlib.Path(git_dir).is_absolute()
+        or not isinstance(workspace_root, str)
+        or not pathlib.Path(workspace_root).is_absolute()
+    ):
         raise WorkerError(409, "workspace_identity_changed", "workspace Git identity is unavailable")
-    return {"GIT_DIR": git_dir, "GIT_WORK_TREE": str(WORKSPACE)}
+    return {"GIT_DIR": git_dir, "GIT_WORK_TREE": workspace_root}
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | os.O_CLOEXEC
+        | os.O_NONBLOCK
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _validate_git_metadata_tree(
+    metadata_descriptor: int,
+    *,
+    deadline: float | None = None,
+) -> None:
+    pending = [metadata_descriptor]
+    visited = 0
+    try:
+        while pending:
+            if deadline is not None:
+                require_request_time(deadline)
+            directory = pending.pop()
+            try:
+                with os.scandir(directory) as iterator:
+                    for entry in iterator:
+                        if deadline is not None:
+                            require_request_time(deadline)
+                        visited += 1
+                        if visited > MAX_GIT_METADATA_ENTRIES:
+                            raise WorkerError(
+                                413,
+                                "workspace_too_large",
+                                "workspace Git metadata exceeds its entry-count bound",
+                            )
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                        except OSError as error:
+                            raise WorkerError(
+                                409,
+                                "workspace_identity_changed",
+                                "workspace Git metadata changed during inventory",
+                            ) from error
+                        if stat.S_ISLNK(info.st_mode):
+                            raise WorkerError(
+                                409,
+                                "unsupported_workspace",
+                                "workspace Git metadata must not contain symlinks",
+                            )
+                        if stat.S_ISDIR(info.st_mode):
+                            try:
+                                child = os.open(
+                                    entry.name,
+                                    _directory_open_flags(),
+                                    dir_fd=directory,
+                                )
+                            except OSError as error:
+                                raise WorkerError(
+                                    409,
+                                    "workspace_identity_changed",
+                                    "workspace Git metadata changed during inventory",
+                                ) from error
+                            opened = os.fstat(child)
+                            if (
+                                opened.st_dev != info.st_dev
+                                or opened.st_ino != info.st_ino
+                                or not stat.S_ISDIR(opened.st_mode)
+                            ):
+                                os.close(child)
+                                raise WorkerError(
+                                    409,
+                                    "workspace_identity_changed",
+                                    "workspace Git metadata changed during inventory",
+                                )
+                            pending.append(child)
+                        elif stat.S_ISREG(info.st_mode):
+                            if info.st_nlink != 1:
+                                raise WorkerError(
+                                    409,
+                                    "unsupported_workspace",
+                                    "workspace Git metadata must use independent files",
+                                )
+                        else:
+                            raise WorkerError(
+                                409,
+                                "unsupported_workspace",
+                                "workspace Git metadata contains a special file",
+                            )
+            except WorkerError:
+                raise
+            except OSError as error:
+                raise WorkerError(
+                    409,
+                    "unsupported_workspace",
+                    "workspace Git metadata cannot be read safely",
+                ) from error
+            finally:
+                os.close(directory)
+    except Exception:
+        for descriptor in pending:
+            os.close(descriptor)
+        raise
+
+
+def _contained_git_metadata(root: pathlib.Path, *, deadline: float | None = None) -> pathlib.Path:
+    metadata = root / ".git"
+    root_descriptor = None
+    metadata_descriptor = None
+    try:
+        root_descriptor = os.open(root, _directory_open_flags())
+        root_info = os.fstat(root_descriptor)
+        named_root = os.stat(root, follow_symlinks=False)
+        if (
+            root_info.st_dev != named_root.st_dev
+            or root_info.st_ino != named_root.st_ino
+            or not stat.S_ISDIR(root_info.st_mode)
+        ):
+            raise OSError("workspace root changed while being opened")
+        named_metadata = os.stat(".git", dir_fd=root_descriptor, follow_symlinks=False)
+        metadata_descriptor = os.open(
+            ".git",
+            _directory_open_flags(),
+            dir_fd=root_descriptor,
+        )
+        opened_metadata = os.fstat(metadata_descriptor)
+        if (
+            opened_metadata.st_dev != named_metadata.st_dev
+            or opened_metadata.st_ino != named_metadata.st_ino
+            or not stat.S_ISDIR(opened_metadata.st_mode)
+        ):
+            raise OSError("workspace Git metadata changed while being opened")
+    except OSError as error:
+        if metadata_descriptor is not None:
+            os.close(metadata_descriptor)
+        raise WorkerError(
+            409,
+            "unsupported_workspace",
+            "workspace must contain a standalone Git metadata directory",
+        ) from error
+    finally:
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+    _validate_git_metadata_tree(metadata_descriptor, deadline=deadline)
+    return metadata
+
+
+def _resolved_repository_paths(
+    root: pathlib.Path,
+    *,
+    extra_environment: dict[str, str] | None = None,
+    deadline: float | None = None,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    git_dir = pathlib.Path(
+        git_text(
+            ["rev-parse", "--absolute-git-dir"],
+            extra_environment=extra_environment,
+            deadline=deadline,
+        )
+    )
+    common_dir = pathlib.Path(
+        git_text(
+            ["rev-parse", "--git-common-dir"],
+            extra_environment=extra_environment,
+            deadline=deadline,
+        )
+    )
+    object_path = pathlib.Path(
+        git_text(
+            ["rev-parse", "--git-path", "objects"],
+            extra_environment=extra_environment,
+            deadline=deadline,
+        )
+    )
+    if not common_dir.is_absolute():
+        common_dir = root / common_dir
+    if not object_path.is_absolute():
+        object_path = root / object_path
+    try:
+        return (
+            git_dir.resolve(strict=True),
+            common_dir.resolve(strict=True),
+            object_path.resolve(strict=True),
+        )
+    except OSError as error:
+        raise WorkerError(409, "unsupported_workspace", "workspace Git metadata is unavailable") from error
+
+
+def _assert_repository_identity(identity: dict[str, object], *, deadline: float | None = None) -> None:
+    expected_root = identity.get("_workspace_root")
+    expected_git = identity.get("_git_dir")
+    expected_objects = identity.get("_object_dir")
+    if (
+        not isinstance(expected_root, str)
+        or not isinstance(expected_git, str)
+        or not isinstance(expected_objects, str)
+    ):
+        raise WorkerError(409, "workspace_identity_changed", "workspace Git identity is unavailable")
+    try:
+        root = WORKSPACE.resolve(strict=True)
+    except OSError as error:
+        raise WorkerError(409, "workspace_identity_changed", "workspace root is unavailable") from error
+    if str(root) != expected_root:
+        raise WorkerError(409, "workspace_identity_changed", "workspace root identity changed")
+    metadata = _contained_git_metadata(root, deadline=deadline)
+    environment = _repository_environment(identity)
+    git_dir, common_dir, object_path = _resolved_repository_paths(
+        root,
+        extra_environment=environment,
+        deadline=deadline,
+    )
+    expected_object_path = metadata / "objects"
+    try:
+        object_info = os.stat(expected_object_path, follow_symlinks=False)
+    except OSError as error:
+        raise WorkerError(409, "workspace_identity_changed", "workspace object store is unavailable") from error
+    if (
+        git_dir != metadata
+        or common_dir != metadata
+        or object_path != expected_object_path
+        or not stat.S_ISDIR(object_info.st_mode)
+        or str(git_dir) != expected_git
+        or str(object_path) != expected_objects
+        or os.pathsep in str(object_path)
+    ):
+        raise WorkerError(
+            409,
+            "unsupported_workspace",
+            "workspace Git metadata must be contained in its standalone checkout",
+        )
+    if os.path.lexists(object_path / "info" / "alternates"):
+        raise WorkerError(409, "unsupported_workspace", "alternate Git object stores are not supported")
 
 
 def _ignored_paths(
@@ -623,13 +1144,13 @@ def _reject_special_workspace_entries(*, deadline: float | None = None) -> None:
     visited = 0
     while pending:
         if deadline is not None and time.monotonic() >= deadline:
-            raise WorkerError(504, "handoff_timeout", "Git handoff exceeded its aggregate time limit")
+            raise WorkerError(504, "request_timeout", "coding request exceeded its aggregate time limit")
         directory, parent_components = pending.pop()
         try:
             with os.scandir(directory) as iterator:
                 for entry in iterator:
                     if deadline is not None and time.monotonic() >= deadline:
-                        raise WorkerError(504, "handoff_timeout", "Git handoff exceeded its aggregate time limit")
+                        raise WorkerError(504, "request_timeout", "coding request exceeded its aggregate time limit")
                     if directory == WORKSPACE and entry.name == ".git":
                         continue
                     visited += 1
@@ -650,6 +1171,12 @@ def _reject_special_workspace_entries(*, deadline: float | None = None) -> None:
                     portable_paths.add(portable_key)
                     if stat.S_ISDIR(info.st_mode):
                         pending.append((pathlib.Path(entry.path), components))
+                    elif stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                        raise WorkerError(
+                            409,
+                            "special_file_not_supported",
+                            "handoff workspaces do not support hard-linked files",
+                        )
                     elif not stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
                         raise WorkerError(
                             409,
@@ -743,18 +1270,25 @@ def _reject_unsupported_repository(
             )
 
 
-def workspace_identity(expected_base_commit: str) -> dict[str, object]:
+def workspace_identity(
+    expected_base_commit: str,
+    *,
+    deadline: float | None = None,
+) -> dict[str, object]:
+    if deadline is not None:
+        require_request_time(deadline)
     try:
         root = WORKSPACE.resolve(strict=True)
     except OSError as error:
         raise WorkerError(400, "invalid_workspace", "workspace directory is unavailable") from error
-    top = pathlib.Path(git_text(["rev-parse", "--show-toplevel"]))
+    metadata = _contained_git_metadata(root, deadline=deadline)
+    top = pathlib.Path(git_text(["rev-parse", "--show-toplevel"], deadline=deadline))
     try:
         if top.resolve(strict=True) != root:
             raise WorkerError(409, "unsupported_workspace", "workspace must be the Git checkout root")
     except OSError as error:
         raise WorkerError(409, "unsupported_workspace", "workspace root cannot be resolved") from error
-    object_format = git_text(["rev-parse", "--show-object-format"])
+    object_format = git_text(["rev-parse", "--show-object-format"], deadline=deadline)
     length = OBJECT_ID_LENGTHS.get(object_format)
     if length is None:
         raise WorkerError(409, "unsupported_workspace", "workspace uses an unsupported Git object format")
@@ -768,35 +1302,52 @@ def workspace_identity(expected_base_commit: str) -> dict[str, object]:
         ["rev-parse", "--verify", "HEAD^{commit}"],
         code="base_commit_mismatch",
         message="workspace HEAD does not identify the expected base commit",
+        deadline=deadline,
     )
     if base_commit != expected_base_commit:
         raise WorkerError(409, "base_commit_mismatch", "workspace HEAD does not match the expected base commit")
-    base_tree = git_text(["rev-parse", "--verify", f"{base_commit}^{{tree}}"])
-    git_dir = pathlib.Path(git_text(["rev-parse", "--absolute-git-dir"]))
-    object_path = pathlib.Path(git_text(["rev-parse", "--git-path", "objects"]))
-    if not object_path.is_absolute():
-        object_path = root / object_path
+    base_tree = git_text(
+        ["rev-parse", "--verify", f"{base_commit}^{{tree}}"],
+        deadline=deadline,
+    )
+    git_dir, common_dir, object_path = _resolved_repository_paths(root, deadline=deadline)
+    expected_object_path = metadata / "objects"
     try:
-        git_dir = git_dir.resolve(strict=True)
-        object_path = object_path.resolve(strict=True)
+        object_info = os.stat(expected_object_path, follow_symlinks=False)
     except OSError as error:
-        raise WorkerError(409, "unsupported_workspace", "workspace Git metadata is unavailable") from error
-    if not git_dir.is_dir() or not object_path.is_dir() or os.pathsep in str(object_path):
-        raise WorkerError(409, "unsupported_workspace", "workspace Git metadata layout is unsupported")
+        raise WorkerError(409, "unsupported_workspace", "workspace Git object store is unavailable") from error
+    if (
+        git_dir != metadata
+        or common_dir != metadata
+        or object_path != expected_object_path
+        or not stat.S_ISDIR(object_info.st_mode)
+        or os.pathsep in str(object_path)
+    ):
+        raise WorkerError(
+            409,
+            "unsupported_workspace",
+            "workspace Git metadata must be contained in its standalone checkout",
+        )
     if os.path.lexists(object_path / "info" / "alternates"):
         raise WorkerError(409, "unsupported_workspace", "alternate Git object stores are not supported")
     identity: dict[str, object] = {
         "object_format": object_format,
         "base_commit": base_commit,
         "base_tree": base_tree,
+        "_workspace_root": str(root),
         "_git_dir": str(git_dir),
         "_object_dir": str(object_path),
     }
     repository_environment = _repository_environment(identity)
-    _reject_unsupported_repository(base_commit, extra_environment=repository_environment)
-    _reject_special_workspace_entries()
-    if git_status() or _ignored_paths(repository_environment):
+    _reject_unsupported_repository(
+        base_commit,
+        extra_environment=repository_environment,
+        deadline=deadline,
+    )
+    _reject_special_workspace_entries(deadline=deadline)
+    if git_status(deadline=deadline) or _ignored_paths(repository_environment, deadline=deadline):
         raise WorkerError(409, "workspace_not_clean", "version 2 coding tasks require a fully clean checkout")
+    _assert_repository_identity(identity, deadline=deadline)
     return identity
 
 
@@ -1079,7 +1630,7 @@ def _scan_tree_blobs(
         ):
             raise WorkerError(409, "handoff_not_reproducible", "handoff blob stream is invalid")
         offset += 1
-        if any(marker and marker in value for marker in protected_markers):
+        if contains_protected(value, protected_markers, deadline=deadline):
             raise WorkerError(502, "credential_output_blocked", "handoff blob matched protected credential material")
     if offset != len(raw):
         raise WorkerError(409, "handoff_not_reproducible", "handoff blob stream has trailing data")
@@ -1134,7 +1685,7 @@ def _capture_snapshot(
         if portable_key in portable_names:
             raise WorkerError(409, "unsupported_workspace", "handoff paths collide on portable filesystems")
         portable_names.add(portable_key)
-        if any(marker and marker in encoded_path for marker in protected_markers):
+        if contains_protected(encoded_path, protected_markers, deadline=deadline):
             raise WorkerError(502, "credential_output_blocked", "changed path matched protected credential material")
         value = _read_changed_entry(path, path_text)
         if value is None:
@@ -1142,7 +1693,7 @@ def _capture_snapshot(
         changed_bytes += len(value)
         if changed_bytes > MAX_CHANGED_TOTAL_BYTES:
             raise WorkerError(413, "handoff_too_large", "changed files exceed the handoff byte limit")
-        if any(marker and marker in value for marker in protected_markers):
+        if contains_protected(value, protected_markers, deadline=deadline):
             raise WorkerError(502, "credential_output_blocked", "changed file matched protected credential material")
     object_id_length = OBJECT_ID_LENGTHS[str(identity["object_format"])]
     with tempfile.TemporaryDirectory(prefix="steward-coding-handoff-") as temporary:
@@ -1234,7 +1785,7 @@ def _capture_snapshot(
         )
         if len(patch) > MAX_HANDOFF_PATCH:
             raise WorkerError(413, "handoff_too_large", "handoff patch exceeds its byte limit")
-        if any(marker and marker in patch for marker in protected_markers):
+        if contains_protected(patch, protected_markers, deadline=deadline):
             raise WorkerError(502, "credential_output_blocked", "handoff patch matched protected credential material")
         verified_environment = _temporary_repository_environment(identity, root / "verified")
         run_git(
@@ -1269,37 +1820,44 @@ def _capture_snapshot(
 def capture_git_handoff(
     base_identity: dict[str, object],
     protected_markers: tuple[bytes, ...] = (),
+    *,
+    deadline: float | None = None,
 ) -> dict[str, object]:
     identity = dict(base_identity)
+    handoff_deadline = time.monotonic() + HANDOFF_TIMEOUT
+    if deadline is not None:
+        handoff_deadline = min(handoff_deadline, deadline)
+    require_request_time(handoff_deadline)
+    _assert_repository_identity(identity, deadline=handoff_deadline)
     repository_environment = _repository_environment(identity)
-    deadline = time.monotonic() + HANDOFF_TIMEOUT
     current = git_text(
         ["rev-parse", "--verify", "HEAD^{commit}"],
         extra_environment=repository_environment,
         code="workspace_history_changed",
         message="workspace history changed during coding",
-        deadline=deadline,
+        deadline=handoff_deadline,
     )
     if current != identity.get("base_commit"):
         raise WorkerError(409, "workspace_history_changed", "workspace history changed during coding")
     _reject_unsupported_repository(
         current,
         extra_environment=repository_environment,
-        deadline=deadline,
+        deadline=handoff_deadline,
     )
-    _reject_special_workspace_entries(deadline=deadline)
+    _reject_special_workspace_entries(deadline=handoff_deadline)
     first_patch, first_paths, first_tree = _capture_snapshot(
         identity,
         protected_markers,
-        deadline=deadline,
+        deadline=handoff_deadline,
     )
     second_patch, second_paths, second_tree = _capture_snapshot(
         identity,
         protected_markers,
-        deadline=deadline,
+        deadline=handoff_deadline,
     )
     if first_patch != second_patch or first_paths != second_paths or first_tree != second_tree:
         raise WorkerError(409, "workspace_changed", "workspace changed while the handoff was captured")
+    _assert_repository_identity(identity, deadline=handoff_deadline)
     return {
         "schema_version": "steward.git-handoff.v1",
         "object_format": identity["object_format"],
@@ -1313,27 +1871,49 @@ def capture_git_handoff(
     }
 
 
-def _current_head() -> str:
-    return git_text(["rev-parse", "--verify", "HEAD^{commit}"])
+def _current_head(*, deadline: float | None = None) -> str:
+    return git_text(["rev-parse", "--verify", "HEAD^{commit}"], deadline=deadline)
 
 
 def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> dict[str, object]:
+    request_started = time.monotonic()
     task = str(request["task"])
     mode = str(request["mode"])
     timeout_seconds = int(request["timeout_seconds"])
     version = str(request["schema_version"])
+    request_deadline = request_started + timeout_seconds + REQUEST_OVERHEAD_TIMEOUT
+    preflight_deadline = min(
+        request_started + PREFLIGHT_TIMEOUT,
+        request_deadline - POSTFLIGHT_RESERVE,
+    )
     base_identity = None
     if version == "steward.coding-task.v2":
-        base_identity = workspace_identity(str(request["expected_base_commit"]))
-    before = git_status()
+        base_identity = workspace_identity(
+            str(request["expected_base_commit"]),
+            deadline=preflight_deadline,
+        )
+    else:
+        _reject_special_workspace_entries(deadline=preflight_deadline)
+    before = git_status(deadline=preflight_deadline)
     if before and os.environ.get("STEWARD_ALLOW_DIRTY_WORKSPACE", "NO") != "YES":
         raise WorkerError(409, "workspace_not_clean", "coding worker requires a clean dedicated worktree")
     base_commit = str(base_identity["base_commit"]) if base_identity is not None else None
     environment = clean_environment(engine)
-    protected_markers = tuple(secret_markers(worker_token, environment))
+    protected_markers = tuple(
+        secret_markers(
+            worker_token,
+            environment,
+            deadline=preflight_deadline,
+        )
+    )
     command = command_for(engine, task, mode)
-    baseline_children = prepare_engine_isolation(version)
-    started = time.monotonic()
+    baseline_children = prepare_engine_isolation()
+    require_request_time(preflight_deadline)
+    engine_deadline = min(
+        time.monotonic() + timeout_seconds,
+        request_deadline - POSTFLIGHT_RESERVE,
+    )
+    require_request_time(engine_deadline)
     try:
         process = subprocess.Popen(
             command,
@@ -1346,55 +1926,85 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
         )
     except OSError as error:
         raise WorkerError(503, "engine_unavailable", f"{engine} CLI could not start") from error
+    stdout = bytearray()
+    stderr = bytearray()
+    exceeded = threading.Event()
+    stream_limit = MAX_HANDOFF_STREAM if version == "steward.coding-task.v2" else MAX_STREAM
+    readers = [
+        threading.Thread(target=drain, args=(process.stdout, stdout, exceeded, stream_limit), daemon=True),
+        threading.Thread(target=drain, args=(process.stderr, stderr, exceeded, stream_limit), daemon=True),
+    ]
+    started_readers: list[threading.Thread] = []
+    timed_out = False
     try:
-        stdout = bytearray()
-        stderr = bytearray()
-        exceeded = threading.Event()
-        stream_limit = MAX_HANDOFF_STREAM if version == "steward.coding-task.v2" else MAX_STREAM
-        readers = [
-            threading.Thread(target=drain, args=(process.stdout, stdout, exceeded, stream_limit), daemon=True),
-            threading.Thread(target=drain, args=(process.stderr, stderr, exceeded, stream_limit), daemon=True),
-        ]
         for reader in readers:
             reader.start()
-        deadline = started + timeout_seconds
-        timed_out = False
+            started_readers.append(reader)
         while process.poll() is None:
-            if exceeded.is_set() or time.monotonic() >= deadline:
-                timed_out = time.monotonic() >= deadline
+            if exceeded.is_set() or time.monotonic() >= engine_deadline:
+                timed_out = time.monotonic() >= engine_deadline
                 break
             time.sleep(0.05)
-        stopped = stop_process(process)
-        descendants_stopped = stop_engine_descendants(baseline_children)
-        for reader in readers:
-            reader.join(timeout=2)
-        if not stopped or not descendants_stopped:
-            raise WorkerError(502, "engine_cleanup_failed", "coding engine descendants did not stop")
-        if any(reader.is_alive() for reader in readers):
-            raise WorkerError(502, "engine_stream_stalled", "coding engine output did not close")
-        if exceeded.is_set():
-            raise WorkerError(
-                502,
-                "engine_output_too_large",
-                f"coding engine output exceeded its {stream_limit >> 10} KiB per-stream limit",
-            )
-        if timed_out:
-            raise WorkerError(504, "engine_timeout", "coding engine exceeded the requested timeout")
     finally:
+        cleanup_deadline = min(
+            time.monotonic() + ENGINE_CLEANUP_TIMEOUT,
+            request_deadline - HANDOFF_TIMEOUT - RESPONSE_TIMEOUT,
+        )
+        try:
+            stopped = stop_process(process, deadline=cleanup_deadline)
+        except Exception:
+            stopped = False
+        try:
+            descendants_stopped = stop_engine_descendants(
+                baseline_children,
+                deadline=cleanup_deadline,
+            )
+        except Exception:
+            descendants_stopped = False
+        for reader in started_readers:
+            remaining = cleanup_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            reader.join(timeout=min(2, remaining))
         close_process_streams(process)
+        if (
+            not stopped
+            or not descendants_stopped
+            or any(reader.is_alive() for reader in started_readers)
+        ):
+            raise WorkerError(502, "engine_cleanup_failed", "coding engine descendants did not stop")
+    if exceeded.is_set():
+        raise WorkerError(
+            502,
+            "engine_output_too_large",
+            f"coding engine output exceeded its {stream_limit >> 10} KiB per-stream limit",
+        )
+    if timed_out:
+        raise WorkerError(504, "engine_timeout", "coding engine exceeded the requested timeout")
+    postflight_deadline = min(
+        time.monotonic() + HANDOFF_TIMEOUT,
+        request_deadline - RESPONSE_TIMEOUT,
+    )
+    require_request_time(postflight_deadline)
     protected_markers = tuple(
         sorted(
-            set(protected_markers).union(secret_markers(worker_token, environment)),
+            set(protected_markers).union(
+                secret_markers(
+                    worker_token,
+                    environment,
+                    deadline=postflight_deadline,
+                )
+            ),
             key=len,
             reverse=True,
         )
     )
     combined = bytes(stdout) + b"\x00" + bytes(stderr)
-    if any(marker and marker in combined for marker in protected_markers):
+    if contains_protected(combined, protected_markers, deadline=postflight_deadline):
         raise WorkerError(502, "credential_output_blocked", "coding engine output matched protected credential material")
-    if base_commit is not None and _current_head() != base_commit:
+    if base_commit is not None and _current_head(deadline=postflight_deadline) != base_commit:
         raise WorkerError(409, "workspace_history_changed", "coding engine changed workspace history")
-    after = git_status()
+    after = git_status(deadline=postflight_deadline)
     if mode == "read" and after != before:
         raise WorkerError(409, "read_mode_modified_workspace", "read-only coding task changed the workspace")
     common: dict[str, object] = {
@@ -1402,16 +2012,21 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
         "mode": mode,
         "outcome": "completed" if process.returncode == 0 else "failed",
         "exit_code": process.returncode,
-        "duration_ms": int((time.monotonic() - started) * 1000),
+        "duration_ms": 0,
         "stdout": bytes(stdout).decode("utf-8", "replace"),
         "stderr": bytes(stderr).decode("utf-8", "replace"),
     }
     if version == "steward.coding-task.v2":
         if base_identity is None:
             raise WorkerError(500, "internal_error", "coding handoff identity is unavailable")
-        handoff = capture_git_handoff(base_identity, protected_markers)
+        handoff = capture_git_handoff(
+            base_identity,
+            protected_markers,
+            deadline=postflight_deadline,
+        )
         if mode == "read" and handoff["patch_bytes"] != 0:
             raise WorkerError(409, "read_mode_modified_workspace", "read-only coding task changed the workspace")
+        common["duration_ms"] = int((time.monotonic() - request_started) * 1000)
         result = {
             "schema_version": "steward.coding-result.v2",
             **common,
@@ -1421,7 +2036,10 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
         if len(encoded) > MAX_PORTABLE_RESULT:
             raise WorkerError(502, "response_too_large", "coding result exceeds its portable 448 KiB limit")
+        require_request_time(request_deadline)
         return result
+    common["duration_ms"] = int((time.monotonic() - request_started) * 1000)
+    require_request_time(request_deadline)
     return {
         "schema_version": "steward.coding-result.v1",
         **common,

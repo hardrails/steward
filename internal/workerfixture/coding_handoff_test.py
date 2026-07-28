@@ -7,6 +7,7 @@ import base64
 import contextlib
 import hashlib
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -617,6 +618,72 @@ class CodingHandoffContractTest(unittest.TestCase):
                     code="unsupported_workspace",
                 )
 
+    def test_git_metadata_must_be_standalone_contained_and_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            origin, base_commit, _ = initialize_repository(root, "origin")
+
+            independent = root / "independent"
+            git(root, "clone", "-q", "--no-local", str(origin), str(independent))
+            with workspace(independent):
+                worker.workspace_identity(base_commit)
+
+            local = root / "local"
+            git(root, "clone", "-q", "--local", str(origin), str(local))
+            self.assertTrue(
+                any(
+                    path.is_file() and not path.is_symlink() and path.stat().st_nlink > 1
+                    for path in (local / ".git").rglob("*")
+                ),
+                "the local-clone fixture did not create shared metadata files",
+            )
+            with workspace(local):
+                self.assert_worker_error(
+                    lambda: worker.workspace_identity(base_commit),
+                    status=409,
+                    code="unsupported_workspace",
+                )
+
+            linked = root / "linked"
+            git(origin, "worktree", "add", "-q", "--detach", str(linked), base_commit)
+            self.assertTrue((linked / ".git").is_file())
+            with workspace(linked):
+                self.assert_worker_error(
+                    lambda: worker.workspace_identity(base_commit),
+                    status=409,
+                    code="unsupported_workspace",
+                )
+
+            linked_metadata, linked_base, _ = initialize_repository(root, "linked-metadata")
+            external_metadata = root / "external-metadata"
+            (linked_metadata / ".git").rename(external_metadata)
+            os.symlink(external_metadata, linked_metadata / ".git", target_is_directory=True)
+            with workspace(linked_metadata):
+                self.assert_worker_error(
+                    lambda: worker.workspace_identity(linked_base),
+                    status=409,
+                    code="unsupported_workspace",
+                )
+
+    def test_late_external_object_store_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            repository, base_commit, _ = initialize_repository(root)
+            identity, _ = self.identity(repository, base_commit)
+            external_objects = root / "external-objects"
+            (repository / ".git" / "objects").rename(external_objects)
+            os.symlink(
+                external_objects,
+                repository / ".git" / "objects",
+                target_is_directory=True,
+            )
+            with workspace(repository):
+                self.assert_worker_error(
+                    lambda: worker.capture_git_handoff(identity),
+                    status=409,
+                    code="unsupported_workspace",
+                )
+
     def test_changed_base_blobs_with_protected_material_are_refused(self) -> None:
         marker = b"fixture-protected-base-secret-927451"
         cases: tuple[tuple[str, bytes, bytes | None], ...] = (
@@ -793,6 +860,149 @@ class CodingHandoffContractTest(unittest.TestCase):
                     worker._reject_special_workspace_entries,
                     status=413,
                     code="workspace_too_large",
+                )
+
+    def test_hardlinked_workspace_file_is_refused_before_engine_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            repository, _, _ = initialize_repository(root)
+            external = write(root, "outside.txt", b"outside remains unchanged\n")
+            os.link(external, repository / "shared.txt")
+            with workspace(repository), mock.patch.object(
+                worker,
+                "command_for",
+                side_effect=AssertionError("engine must not start"),
+            ):
+                self.assert_worker_error(
+                    lambda: worker.run_task(
+                        "codex",
+                        b"fixture-worker-token-value",
+                        worker.validate_task_payload(
+                            {
+                                "schema_version": "steward.coding-task.v1",
+                                "task": "Change the shared file",
+                                "mode": "write",
+                                "timeout_seconds": 30,
+                            }
+                        ),
+                    ),
+                    status=409,
+                    code="special_file_not_supported",
+                )
+            self.assertEqual(external.read_bytes(), b"outside remains unchanged\n")
+
+    def test_credential_inventory_is_bounded_nofollow_and_complete(self) -> None:
+        token = b"fixture-worker-token-value"
+        key_secret = b"fixture-json-key-secret-73915"
+        proxy = "http://proxy-user:secret%2Fpass@proxy.invalid:8080"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            credential_home = root / "credentials"
+            credential_home.mkdir(mode=0o700)
+            (credential_home / "auth.json").write_bytes(
+                json.dumps({key_secret.decode(): True}).encode()
+            )
+            markers = worker.secret_markers(
+                token,
+                {
+                    "CODEX_HOME": str(credential_home),
+                    "HTTPS_PROXY": proxy,
+                },
+            )
+            for protected in (
+                token,
+                key_secret,
+                proxy.encode(),
+                b"proxy-user",
+                b"secret/pass",
+            ):
+                self.assertIn(protected, markers)
+
+            linked_home = root / "linked-credentials"
+            os.symlink(credential_home, linked_home, target_is_directory=True)
+            self.assert_worker_error(
+                lambda: worker.secret_markers(
+                    token,
+                    {"CODEX_HOME": str(linked_home)},
+                ),
+                status=500,
+                code="credential_store_unsafe",
+            )
+
+            (credential_home / "oversized").write_bytes(
+                b"x" * (worker.MAX_CREDENTIAL_FILE_BYTES + 1)
+            )
+            self.assert_worker_error(
+                lambda: worker.secret_markers(
+                    token,
+                    {"CODEX_HOME": str(credential_home)},
+                ),
+                status=500,
+                code="credential_inventory_too_large",
+            )
+
+    def test_credential_entry_and_value_bounds_fail_closed(self) -> None:
+        token = b"fixture-worker-token-value"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            entries = root / "entries"
+            entries.mkdir(mode=0o700)
+            for index in range(3):
+                (entries / f"value-{index}").write_bytes(b"credential-value")
+            with mock.patch.object(worker, "MAX_CREDENTIAL_ENTRIES", 2):
+                self.assert_worker_error(
+                    lambda: worker.secret_markers(
+                        token,
+                        {"CODEX_HOME": str(entries)},
+                    ),
+                    status=500,
+                    code="credential_inventory_too_large",
+                )
+
+            values = root / "values"
+            values.mkdir(mode=0o700)
+            (values / "auth.json").write_text(
+                json.dumps(
+                    {
+                        f"credential-key-{index:04d}": True
+                        for index in range(worker.MAX_CREDENTIAL_VALUES)
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assert_worker_error(
+                lambda: worker.secret_markers(
+                    token,
+                    {"CODEX_HOME": str(values)},
+                ),
+                status=500,
+                code="credential_inventory_too_large",
+            )
+
+    def test_protected_marker_scan_honors_its_absolute_deadline(self) -> None:
+        with mock.patch.object(worker.time, "monotonic", side_effect=(0.0, 2.0)):
+            self.assert_worker_error(
+                lambda: worker.contains_protected(
+                    b"safe output",
+                    (b"first-missing-marker", b"second-missing-marker"),
+                    deadline=1.0,
+                ),
+                status=504,
+                code="request_timeout",
+            )
+
+    def test_handoff_rejects_an_expired_caller_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, base_commit, _ = initialize_repository(pathlib.Path(temporary))
+            identity, _ = self.identity(repository, base_commit)
+            with workspace(repository):
+                self.assert_worker_error(
+                    lambda: worker.capture_git_handoff(
+                        identity,
+                        deadline=time.monotonic() - 1,
+                    ),
+                    status=504,
+                    code="request_timeout",
                 )
 
     def test_v2_dirty_start_ignores_the_v1_development_escape_hatch(self) -> None:
@@ -1033,38 +1243,33 @@ class CodingHandoffContractTest(unittest.TestCase):
     def test_run_task_contains_detached_background_children_before_returning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository, base_commit, _ = initialize_repository(pathlib.Path(temporary))
-            cleanup_error: worker.WorkerError | None = None
-            try:
+            for version in ("steward.coding-task.v1", "steward.coding-task.v2"):
+                suffix = version.rsplit(".", 1)[-1]
+                payload: dict[str, object] = {
+                    "schema_version": version,
+                    "task": "Do not leave detached background processes",
+                    "mode": "write",
+                    "timeout_seconds": 30,
+                }
+                if version == "steward.coding-task.v2":
+                    payload["expected_base_commit"] = base_commit
                 result = self.run_engine(
                     repository,
-                    {
-                        "schema_version": "steward.coding-task.v2",
-                        "task": "Do not leave detached background processes",
-                        "mode": "write",
-                        "timeout_seconds": 30,
-                        "expected_base_commit": base_commit,
-                    },
+                    payload,
                     self.background_writer_source(
-                        "release-detached",
-                        "late-detached.txt",
+                        f"release-detached-{suffix}",
+                        f"late-detached-{suffix}.txt",
                         detached=True,
                     ),
                 )
                 self.assertEqual(result["outcome"], "completed")
-            except worker.WorkerError as error:
-                cleanup_error = error
-                self.assertIn(
-                    error.code,
-                    {"engine_cleanup_failed", "engine_process_leaked"},
+                release = write(repository, f"release-detached-{suffix}", b"release\n")
+                time.sleep(0.4)
+                self.assertFalse(
+                    (repository / f"late-detached-{suffix}.txt").exists(),
+                    f"a detached {version} engine child mutated the workspace after run_task returned",
                 )
-            write(repository, "release-detached", b"release\n")
-            time.sleep(0.4)
-            self.assertFalse(
-                (repository / "late-detached.txt").exists(),
-                "a detached engine child mutated the workspace after run_task returned",
-            )
-            if cleanup_error is not None:
-                self.assertGreaterEqual(cleanup_error.status, 500)
+                release.unlink()
 
     def test_credential_created_during_engine_run_is_blocked_from_output(self) -> None:
         token = "fixture-refreshed-credential-864209"
@@ -1083,7 +1288,7 @@ class CodingHandoffContractTest(unittest.TestCase):
             )
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_HOME": str(credential_home)},
+                {"CODEX_HOME": str(credential_home.resolve())},
                 clear=False,
             ):
                 self.assert_worker_error(
