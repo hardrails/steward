@@ -394,6 +394,24 @@ class CodingHandoffContractTest(unittest.TestCase):
                 },
             )
 
+    def test_bounded_process_times_out_when_a_child_does_not_read_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            started = time.monotonic()
+            _, stdout, stderr, exceeded, timed_out = worker.run_bounded_process(
+                [sys.executable, "-I", "-B", "-c", "import time; time.sleep(10)"],
+                cwd=pathlib.Path(temporary),
+                environment=worker.git_environment(),
+                timeout_seconds=0.05,
+                stdout_limit=1024,
+                stderr_limit=1024,
+                input_bytes=b"x" * (256 << 10),
+            )
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(stdout, b"")
+        self.assertEqual(stderr, b"")
+        self.assertFalse(exceeded)
+        self.assertTrue(timed_out)
+
     def test_empty_handoff_binds_equal_trees_and_an_empty_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository, base_commit, base_tree = initialize_repository(pathlib.Path(temporary))
@@ -681,9 +699,10 @@ class CodingHandoffContractTest(unittest.TestCase):
                         code="unsupported_workspace",
                     )
 
-    def test_untracked_files_use_one_staged_patch_diff_per_stable_capture(self) -> None:
+    def test_untracked_file_handoff_is_bounded_and_independently_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            repository, base_commit, _ = initialize_repository(pathlib.Path(temporary))
+            root = pathlib.Path(temporary)
+            repository, base_commit, _ = initialize_repository(root)
             identity, _ = self.identity(repository, base_commit)
             for index in range(4):
                 write(repository, f"untracked-{index}.txt", f"value {index}\n".encode())
@@ -706,19 +725,75 @@ class CodingHandoffContractTest(unittest.TestCase):
                 handoff["changed_paths"],
                 [f"untracked-{index}.txt" for index in range(4)],
             )
-            patch_diffs = [
-                arguments
-                for arguments in calls
-                if arguments
-                and arguments[0] == "diff"
-                and "--cached" in arguments
-                and "--binary" in arguments
-            ]
-            self.assertEqual(len(patch_diffs), 2, calls)
-            self.assertFalse(
-                any(arguments and arguments[0] == "diff" and "--no-index" in arguments for arguments in calls),
-                calls,
+            self.assertLessEqual(len(calls), 64, calls)
+            review = root / "untracked-review"
+            git(root, "clone", "-q", "--no-local", str(repository), str(review))
+            git(review, "apply", "--index", "--binary", "-", input_bytes=patch_bytes(handoff))
+            self.assertEqual(
+                git(review, "write-tree").stdout.decode().strip(),
+                handoff["result_tree"],
             )
+
+    def test_handoff_enforces_exact_path_and_patch_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, base_commit, _ = initialize_repository(pathlib.Path(temporary))
+            identity, _ = self.identity(repository, base_commit)
+            for index in range(worker.MAX_CHANGED_PATHS):
+                write(repository, f"bounded-{index:03d}.txt", b"x\n")
+            with workspace(repository):
+                environment = worker._repository_environment(identity)
+                paths = worker._changed_path_inventory(
+                    environment,
+                    deadline=time.monotonic() + 20,
+                )
+            self.assertEqual(len(paths), worker.MAX_CHANGED_PATHS)
+            write(repository, "one-too-many.txt", b"x\n")
+            with workspace(repository):
+                self.assert_worker_error(
+                    lambda: worker._changed_path_inventory(
+                        environment,
+                        deadline=time.monotonic() + 20,
+                    ),
+                    status=413,
+                    code="handoff_too_large",
+                )
+
+        for size, expected_code in (
+            (worker.MAX_HANDOFF_PATCH, "handoff_not_reproducible"),
+            (worker.MAX_HANDOFF_PATCH + 1, "handoff_too_large"),
+        ):
+            with self.subTest(patch_bytes=size), tempfile.TemporaryDirectory() as temporary:
+                repository, base_commit, _ = initialize_repository(pathlib.Path(temporary))
+                identity, _ = self.identity(repository, base_commit)
+                write(repository, "changed.txt", b"result\n")
+                original_run_git = worker.run_git
+
+                def bounded_patch(arguments: list[str], **kwargs: object) -> bytes:
+                    if arguments and arguments[0] == "diff" and "--binary" in arguments:
+                        return b"x" * size
+                    return original_run_git(arguments, **kwargs)
+
+                with workspace(repository), mock.patch.object(
+                    worker,
+                    "run_git",
+                    side_effect=bounded_patch,
+                ):
+                    self.assert_worker_error(
+                        lambda: worker.capture_git_handoff(identity),
+                        code=expected_code,
+                    )
+
+    def test_workspace_entry_bound_is_enforced_while_streaming(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = pathlib.Path(temporary)
+            for index in range(3):
+                write(repository, f"entry-{index}.txt", b"x\n")
+            with workspace(repository), mock.patch.object(worker, "MAX_WORKSPACE_ENTRIES", 2):
+                self.assert_worker_error(
+                    worker._reject_special_workspace_entries,
+                    status=413,
+                    code="workspace_too_large",
+                )
 
     def test_v2_dirty_start_ignores_the_v1_development_escape_hatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -877,6 +952,56 @@ class CodingHandoffContractTest(unittest.TestCase):
         self.assertEqual(result["changed_paths"], [])
         self.assertEqual(result["stdout"], "version one\n")
         self.assertEqual(result["stderr"], "diagnostic\n")
+
+    def test_run_task_version_1_supports_a_clean_unborn_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = pathlib.Path(temporary) / "unborn"
+            repository.mkdir()
+            git(repository, "init", "-q")
+            result = self.run_engine(
+                repository,
+                {
+                    "schema_version": "steward.coding-task.v1",
+                    "task": "Inspect the unborn repository",
+                    "mode": "read",
+                    "timeout_seconds": 30,
+                },
+                'print("unborn repository")',
+            )
+        self.assert_result_shape(result, "steward.coding-result.v1")
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(result["changed_paths"], [])
+
+    def test_run_task_version_1_write_preserves_dirty_escape_and_failure_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, _, _ = initialize_repository(pathlib.Path(temporary))
+            write(repository, "existing-dirty.txt", b"operator fixture\n")
+            with mock.patch.dict(
+                os.environ,
+                {"STEWARD_ALLOW_DIRTY_WORKSPACE": "YES"},
+                clear=False,
+            ):
+                result = self.run_engine(
+                    repository,
+                    {
+                        "schema_version": "steward.coding-task.v1",
+                        "task": "Write a partial result",
+                        "mode": "write",
+                        "timeout_seconds": 30,
+                    },
+                    (
+                        "import pathlib; "
+                        "pathlib.Path('engine-output.txt').write_bytes(b'partial\\n'); "
+                        "raise SystemExit(7)"
+                    ),
+                )
+        self.assert_result_shape(result, "steward.coding-result.v1")
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["exit_code"], 7)
+        self.assertEqual(
+            result["changed_paths"],
+            ["engine-output.txt", "existing-dirty.txt"],
+        )
 
     def test_run_task_stops_same_group_background_children_before_returning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -132,6 +132,25 @@ def drain(stream: object, output: bytearray, exceeded: threading.Event, maximum:
             return
 
 
+def feed_process_input(stream: object, value: bytes) -> None:
+    view = memoryview(value)
+    offset = 0
+    try:
+        descriptor = stream.fileno()
+        while offset < len(view):
+            written = os.write(descriptor, view[offset:])
+            if written <= 0:
+                return
+            offset += written
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
 def process_group_exists(group_id: int) -> bool:
     try:
         os.killpg(group_id, 0)
@@ -291,6 +310,7 @@ def run_bounded_process(
     except OSError as error:
         raise WorkerError(400, "invalid_workspace", "workspace command could not start") from error
     try:
+        deadline = time.monotonic() + timeout_seconds
         stdout = bytearray()
         stderr = bytearray()
         stdout_exceeded = threading.Event()
@@ -309,13 +329,14 @@ def run_bounded_process(
         ]
         for reader in readers:
             reader.start()
+        input_writer = None
         if input_bytes is not None:
-            try:
-                process.stdin.write(input_bytes)
-                process.stdin.close()
-            except BrokenPipeError:
-                pass
-        deadline = time.monotonic() + timeout_seconds
+            input_writer = threading.Thread(
+                target=feed_process_input,
+                args=(process.stdin, input_bytes),
+                daemon=True,
+            )
+            input_writer.start()
         timed_out = False
         while process.poll() is None:
             if stdout_exceeded.is_set() or stderr_exceeded.is_set() or time.monotonic() >= deadline:
@@ -325,7 +346,13 @@ def run_bounded_process(
         stopped = stop_process(process)
         for reader in readers:
             reader.join(timeout=2)
-        if not stopped or any(reader.is_alive() for reader in readers):
+        if input_writer is not None:
+            input_writer.join(timeout=2)
+        if (
+            not stopped
+            or any(reader.is_alive() for reader in readers)
+            or (input_writer is not None and input_writer.is_alive())
+        ):
             raise WorkerError(400, "invalid_workspace", "workspace command output did not close")
         return process.returncode, bytes(stdout), bytes(stderr), (
             stdout_exceeded.is_set() or stderr_exceeded.is_set()
@@ -426,7 +453,14 @@ def run_git(
     return stdout
 
 
-def decode_nul_values(raw: bytes, *, label: str, maximum: int) -> tuple[str, ...]:
+def decode_nul_values(
+    raw: bytes,
+    *,
+    label: str,
+    maximum: int,
+    overflow_status: int = 409,
+    overflow_code: str = "workspace_too_large",
+) -> tuple[str, ...]:
     values: list[str] = []
     for encoded in raw.split(b"\x00"):
         if not encoded:
@@ -439,7 +473,7 @@ def decode_nul_values(raw: bytes, *, label: str, maximum: int) -> tuple[str, ...
             raise WorkerError(409, "unsupported_workspace", f"{label} contains an invalid path")
         values.append(value)
         if len(values) > maximum:
-            raise WorkerError(409, "workspace_too_large", f"{label} exceeds its path-count bound")
+            raise WorkerError(overflow_status, overflow_code, f"{label} exceeds its path-count bound")
     return tuple(values)
 
 
@@ -593,32 +627,37 @@ def _reject_special_workspace_entries(*, deadline: float | None = None) -> None:
         directory, parent_components = pending.pop()
         try:
             with os.scandir(directory) as iterator:
-                entries = tuple(iterator)
+                for entry in iterator:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise WorkerError(504, "handoff_timeout", "Git handoff exceeded its aggregate time limit")
+                    if directory == WORKSPACE and entry.name == ".git":
+                        continue
+                    visited += 1
+                    if visited > MAX_WORKSPACE_ENTRIES:
+                        raise WorkerError(413, "workspace_too_large", "workspace exceeds its entry-count bound")
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as error:
+                        raise WorkerError(409, "workspace_changed", "workspace changed during inventory") from error
+                    components = (*parent_components, entry.name)
+                    portable_key = _portable_path_key(components)
+                    if portable_key in portable_paths:
+                        raise WorkerError(
+                            409,
+                            "unsupported_workspace",
+                            "workspace paths collide on portable filesystems",
+                        )
+                    portable_paths.add(portable_key)
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append((pathlib.Path(entry.path), components))
+                    elif not stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                        raise WorkerError(
+                            409,
+                            "special_file_not_supported",
+                            "handoff workspaces support only directories, regular files, and symlinks",
+                        )
         except OSError as error:
             raise WorkerError(409, "unsupported_workspace", "workspace inventory cannot be read safely") from error
-        for entry in entries:
-            if directory == WORKSPACE and entry.name == ".git":
-                continue
-            visited += 1
-            if visited > MAX_WORKSPACE_ENTRIES:
-                raise WorkerError(413, "workspace_too_large", "workspace exceeds its entry-count bound")
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError as error:
-                raise WorkerError(409, "workspace_changed", "workspace changed during inventory") from error
-            components = (*parent_components, entry.name)
-            portable_key = _portable_path_key(components)
-            if portable_key in portable_paths:
-                raise WorkerError(409, "unsupported_workspace", "workspace paths collide on portable filesystems")
-            portable_paths.add(portable_key)
-            if stat.S_ISDIR(info.st_mode):
-                pending.append((pathlib.Path(entry.path), components))
-            elif not stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
-                raise WorkerError(
-                    409,
-                    "special_file_not_supported",
-                    "handoff workspaces support only directories, regular files, and symlinks",
-                )
 
 
 def _reject_unsupported_repository(
@@ -870,6 +909,8 @@ def _changed_path_inventory(
         ),
         label="tracked change inventory",
         maximum=MAX_CHANGED_PATHS,
+        overflow_status=413,
+        overflow_code="handoff_too_large",
     )
     untracked = decode_nul_values(
         run_git(
@@ -879,6 +920,8 @@ def _changed_path_inventory(
         ),
         label="untracked change inventory",
         maximum=MAX_CHANGED_PATHS,
+        overflow_status=413,
+        overflow_code="handoff_too_large",
     )
     paths = tuple(sorted(set(tracked) | set(untracked)))
     if len(paths) > MAX_CHANGED_PATHS:
@@ -1181,7 +1224,7 @@ def _capture_snapshot(
                 str(identity["base_commit"]),
                 "--",
             ],
-            stdout_limit=MAX_HANDOFF_PATCH + 1,
+            stdout_limit=MAX_HANDOFF_PATCH,
             extra_environment=staged_environment,
             status=413,
             code="handoff_too_large",
@@ -1189,6 +1232,8 @@ def _capture_snapshot(
             overflow_code="handoff_too_large",
             deadline=deadline,
         )
+        if len(patch) > MAX_HANDOFF_PATCH:
+            raise WorkerError(413, "handoff_too_large", "handoff patch exceeds its byte limit")
         if any(marker and marker in patch for marker in protected_markers):
             raise WorkerError(502, "credential_output_blocked", "handoff patch matched protected credential material")
         verified_environment = _temporary_repository_environment(identity, root / "verified")
@@ -1272,20 +1317,6 @@ def _current_head() -> str:
     return git_text(["rev-parse", "--verify", "HEAD^{commit}"])
 
 
-def _changed_paths_since(base_commit: str) -> list[str]:
-    tracked = decode_nul_values(
-        run_git(["diff", "--name-only", "-z", "--no-renames", base_commit, "--"]),
-        label="workspace change inventory",
-        maximum=4096,
-    )
-    untracked = decode_nul_values(
-        run_git(["ls-files", "--others", "--exclude-standard", "-z"]),
-        label="workspace change inventory",
-        maximum=4096,
-    )
-    return sorted(set(tracked) | set(untracked))
-
-
 def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> dict[str, object]:
     task = str(request["task"])
     mode = str(request["mode"])
@@ -1297,7 +1328,7 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
     before = git_status()
     if before and os.environ.get("STEWARD_ALLOW_DIRTY_WORKSPACE", "NO") != "YES":
         raise WorkerError(409, "workspace_not_clean", "coding worker requires a clean dedicated worktree")
-    base_commit = _current_head()
+    base_commit = str(base_identity["base_commit"]) if base_identity is not None else None
     environment = clean_environment(engine)
     protected_markers = tuple(secret_markers(worker_token, environment))
     command = command_for(engine, task, mode)
@@ -1361,7 +1392,7 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
     combined = bytes(stdout) + b"\x00" + bytes(stderr)
     if any(marker and marker in combined for marker in protected_markers):
         raise WorkerError(502, "credential_output_blocked", "coding engine output matched protected credential material")
-    if _current_head() != base_commit:
+    if base_commit is not None and _current_head() != base_commit:
         raise WorkerError(409, "workspace_history_changed", "coding engine changed workspace history")
     after = git_status()
     if mode == "read" and after != before:
@@ -1394,7 +1425,7 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
     return {
         "schema_version": "steward.coding-result.v1",
         **common,
-        "changed_paths": _changed_paths_since(base_commit),
+        "changed_paths": sorted({entry[3:] for entry in after if len(entry) > 3}),
     }
 
 
@@ -1468,6 +1499,8 @@ class Server(http.server.HTTPServer):
 
 
 def main() -> int:
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("coding worker requires Linux process-containment support")
     if os.geteuid() == 0 or os.getegid() == 0:
         raise RuntimeError("coding worker refuses to run as root")
     info = os.stat(WORKSPACE, follow_symlinks=False)
