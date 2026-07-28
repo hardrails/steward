@@ -640,6 +640,7 @@ jobs:
           test -z "$(git status --porcelain=v1)"
 
           STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
+          HERMES_DEBUG_KEEP_FAILED_WORK=YES \
           HERMES_SOURCE_DIR="$upstream_root" \
           HERMES_EVIDENCE_OUT="$evidence_root/hermes-feasibility.json" \
           HERMES_BUILD_TIMEOUT_SECONDS=3600 \
@@ -712,6 +713,26 @@ jobs:
           go test ./internal/adapterfixture \
             -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' \
             -count=1
+
+      - name: Report bounded Hermes build diagnostics
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t build_logs < <(
+            find /tmp -maxdepth 2 -type f \
+              -path '/tmp/steward-hermes-feasibility.*/build.log' -print0
+          )
+          if (( ${#build_logs[@]} == 0 )); then
+            echo 'No Hermes feasibility build log was retained.' >&2
+            exit 0
+          fi
+          if (( ${#build_logs[@]} != 1 )); then
+            echo 'Refusing to print ambiguous Hermes feasibility diagnostics.' >&2
+            exit 1
+          fi
+          test "$(stat -c '%s' "${build_logs[0]}")" -le 33554432
+          tail -n 250 -- "${build_logs[0]}" >&2
 
       - name: Upload metadata-only qualification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
