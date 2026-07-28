@@ -1130,22 +1130,26 @@ wait_for_hermes() {
 start_workload() {
 	local generation=$1
 	local response=$work/start-g$generation.response.json
+	local readiness=$work/start-g$generation.readiness.json
 	local status
 	status=$(curl -sS -o "$response" -w '%{http_code}' -X POST \
 		"$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" || true)
 	if [[ $status == 200 ]]; then
 		return 0
 	fi
+	curl -sS -o "$readiness" -H "Authorization: Bearer $token" \
+		"$executor_url/v1/readiness" >/dev/null 2>&1 || true
 	echo "hermes-steward-acceptance: Executor start failed for generation $generation" >&2
-	if ! python3 -I - "$response" "$status" "$generation" <<'PY' >&2
+	if ! python3 -I - "$response" "$readiness" "$status" "$generation" <<'PY' >&2
 import json
 import pathlib
 import re
 import sys
 
 path = pathlib.Path(sys.argv[1])
-status = sys.argv[2]
-generation = sys.argv[3]
+readiness_path = pathlib.Path(sys.argv[2])
+status = sys.argv[3]
+generation = sys.argv[4]
 try:
     raw = path.read_bytes()
     document = json.loads(raw)
@@ -1161,9 +1165,28 @@ if (
     or generation not in {"1", "2"}
 ):
     raise SystemExit(1)
+failures = []
+try:
+    readiness_raw = readiness_path.read_bytes()
+    readiness_document = json.loads(readiness_raw)
+    candidates = readiness_document["reconciliation"].get("failures", [])
+    if not 0 < len(readiness_raw) <= 65536 or not isinstance(candidates, list) or len(candidates) > 64:
+        raise ValueError
+    for failure in candidates:
+        if (
+            set(failure) - {"runtime_ref", "code", "message"}
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", str(failure.get("code", ""))) is None
+            or not isinstance(failure.get("message"), str)
+            or not 0 < len(failure["message"]) <= 4096
+        ):
+            raise ValueError
+        failures.append({"code": failure["code"], "message": failure["message"]})
+except (KeyError, OSError, TypeError, ValueError):
+    failures = []
 payload = {
     "contains_agent_content": False,
     "error": document["error"],
+    "failures": failures,
     "generation": int(generation),
     "message": document["message"],
     "schema_version": "steward.executor-start-diagnostic.v1",
