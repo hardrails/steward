@@ -13,6 +13,7 @@ import os
 import pathlib
 import re
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -254,6 +255,25 @@ def close_process_streams(process: subprocess.Popen[bytes]) -> None:
             stream.close()
 
 
+def defer_process_stream_close(
+    process: subprocess.Popen[bytes],
+    threads: tuple[threading.Thread, ...],
+) -> None:
+    def close_when_idle() -> None:
+        for thread in threads:
+            thread.join()
+        try:
+            close_process_streams(process)
+        except Exception:
+            pass
+
+    try:
+        closer = threading.Thread(target=close_when_idle, daemon=True)
+        closer.start()
+    except Exception:
+        pass
+
+
 def linux_child_processes() -> set[int] | None:
     if sys.platform != "linux":
         return None
@@ -349,6 +369,7 @@ def run_bounded_process(
     input_bytes: bytes | None = None,
     absolute_deadline: float | None = None,
 ) -> tuple[int, bytes, bytes, bool, bool]:
+    baseline_children = prepare_engine_isolation()
     try:
         process = subprocess.Popen(
             command,
@@ -403,10 +424,28 @@ def run_bounded_process(
             time.sleep(0.02)
     finally:
         cleanup_deadline = absolute_deadline if absolute_deadline is not None else time.monotonic() + 10
+        remaining_cleanup = max(0.0, cleanup_deadline - time.monotonic())
+        descendant_budget = min(5.0, remaining_cleanup / 2)
+        process_cleanup_deadline = cleanup_deadline - descendant_budget
         try:
-            stopped = stop_process(process, deadline=cleanup_deadline)
+            stopped = stop_process(process, deadline=process_cleanup_deadline)
         except Exception:
             stopped = False
+        unexpected_descendants = False
+        descendant_inventory_safe = True
+        if baseline_children is not None:
+            current_children = linux_child_processes()
+            if current_children is None:
+                descendant_inventory_safe = False
+            else:
+                unexpected_descendants = bool(current_children - baseline_children)
+        try:
+            descendants_stopped = stop_engine_descendants(
+                baseline_children,
+                deadline=cleanup_deadline,
+            )
+        except Exception:
+            descendants_stopped = False
         for reader in started_readers:
             remaining = cleanup_deadline - time.monotonic()
             if remaining <= 0:
@@ -416,13 +455,41 @@ def run_bounded_process(
             remaining = cleanup_deadline - time.monotonic()
             if remaining > 0:
                 input_writer.join(timeout=min(2, remaining))
-        close_process_streams(process)
+        threads_alive = any(reader.is_alive() for reader in started_readers) or (
+            input_writer is not None
+            and input_writer_started
+            and input_writer.is_alive()
+        )
+        streams_closed = False
+        if stopped and not threads_alive:
+            try:
+                close_process_streams(process)
+                streams_closed = True
+            except Exception:
+                pass
         if (
             not stopped
-            or any(reader.is_alive() for reader in started_readers)
-            or (input_writer is not None and input_writer_started and input_writer.is_alive())
+            or not descendant_inventory_safe
+            or not descendants_stopped
+            or threads_alive
+            or not streams_closed
         ):
-            raise WorkerError(400, "invalid_workspace", "workspace command output did not close")
+            if not streams_closed:
+                deferred_threads = tuple(started_readers)
+                if input_writer is not None and input_writer_started:
+                    deferred_threads = (*deferred_threads, input_writer)
+                defer_process_stream_close(process, deferred_threads)
+            raise WorkerError(
+                502,
+                "worker_cleanup_failed",
+                "workspace command descendants did not stop",
+            )
+        if unexpected_descendants:
+            raise WorkerError(
+                400,
+                "invalid_workspace",
+                "workspace command launched an unsupported detached process",
+            )
     return process.returncode, bytes(stdout), bytes(stderr), (
         stdout_exceeded.is_set() or stderr_exceeded.is_set()
     ), timed_out
@@ -1457,7 +1524,12 @@ def _changed_path_inventory(
     tracked = decode_nul_values(
         run_git(
             ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"],
+            stdout_limit=MAX_CHANGED_PATH_BYTES + MAX_CHANGED_PATHS,
             extra_environment=repository_environment,
+            status=413,
+            code="handoff_too_large",
+            message="tracked change inventory exceeds the handoff bound",
+            overflow_code="handoff_too_large",
             deadline=deadline,
         ),
         label="tracked change inventory",
@@ -1468,7 +1540,12 @@ def _changed_path_inventory(
     untracked = decode_nul_values(
         run_git(
             ["ls-files", "--others", "--exclude-standard", "-z"],
+            stdout_limit=MAX_CHANGED_PATH_BYTES + MAX_CHANGED_PATHS,
             extra_environment=repository_environment,
+            status=413,
+            code="handoff_too_large",
+            message="untracked change inventory exceeds the handoff bound",
+            overflow_code="handoff_too_large",
             deadline=deadline,
         ),
         label="untracked change inventory",
@@ -1928,17 +2005,18 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
         )
     except OSError as error:
         raise WorkerError(503, "engine_unavailable", f"{engine} CLI could not start") from error
-    stdout = bytearray()
-    stderr = bytearray()
-    exceeded = threading.Event()
     stream_limit = MAX_HANDOFF_STREAM if version == "steward.coding-task.v2" else MAX_STREAM
-    readers = [
-        threading.Thread(target=drain, args=(process.stdout, stdout, exceeded, stream_limit), daemon=True),
-        threading.Thread(target=drain, args=(process.stderr, stderr, exceeded, stream_limit), daemon=True),
-    ]
+    readers: list[threading.Thread] = []
     started_readers: list[threading.Thread] = []
     timed_out = False
     try:
+        stdout = bytearray()
+        stderr = bytearray()
+        exceeded = threading.Event()
+        readers = [
+            threading.Thread(target=drain, args=(process.stdout, stdout, exceeded, stream_limit), daemon=True),
+            threading.Thread(target=drain, args=(process.stderr, stderr, exceeded, stream_limit), daemon=True),
+        ]
         for reader in readers:
             reader.start()
             started_readers.append(reader)
@@ -1952,8 +2030,11 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
             time.monotonic() + ENGINE_CLEANUP_TIMEOUT,
             request_deadline - HANDOFF_TIMEOUT - RESPONSE_TIMEOUT,
         )
+        remaining_cleanup = max(0.0, cleanup_deadline - time.monotonic())
+        descendant_budget = min(5.0, remaining_cleanup / 2)
+        process_cleanup_deadline = cleanup_deadline - descendant_budget
         try:
-            stopped = stop_process(process, deadline=cleanup_deadline)
+            stopped = stop_process(process, deadline=process_cleanup_deadline)
         except Exception:
             stopped = False
         try:
@@ -1963,16 +2044,30 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
             )
         except Exception:
             descendants_stopped = False
-        for reader in started_readers:
-            remaining = cleanup_deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            reader.join(timeout=min(2, remaining))
-        close_process_streams(process)
+        readers_alive = True
+        try:
+            for reader in started_readers:
+                remaining = cleanup_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                reader.join(timeout=min(2, remaining))
+            readers_alive = any(reader.is_alive() for reader in started_readers)
+        except Exception:
+            readers_alive = True
+        streams_closed = False
+        if stopped and descendants_stopped and not readers_alive:
+            try:
+                close_process_streams(process)
+                streams_closed = True
+            except Exception:
+                pass
+        if not streams_closed:
+            defer_process_stream_close(process, tuple(started_readers))
         if (
             not stopped
             or not descendants_stopped
-            or any(reader.is_alive() for reader in started_readers)
+            or readers_alive
+            or not streams_closed
         ):
             raise WorkerError(502, "engine_cleanup_failed", "coding engine descendants did not stop")
     if exceeded.is_set():
@@ -2052,13 +2147,26 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "steward-coding-worker/1"
 
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(RESPONSE_TIMEOUT)
+
     def do_POST(self) -> None:  # noqa: N802
         try:
             self.authorize()
             if self.path != "/v1/run":
                 raise WorkerError(404, "route_not_found", "route is not available")
             request = validate_task_payload(self.read_payload())
-            result = run_task(self.server.engine, self.server.worker_token, request)
+            self.server.suspend_engine_ingress()
+            try:
+                result = run_task(self.server.engine, self.server.worker_token, request)
+            except WorkerError as error:
+                if error.code in {"engine_cleanup_failed", "worker_cleanup_failed"}:
+                    self.server.poison_engine_ingress()
+                raise
+            finally:
+                if not self.server.poisoned:
+                    self.server.resume_engine_ingress()
             self.write_json(200, result)
         except WorkerError as error:
             self.write_json(error.status, {"error": error.code, "message": error.message})
@@ -2110,12 +2218,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 class Server(http.server.HTTPServer):
+    allow_reuse_address = True
     request_queue_size = 4
 
     def __init__(self, address: tuple[str, int], engine: str, token: bytes) -> None:
         super().__init__(address, Handler)
         self.engine = engine
         self.worker_token = token
+        self.accepting = True
+        self.poisoned = False
+
+    def suspend_engine_ingress(self) -> None:
+        if self.poisoned or not self.accepting:
+            raise WorkerError(
+                503,
+                "engine_ingress_unavailable",
+                "coding worker cannot isolate engine ingress",
+            )
+        address = self.server_address
+        self.server_close()
+        self.accepting = False
+        replacement = None
+        try:
+            replacement = socket.socket(self.address_family, self.socket_type)
+            self.socket = replacement
+            self.server_address = address
+            self.server_bind()
+        except Exception as error:
+            if replacement is not None:
+                try:
+                    replacement.close()
+                except OSError:
+                    pass
+            self.poisoned = True
+            raise WorkerError(
+                503,
+                "engine_ingress_unavailable",
+                "coding worker cannot isolate engine ingress",
+            ) from error
+
+    def resume_engine_ingress(self) -> None:
+        if self.poisoned or self.accepting:
+            raise WorkerError(
+                503,
+                "engine_ingress_unavailable",
+                "coding worker cannot restore engine ingress",
+            )
+        try:
+            self.server_activate()
+        except OSError as error:
+            self.poisoned = True
+            raise WorkerError(
+                503,
+                "engine_ingress_unavailable",
+                "coding worker cannot restore engine ingress",
+            ) from error
+        self.accepting = True
+
+    def poison_engine_ingress(self) -> None:
+        self.poisoned = True
+        self.accepting = False
 
 
 def main() -> int:
@@ -2137,12 +2299,13 @@ def main() -> int:
     server.timeout = 1
     print(f"coding-worker: {engine} ready on :{port_text}", file=sys.stderr)
     try:
-        while True:
+        while not server.poisoned:
             server.handle_request()
     except KeyboardInterrupt:
         return 0
     finally:
         server.server_close()
+    return 1
 
 
 if __name__ == "__main__":

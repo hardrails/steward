@@ -6,15 +6,19 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
 import pathlib
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections.abc import Callable, Iterator, Mapping
@@ -474,6 +478,42 @@ class CodingHandoffContractTest(unittest.TestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(process_id, 0)
 
+    def test_bounded_process_does_not_block_closing_a_live_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            pid_path = root / "detached.pid"
+            child_source = "import time; time.sleep(10)"
+            source = (
+                "import pathlib,subprocess,sys; "
+                "child=subprocess.Popen("
+                f"[sys.executable, '-I', '-B', '-c', {child_source!r}], "
+                "stdin=subprocess.DEVNULL, start_new_session=True); "
+                f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))"
+            )
+            started = time.monotonic()
+            try:
+                self.assert_worker_error(
+                    lambda: worker.run_bounded_process(
+                        [sys.executable, "-I", "-B", "-c", source],
+                        cwd=root,
+                        environment=worker.git_environment(),
+                        timeout_seconds=0.1,
+                        stdout_limit=1024,
+                        stderr_limit=1024,
+                        absolute_deadline=started + 0.5,
+                    ),
+                    status=502,
+                    code="worker_cleanup_failed",
+                )
+                self.assertLess(time.monotonic() - started, 0.9)
+            finally:
+                if pid_path.exists():
+                    try:
+                        os.kill(int(pid_path.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                time.sleep(0.05)
+
     def test_empty_handoff_binds_equal_trees_and_an_empty_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository, base_commit, base_tree = initialize_repository(pathlib.Path(temporary))
@@ -921,6 +961,27 @@ class CodingHandoffContractTest(unittest.TestCase):
                     worker._reject_special_workspace_entries,
                     status=413,
                     code="workspace_too_large",
+                )
+
+    def test_changed_path_raw_inventory_overflow_uses_the_handoff_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, base_commit, _ = initialize_repository(pathlib.Path(temporary))
+            identity, _ = self.identity(repository, base_commit)
+            write(repository, "a" * 40, b"a\n")
+            write(repository, "b" * 40, b"b\n")
+            with workspace(repository), mock.patch.object(
+                worker,
+                "MAX_CHANGED_PATH_BYTES",
+                64,
+            ), mock.patch.object(worker, "MAX_CHANGED_PATHS", 2):
+                environment = worker._repository_environment(identity)
+                self.assert_worker_error(
+                    lambda: worker._changed_path_inventory(
+                        environment,
+                        deadline=time.monotonic() + 10,
+                    ),
+                    status=413,
+                    code="handoff_too_large",
                 )
 
     def test_hardlinked_workspace_file_is_refused_before_engine_execution(self) -> None:
@@ -1444,6 +1505,196 @@ class CodingHandoffContractTest(unittest.TestCase):
                 (review / "engine-output.txt").read_bytes(),
                 b"bounded output\n",
             )
+
+    def test_server_refuses_authenticated_recursive_ingress_during_engine_run(self) -> None:
+        token = b"fixture-worker-token-value"
+        payload = {
+            "schema_version": "steward.coding-task.v1",
+            "task": "Attempt a recursive dispatch",
+            "mode": "read",
+            "timeout_seconds": 30,
+        }
+        encoded = json.dumps(payload).encode()
+        server = worker.Server(("127.0.0.1", 0), "codex", token)
+        server.timeout = 0.05
+        stop = threading.Event()
+        calls: list[dict[str, object]] = []
+        recursive_errors: list[BaseException] = []
+
+        def serve() -> None:
+            while not stop.is_set() and not server.poisoned:
+                server.handle_request()
+
+        def fake_run_task(
+            engine: str,
+            worker_token: bytes,
+            request: dict[str, object],
+        ) -> dict[str, object]:
+            self.assertEqual(engine, "codex")
+            self.assertEqual(worker_token, token)
+            calls.append(request)
+            recursive = http.client.HTTPConnection(
+                server.server_address[0],
+                server.server_address[1],
+                timeout=0.2,
+            )
+            try:
+                recursive.request(
+                    "POST",
+                    "/v1/run",
+                    body=encoded,
+                    headers={
+                        "Authorization": f"Bearer {token.decode()}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                recursive.getresponse()
+            except OSError as error:
+                recursive_errors.append(error)
+            finally:
+                recursive.close()
+            return {"schema_version": "fixture-result", "outcome": "completed"}
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            with mock.patch.object(worker, "run_task", side_effect=fake_run_task):
+                for expected_calls in (1, 2):
+                    connection = http.client.HTTPConnection(
+                        server.server_address[0],
+                        server.server_address[1],
+                        timeout=2,
+                    )
+                    try:
+                        connection.request(
+                            "POST",
+                            "/v1/run",
+                            body=encoded,
+                            headers={
+                                "Authorization": f"Bearer {token.decode()}",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        response = connection.getresponse()
+                        body = json.loads(response.read())
+                    finally:
+                        connection.close()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(body["outcome"], "completed")
+                    self.assertEqual(len(calls), expected_calls)
+                    self.assertTrue(server.accepting)
+                    self.assertFalse(server.poisoned)
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(recursive_errors), 2)
+        self.assertEqual(len(calls), 2)
+
+    def test_server_never_rearms_after_uncertain_engine_cleanup(self) -> None:
+        token = b"fixture-worker-token-value"
+        payload = json.dumps(
+            {
+                "schema_version": "steward.coding-task.v1",
+                "task": "Fail cleanup",
+                "mode": "read",
+                "timeout_seconds": 30,
+            }
+        ).encode()
+        server = worker.Server(("127.0.0.1", 0), "codex", token)
+        server.timeout = 0.05
+
+        def serve() -> None:
+            while not server.poisoned:
+                server.handle_request()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            with mock.patch.object(
+                worker,
+                "run_task",
+                side_effect=worker.WorkerError(
+                    502,
+                    "engine_cleanup_failed",
+                    "coding engine descendants did not stop",
+                ),
+            ):
+                connection = http.client.HTTPConnection(
+                    server.server_address[0],
+                    server.server_address[1],
+                    timeout=2,
+                )
+                try:
+                    connection.request(
+                        "POST",
+                        "/v1/run",
+                        body=payload,
+                        headers={
+                            "Authorization": f"Bearer {token.decode()}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    response = connection.getresponse()
+                    body = json.loads(response.read())
+                finally:
+                    connection.close()
+            self.assertEqual(response.status, 502)
+            self.assertEqual(body["error"], "engine_cleanup_failed")
+            self.assertTrue(server.poisoned)
+            self.assertFalse(server.accepting)
+            thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
+            with self.assertRaises(OSError):
+                probe = socket.create_connection(server.server_address, timeout=0.2)
+                probe.close()
+        finally:
+            server.server_close()
+
+    def test_server_guard_transition_failures_poison_ingress(self) -> None:
+        token = b"fixture-worker-token-value"
+        creation_failure = worker.Server(("127.0.0.1", 0), "codex", token)
+        try:
+            with mock.patch.object(
+                worker.socket,
+                "socket",
+                side_effect=OSError("fixture descriptor exhaustion"),
+            ):
+                self.assert_worker_error(
+                    creation_failure.suspend_engine_ingress,
+                    status=503,
+                    code="engine_ingress_unavailable",
+                )
+            self.assertTrue(creation_failure.poisoned)
+            self.assertFalse(creation_failure.accepting)
+            self.assertEqual(creation_failure.socket.fileno(), -1)
+        finally:
+            creation_failure.server_close()
+
+        activation_failure = worker.Server(("127.0.0.1", 0), "codex", token)
+        try:
+            activation_failure.suspend_engine_ingress()
+            with mock.patch.object(
+                activation_failure,
+                "server_activate",
+                side_effect=OSError("fixture listen failure"),
+            ):
+                self.assert_worker_error(
+                    activation_failure.resume_engine_ingress,
+                    status=503,
+                    code="engine_ingress_unavailable",
+                )
+            self.assertTrue(activation_failure.poisoned)
+            self.assertFalse(activation_failure.accepting)
+            with self.assertRaises(OSError):
+                probe = socket.create_connection(
+                    activation_failure.server_address,
+                    timeout=0.2,
+                )
+                probe.close()
+        finally:
+            activation_failure.server_close()
 
 
 if __name__ == "__main__":
