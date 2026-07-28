@@ -228,10 +228,12 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 		},
 		{
 			profile: "developer", name: "steward-coding-worker", entrypoint: "coding_worker.py",
-			publicDigest: "0b131eeb43a3f6fd4e5ed8a16c5b4a20501860400d74fb95a7b2f4e9e73e6fac",
+			publicDigest: "2c483f717e5d3d15c502b4f00caed130ddbf2f0a95fd0db581ea9be68684d516",
 			connectors:   []string{"steward-claude-code", "steward-codex"},
-			limits: map[string]int{"max_request_bytes": 65536, "max_response_bytes": 1048576,
-				"max_task_bytes": 16384, "max_timeout_seconds": 900},
+			limits: map[string]int{"connector_timeout_seconds": 990, "max_changed_path_bytes": 49152,
+				"max_changed_paths": 512, "max_handoff_patch_bytes": 262144,
+				"max_portable_result_bytes": 458752, "max_request_bytes": 65536,
+				"max_response_bytes": 1048576, "max_task_bytes": 16384, "max_timeout_seconds": 900},
 		},
 	}
 	for _, test := range tests {
@@ -277,7 +279,7 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 				t.Fatal(err)
 			}
 			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" ||
-				manifest.Version != map[string]string{"research": "2", "developer": "1"}[test.profile] ||
+				manifest.Version != map[string]string{"research": "2", "developer": "2"}[test.profile] ||
 				manifest.Name != test.name || manifest.Entrypoint != test.entrypoint ||
 				!valuesEqual(manifest.ConnectorIDs, test.connectors) || !valuesEqual(manifest.Limits, test.limits) || len(manifest.Files) != 2 {
 				t.Fatalf("unexpected profile authority: %#v", manifest)
@@ -360,6 +362,9 @@ func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *t
 				`CONNECTOR_ORIGIN = "http://steward-relay:8081"`,
 				`connector = "steward-codex" if arguments.worker == "codex" else "steward-claude-code"`,
 				`/operations/run`,
+				`"X-Steward-Task-ID": task_id`,
+				`"steward.coding-task.v2"`,
+				`"steward.git-handoff.v1"`,
 			},
 		},
 	} {
@@ -381,6 +386,256 @@ func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *t
 	if !strings.Contains(developerSkill, "separate security boundary") ||
 		!strings.Contains(developerSkill, "Do not install a CLI") {
 		t.Fatal("developer skill does not explain the isolated-worker boundary")
+	}
+}
+
+func TestHermesDeveloperHelperBindsTaskIdentityAndValidatesImmutableHandoffs(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	programPath := filepath.Join(hermesAdapterRoot(t), "profiles", "developer", "coding_worker.py")
+	program := `
+import argparse
+import base64
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import sys
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("steward_coding_helper", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+pending = []
+calls = []
+
+class Response:
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+    def getheader(self, name):
+        return {
+            "Content-Encoding": None,
+            "Content-Length": str(len(self.body)),
+            "Content-Type": "application/json",
+        }.get(name)
+    def read(self, maximum):
+        assert maximum in {module.MAX_RESPONSE + 1, module.MAX_PORTABLE_RESULT + 1}
+        return self.body
+
+class Connection:
+    def __init__(self, host, port, timeout):
+        assert (host, port) == ("steward-relay", 8081)
+        assert 120 <= timeout <= module.MAX_TIMEOUT + module.CONNECTOR_GRACE_SECONDS
+    def request(self, method, path, body, headers):
+        assert method == "POST"
+        assert path in {
+            "/v1/connectors/steward-codex/operations/run",
+            "/v1/connectors/steward-claude-code/operations/run",
+        }
+        assert set(headers) == {
+            "Accept", "Content-Length", "Content-Type", "X-Steward-Task-ID",
+        }
+        assert headers["Content-Length"] == str(len(body))
+        calls.append((path, json.loads(body), dict(headers)))
+    def getresponse(self):
+        status, body = pending.pop(0)
+        return Response(status, body)
+    def close(self):
+        pass
+
+class Output:
+    def __init__(self):
+        self.buffer = io.BytesIO()
+    def write(self, value):
+        return self.buffer.write(value.encode())
+    def flush(self):
+        pass
+
+module.http.client.HTTPConnection = Connection
+
+def invoke(arguments, payload, status=200):
+    pending.append((status, module.canonical_json(payload)))
+    previous_argv, previous_stdout = sys.argv, sys.stdout
+    output = Output()
+    sys.argv = ["steward-coding-worker", *arguments]
+    sys.stdout = output
+    try:
+        code = module.main()
+    finally:
+        sys.argv, sys.stdout = previous_argv, previous_stdout
+    return code, output.buffer.getvalue(), calls[-1]
+
+v1 = {
+    "schema_version": "steward.coding-result.v1",
+    "engine": "codex",
+    "mode": "read",
+    "outcome": "completed",
+    "exit_code": 0,
+    "duration_ms": 12,
+    "changed_paths": [],
+    "stdout": "inspected\n",
+    "stderr": "",
+}
+v1_arguments = [
+    "--worker", "codex",
+    "--task-id", "task-helper-v1-1234",
+    "--task", "Inspect the repository",
+    "--mode", "read",
+    "--timeout-seconds", "30",
+]
+code, output, call = invoke(v1_arguments, v1)
+assert code == 0 and json.loads(output) == v1
+assert call[0] == "/v1/connectors/steward-codex/operations/run"
+assert call[1] == {
+    "schema_version": "steward.coding-task.v1",
+    "task": "Inspect the repository",
+    "mode": "read",
+    "timeout_seconds": 30,
+}
+assert call[2]["X-Steward-Task-ID"] == "task-helper-v1-1234"
+
+patch = b"bounded immutable patch"
+base = "a" * 40
+paths = ["a.txt", "b.txt"]
+handoff = {
+    "schema_version": "steward.git-handoff.v1",
+    "object_format": "sha1",
+    "base_commit": base,
+    "base_tree": "b" * 40,
+    "result_tree": "c" * 40,
+    "patch_sha256": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    "patch_bytes": len(patch),
+    "patch_base64": base64.b64encode(patch).decode(),
+    "changed_paths": paths,
+}
+v2 = {
+    "schema_version": "steward.coding-result.v2",
+    "engine": "claude-code",
+    "mode": "write",
+    "outcome": "completed",
+    "exit_code": 0,
+    "duration_ms": 34,
+    "changed_paths": paths,
+    "stdout": "implemented\n",
+    "stderr": "",
+    "handoff": handoff,
+}
+v2_arguments = [
+    "--worker", "claude-code",
+    "--task-id", "task-helper-v2-5678",
+    "--task", "Implement the bounded change",
+    "--mode", "write",
+    "--timeout-seconds", "30",
+    "--expected-base-commit", base,
+]
+code, output, call = invoke(v2_arguments, v2)
+assert code == 0 and json.loads(output) == v2
+assert call[0] == "/v1/connectors/steward-claude-code/operations/run"
+assert call[1] == {
+    "schema_version": "steward.coding-task.v2",
+    "task": "Implement the bounded change",
+    "mode": "write",
+    "timeout_seconds": 30,
+    "expected_base_commit": base,
+}
+assert call[2]["X-Steward-Task-ID"] == "task-helper-v2-5678"
+
+arguments = argparse.Namespace(worker="claude-code", mode="write", timeout_seconds=30)
+sha256_result = copy.deepcopy(v2)
+sha256_result["handoff"].update({
+    "object_format": "sha256",
+    "base_commit": "d" * 64,
+    "base_tree": "e" * 64,
+    "result_tree": "f" * 64,
+})
+assert module.validate_result(sha256_result, arguments, "d" * 64) == sha256_result
+
+bad_results = []
+for field, value in (
+    ("patch_base64", "AA="),
+    ("patch_sha256", "sha256:" + "0" * 64),
+    ("patch_bytes", len(patch) + 1),
+    ("base_commit", "A" * 40),
+):
+    candidate = copy.deepcopy(v2)
+    candidate["handoff"][field] = value
+    bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["changed_paths"] = list(reversed(paths))
+bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["handoff"]["changed_paths"] = ["a.txt"]
+bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["unexpected"] = True
+bad_results.append(candidate)
+for candidate in bad_results:
+    try:
+        module.validate_result(candidate, arguments, base)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("developer helper accepted a corrupt immutable handoff")
+
+try:
+    module.decode_json(b'{"a":1,"a":1}')
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted duplicate JSON fields")
+
+failed = copy.deepcopy(v2)
+failed["outcome"] = "failed"
+failed["exit_code"] = 7
+code, output, _ = invoke(v2_arguments, failed)
+assert code == 1 and json.loads(output) == failed
+
+pending.append((403, module.canonical_json({"error": "connector_denied", "message": "denied"})))
+previous_argv = sys.argv
+sys.argv = ["steward-coding-worker", *v1_arguments]
+try:
+    try:
+        module.main()
+    except RuntimeError as error:
+        assert "HTTP 403" in str(error)
+    else:
+        raise AssertionError("developer helper accepted a non-success response")
+finally:
+    sys.argv = previous_argv
+
+for task_id in ("-leading", "space value", "a" * 129):
+    try:
+        module.bounded_task_id(task_id)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("developer helper accepted an invalid task ID")
+
+previous_argv = sys.argv
+sys.argv = [
+    "steward-coding-worker",
+    "--worker", "codex",
+    "--task", "Missing identity",
+]
+try:
+    try:
+        module.parser().parse_args()
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("developer helper made --task-id optional")
+finally:
+    sys.argv = previous_argv
+`
+	command := exec.Command(python, "-I", "-B", "-c", program, programPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("developer helper immutable-handoff test failed: %v\n%s", err, output)
 	}
 }
 

@@ -92,11 +92,16 @@ PROFILE_SKILLS = {
     "developer": {
         "path": DEVELOPER_SKILL,
         "name": "steward-coding-worker",
-        "version": "1",
+        "version": "2",
         "entrypoint": "coding_worker.py",
-        "public_key_sha256": "0b131eeb43a3f6fd4e5ed8a16c5b4a20501860400d74fb95a7b2f4e9e73e6fac",
+        "public_key_sha256": "2c483f717e5d3d15c502b4f00caed130ddbf2f0a95fd0db581ea9be68684d516",
         "connector_ids": ["steward-claude-code", "steward-codex"],
         "limits": {
+            "connector_timeout_seconds": 990,
+            "max_changed_path_bytes": 49152,
+            "max_changed_paths": 512,
+            "max_handoff_patch_bytes": 262144,
+            "max_portable_result_bytes": 458752,
             "max_request_bytes": 65536,
             "max_response_bytes": 1048576,
             "max_task_bytes": 16384,

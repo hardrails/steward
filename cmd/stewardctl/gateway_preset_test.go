@@ -23,8 +23,8 @@ func TestAgentServiceConnectorPresetsOwnFiniteContracts(t *testing.T) {
 		{"research-extract", "steward-research-extract", "extract=POST:/v1/extract", 4, 64 << 10, 4 << 20, 60, 64},
 		{"browser-search", "steward-browser-search", "search=POST:/v1/search", 4, 64 << 10, 1 << 20, 45, 64},
 		{"browser-read", "steward-browser-read", "read=POST:/v1/read", 2, 64 << 10, 1 << 20, 180, 32},
-		{"codex-worker", "steward-codex", "run=POST:/v1/run", 2, 64 << 10, 1 << 20, 915, 16},
-		{"claude-code-worker", "steward-claude-code", "run=POST:/v1/run", 2, 64 << 10, 1 << 20, 915, 16},
+		{"codex-worker", "steward-codex", "run=POST:/v1/run", 2, 64 << 10, 1 << 20, 990, 16},
+		{"claude-code-worker", "steward-claude-code", "run=POST:/v1/run", 2, 64 << 10, 1 << 20, 990, 16},
 	}
 	for _, test := range tests {
 		t.Run(test.preset, func(t *testing.T) {
