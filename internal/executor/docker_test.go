@@ -816,6 +816,10 @@ func TestNetworkSpecBindsDockerAllocatedPrivateAddresses(t *testing.T) {
 		name, subnet, gateway string
 	}{
 		{"too small", "172.30.8.0/30", ""},
+		{"non-canonical", "172.30.8.1/29", ""},
+		{"public subnet", "192.0.2.0/24", ""},
+		{"partially private ten", "10.0.0.0/7", ""},
+		{"partially private one seventy two", "172.0.0.0/8", ""},
 		{"public gateway", "192.0.2.0/29", "192.0.2.1"},
 		{"outside gateway", "172.30.8.0/29", "172.30.9.1"},
 		{"invalid gateway", "172.30.8.0/29", "not-an-address"},

@@ -107,10 +107,10 @@ func networkSpecFromIPAM(identity NetworkSpec, subnet, gateway string) (NetworkS
 		return NetworkSpec{}, errors.New("network identity is invalid")
 	}
 	prefix, err := netip.ParsePrefix(subnet)
-	if err != nil || !prefix.Addr().Is4() || prefix.Bits() > 29 {
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.Bits() > 29 ||
+		!privateIPv4Prefix(prefix) {
 		return NetworkSpec{}, errors.New("Docker allocated an unsupported network subnet")
 	}
-	prefix = prefix.Masked()
 	var gatewayAddress netip.Addr
 	if gateway != "" {
 		gatewayAddress, err = netip.ParseAddr(gateway)
@@ -138,6 +138,19 @@ func networkSpecFromIPAM(identity NetworkSpec, subnet, gateway string) (NetworkS
 	}
 	want.RelayIP, want.AgentIP = endpoints[0].String(), endpoints[1].String()
 	return want, nil
+}
+
+func privateIPv4Prefix(prefix netip.Prefix) bool {
+	for _, private := range [...]netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+	} {
+		if prefix.Bits() >= private.Bits() && private.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 func validRuntimeAddresses(relay, agent string) bool {
