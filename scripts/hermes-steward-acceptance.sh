@@ -1127,6 +1127,56 @@ wait_for_hermes() {
 	return 1
 }
 
+start_workload() {
+	local generation=$1
+	local response=$work/start-g$generation.response.json
+	local status
+	status=$(curl -sS -o "$response" -w '%{http_code}' -X POST \
+		"$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" || true)
+	if [[ $status == 200 ]]; then
+		return 0
+	fi
+	echo "hermes-steward-acceptance: Executor start failed for generation $generation" >&2
+	if ! python3 -I - "$response" "$status" "$generation" <<'PY' >&2
+import json
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+status = sys.argv[2]
+generation = sys.argv[3]
+try:
+    raw = path.read_bytes()
+    document = json.loads(raw)
+except (OSError, ValueError):
+    raise SystemExit(1)
+if (
+    not 0 < len(raw) <= 65536
+    or set(document) != {"error", "message"}
+    or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", str(document["error"])) is None
+    or not isinstance(document["message"], str)
+    or not 0 < len(document["message"]) <= 4096
+    or re.fullmatch(r"[0-9]{3}", status) is None
+    or generation not in {"1", "2"}
+):
+    raise SystemExit(1)
+payload = {
+    "contains_agent_content": False,
+    "error": document["error"],
+    "generation": int(generation),
+    "message": document["message"],
+    "schema_version": "steward.executor-start-diagnostic.v1",
+    "status": int(status),
+}
+print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+PY
+	then
+		echo "hermes-steward-acceptance: Executor start diagnostics are unavailable or malformed" >&2
+	fi
+	return 1
+}
+
 admission_response=$(admit 1 new)
 require_admission <<<"$admission_response"
 mapfile -t admission < <(extract_admission <<<"$admission_response")
@@ -1147,7 +1197,7 @@ connector_route_policy_digest=${connector_bindings[1]}
 	exit 1
 }
 mark generation_1_admitted
-curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+start_workload 1
 mark generation_1_started
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
@@ -1226,7 +1276,7 @@ mapfile -t admission < <(extract_admission <<<"$admission_response")
 runtime_ref=${admission[0]}
 grant_id=${admission[1]}
 mark generation_2_admitted
-curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+start_workload 2
 mark generation_2_started
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]

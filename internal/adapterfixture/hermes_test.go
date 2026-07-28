@@ -1232,6 +1232,25 @@ func TestHermesAcceptanceReportsBoundedRuntimeReadinessFailures(t *testing.T) {
 	}
 }
 
+func TestHermesAcceptanceReportsBoundedExecutorStartFailures(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	for _, contract := range []string{
+		"steward.executor-start-diagnostic.v1",
+		`"contains_agent_content": False`,
+		"not 0 < len(raw) <= 65536",
+		`set(document) != {"error", "message"}`,
+		`not 0 < len(document["message"]) <= 4096`,
+		`start_workload 1`,
+		`start_workload 2`,
+		"Executor start diagnostics are unavailable or malformed",
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes Executor start diagnostics are missing contract %q", contract)
+		}
+	}
+}
+
 func TestAcceptanceGatewaysUseInvokerGroupWhenUnprivileged(t *testing.T) {
 	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
 	for _, name := range []string{
