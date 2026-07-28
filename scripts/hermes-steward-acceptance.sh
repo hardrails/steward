@@ -602,7 +602,14 @@ for _ in $(seq 1 30); do
 	sleep 1
 done
 curl -fsS "$connector_origin/health" >/dev/null
-gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+gid=$(id -g)
+if [[ $gid == 0 ]]; then
+	gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+fi
+[[ $gid =~ ^[1-9][0-9]*$ ]] || {
+	echo "hermes-steward-acceptance: a non-root Gateway group is required" >&2
+	exit 1
+}
 mkdir -p "$work/gateway" "$work/grants"
 printf '%s\n' "{
   \"version\":1,

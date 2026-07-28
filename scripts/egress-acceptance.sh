@@ -98,7 +98,14 @@ relay_image=$(docker image inspect --format '{{.Id}}' "$relay_tag")
 
 printf '%s\n' service-token >"$work/service-token"
 chmod 0600 "$work/service-token"
-gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+gid=$(id -g)
+if [[ $gid == 0 ]]; then
+	gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+fi
+[[ $gid =~ ^[1-9][0-9]*$ ]] || {
+	echo "egress-acceptance: a non-root Gateway group is required" >&2
+	exit 1
+}
 printf '%s\n' "{
   \"version\":1,
   \"control_socket\":\"$work/gateway/control.sock\",

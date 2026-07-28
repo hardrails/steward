@@ -1207,6 +1207,24 @@ func TestHermesAcceptanceReportsBoundedGatewayStartupDiagnostics(t *testing.T) {
 	}
 }
 
+func TestAcceptanceGatewaysUseInvokerGroupWhenUnprivileged(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	for _, name := range []string{
+		"egress-acceptance.sh",
+		"hermes-steward-acceptance.sh",
+		"positive-capabilities-acceptance.sh",
+	} {
+		script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", name), 2<<20))
+		currentGroup := strings.Index(script, "gid=$(id -g)\n")
+		rootFallback := strings.Index(script, "if [[ $gid == 0 ]]; then\n")
+		nobodyGroup := strings.Index(script, "gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)\n")
+		positiveGroup := strings.Index(script, `[[ $gid =~ ^[1-9][0-9]*$ ]]`)
+		if currentGroup < 0 || rootFallback < currentGroup || nobodyGroup < rootFallback || positiveGroup < nobodyGroup {
+			t.Fatalf("%s does not select the invoking non-root group before its root fallback", name)
+		}
+	}
+}
+
 func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
 	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
 	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-feasibility.sh"), 2<<20))
