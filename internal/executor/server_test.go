@@ -100,7 +100,7 @@ func (d *secureDocker) InspectNetwork(context.Context, string) (ObservedNetwork,
 }
 func (d *secureDocker) CreateNetwork(_ context.Context, spec NetworkSpec) error {
 	allocated := testNetworkSpec(spec.TenantID, spec.InstanceID, spec.Generation)
-	d.network = &ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true}
+	d.network = &ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true, ExplicitIPAM: true}
 	return nil
 }
 func (d *secureDocker) RemoveNetwork(context.Context, string) error { d.network = nil; return nil }

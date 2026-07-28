@@ -1390,8 +1390,23 @@ func (d *DockerHTTP) call(ctx context.Context, method, target string, body any, 
 	return nil
 }
 
+type dockerAPIError struct {
+	status  int
+	body    string
+	message string
+}
+
+func (e *dockerAPIError) Error() string {
+	return fmt.Sprintf("docker API returned HTTP %d: %s", e.status, e.body)
+}
+
 func dockerError(resp *http.Response) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("docker API returned HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(raw))
+	body := string(bytes.TrimSpace(raw))
+	var payload struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	return &dockerAPIError{status: resp.StatusCode, body: body, message: payload.Message}
 }
 func pathEscape(value string) string { return url.PathEscape(value) }

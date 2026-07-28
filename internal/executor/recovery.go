@@ -131,7 +131,11 @@ func (s *Server) applyMissingWorkloadRecovery(r *http.Request, record admission.
 			if _, err := s.secure.topology.InspectNetwork(ctx, networkName); !errors.Is(err, ErrNotFound) {
 				return errors.New("missing-workload recovery could not prove isolated network removal")
 			}
-		} else if !errors.Is(networkErr, ErrNotFound) {
+		} else if errors.Is(networkErr, ErrNotFound) {
+			if err := s.secure.topology.RemoveNetwork(ctx, networkName); err != nil && !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("missing-workload recovery could not remove the Docker subnet reservation: %w", err)
+			}
+		} else {
 			return fmt.Errorf("missing-workload recovery could not inspect the isolated network: %w", networkErr)
 		}
 	}

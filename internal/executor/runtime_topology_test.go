@@ -101,7 +101,7 @@ func (f *topologyFixture) CreateNetwork(_ context.Context, spec NetworkSpec) err
 		return f.createNetworkErr
 	}
 	allocated := testNetworkSpec(spec.TenantID, spec.InstanceID, spec.Generation)
-	f.network = &ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true}
+	f.network = &ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true, ExplicitIPAM: true}
 	return nil
 }
 func (f *topologyFixture) RemoveNetwork(context.Context, string) error {
