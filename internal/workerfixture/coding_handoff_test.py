@@ -492,19 +492,20 @@ class CodingHandoffContractTest(unittest.TestCase):
             )
             started = time.monotonic()
             try:
-                self.assert_worker_error(
-                    lambda: worker.run_bounded_process(
-                        [sys.executable, "-I", "-B", "-c", source],
-                        cwd=root,
-                        environment=worker.git_environment(),
-                        timeout_seconds=0.1,
-                        stdout_limit=1024,
-                        stderr_limit=1024,
-                        absolute_deadline=started + 0.5,
-                    ),
-                    status=502,
-                    code="worker_cleanup_failed",
-                )
+                with mock.patch.object(worker, "stop_engine_descendants", return_value=False):
+                    self.assert_worker_error(
+                        lambda: worker.run_bounded_process(
+                            [sys.executable, "-I", "-B", "-c", source],
+                            cwd=root,
+                            environment=worker.git_environment(),
+                            timeout_seconds=0.1,
+                            stdout_limit=1024,
+                            stderr_limit=1024,
+                            absolute_deadline=started + 0.5,
+                        ),
+                        status=502,
+                        code="worker_cleanup_failed",
+                    )
                 self.assertLess(time.monotonic() - started, 0.9)
             finally:
                 if pid_path.exists():
