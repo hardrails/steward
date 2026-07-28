@@ -177,8 +177,11 @@ binary patch, and a 448 KiB canonical result. It rejects a dirty start, ignored
 output, submodules, special files, unsafe or colliding portable paths, executable
 Git filters, sparse or partial repositories, alternate object stores, an unstable
 capture, and a patch that cannot independently recreate its result tree. The
-engine timeout remains at most 900 seconds; the coding connector preset allows
-990 seconds for bounded cleanup and handoff capture.
+engine timeout remains at most 900 seconds. The worker reserves another 120
+seconds across preflight, cleanup, handoff capture, and response delivery. The
+signed helper and coding connector preset allow 1,050 seconds, including a
+30-second relay and transport margin, and the preset serializes calls with
+`max-concurrent=1`.
 
 ## Review a version 2 handoff offline
 

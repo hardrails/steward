@@ -14,6 +14,7 @@ import pathlib
 import re
 import signal
 import socket
+import socketserver
 import stat
 import subprocess
 import sys
@@ -29,6 +30,7 @@ MAX_RESPONSE = 1 << 20
 MAX_PORTABLE_RESULT = 448 << 10
 MAX_HANDOFF_PATCH = 256 << 10
 MAX_HANDOFF_STREAM = 16 << 10
+MAX_V1_CHANGED_PATHS = 4096
 MAX_CHANGED_PATHS = 512
 MAX_CHANGED_PATH_BYTES = 48 << 10
 MAX_CHANGED_FILE_BYTES = 4 << 20
@@ -618,7 +620,7 @@ def git_status(*, deadline: float | None = None) -> tuple[str, ...]:
         stdout_limit=MAX_GIT_INVENTORY,
         deadline=deadline,
     )
-    return decode_nul_values(raw, label="workspace status", maximum=4096)
+    return decode_nul_values(raw, label="workspace status", maximum=MAX_V1_CHANGED_PATHS)
 
 
 def _open_nofollow_credential_root(root: pathlib.Path) -> int | None:
@@ -1148,6 +1150,47 @@ def _resolved_repository_paths(
         raise WorkerError(409, "unsupported_workspace", "workspace Git metadata is unavailable") from error
 
 
+def _standalone_repository_shape(*, deadline: float | None = None) -> dict[str, object]:
+    if deadline is not None:
+        require_request_time(deadline)
+    try:
+        root = WORKSPACE.resolve(strict=True)
+    except OSError as error:
+        raise WorkerError(400, "invalid_workspace", "workspace directory is unavailable") from error
+    metadata = _contained_git_metadata(root, deadline=deadline)
+    top = pathlib.Path(git_text(["rev-parse", "--show-toplevel"], deadline=deadline))
+    try:
+        if top.resolve(strict=True) != root:
+            raise WorkerError(409, "unsupported_workspace", "workspace must be the Git checkout root")
+    except OSError as error:
+        raise WorkerError(409, "unsupported_workspace", "workspace root cannot be resolved") from error
+    git_dir, common_dir, object_path = _resolved_repository_paths(root, deadline=deadline)
+    expected_object_path = metadata / "objects"
+    try:
+        object_info = os.stat(expected_object_path, follow_symlinks=False)
+    except OSError as error:
+        raise WorkerError(409, "unsupported_workspace", "workspace Git object store is unavailable") from error
+    if (
+        git_dir != metadata
+        or common_dir != metadata
+        or object_path != expected_object_path
+        or not stat.S_ISDIR(object_info.st_mode)
+        or os.pathsep in str(object_path)
+    ):
+        raise WorkerError(
+            409,
+            "unsupported_workspace",
+            "workspace Git metadata must be contained in its standalone checkout",
+        )
+    if os.path.lexists(object_path / "info" / "alternates"):
+        raise WorkerError(409, "unsupported_workspace", "alternate Git object stores are not supported")
+    return {
+        "_workspace_root": str(root),
+        "_git_dir": str(git_dir),
+        "_object_dir": str(object_path),
+    }
+
+
 def _assert_repository_identity(identity: dict[str, object], *, deadline: float | None = None) -> None:
     expected_root = identity.get("_workspace_root")
     expected_git = identity.get("_git_dir")
@@ -1158,40 +1201,13 @@ def _assert_repository_identity(identity: dict[str, object], *, deadline: float 
         or not isinstance(expected_objects, str)
     ):
         raise WorkerError(409, "workspace_identity_changed", "workspace Git identity is unavailable")
-    try:
-        root = WORKSPACE.resolve(strict=True)
-    except OSError as error:
-        raise WorkerError(409, "workspace_identity_changed", "workspace root is unavailable") from error
-    if str(root) != expected_root:
-        raise WorkerError(409, "workspace_identity_changed", "workspace root identity changed")
-    metadata = _contained_git_metadata(root, deadline=deadline)
-    environment = _repository_environment(identity)
-    git_dir, common_dir, object_path = _resolved_repository_paths(
-        root,
-        extra_environment=environment,
-        deadline=deadline,
-    )
-    expected_object_path = metadata / "objects"
-    try:
-        object_info = os.stat(expected_object_path, follow_symlinks=False)
-    except OSError as error:
-        raise WorkerError(409, "workspace_identity_changed", "workspace object store is unavailable") from error
+    current = _standalone_repository_shape(deadline=deadline)
     if (
-        git_dir != metadata
-        or common_dir != metadata
-        or object_path != expected_object_path
-        or not stat.S_ISDIR(object_info.st_mode)
-        or str(git_dir) != expected_git
-        or str(object_path) != expected_objects
-        or os.pathsep in str(object_path)
+        current["_workspace_root"] != expected_root
+        or current["_git_dir"] != expected_git
+        or current["_object_dir"] != expected_objects
     ):
-        raise WorkerError(
-            409,
-            "unsupported_workspace",
-            "workspace Git metadata must be contained in its standalone checkout",
-        )
-    if os.path.lexists(object_path / "info" / "alternates"):
-        raise WorkerError(409, "unsupported_workspace", "alternate Git object stores are not supported")
+        raise WorkerError(409, "workspace_identity_changed", "workspace Git identity changed")
 
 
 def _ignored_paths(
@@ -1344,19 +1360,7 @@ def workspace_identity(
     *,
     deadline: float | None = None,
 ) -> dict[str, object]:
-    if deadline is not None:
-        require_request_time(deadline)
-    try:
-        root = WORKSPACE.resolve(strict=True)
-    except OSError as error:
-        raise WorkerError(400, "invalid_workspace", "workspace directory is unavailable") from error
-    metadata = _contained_git_metadata(root, deadline=deadline)
-    top = pathlib.Path(git_text(["rev-parse", "--show-toplevel"], deadline=deadline))
-    try:
-        if top.resolve(strict=True) != root:
-            raise WorkerError(409, "unsupported_workspace", "workspace must be the Git checkout root")
-    except OSError as error:
-        raise WorkerError(409, "unsupported_workspace", "workspace root cannot be resolved") from error
+    shape = _standalone_repository_shape(deadline=deadline)
     object_format = git_text(["rev-parse", "--show-object-format"], deadline=deadline)
     length = OBJECT_ID_LENGTHS.get(object_format)
     if length is None:
@@ -1379,33 +1383,11 @@ def workspace_identity(
         ["rev-parse", "--verify", f"{base_commit}^{{tree}}"],
         deadline=deadline,
     )
-    git_dir, common_dir, object_path = _resolved_repository_paths(root, deadline=deadline)
-    expected_object_path = metadata / "objects"
-    try:
-        object_info = os.stat(expected_object_path, follow_symlinks=False)
-    except OSError as error:
-        raise WorkerError(409, "unsupported_workspace", "workspace Git object store is unavailable") from error
-    if (
-        git_dir != metadata
-        or common_dir != metadata
-        or object_path != expected_object_path
-        or not stat.S_ISDIR(object_info.st_mode)
-        or os.pathsep in str(object_path)
-    ):
-        raise WorkerError(
-            409,
-            "unsupported_workspace",
-            "workspace Git metadata must be contained in its standalone checkout",
-        )
-    if os.path.lexists(object_path / "info" / "alternates"):
-        raise WorkerError(409, "unsupported_workspace", "alternate Git object stores are not supported")
     identity: dict[str, object] = {
+        **shape,
         "object_format": object_format,
         "base_commit": base_commit,
         "base_tree": base_tree,
-        "_workspace_root": str(root),
-        "_git_dir": str(git_dir),
-        "_object_dir": str(object_path),
     }
     repository_environment = _repository_environment(identity)
     _reject_unsupported_repository(
@@ -1424,17 +1406,35 @@ def _portable_component(component: str) -> str:
     normalized = unicodedata.normalize("NFC", component).casefold()
     protected = normalized.rstrip(" .")
     device = protected.split(".", 1)[0]
+    short_prefix, short_separator, short_suffix = protected.partition("~")
+    gitmodules_fallback = (
+        short_separator == "~"
+        and 1 <= len(short_prefix) <= 6
+        and "gi7eba".startswith(short_prefix)
+        and len(short_prefix) + len(short_suffix) == 7
+        and re.fullmatch(r"[1-9][0-9]*", short_suffix) is not None
+    )
     if (
         not normalized
         or normalized in {".", ".."}
         or normalized[-1] in {" ", "."}
         or "\\" in normalized
         or ":" in normalized
+        or any(character in '<>"|?*' for character in normalized)
+        or any(
+            "\u200c" <= character <= "\u200f"
+            or "\u202a" <= character <= "\u202e"
+            or "\u206a" <= character <= "\u206f"
+            or character == "\ufeff"
+            for character in normalized
+        )
         or any(ord(character) < 0x20 or ord(character) == 0x7F for character in normalized)
         or protected in {".git", ".gitmodules"}
         or re.fullmatch(r"\.?git~[0-9]+", protected) is not None
-        or device in {"con", "prn", "aux", "nul"}
-        or re.fullmatch(r"(com|lpt)[1-9]", device) is not None
+        or re.fullmatch(r"gitmod~[1-4]", protected) is not None
+        or gitmodules_fallback
+        or device in {"con", "prn", "aux", "nul", "conin$", "conout$"}
+        or re.fullmatch(r"(com|lpt)([1-9]|[¹²³])", device) is not None
     ):
         raise WorkerError(409, "unsupported_workspace", "handoff contains a non-portable path")
     return normalized
@@ -1467,6 +1467,41 @@ def _validate_changed_path(path_text: str) -> tuple[pathlib.Path, bytes, str]:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise WorkerError(409, "unsupported_workspace", "handoff path has an unsafe parent")
     return WORKSPACE.joinpath(*components), encoded, portable_key
+
+
+def _status_changed_paths(
+    entries: tuple[str, ...],
+    *,
+    deadline: float,
+) -> list[str]:
+    paths: list[str] = []
+    index = 0
+    while index < len(entries):
+        require_request_time(deadline)
+        record = entries[index]
+        if len(record) <= 3 or record[2] != " ":
+            raise WorkerError(409, "unsupported_workspace", "workspace status is malformed")
+        paths.append(record[3:])
+        if "R" in record[:2] or "C" in record[:2]:
+            index += 1
+            if index >= len(entries):
+                raise WorkerError(409, "unsupported_workspace", "workspace rename status is incomplete")
+            paths.append(entries[index])
+        index += 1
+    result = sorted(set(paths))
+    if len(result) > MAX_V1_CHANGED_PATHS:
+        raise WorkerError(413, "workspace_too_large", "workspace status exceeds its changed-path count")
+    portable_paths: set[str] = set()
+    total_bytes = 0
+    for path in result:
+        _, encoded, portable_key = _validate_changed_path(path)
+        if portable_key in portable_paths:
+            raise WorkerError(409, "unsupported_workspace", "workspace status contains colliding paths")
+        portable_paths.add(portable_key)
+        total_bytes += len(encoded)
+    if total_bytes > MAX_RESPONSE:
+        raise WorkerError(413, "workspace_too_large", "workspace status exceeds its changed-path byte limit")
+    return result
 
 
 def _read_changed_entry(path: pathlib.Path, path_text: str) -> bytes | None:
@@ -1965,13 +2000,15 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
         request_started + PREFLIGHT_TIMEOUT,
         request_deadline - POSTFLIGHT_RESERVE,
     )
-    base_identity = None
+    base_identity: dict[str, object] | None = None
     if version == "steward.coding-task.v2":
         base_identity = workspace_identity(
             str(request["expected_base_commit"]),
             deadline=preflight_deadline,
         )
+        repository_identity = base_identity
     else:
+        repository_identity = _standalone_repository_shape(deadline=preflight_deadline)
         _reject_special_workspace_entries(deadline=preflight_deadline)
     before = git_status(deadline=preflight_deadline)
     if before and os.environ.get("STEWARD_ALLOW_DIRTY_WORKSPACE", "NO") != "YES":
@@ -2083,6 +2120,8 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
         request_deadline - RESPONSE_TIMEOUT,
     )
     require_request_time(postflight_deadline)
+    _assert_repository_identity(repository_identity, deadline=postflight_deadline)
+    _reject_special_workspace_entries(deadline=postflight_deadline)
     protected_markers = tuple(
         sorted(
             set(protected_markers).union(
@@ -2135,12 +2174,13 @@ def run_task(engine: str, worker_token: bytes, request: dict[str, object]) -> di
             raise WorkerError(502, "response_too_large", "coding result exceeds its portable 448 KiB limit")
         require_request_time(request_deadline)
         return result
+    changed_paths = _status_changed_paths(after, deadline=postflight_deadline)
     common["duration_ms"] = int((time.monotonic() - request_started) * 1000)
     require_request_time(request_deadline)
     return {
         "schema_version": "steward.coding-result.v1",
         **common,
-        "changed_paths": sorted({entry[3:] for entry in after if len(entry) > 3}),
+        "changed_paths": changed_paths,
     }
 
 
@@ -2228,6 +2268,11 @@ class Server(http.server.HTTPServer):
         self.accepting = True
         self.poisoned = False
 
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
+
     def suspend_engine_ingress(self) -> None:
         if self.poisoned or not self.accepting:
             raise WorkerError(
@@ -2235,15 +2280,25 @@ class Server(http.server.HTTPServer):
                 "engine_ingress_unavailable",
                 "coding worker cannot isolate engine ingress",
             )
-        address = self.server_address
-        self.server_close()
         self.accepting = False
+
+    def resume_engine_ingress(self) -> None:
+        if self.poisoned or self.accepting:
+            raise WorkerError(
+                503,
+                "engine_ingress_unavailable",
+                "coding worker cannot restore engine ingress",
+            )
+        address = self.server_address
+        self.poisoned = True
         replacement = None
         try:
+            self.server_close()
             replacement = socket.socket(self.address_family, self.socket_type)
             self.socket = replacement
             self.server_address = address
             self.server_bind()
+            self.server_activate()
         except Exception as error:
             if replacement is not None:
                 try:
@@ -2254,25 +2309,9 @@ class Server(http.server.HTTPServer):
             raise WorkerError(
                 503,
                 "engine_ingress_unavailable",
-                "coding worker cannot isolate engine ingress",
-            ) from error
-
-    def resume_engine_ingress(self) -> None:
-        if self.poisoned or self.accepting:
-            raise WorkerError(
-                503,
-                "engine_ingress_unavailable",
-                "coding worker cannot restore engine ingress",
-            )
-        try:
-            self.server_activate()
-        except OSError as error:
-            self.poisoned = True
-            raise WorkerError(
-                503,
-                "engine_ingress_unavailable",
                 "coding worker cannot restore engine ingress",
             ) from error
+        self.poisoned = False
         self.accepting = True
 
     def poison_engine_ingress(self) -> None:

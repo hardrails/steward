@@ -925,11 +925,11 @@ func applyAgentServiceConnectorPreset(
 		},
 		"codex-worker": {
 			id: "steward-codex", operation: "run=POST:/v1/run",
-			concurrent: 2, request: 64 << 10, response: 1 << 20, seconds: 990, calls: 16,
+			concurrent: 1, request: 64 << 10, response: 1 << 20, seconds: 1050, calls: 16,
 		},
 		"claude-code-worker": {
 			id: "steward-claude-code", operation: "run=POST:/v1/run",
-			concurrent: 2, request: 64 << 10, response: 1 << 20, seconds: 990, calls: 16,
+			concurrent: 1, request: 64 << 10, response: 1 << 20, seconds: 1050, calls: 16,
 		},
 	}
 	selected, ok := presets[preset]

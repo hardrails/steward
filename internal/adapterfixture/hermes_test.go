@@ -228,9 +228,9 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 		},
 		{
 			profile: "developer", name: "steward-coding-worker", entrypoint: "coding_worker.py",
-			publicDigest: "2c483f717e5d3d15c502b4f00caed130ddbf2f0a95fd0db581ea9be68684d516",
+			publicDigest: "e0b80e5a347293ea4eb0e4d51a1e47446e3ba191e722ff3dc61c57470b440551",
 			connectors:   []string{"steward-claude-code", "steward-codex"},
-			limits: map[string]int{"connector_timeout_seconds": 990, "max_changed_path_bytes": 49152,
+			limits: map[string]int{"connector_timeout_seconds": 1050, "max_changed_path_bytes": 49152,
 				"max_changed_paths": 512, "max_handoff_patch_bytes": 262144,
 				"max_portable_result_bytes": 458752, "max_request_bytes": 65536,
 				"max_response_bytes": 1048576, "max_task_bytes": 16384, "max_timeout_seconds": 900},
@@ -279,7 +279,7 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 				t.Fatal(err)
 			}
 			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" ||
-				manifest.Version != map[string]string{"research": "2", "developer": "2"}[test.profile] ||
+				manifest.Version != map[string]string{"research": "2", "developer": "3"}[test.profile] ||
 				manifest.Name != test.name || manifest.Entrypoint != test.entrypoint ||
 				!valuesEqual(manifest.ConnectorIDs, test.connectors) || !valuesEqual(manifest.Limits, test.limits) || len(manifest.Files) != 2 {
 				t.Fatalf("unexpected profile authority: %#v", manifest)
@@ -547,6 +547,27 @@ assert call[1] == {
 assert call[2]["X-Steward-Task-ID"] == "task-helper-v2-5678"
 
 arguments = argparse.Namespace(worker="claude-code", mode="write", timeout_seconds=30)
+read_arguments = argparse.Namespace(worker="claude-code", mode="read", timeout_seconds=30)
+read_result = copy.deepcopy(v2)
+read_result["mode"] = "read"
+read_result["changed_paths"] = []
+read_result["handoff"].update({
+    "result_tree": read_result["handoff"]["base_tree"],
+    "patch_sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
+    "patch_bytes": 0,
+    "patch_base64": "",
+    "changed_paths": [],
+})
+assert module.validate_result(read_result, read_arguments, base) == read_result
+modified_read = copy.deepcopy(v2)
+modified_read["mode"] = "read"
+try:
+    module.validate_result(modified_read, read_arguments, base)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted a modified read-only handoff")
+
 sha256_result = copy.deepcopy(v2)
 sha256_result["handoff"].update({
     "object_format": "sha256",
@@ -575,6 +596,9 @@ bad_results.append(candidate)
 candidate = copy.deepcopy(v2)
 candidate["unexpected"] = True
 bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["stdout"] = "x" * (module.MAX_HANDOFF_STREAM + 1)
+bad_results.append(candidate)
 for candidate in bad_results:
     try:
         module.validate_result(candidate, arguments, base)
@@ -582,6 +606,85 @@ for candidate in bad_results:
         pass
     else:
         raise AssertionError("developer helper accepted a corrupt immutable handoff")
+
+unsafe_path_sets = [
+    [".git/config"],
+    [".GITMODULES"],
+    [".g\u200cit"],
+    [".\u200cgitmodules"],
+    ["git~1/config"],
+    ["GITMOD~1"],
+    ["gitmod~4"],
+    ["GI7EBA~1"],
+    ["gi7eba~9"],
+    ["GI7EB~12"],
+    ["G~123456"],
+    ["CON.txt"],
+    ["COM1.log"],
+    ["COM¹.log"],
+    ["LPT³"],
+    ["CONIN$.txt"],
+    ["CONOUT$"],
+    ["a\\b"],
+    ["name:stream"],
+    ["bad?.txt"],
+    ["pipe|name"],
+    ["trailing."],
+    ["trailing "],
+    ["A.txt", "a.txt"],
+    sorted(["Café.txt", "Cafe\u0301.txt"]),
+]
+for unsafe_paths in unsafe_path_sets:
+    candidate = copy.deepcopy(v2)
+    candidate["changed_paths"] = unsafe_paths
+    candidate["handoff"]["changed_paths"] = unsafe_paths
+    try:
+        module.validate_result(candidate, arguments, base)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError(f"developer helper accepted non-portable paths {unsafe_paths!r}")
+
+v1_unsafe = copy.deepcopy(v1)
+v1_unsafe["changed_paths"] = ["CON.txt"]
+try:
+    module.validate_result(
+        v1_unsafe,
+        argparse.Namespace(worker="codex", mode="read", timeout_seconds=30),
+        None,
+    )
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted a non-portable version 1 path")
+
+v1_oversized = copy.deepcopy(v1)
+v1_oversized["stderr"] = "x" * (module.MAX_STREAM + 1)
+try:
+    module.validate_result(
+        v1_oversized,
+        argparse.Namespace(worker="codex", mode="read", timeout_seconds=30),
+        None,
+    )
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted an oversized version 1 stream")
+
+portable_paths = sorted([
+    ".github/workflow.yml",
+    "com10.txt",
+    "context.txt",
+    "git~x/config",
+])
+portable = copy.deepcopy(v2)
+portable["changed_paths"] = portable_paths
+portable["handoff"]["changed_paths"] = portable_paths
+assert module.validate_result(portable, arguments, base) == portable
+
+replacement_boundary = copy.deepcopy(v2)
+replacement_boundary["stdout"] = "\ufffd" * module.MAX_HANDOFF_STREAM
+assert module.validate_result(replacement_boundary, arguments, base) == replacement_boundary
 
 try:
     module.decode_json(b'{"a":1,"a":1}')

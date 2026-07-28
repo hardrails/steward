@@ -65,10 +65,20 @@ supported service runtime is Linux because version 2 depends on Linux
 child-process containment before it captures the final tree.
 
 The finite contract permits at most 512 changed paths, 48 KiB of path bytes, a
-256 KiB patch, and a 448 KiB canonical result. One 45-second aggregate handoff
-deadline covers both captures and independent application. The coding connector
-preset allows 990 seconds so a maximum 900-second engine task can finish that
-bounded post-processing.
+256 KiB patch, and a 448 KiB canonical result. The aggregate worker budget reserves
+45 seconds for preflight, a maximum 900-second engine task, 20 seconds for cleanup,
+45 seconds for both captures and independent application, and 10 seconds for
+response delivery. The coding connector preset allows 1,050 seconds, including a
+30-second relay and transport margin, and serializes calls with
+`max-concurrent=1`.
+
+After authenticating and validating one request, the single-threaded worker keeps
+the original listener open but performs no further accepts while the engine runs.
+The active listener prevents an engine from claiming the port. Only after
+process-group and Linux descendant cleanup succeeds does the worker close and
+replace that listener, dropping every queued recursive connection before another
+request can run. Uncertain cleanup poisons and terminates the worker without
+rearming.
 
 The handoff is application output, not a correctness verdict or a new signature.
 Gateway still mediates the call and records its bounded connector evidence. A

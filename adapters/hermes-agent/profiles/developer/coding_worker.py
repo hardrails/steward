@@ -10,6 +10,7 @@ import http.client
 import json
 import re
 import sys
+import unicodedata
 import urllib.parse
 
 CONNECTOR_ORIGIN = "http://steward-relay:8081"
@@ -17,11 +18,14 @@ MAX_REQUEST = 64 << 10
 MAX_RESPONSE = 1 << 20
 MAX_PORTABLE_RESULT = 448 << 10
 MAX_HANDOFF_PATCH = 256 << 10
+MAX_STREAM = 448 << 10
+MAX_HANDOFF_STREAM = 16 << 10
+MAX_V1_CHANGED_PATHS = 4096
 MAX_CHANGED_PATHS = 512
 MAX_CHANGED_PATH_BYTES = 48 << 10
 MAX_TASK = 16 << 10
 MAX_TIMEOUT = 900
-CONNECTOR_GRACE_SECONDS = 90
+CONNECTOR_GRACE_SECONDS = 150
 TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 HEX_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 OBJECT_ID_LENGTHS = {"sha1": 40, "sha256": 64}
@@ -108,6 +112,55 @@ def object_id(value: object, length: int, label: str) -> str:
     return value
 
 
+def decoded_source_bytes(value: str) -> int:
+    return sum(
+        1 if character == "\ufffd" else len(character.encode("utf-8"))
+        for character in value
+    )
+
+
+def _portable_component(component: str) -> str:
+    normalized = unicodedata.normalize("NFC", component).casefold()
+    protected = normalized.rstrip(" .")
+    device = protected.split(".", 1)[0]
+    short_prefix, short_separator, short_suffix = protected.partition("~")
+    gitmodules_fallback = (
+        short_separator == "~"
+        and 1 <= len(short_prefix) <= 6
+        and "gi7eba".startswith(short_prefix)
+        and len(short_prefix) + len(short_suffix) == 7
+        and re.fullmatch(r"[1-9][0-9]*", short_suffix) is not None
+    )
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or normalized[-1] in {" ", "."}
+        or "\\" in normalized
+        or ":" in normalized
+        or any(character in '<>"|?*' for character in normalized)
+        or any(
+            "\u200c" <= character <= "\u200f"
+            or "\u202a" <= character <= "\u202e"
+            or "\u206a" <= character <= "\u206f"
+            or character == "\ufeff"
+            for character in normalized
+        )
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in normalized)
+        or protected in {".git", ".gitmodules"}
+        or re.fullmatch(r"\.?git~[0-9]+", protected) is not None
+        or re.fullmatch(r"gitmod~[1-4]", protected) is not None
+        or gitmodules_fallback
+        or device in {"con", "prn", "aux", "nul", "conin$", "conout$"}
+        or re.fullmatch(r"(com|lpt)([1-9]|[¹²³])", device) is not None
+    ):
+        raise RuntimeError("coding worker returned a non-portable changed path")
+    return normalized
+
+
+def _portable_path_key(components: tuple[str, ...]) -> str:
+    return "/".join(_portable_component(component) for component in components)
+
+
 def changed_paths(
     value: object,
     *,
@@ -117,6 +170,7 @@ def changed_paths(
     if not isinstance(value, list) or len(value) > maximum:
         raise RuntimeError("coding worker returned an invalid changed-path inventory")
     result: list[str] = []
+    portable_paths: set[str] = set()
     total = 0
     for path in value:
         if not isinstance(path, str):
@@ -131,6 +185,10 @@ def changed_paths(
             or any(ord(character) < 0x20 or ord(character) == 0x7F for character in path)
         ):
             raise RuntimeError("coding worker returned an unsafe changed path")
+        portable_key = _portable_path_key(tuple(components))
+        if portable_key in portable_paths:
+            raise RuntimeError("coding worker returned colliding changed paths")
+        portable_paths.add(portable_key)
         total += len(encoded)
         result.append(path)
     if total > maximum_bytes or result != sorted(set(result)):
@@ -154,6 +212,9 @@ def validate_common(
     outcome = value.get("outcome")
     exit_code = value.get("exit_code")
     duration = value.get("duration_ms")
+    stdout = value.get("stdout")
+    stderr = value.get("stderr")
+    stream_limit = MAX_HANDOFF_STREAM if schema_version == "steward.coding-result.v2" else MAX_STREAM
     if (
         outcome not in {"completed", "failed"}
         or type(exit_code) is not int
@@ -161,8 +222,10 @@ def validate_common(
         or (outcome == "completed") != (exit_code == 0)
         or type(duration) is not int
         or not 0 <= duration <= (arguments.timeout_seconds + CONNECTOR_GRACE_SECONDS) * 1000
-        or not isinstance(value.get("stdout"), str)
-        or not isinstance(value.get("stderr"), str)
+        or not isinstance(stdout, str)
+        or not isinstance(stderr, str)
+        or decoded_source_bytes(stdout) > stream_limit
+        or decoded_source_bytes(stderr) > stream_limit
     ):
         raise RuntimeError("coding worker returned invalid execution metadata")
     return changed_paths(
@@ -176,6 +239,8 @@ def validate_handoff(
     handoff: object,
     expected_base_commit: str,
     top_level_paths: list[str],
+    *,
+    read_only: bool,
 ) -> None:
     if not isinstance(handoff, dict) or set(handoff) != HANDOFF_FIELDS:
         raise RuntimeError("coding worker returned an invalid Git handoff contract")
@@ -222,6 +287,8 @@ def validate_handoff(
         raise RuntimeError("empty coding handoff does not preserve its base tree")
     if patch and not paths:
         raise RuntimeError("non-empty coding handoff has no changed paths")
+    if read_only and (patch or paths or base_tree != result_tree):
+        raise RuntimeError("read-only coding handoff changed the workspace")
 
 
 def validate_result(
@@ -236,7 +303,7 @@ def validate_result(
             value,
             arguments,
             schema_version="steward.coding-result.v1",
-            maximum_paths=4096,
+            maximum_paths=MAX_V1_CHANGED_PATHS,
             maximum_path_bytes=MAX_RESPONSE,
         )
     else:
@@ -247,7 +314,12 @@ def validate_result(
             maximum_paths=MAX_CHANGED_PATHS,
             maximum_path_bytes=MAX_CHANGED_PATH_BYTES,
         )
-        validate_handoff(value.get("handoff"), expected_base_commit, paths)
+        validate_handoff(
+            value.get("handoff"),
+            expected_base_commit,
+            paths,
+            read_only=arguments.mode == "read",
+        )
     return value
 
 

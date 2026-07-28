@@ -90,15 +90,25 @@ temporary Git index and object directory. The source index, refs, and object
 database are not used for handoff writes.
 
 Version 2 is bounded to 512 paths, 48 KiB of path bytes, a 256 KiB patch, and a
-448 KiB canonical result. One 45-second aggregate deadline covers both captures
-and verification after an engine task of at most 900 seconds. The shipped Steward
-Gateway coding presets fix the connector ceiling at 990 seconds.
+448 KiB canonical result. A coding request reserves at most 45 seconds for
+preflight, the requested engine budget of at most 900 seconds, 20 seconds for
+process cleanup, 45 seconds for handoff capture, and 10 seconds for response
+delivery. The signed helper and shipped Gateway coding presets use a 1,050-second
+connector ceiling, leaving 30 seconds for relay and transport scheduling, and the
+presets serialize calls with `max-concurrent=1`.
 
 Ignored output, submodules, special files, unsafe or portable-colliding paths,
 partial or sparse repositories, alternate object stores, executable Git filters,
 unstable captures, and non-reproducible patches fail closed. Changed content,
 relevant base/result blobs, streams, and raw patch bytes are scanned for protected
 credential material.
+
+After authentication and request validation, the single-threaded worker keeps its
+original listener open but accepts nothing else for the entire engine lifetime.
+Only after all engine descendants are proved stopped does it close and replace the
+listener, which drops every queued recursive connection before another request can
+run. Uncertain cleanup permanently poisons the worker and the listener is never
+rearmed.
 
 The handoff is untrusted application output. Reproducing its result tree does not
 prove the patch correct, identify the provider or model, or make it a signed
