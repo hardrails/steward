@@ -719,10 +719,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -d '' -t build_logs < <(
-            find /tmp -maxdepth 2 -type f \
-              -path '/tmp/steward-hermes-feasibility.*/build.log' -print0
-          )
+          shopt -s nullglob
+          build_logs=(/tmp/steward-hermes-feasibility.*/build.log)
           if (( ${#build_logs[@]} == 0 )); then
             echo 'No Hermes feasibility build log was retained.' >&2
             exit 0

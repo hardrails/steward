@@ -683,6 +683,8 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 		"urllib.request.ProxyHandler({})", "RejectRedirects", "files.pythonhosted.org",
 		"qualified only on linux/amd64",
 		"docker build --network=none",
+		`hermes_prepare_readonly_input_tree "$work/context/upstream"`,
+		`hermes_prepare_readonly_input_tree "$work/context/adapter"`,
 		`GIT_NO_REPLACE_OBJECTS=1`, `-c core.fsmonitor=false`,
 	} {
 		if !strings.Contains(builder, required) {
@@ -725,6 +727,78 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	connectorCommand := "/opt/steward/skills/steward.connector-work/connector_work.py"
 	if !strings.Contains(model, connectorCommand) || strings.Contains(model, "/opt/data/skills/steward.connector-work") {
 		t.Fatal("fixture model does not execute the immutable signed connector skill path")
+	}
+}
+
+func TestHermesBuilderMakesPrivateArchiveInputsSandboxReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are unavailable")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable")
+	}
+	builder := string(readBounded(
+		t,
+		filepath.Join(hermesAdapterRoot(t), "..", "..", "scripts", "build-hermes-adapter.sh"),
+		2<<20,
+	))
+	start := strings.Index(builder, "hermes_prepare_readonly_input_tree() {")
+	end := strings.Index(builder, "# END HERMES_READONLY_INPUT_TREE")
+	if start < 0 || end <= start {
+		t.Fatal("builder read-only input helper markers are missing")
+	}
+	script := filepath.Join(t.TempDir(), "readonly-input-helper.sh")
+	program := "#!/usr/bin/env bash\nset -euo pipefail\n" +
+		builder[start:end] + "\nhermes_prepare_readonly_input_tree \"$1\"\n"
+	if err := os.WriteFile(script, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	tree := filepath.Join(t.TempDir(), "input")
+	nested := filepath.Join(tree, "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(nested, 0o700)
+		_ = os.Chmod(tree, 0o700)
+	})
+	regular := filepath.Join(tree, "uv.lock")
+	executable := filepath.Join(nested, "tool")
+	if err := os.WriteFile(regular, []byte("version = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tree, "lock-link")
+	if err := os.Symlink("uv.lock", link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	command := exec.Command(bash, script, tree)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("read-only input helper failed: %v\n%s", err, output)
+	}
+	for path, want := range map[string]os.FileMode{
+		tree:       0o555,
+		nested:     0o555,
+		regular:    0o444,
+		executable: 0o555,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode = %04o, want %04o", path, got, want)
+		}
+	}
+	if info, err := os.Lstat(link); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a symlink", link)
 	}
 }
 

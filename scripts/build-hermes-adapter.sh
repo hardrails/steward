@@ -161,6 +161,45 @@ check_free_space() {
 }
 
 # Keep this function self-contained: the focused adapter fixture test executes
+# this exact block against private archive modes produced under umask 077.
+# BEGIN HERMES_READONLY_INPUT_TREE
+hermes_prepare_readonly_input_tree() {
+	python3 -I - "$1" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+root_info = os.lstat(root)
+if not stat.S_ISDIR(root_info.st_mode):
+    raise SystemExit("Hermes build input root is not a directory")
+
+def raise_walk_error(error):
+    raise error
+
+for current, directories, files in os.walk(
+    root,
+    topdown=True,
+    onerror=raise_walk_error,
+    followlinks=False,
+):
+    current_path = pathlib.Path(current)
+    for name in directories + files:
+        path = current_path / name
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or stat.S_ISDIR(info.st_mode):
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"Hermes build input contains a special file: {path}")
+        mode = 0o555 if info.st_mode & 0o111 else 0o444
+        os.chmod(path, mode, follow_symlinks=False)
+    os.chmod(current_path, 0o555, follow_symlinks=False)
+PY
+}
+# END HERMES_READONLY_INPUT_TREE
+
+# Keep this function self-contained: the focused adapter fixture test executes
 # this exact block to simulate stops at each publication boundary.
 # BEGIN HERMES_PUBLICATION_PAIR
 hermes_publication_pair() {
@@ -705,6 +744,7 @@ cleanup() {
 		docker image rm "$image_tag" >/dev/null 2>&1 || true
 	fi
 	[[ -z $sandbox_name ]] || docker rm -f "$sandbox_name" >/dev/null 2>&1 || true
+	find "$work" -type d -exec chmod u+rwx -- {} + 2>/dev/null || true
 	rm -rf -- "$work"
 	if [[ ! -e $output && ! -L $output && ! -e $attestation && ! -L $attestation ]]; then
 		rm -rf -- "$publish_dir"
@@ -789,7 +829,8 @@ fi
 # the private temporary parent and read-only access to the explicit bind roots;
 # all other build state remains owner-only.
 chmod 0711 "$work" "$work/context"
-chmod 0555 "$work/context/upstream" "$work/context/adapter"
+hermes_prepare_readonly_input_tree "$work/context/upstream"
+hermes_prepare_readonly_input_tree "$work/context/adapter"
 
 progress "Planning exact Linux wheel fetches from the verified Hermes lockfile"
 wheel_plan=$work/wheel-plan.json
