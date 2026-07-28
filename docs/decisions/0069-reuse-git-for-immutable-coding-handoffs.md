@@ -18,11 +18,12 @@ paths and untrusted engine output. That is enough to tell an operator where to
 look, but not enough to give a separately authorized reviewer the exact result
 without mounting the same mutable checkout.
 
-A trustworthy handoff must bind the repository state accepted before execution,
-the exact version-controlled change bytes, and the tree obtained after applying
-them. It must remain bounded by the existing connector response, work without a
-hosted service, preserve the worker's no-commit/no-push boundary, and avoid adding
-another signing key to an engine that already sits behind Steward Gateway.
+A bounded reproducible handoff must bind the repository state accepted before
+execution, the exact version-controlled change bytes, and the tree obtained after
+applying them. It must remain bounded by the existing connector response, work
+without a hosted service, avoid having the supervisor publish repository state,
+and avoid adding another signing key to an engine that already sits behind
+Steward Gateway.
 
 Git already defines commit, tree, binary patch, file-mode, symlink, and apply
 semantics. A new patch or archive format would create a second repository model,
@@ -45,18 +46,29 @@ base commit. After the engine exits, the coding worker returns
 
 The worker captures the patch twice and requires byte-for-byte stability. Fixed
 Git commands disable external diffs, text conversion, hooks, filesystem monitors,
-system and user configuration, prompts, and pagers. The temporary verification
-store may read the checkout's existing objects but cannot write its index, refs,
-or object database.
+system and user configuration, prompts, and pagers. The capture and verification
+stores write only their own temporary indexes and object directories; they read
+the checkout object database as an alternate and never write the checkout's
+index, refs, or objects.
 
 Version 1 requests and results remain available. The signed Hermes developer
 helper requires a caller-selected, one-use connector task ID and forwards it
 through the already required `X-Steward-Task-ID` header. An expected base selects
 version 2; omission selects version 1.
 
-Version 2 excludes ignored files and rejects submodules and special files. Those
-states need separate nested-repository or device semantics and must not be
-silently flattened into an apparently complete handoff.
+Version 2 rejects ignored files present at startup and ignored output created by
+the engine, along with submodules and special files. Those states need separate
+nested-repository or device semantics and must not be silently flattened into an
+apparently complete handoff. It also requires a clean standalone checkout at the
+exact expected commit, regardless of the version 1 development escape hatch. The
+supported service runtime is Linux because version 2 depends on Linux
+child-process containment before it captures the final tree.
+
+The finite contract permits at most 512 changed paths, 48 KiB of path bytes, a
+256 KiB patch, and a 448 KiB canonical result. One 45-second aggregate handoff
+deadline covers both captures and independent application. The coding connector
+preset allows 990 seconds so a maximum 900-second engine task can finish that
+bounded post-processing.
 
 The handoff is application output, not a correctness verdict or a new signature.
 Gateway still mediates the call and records its bounded connector evidence. A
@@ -82,11 +94,12 @@ inside the same trust boundary without proving correctness.
   base and returned patch without accessing the producer's checkout.
 - A mismatched base, changed history, unstable capture, non-reproducible patch,
   unsupported repository shape, or exceeded bound fails closed.
-- The coding worker still never commits, pushes, merges, publishes, or declares a
-  patch correct.
-- Operators should mount a disposable clone and make its Git metadata read-only.
-  A host worktree whose `.git` file points outside the mount is not a portable
-  container input.
+- The supervisor does not invoke commit, push, merge, or publish, and it rejects a
+  changed final `HEAD`. That does not prove an engine never committed and reset or
+  attempted a push. Operators must mount the clone's Git metadata read-only,
+  remove remote credentials, and restrict egress so those effects are unavailable.
+- Operators must mount a disposable standalone clone. A linked host worktree whose
+  `.git` file points outside the mount is not a portable container input.
 - Steward retains zero private Go dependencies and adds no provider SDK, workflow
   engine, signing service, or artifact database.
 
