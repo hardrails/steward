@@ -1190,6 +1190,23 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	}
 }
 
+func TestHermesAcceptanceReportsBoundedGatewayStartupDiagnostics(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	for _, contract := range []string{
+		"Gateway remained running without its control socket",
+		"Gateway exited before creating its control socket",
+		`gateway_log_size=$(stat -c '%s' -- "$work/gateway.log")`,
+		"gateway_log_size <= 1048576",
+		"bounded Gateway startup diagnostics follow",
+		`tail -n 100 -- "$work/gateway.log"`,
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes acceptance startup diagnostics are missing contract %q", contract)
+		}
+	}
+}
+
 func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
 	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
 	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-feasibility.sh"), 2<<20))

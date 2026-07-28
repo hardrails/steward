@@ -33,7 +33,7 @@ build_attestation=${HERMES_BUILD_ATTESTATION:-}
 	echo "hermes-steward-acceptance: set STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES only on a disposable host" >&2
 	exit 2
 }
-for command in base64 curl docker python3; do
+for command in base64 curl docker python3 stat tail; do
 	command -v "$command" >/dev/null 2>&1 || { echo "hermes-steward-acceptance: $command is required" >&2; exit 2; }
 done
 executor_addr=${STEWARD_ACCEPTANCE_EXECUTOR_ADDR:-127.0.0.1:8090}
@@ -637,7 +637,24 @@ printf '%s\n' "{
 "$gateway_bin" -config "$work/gateway.json" >"$work/gateway.log" 2>&1 &
 gateway_pid=$!
 for _ in $(seq 1 30); do [[ -S $work/gateway/control.sock ]] && break; sleep 1; done
-[[ -S $work/gateway/control.sock ]] || { echo "hermes-steward-acceptance: Gateway did not become ready" >&2; exit 1; }
+if [[ ! -S $work/gateway/control.sock ]]; then
+	echo "hermes-steward-acceptance: Gateway did not become ready" >&2
+	if kill -0 "$gateway_pid" 2>/dev/null; then
+		echo "hermes-steward-acceptance: Gateway remained running without its control socket" >&2
+	else
+		echo "hermes-steward-acceptance: Gateway exited before creating its control socket" >&2
+	fi
+	gateway_log_size=
+	if [[ -f $work/gateway.log && ! -L $work/gateway.log ]] &&
+		gateway_log_size=$(stat -c '%s' -- "$work/gateway.log") &&
+		[[ $gateway_log_size =~ ^[0-9]{1,7}$ ]] && (( gateway_log_size <= 1048576 )); then
+		echo "hermes-steward-acceptance: bounded Gateway startup diagnostics follow" >&2
+		tail -n 100 -- "$work/gateway.log" >&2
+	else
+		echo "hermes-steward-acceptance: Gateway startup diagnostics are unavailable or oversized" >&2
+	fi
+	exit 1
+fi
 unset connector_secret
 
 "$ctl_bin" keygen -key-id site-root -private-out "$work/site.private" -public-out "$work/site.public" >/dev/null
