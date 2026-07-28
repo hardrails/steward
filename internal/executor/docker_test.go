@@ -850,6 +850,18 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 				create["Options"].(map[string]any)[isolatedGatewayOption] != isolatedGatewayMode {
 				t.Fatalf("network create=%#v", create)
 			}
+			ipam, ok := create["IPAM"].(map[string]any)
+			if !ok || len(ipam) != 2 || ipam["Driver"] != defaultIPAMDriver {
+				t.Fatalf("network create does not explicitly select Docker's default IPAM: %#v", create)
+			}
+			config, ok := ipam["Config"].([]any)
+			if !ok || len(config) != 1 {
+				t.Fatalf("network create does not request one Docker-selected user-configured subnet: %#v", create)
+			}
+			allocation, ok := config[0].(map[string]any)
+			if !ok || len(allocation) != 0 {
+				t.Fatalf("network create does not request one Docker-selected user-configured subnet: %#v", create)
+			}
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1.41/networks/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{

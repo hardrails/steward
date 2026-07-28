@@ -77,6 +77,7 @@ const managedNetworkLabel = "io.hardrails.network.managed"
 const networkGenerationLabel = "io.hardrails.network.generation"
 const managedRelayLabel = "io.hardrails.relay.managed"
 const relayFingerprintLabel = "io.hardrails.relay-sha256"
+const defaultIPAMDriver = "default"
 const isolatedGatewayOption = "com.docker.network.bridge.gateway_mode_ipv4"
 const isolatedGatewayMode = "isolated"
 
@@ -163,6 +164,14 @@ func (d *DockerHTTP) CreateNetwork(ctx context.Context, spec NetworkSpec) error 
 	}
 	body := map[string]any{
 		"Name": spec.Name, "Driver": "bridge", "CheckDuplicate": true, "Internal": true, "Attachable": false,
+		// An explicit empty Config entry asks Docker's default IPAM driver to
+		// select a collision-free subnet while marking the network as
+		// user-configured. Docker requires that marker before it accepts the
+		// fixed relay and agent addresses derived from the observed allocation.
+		"IPAM": map[string]any{
+			"Driver": defaultIPAMDriver,
+			"Config": []map[string]string{{}},
+		},
 		"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
 		"Labels": map[string]string{
 			managedNetworkLabel: "true", "io.hardrails.tenant": spec.TenantID,
