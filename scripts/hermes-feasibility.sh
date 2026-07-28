@@ -33,6 +33,13 @@ command -v docker >/dev/null || { echo 'hermes-feasibility: docker is required' 
 command -v python3 >/dev/null || { echo 'hermes-feasibility: python3 is required' >&2; exit 2; }
 command -v sha256sum >/dev/null || { echo 'hermes-feasibility: sha256sum is required' >&2; exit 2; }
 command -v timeout >/dev/null || { echo 'hermes-feasibility: GNU timeout is required' >&2; exit 2; }
+privileged=()
+if (( EUID != 0 )); then
+	command -v sudo >/dev/null || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }
+	sudo -n -- true >/dev/null || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }
+	privileged=(sudo -n --)
+fi
+readonly -a privileged
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || {
 	echo 'hermes-feasibility: Docker runtime runsc is required' >&2
 	exit 2
@@ -48,6 +55,7 @@ mcp=$name_prefix-mcp
 work=$(mktemp -d /tmp/steward-hermes-feasibility.XXXXXX)
 checks=$work/checks.tsv
 state_root=$work/state
+readonly work state_root
 source_archive_digest=unavailable
 source_tree_digest=unavailable
 adapter_commit=unavailable
@@ -88,6 +96,53 @@ safe_git() {
 		-u GIT_SHALLOW_FILE -u GIT_TEMPLATE_DIR -u GIT_WORK_TREE \
 		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
 		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c tar.umask=0022 -C "$repository" "$@"
+}
+
+bounded_state_root() {
+	[[ ${work%/*} == /tmp &&
+		${work##*/} == steward-hermes-feasibility.?????? &&
+		-d $work && ! -L $work &&
+		$state_root == "$work/state" && ! -L $state_root ]]
+}
+
+privileged_command() {
+	"${privileged[@]}" "$@"
+}
+
+prepare_state_ownership() {
+	bounded_state_root || {
+		echo 'hermes-feasibility: refusing unbounded state ownership change' >&2
+		return 1
+	}
+	privileged_command chown -hR 65532:65532 -- "$state_root"
+}
+
+state_authority_digest() {
+	bounded_state_root || {
+		echo 'hermes-feasibility: refusing unbounded state inspection' >&2
+		return 1
+	}
+	privileged_command find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 |
+		sort -z |
+		privileged_command xargs -0 sha256sum |
+		sha256sum |
+		awk '{print $1}'
+}
+
+read_state_probe() {
+	bounded_state_root || {
+		echo 'hermes-feasibility: refusing unbounded state read' >&2
+		return 1
+	}
+	privileged_command cat -- "$state_root/steward/state-write-probe"
+}
+
+remove_state_root() {
+	bounded_state_root || {
+		echo 'hermes-feasibility: refusing unbounded state cleanup' >&2
+		return 1
+	}
+	privileged_command rm -rf -- "$state_root"
 }
 
 stop_gate() {
@@ -196,7 +251,8 @@ cleanup() {
 		[[ $image_digest == sha256:* ]] && docker image rm "$image_digest" >/dev/null 2>&1 || true
 	done
 	if [[ $overall == passed || $debug_keep != YES ]]; then
-		rm -rf "$work"
+		remove_state_root
+		rm -rf -- "$work"
 	else
 		echo "hermes-feasibility: preserved failed diagnostic workspace: $work" >&2
 	fi
@@ -312,7 +368,7 @@ printf 'alpha\n' >"$state_root/workspace/alpha.txt"
 printf 'beta\n' >"$state_root/workspace/nested/beta.txt"
 chmod 0700 "$state_root"
 chmod -R u=rwX,go= "$state_root/workspace"
-chown -R 65532:65532 "$state_root"
+prepare_state_ownership || stop_gate runtime.state state_ownership_failed
 docker network create --internal --label io.hardrails.feasibility=true "$network" >/dev/null
 record network.internal passed no_external_route
 
@@ -419,9 +475,9 @@ python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")==
 record agent.readiness passed "health_sha256:$(printf %s "$health" | sha256sum | awk '{print $1}')"
 
 negotiation_one=$(agent_get /steward/v1/negotiation) || stop_gate adapter.negotiation negotiation_failed
-authority_before=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+authority_before=$(state_authority_digest) || stop_gate adapter.negotiation authority_state_unreadable
 negotiation_two=$(agent_get /steward/v1/negotiation) || stop_gate adapter.negotiation negotiation_replay_failed
-authority_after=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+authority_after=$(state_authority_digest) || stop_gate adapter.negotiation authority_state_unreadable
 [[ $negotiation_one == "$negotiation_two" && $authority_before == "$authority_after" ]] || stop_gate adapter.negotiation negotiation_mutated_authority_state
 python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert set(p)=={"adapter","adapter_contract","capabilities","native_protocols","schema_version","task_protocol","upstream_revision"}; assert p["schema_version"]=="steward.adapter-negotiation.v1" and p["adapter"]=="hermes-agent" and p["adapter_contract"]=="steward.hermes-agent.v1" and p["upstream_revision"]==sys.argv[1]; assert p["task_protocol"]=="hermes.runs.v1" and p["native_protocols"]==["http"]; assert p["capabilities"]==[{"fixture_id":"steward.workspace-audit","id":"skill"},{"fixture_id":"steward.connector-work","id":"skill"},{"fixture_id":"fixed-response","id":"task"}]' "$revision" <<<"$negotiation_one" || stop_gate adapter.negotiation invalid_negotiation_contract
 record adapter.negotiation passed side_effect_free_exact_contract
@@ -469,7 +525,8 @@ if docker exec -u 65532:65532 "$agent" sh -c 'touch /steward-root-write-probe' >
 	stop_gate runtime.rootfs rootfs_write_succeeded
 fi
 docker exec -u 65532:65532 "$agent" sh -c 'printf ok > /opt/data/steward/state-write-probe' || stop_gate runtime.state state_write_failed
-[[ $(cat "$state_root/steward/state-write-probe") == ok ]] || stop_gate runtime.state state_write_not_observed
+state_probe=$(read_state_probe) || stop_gate runtime.state state_write_unreadable
+[[ $state_probe == ok ]] || stop_gate runtime.state state_write_not_observed
 record runtime.filesystem passed fixed_state_only
 
 if docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' >/dev/null 2>&1
@@ -517,7 +574,7 @@ PY
 run_native_task basic STEWARD_TASK_FIXTURE "steward-task:$expected_digest"
 run_native_task skill STEWARD_WORKSPACE_AUDIT "$workspace_manifest_digest"
 run_native_task mcp STEWARD_MCP_FIXTURE steward-hermes-phase1
-persisted_authority_before_restart=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+persisted_authority_before_restart=$(state_authority_digest) || stop_gate restart.state authority_state_unreadable
 
 docker rm -f "$agent" >/dev/null
 docker run -d --name "$agent" --network-alias steward-agent "${closed_run[@]}" "${agent_hosts[@]}" \
@@ -531,7 +588,7 @@ for _ in $(seq 1 90); do
 done
 agent_get /health >/dev/null 2>&1 || stop_gate restart.readiness restarted_agent_not_ready
 record restart.readiness passed restarted_native_api_ready
-persisted_authority_after_restart=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+persisted_authority_after_restart=$(state_authority_digest) || stop_gate restart.state authority_state_unreadable
 [[ $persisted_authority_before_restart == "$persisted_authority_after_restart" ]] || stop_gate restart.state persisted_authority_changed
 run_native_task restart STEWARD_WORKSPACE_AUDIT "$workspace_manifest_digest"
 record restart.state passed workspace_skill_reused

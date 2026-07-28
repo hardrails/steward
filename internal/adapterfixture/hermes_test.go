@@ -1189,6 +1189,46 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	}
 }
 
+func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-feasibility.sh"), 2<<20))
+	for _, contract := range []string{
+		"readonly work state_root",
+		"${work##*/} == steward-hermes-feasibility.??????",
+		"-d $work && ! -L $work",
+		`$state_root == "$work/state" && ! -L $state_root`,
+		"sudo -n -- true",
+		"privileged=(sudo -n --)",
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes feasibility privilege boundary is missing contract %q", contract)
+		}
+	}
+
+	allowed := map[string]bool{
+		`privileged_command chown -hR 65532:65532 -- "$state_root"`:                                                                         true,
+		`privileged_command find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 |`: true,
+		"privileged_command xargs -0 sha256sum |":                                                                                           true,
+		`privileged_command cat -- "$state_root/steward/state-write-probe"`:                                                                 true,
+		`privileged_command rm -rf -- "$state_root"`:                                                                                        true,
+	}
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "sudo ") && line != "sudo -n -- true >/dev/null || { echo 'hermes-feasibility: passwordless sudo is required for state ownership' >&2; exit 2; }" {
+			t.Fatalf("Hermes feasibility invokes sudo outside its bootstrap probe: %q", line)
+		}
+		if strings.Contains(line, "privileged_command ") {
+			if !allowed[line] {
+				t.Fatalf("Hermes feasibility uses privilege outside its state allowlist: %q", line)
+			}
+			delete(allowed, line)
+		}
+	}
+	if len(allowed) != 0 {
+		t.Fatalf("Hermes feasibility does not exercise every privileged state operation: %#v", allowed)
+	}
+}
+
 func TestHermesSecretScannerRejectsEquivalentConnectorMaterial(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
