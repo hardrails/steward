@@ -413,6 +413,67 @@ class CodingHandoffContractTest(unittest.TestCase):
         self.assertFalse(exceeded)
         self.assertTrue(timed_out)
 
+    def test_stop_process_preserves_a_force_kill_observation_budget(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                (
+                    "import signal,time; "
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                    "print('ready', flush=True); "
+                    "time.sleep(10)"
+                ),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            self.assertEqual(process.stdout.readline(), b"ready\n")
+            started = time.monotonic()
+            self.assertTrue(
+                worker.stop_process(
+                    process,
+                    deadline=started + 0.4,
+                )
+            )
+            self.assertLess(time.monotonic() - started, 0.8)
+            self.assertFalse(worker.process_group_exists(process.pid))
+        finally:
+            worker.stop_process(process, deadline=time.monotonic() + 1)
+            worker.close_process_streams(process)
+
+    def test_bounded_process_cleans_a_term_ignoring_child_before_absolute_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            pid_path = root / "child.pid"
+            source = (
+                "import os,pathlib,signal,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+                "time.sleep(10)"
+            )
+            started = time.monotonic()
+            _, _, _, exceeded, timed_out = worker.run_bounded_process(
+                [sys.executable, "-I", "-B", "-c", source],
+                cwd=root,
+                environment=worker.git_environment(),
+                timeout_seconds=0.25,
+                stdout_limit=1024,
+                stderr_limit=1024,
+                absolute_deadline=started + 1,
+            )
+            self.assertLess(time.monotonic() - started, 1.2)
+            self.assertFalse(exceeded)
+            self.assertTrue(timed_out)
+            process_id = int(pid_path.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(process_id, 0)
+
     def test_empty_handoff_binds_equal_trees_and_an_empty_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository, base_commit, base_tree = initialize_repository(pathlib.Path(temporary))

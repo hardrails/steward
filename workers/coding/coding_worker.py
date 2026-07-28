@@ -212,13 +212,15 @@ def stop_process(
 ) -> bool:
     group_id = process.pid
     cleanup_deadline = deadline if deadline is not None else time.monotonic() + 10
+    remaining = max(0.0, cleanup_deadline - time.monotonic())
+    graceful_budget = min(5.0, remaining / 2)
     try:
         os.killpg(group_id, signal.SIGTERM)
     except ProcessLookupError:
         pass
     except PermissionError:
         return False
-    graceful_deadline = min(cleanup_deadline, time.monotonic() + 5)
+    graceful_deadline = min(cleanup_deadline, time.monotonic() + graceful_budget)
     while time.monotonic() < graceful_deadline:
         process.poll()
         if process.returncode is not None:
@@ -232,7 +234,7 @@ def stop_process(
         pass
     except PermissionError:
         return False
-    force_deadline = min(cleanup_deadline, time.monotonic() + 5)
+    force_deadline = cleanup_deadline
     while time.monotonic() < force_deadline:
         process.poll()
         if process.returncode is not None:
