@@ -789,6 +789,7 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 		`hermes_set_input_tree_modes "$work/context/adapter" 0755 0644 0755`,
 		`hermes_set_input_tree_modes "$work/context/upstream" 0555 0444 0555`,
 		`hermes_set_input_tree_modes "$work/context/adapter" 0555 0444 0555`,
+		`hermes_set_input_tree_modes "$work/final-context/artifact/venv/.venv" 0555 0444 0555`,
 		`GIT_NO_REPLACE_OBJECTS=1`, `-c core.fsmonitor=false`,
 	} {
 		if !strings.Contains(builder, required) {

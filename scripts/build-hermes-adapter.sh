@@ -1186,6 +1186,10 @@ with tarfile.open(archive_path, mode="r:") as archive:
             raise SystemExit("gVisor build artifact places content below a symlink")
 PY
 tar --no-same-owner -xf "$work/venv.tar" -C "$work/final-context/artifact/venv"
+# The sandbox may inherit a private umask. Normalize the already-validated
+# runtime tree before COPY changes its owner to root so UID 65532 can traverse
+# the venv and execute only files that were executable in the build artifact.
+hermes_set_input_tree_modes "$work/final-context/artifact/venv/.venv" 0555 0444 0555
 mkdir -p "$work/final-context/artifact/state/home"
 chmod 0700 "$work/final-context/artifact/state" "$work/final-context/artifact/state/home"
 printf 'docker\n' >"$work/final-context/artifact/install_method"
