@@ -188,16 +188,11 @@ func RelayName(tenantID, instanceID string, generation uint64) string {
 	return "steward-relay-" + hex.EncodeToString(sum[:])
 }
 
-func (d *DockerHTTP) CreateNetwork(ctx context.Context, spec NetworkSpec) (returnErr error) {
+func (d *DockerHTTP) CreateNetwork(ctx context.Context, spec NetworkSpec) error {
 	if spec != NetworkSpecFor(spec.TenantID, spec.InstanceID, spec.Generation) ||
 		!boundedText(spec.TenantID, 128) || !boundedText(spec.InstanceID, 256) || spec.Generation == 0 {
 		return &PolicyError{"internal network specification is invalid"}
 	}
-	defer func() {
-		if returnErr != nil {
-			d.cleanupNetworkReservation(spec)
-		}
-	}()
 	var lastErr error
 	for attempt := 0; attempt < maxNetworkAllocationAttempts; attempt++ {
 		observed, err := d.InspectNetwork(ctx, spec.Name)
@@ -319,18 +314,6 @@ func (d *DockerHTTP) releaseNetworkReservation(ctx context.Context, spec Network
 		return fmt.Errorf("release Docker subnet reservation: %w", removeErr)
 	}
 	return errors.New("Docker subnet reservation remained after removal")
-}
-
-func (d *DockerHTTP) cleanupNetworkReservation(spec NetworkSpec) {
-	ctx, cancel := context.WithTimeout(context.Background(), networkCleanupTimeout)
-	defer cancel()
-	reservation, err := d.inspectDockerNetwork(ctx, networkReservationName(spec))
-	if err != nil {
-		return
-	}
-	if _, err := reservationAllocation(reservation, spec); err == nil {
-		_ = d.call(ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(reservation.ID), nil, http.StatusNoContent)
-	}
 }
 
 func (d *DockerHTTP) cleanupNetworkReservationID(id string) {

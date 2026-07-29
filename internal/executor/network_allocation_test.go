@@ -34,6 +34,7 @@ type networkAPIFixture struct {
 	reservationFaults    []networkMutationFault
 	reservationDelFaults []networkMutationFault
 	finalFaults          []networkMutationFault
+	replaceOnDelete      bool
 }
 
 func newNetworkAPIFixture(t *testing.T) (*networkAPIFixture, *DockerHTTP) {
@@ -165,6 +166,10 @@ func (f *networkAPIFixture) deleteNetwork(w http.ResponseWriter, ref string) {
 	}
 	if fault.status == 0 || fault.apply {
 		delete(f.networks, network.name)
+		if f.replaceOnDelete && network.labels[networkAllocationLabel] == networkReservationAllocation {
+			f.replaceOnDelete = false
+			f.addReservation(network.subnet)
+		}
 	}
 	if fault.status != 0 {
 		w.WriteHeader(fault.status)
@@ -276,6 +281,26 @@ func TestCreateNetworkResolvesAppliedMutationResponseLoss(t *testing.T) {
 	}
 	if fixture.networks[networkReservationName(fixture.spec)] != nil || fixture.networks[fixture.spec.Name] == nil {
 		t.Fatalf("networks=%#v", fixture.networks)
+	}
+}
+
+func TestCreateNetworkNeverDeletesReplacementReservation(t *testing.T) {
+	fixture, docker := newNetworkAPIFixture(t)
+	original := fixture.addReservation("172.30.8.0/29")
+	fixture.replaceOnDelete = true
+	err := docker.CreateNetwork(context.Background(), fixture.spec)
+	if err == nil || !strings.Contains(err.Error(), "identity changed during removal") {
+		t.Fatalf("replacement race error=%v", err)
+	}
+	replacement := fixture.networks[networkReservationName(fixture.spec)]
+	if replacement == nil || replacement.id == original.id {
+		t.Fatalf("replacement=%#v original=%#v", replacement, original)
+	}
+	if contains(fixture.deleteTargets, replacement.id) {
+		t.Fatalf("same-name replacement %q was deleted: targets=%#v", replacement.id, fixture.deleteTargets)
+	}
+	if fixture.finalCreates != 0 {
+		t.Fatalf("final network creates=%d, want 0", fixture.finalCreates)
 	}
 }
 
