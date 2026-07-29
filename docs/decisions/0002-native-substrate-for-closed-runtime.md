@@ -67,8 +67,8 @@ images.
 - Existing unmarked managed networks remain valid only for already committed
   runtime fences. Fresh admission requires the explicit-allocation marker. A
   process kill while a prepared journal is pending can leave an empty,
-  self-identifying reservation for the existing operator reconciliation flow;
-  it is never treated as a final capability network.
+  self-identifying reservation that requires operator reconciliation; it is
+  never treated as a final capability network.
 - An absent Docker gateway is the normal result for an isolated bridge and does not
   weaken host-gateway isolation. If Docker reports a gateway, Steward validates and
   records it as network metadata; it does not enable a host route.

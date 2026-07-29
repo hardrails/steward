@@ -91,6 +91,8 @@ const maxNetworkAllocationAttempts = 3
 const networkCleanupTimeout = 5 * time.Second
 const isolatedGatewayOption = "com.docker.network.bridge.gateway_mode_ipv4"
 const isolatedGatewayMode = "isolated"
+const bridgeIPv4Option = "com.docker.network.enable_ipv4"
+const bridgeIPv6Option = "com.docker.network.enable_ipv6"
 const dockerPoolOverlapMessage = "invalid pool request: Pool overlaps with other one on this address space"
 
 func NetworkName(tenantID, instanceID string, generation uint64) string {
@@ -432,10 +434,35 @@ func (d *DockerHTTP) inspectDockerNetwork(ctx context.Context, name string) (doc
 func networkEnvelopeMatches(payload dockerNetworkInspect, name string, labels map[string]string) bool {
 	return payload.ID != "" && payload.Name == name && payload.Driver == "bridge" && payload.Scope == "local" &&
 		payload.Internal && !payload.Attachable && !payload.Ingress && !payload.ConfigOnly && !payload.EnableIPv6 &&
-		exactStringMap(payload.Options, map[string]string{isolatedGatewayOption: isolatedGatewayMode}) &&
+		hardenedNetworkOptions(payload.Options) &&
 		exactStringMap(payload.Labels, labels) && payload.IPAM.Driver == defaultIPAMDriver &&
 		len(payload.IPAM.Options) == 0 && len(payload.IPAM.Config) == 1 &&
 		payload.IPAM.Config[0].IPRange == "" && len(payload.IPAM.Config[0].AuxiliaryAddresses) == 0
+}
+
+func hardenedNetworkOptions(options map[string]string) bool {
+	if options[isolatedGatewayOption] != isolatedGatewayMode {
+		return false
+	}
+	for key, value := range options {
+		switch key {
+		case isolatedGatewayOption:
+			if value != isolatedGatewayMode {
+				return false
+			}
+		case bridgeIPv4Option:
+			if value != "true" {
+				return false
+			}
+		case bridgeIPv6Option:
+			if value != "false" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func reservationAllocation(payload dockerNetworkInspect, spec NetworkSpec) (NetworkSpec, error) {
@@ -494,7 +521,7 @@ func observedNetworkFromPayload(payload dockerNetworkInspect) (ObservedNetwork, 
 	}
 	internal := payload.Name == observed.Name && payload.Driver == "bridge" && payload.Scope == "local" &&
 		payload.Internal && !payload.Attachable && !payload.Ingress && !payload.ConfigOnly && !payload.EnableIPv6 &&
-		exactStringMap(payload.Options, map[string]string{isolatedGatewayOption: isolatedGatewayMode})
+		hardenedNetworkOptions(payload.Options)
 	explicitIPAM := networkEnvelopeMatches(
 		payload, observed.Name, networkLabels(observed, networkExplicitAllocation, observed.Subnet),
 	)

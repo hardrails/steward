@@ -353,3 +353,66 @@ func TestRemoveNetworkPreflightsFinalAndReservationBeforeDeletingEither(t *testi
 		t.Fatalf("cleanup mutated an unproven topology: networks=%#v deletes=%#v", fixture.networks, fixture.deleteTargets)
 	}
 }
+
+func TestHardenedNetworkOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options map[string]string
+		want    bool
+	}{
+		{
+			name: "isolated gateway only",
+			options: map[string]string{
+				isolatedGatewayOption: isolatedGatewayMode,
+			},
+			want: true,
+		},
+		{
+			name: "Docker reported address family defaults",
+			options: map[string]string{
+				isolatedGatewayOption: isolatedGatewayMode,
+				bridgeIPv4Option:      "true",
+				bridgeIPv6Option:      "false",
+			},
+			want: true,
+		},
+		{
+			name:    "missing isolated gateway",
+			options: map[string]string{bridgeIPv4Option: "true"},
+		},
+		{
+			name: "non-isolated gateway",
+			options: map[string]string{
+				isolatedGatewayOption: "nat",
+			},
+		},
+		{
+			name: "IPv4 disabled",
+			options: map[string]string{
+				isolatedGatewayOption: isolatedGatewayMode,
+				bridgeIPv4Option:      "false",
+			},
+		},
+		{
+			name: "IPv6 enabled",
+			options: map[string]string{
+				isolatedGatewayOption: isolatedGatewayMode,
+				bridgeIPv6Option:      "true",
+			},
+		},
+		{
+			name: "unknown option",
+			options: map[string]string{
+				isolatedGatewayOption: isolatedGatewayMode,
+				"unexpected":          "value",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hardenedNetworkOptions(test.options); got != test.want {
+				t.Fatalf("hardenedNetworkOptions(%#v)=%t, want %t", test.options, got, test.want)
+			}
+		})
+	}
+}
