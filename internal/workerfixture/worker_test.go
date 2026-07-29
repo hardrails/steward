@@ -233,7 +233,12 @@ func TestCodingWorkerUsesFixedSafeModeCLIArguments(t *testing.T) {
 	harness := `import importlib.util,json,sys
 spec=importlib.util.spec_from_file_location("worker",sys.argv[1])
 worker=importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
-print(json.dumps({e+"-"+m:worker.command_for(e,"fixed task",m) for e in ("codex","claude-code") for m in ("read","write")},sort_keys=True))
+commands={e+"-"+m:worker.command_for(e,"fixed task",m) for e in ("codex","claude-code") for m in ("read","write")}
+commands["boundary-codex-help"]=worker.command_for("codex","--help","write")
+commands["boundary-codex-bypass"]=worker.command_for("codex","--dangerously-bypass-approvals-and-sandbox","write")
+commands["boundary-claude-help"]=worker.command_for("claude-code","--help","write")
+commands["boundary-claude-bypass"]=worker.command_for("claude-code","--dangerously-skip-permissions","write")
+print(json.dumps(commands,sort_keys=True))
 `
 	command := exec.Command(python, "-I", "-B", "-c", harness, path)
 	raw, err := command.Output()
@@ -245,14 +250,33 @@ print(json.dumps({e+"-"+m:worker.command_for(e,"fixed task",m) for e in ("codex"
 		t.Fatal(err)
 	}
 	for key, arguments := range commands {
-		if len(arguments) < 8 || arguments[len(arguments)-1] != "fixed task" && key[:5] == "codex" {
+		if strings.HasPrefix(key, "boundary-") {
+			continue
+		}
+		if len(arguments) < 8 {
 			t.Fatalf("%s command=%v", key, arguments)
+		}
+		if strings.HasPrefix(key, "codex-") || strings.HasPrefix(key, "claude-code-") {
+			if arguments[len(arguments)-2] != "--" || arguments[len(arguments)-1] != "fixed task" {
+				t.Fatalf("%s command does not delimit task text: %v", key, arguments)
+			}
 		}
 		joined := strings.Join(arguments, " ")
 		for _, forbidden := range []string{"dangerously-bypass", "skip-permissions", "--continue", "--resume"} {
 			if strings.Contains(joined, forbidden) {
 				t.Fatalf("%s command contains %q: %v", key, forbidden, arguments)
 			}
+		}
+	}
+	for key, task := range map[string]string{
+		"boundary-codex-help":    "--help",
+		"boundary-codex-bypass":  "--dangerously-bypass-approvals-and-sandbox",
+		"boundary-claude-help":   "--help",
+		"boundary-claude-bypass": "--dangerously-skip-permissions",
+	} {
+		arguments := commands[key]
+		if len(arguments) < 2 || arguments[len(arguments)-2] != "--" || arguments[len(arguments)-1] != task {
+			t.Fatalf("%s command does not preserve task text after the option boundary: %v", key, arguments)
 		}
 	}
 	for _, required := range []string{"--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only"} {

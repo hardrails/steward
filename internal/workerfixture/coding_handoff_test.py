@@ -788,6 +788,169 @@ class CodingHandoffContractTest(unittest.TestCase):
                     code="unsupported_workspace",
                 )
 
+    def test_mountinfo_paths_use_only_kernel_escapes(self) -> None:
+        self.assertEqual(
+            worker._decode_mountinfo_path(
+                b"/workspace/space\\040tab\\011line\\012slash\\134.git"
+            ),
+            b"/workspace/space tab\tline\nslash\\.git",
+        )
+        for malformed in (
+            b"/workspace/.git\\",
+            b"/workspace/.git\\04",
+            b"/workspace/.git\\041",
+            b"workspace/.git",
+            b"/workspace/\x00.git",
+        ):
+            with self.subTest(value=malformed):
+                with self.assertRaises(ValueError):
+                    worker._decode_mountinfo_path(malformed)
+
+    def test_git_metadata_mountinfo_requires_one_private_readonly_mount(self) -> None:
+        target = pathlib.Path("/workspace/.git")
+
+        def record(
+            mount_id: int,
+            mountpoint: bytes,
+            *,
+            options: bytes = b"ro,nosuid,nodev",
+            optional: bytes = b"",
+            device: bytes = b"0:51",
+        ) -> bytes:
+            optional_fields = b" " + optional if optional else b""
+            return (
+                str(mount_id).encode()
+                + b" 145 "
+                + device
+                + b" /source "
+                + mountpoint
+                + b" "
+                + options
+                + optional_fields
+                + b" - fakeowner /run/host rw,fakeowner\n"
+            )
+
+        exact = record(146, b"/workspace/.git", device=b"0:51")
+        selected = worker._select_readonly_git_mount(exact, target, 146)
+        self.assertEqual(selected[0], 146)
+        self.assertEqual(selected[2], b"0:51")
+
+        refused = {
+            "writable": record(146, b"/workspace/.git", options=b"rw,nosuid,nodev"),
+            "missing": record(145, b"/workspace"),
+            "duplicate": exact + record(147, b"/workspace/.git"),
+            "descendant": exact + record(147, b"/workspace/.git/objects"),
+            "shared": record(146, b"/workspace/.git", optional=b"shared:7"),
+            "wrong-mount-id": exact,
+            "malformed-escape": record(146, b"/workspace/.git\\999"),
+        }
+        for name, raw in refused.items():
+            with self.subTest(name=name):
+                mount_id = 999 if name == "wrong-mount-id" else 146
+                self.assert_worker_error(
+                    lambda raw=raw, mount_id=mount_id: worker._select_readonly_git_mount(
+                        raw,
+                        target,
+                        mount_id,
+                    ),
+                    status=409,
+                    code="git_metadata_not_readonly",
+                )
+
+        with mock.patch.object(worker, "MAX_MOUNTINFO_BYTES", len(exact) - 1):
+            self.assert_worker_error(
+                lambda: worker._select_readonly_git_mount(exact, target, 146),
+                status=409,
+                code="git_metadata_not_readonly",
+            )
+
+    def test_git_metadata_write_probe_accepts_only_erofs(self) -> None:
+        with mock.patch.object(
+            worker.os,
+            "open",
+            side_effect=OSError(worker.errno.EROFS, "read-only filesystem"),
+        ):
+            worker._probe_readonly_git_metadata(99)
+
+        with mock.patch.object(
+            worker.os,
+            "open",
+            side_effect=OSError(worker.errno.EACCES, "permission denied"),
+        ):
+            self.assert_worker_error(
+                lambda: worker._probe_readonly_git_metadata(99),
+                status=409,
+                code="git_metadata_not_readonly",
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                self.assert_worker_error(
+                    lambda: worker._probe_readonly_git_metadata(descriptor),
+                    status=409,
+                    code="git_metadata_not_readonly",
+                )
+            finally:
+                os.close(descriptor)
+            self.assertEqual(list(directory.iterdir()), [])
+
+    def test_unreachable_git_object_attack_requires_writable_metadata(self) -> None:
+        protected = b"fixture-hidden-credential-38491"
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, _, _ = initialize_repository(pathlib.Path(temporary))
+            object_id = git(
+                repository,
+                "hash-object",
+                "-w",
+                "--stdin",
+                input_bytes=protected,
+            ).stdout.strip()
+            self.assertEqual(git(repository, "status", "--porcelain").stdout, b"")
+            self.assertEqual(
+                git(repository, "cat-file", "blob", object_id.decode()).stdout,
+                protected,
+            )
+            descriptor = os.open(
+                repository / ".git",
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                self.assert_worker_error(
+                    lambda: worker._probe_readonly_git_metadata(descriptor),
+                    status=409,
+                    code="git_metadata_not_readonly",
+                )
+            finally:
+                os.close(descriptor)
+
+    def test_git_metadata_mount_is_reopened_to_detect_replacement(self) -> None:
+        descriptors = [
+            os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+            for _ in range(4)
+        ]
+        with (
+            mock.patch.object(
+                worker,
+                "_git_metadata_mount_snapshot",
+                side_effect=[
+                    (("first",), descriptors[0], descriptors[1]),
+                    (("replacement",), descriptors[2], descriptors[3]),
+                ],
+            ) as snapshot,
+            mock.patch.object(worker, "_probe_readonly_git_metadata"),
+        ):
+            self.assert_worker_error(
+                worker.require_readonly_git_metadata_mount,
+                status=409,
+                code="git_metadata_not_readonly",
+            )
+        self.assertEqual(snapshot.call_count, 2)
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
     def test_late_external_object_store_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -1833,6 +1996,7 @@ class CodingHandoffContractTest(unittest.TestCase):
             mock.patch.object(worker.os, "geteuid", return_value=1000),
             mock.patch.object(worker.os, "getegid", return_value=1000),
             mock.patch.object(worker.os, "stat", return_value=workspace_info),
+            mock.patch.object(worker, "require_readonly_git_metadata_mount"),
             mock.patch.object(worker, "read_secret", return_value=b"fixture-token"),
             mock.patch.object(worker, "Server", return_value=instance),
             mock.patch.dict(
@@ -1848,6 +2012,31 @@ class CodingHandoffContractTest(unittest.TestCase):
             self.assertEqual(worker.main(), 1)
         instance.handle_request.assert_called_once_with()
         instance.server_close.assert_called_once_with()
+
+    def test_main_checks_git_metadata_mount_before_reading_credentials(self) -> None:
+        workspace_info = mock.Mock(st_mode=worker.stat.S_IFDIR | 0o755)
+        mount_error = worker.WorkerError(
+            409,
+            "git_metadata_not_readonly",
+            "workspace Git metadata must be one exact private read-only mount",
+        )
+        with (
+            mock.patch.object(worker.sys, "platform", "linux"),
+            mock.patch.object(worker.os, "geteuid", return_value=1000),
+            mock.patch.object(worker.os, "getegid", return_value=1000),
+            mock.patch.object(worker.os, "stat", return_value=workspace_info),
+            mock.patch.object(
+                worker,
+                "require_readonly_git_metadata_mount",
+                side_effect=mount_error,
+            ),
+            mock.patch.object(worker, "read_secret") as read_secret,
+            mock.patch.object(worker, "Server") as server,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exact private read-only mount"):
+                worker.main()
+        read_secret.assert_not_called()
+        server.assert_not_called()
 
     def test_server_guard_transition_failures_poison_ingress(self) -> None:
         token = b"fixture-worker-token-value"

@@ -104,10 +104,15 @@ inside the same trust boundary without proving correctness.
   base and returned patch without accessing the producer's checkout.
 - A mismatched base, changed history, unstable capture, non-reproducible patch,
   unsupported repository shape, or exceeded bound fails closed.
+- Before reading credentials or accepting requests, the Linux worker requires
+  `.git` to be one exact private read-only mount with no descendant mounts. It
+  binds the live descriptor to its mount ID, checks the filesystem read-only
+  flag, requires an `EROFS` write probe, and reopens the mount to detect
+  replacement.
 - The supervisor does not invoke commit, push, merge, or publish, and it rejects a
-  changed final `HEAD`. That does not prove an engine never committed and reset or
-  attempted a push. Operators must mount the clone's Git metadata read-only,
-  remove remote credentials, and restrict egress so those effects are unavailable.
+  changed final `HEAD`. The enforced metadata mount prevents commit-and-reset and
+  hidden-object persistence; operators must remove remote credentials and
+  restrict egress so attempted pushes are unavailable.
 - Operators must mount a disposable standalone clone. A linked host worktree whose
   `.git` file points outside the mount is not a portable container input.
 - Steward retains zero private Go dependencies and adds no provider SDK, workflow
