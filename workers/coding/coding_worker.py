@@ -125,7 +125,7 @@ def command_for(engine: str, task: str, mode: str) -> list[str]:
         return [
             "/opt/worker/node_modules/.bin/codex", "exec", "--ephemeral", "--json",
             "--ignore-user-config", "--ignore-rules", "--sandbox", sandbox,
-            "--cd", str(WORKSPACE), task,
+            "--cd", str(WORKSPACE), "--", task,
         ]
     permission = "plan" if mode == "read" else "acceptEdits"
     return [
