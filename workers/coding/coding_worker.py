@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import errno
 import hashlib
 import hmac
 import http.server
@@ -45,6 +46,10 @@ MAX_CREDENTIAL_FILE_BYTES = 64 << 10
 MAX_CREDENTIAL_VALUE_BYTES = 4 << 20
 MAX_CREDENTIAL_VALUES = 512
 MAX_CREDENTIAL_JSON_NODES = 8192
+MAX_MOUNTINFO_BYTES = 1 << 20
+MAX_MOUNTINFO_ENTRIES = 4096
+MAX_MOUNTINFO_LINE_BYTES = 64 << 10
+MAX_FDINFO_BYTES = 4 << 10
 MAX_GIT_DIAGNOSTIC = 32 << 10
 MAX_GIT_INVENTORY = 1 << 20
 MAX_TASK = 16 << 10
@@ -108,7 +113,14 @@ def read_secret(path_text: str, label: str) -> bytes:
         value = os.read(descriptor, 4097)
         after = os.fstat(descriptor)
         named = os.stat(path, follow_symlinks=False)
-        identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+        def identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+            )
         if len(value) != before.st_size or identity(before) != identity(after) or identity(after) != identity(named):
             raise RuntimeError(f"{label} file changed while being read")
     finally:
@@ -695,13 +707,14 @@ def _read_credential_file(directory: int, name: str) -> bytes:
                 "credential_store_changed",
                 "credential store changed during inventory",
             ) from error
-        identity = lambda item: (
-            item.st_dev,
-            item.st_ino,
-            item.st_size,
-            item.st_mtime_ns,
-            item.st_ctime_ns,
-        )
+        def identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+            )
         if len(value) != before.st_size or identity(before) != identity(after) or identity(after) != identity(named):
             raise WorkerError(500, "credential_store_changed", "credential store changed during inventory")
         return bytes(value)
@@ -972,6 +985,319 @@ def _directory_open_flags() -> int:
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
+
+
+def _git_metadata_mount_error() -> WorkerError:
+    return WorkerError(
+        409,
+        "git_metadata_not_readonly",
+        "workspace Git metadata must be one exact private read-only mount",
+    )
+
+
+def _read_proc_file(
+    path: pathlib.Path,
+    maximum: int,
+    *,
+    deadline: float | None = None,
+) -> bytes:
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | os.O_NONBLOCK
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("proc contract file is not regular")
+        value = bytearray()
+        while len(value) <= maximum:
+            if deadline is not None:
+                require_request_time(deadline)
+            chunk = os.read(descriptor, min(65536, maximum + 1 - len(value)))
+            if not chunk:
+                break
+            value.extend(chunk)
+        after = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+        if (
+            len(value) > maximum
+            or before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or after.st_dev != named.st_dev
+            or after.st_ino != named.st_ino
+            or not stat.S_ISREG(after.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+        ):
+            raise OSError("proc contract file changed while being read")
+        return bytes(value)
+    except (OSError, ValueError) as error:
+        raise _git_metadata_mount_error() from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _decode_mountinfo_path(value: bytes) -> bytes:
+    replacements = {
+        b"011": b"\t",
+        b"012": b"\n",
+        b"040": b" ",
+        b"134": b"\\",
+    }
+    decoded = bytearray()
+    offset = 0
+    while offset < len(value):
+        if value[offset] != ord("\\"):
+            decoded.append(value[offset])
+            offset += 1
+            continue
+        escape = value[offset + 1:offset + 4]
+        replacement = replacements.get(escape)
+        if replacement is None or len(escape) != 3:
+            raise ValueError("invalid mountinfo path escape")
+        decoded.extend(replacement)
+        offset += 4
+    if not decoded.startswith(b"/") or b"\x00" in decoded:
+        raise ValueError("invalid mountinfo path")
+    return bytes(decoded)
+
+
+def _mountinfo_records(raw: bytes) -> tuple[tuple[object, ...], ...]:
+    if (
+        not raw
+        or len(raw) > MAX_MOUNTINFO_BYTES
+        or not raw.endswith(b"\n")
+    ):
+        raise _git_metadata_mount_error()
+    lines = raw.splitlines()
+    if not lines or len(lines) > MAX_MOUNTINFO_ENTRIES:
+        raise _git_metadata_mount_error()
+    records: list[tuple[object, ...]] = []
+    try:
+        for line in lines:
+            if not line or len(line) > MAX_MOUNTINFO_LINE_BYTES:
+                raise ValueError("invalid mountinfo line")
+            fields = line.split(b" ")
+            separators = [index for index, field in enumerate(fields) if field == b"-"]
+            if (
+                b"" in fields
+                or len(separators) != 1
+                or separators[0] < 6
+                or len(fields) < separators[0] + 4
+                or not fields[0].isdigit()
+                or not fields[1].isdigit()
+            ):
+                raise ValueError("invalid mountinfo record")
+            device = fields[2].split(b":")
+            if len(device) != 2 or not all(component.isdigit() for component in device):
+                raise ValueError("invalid mountinfo device")
+            options = tuple(fields[5].split(b","))
+            if not options or b"" in options:
+                raise ValueError("invalid mountinfo options")
+            separator = separators[0]
+            records.append(
+                (
+                    int(fields[0]),
+                    int(fields[1]),
+                    fields[2],
+                    _decode_mountinfo_path(fields[3]),
+                    _decode_mountinfo_path(fields[4]),
+                    options,
+                    tuple(fields[6:separator]),
+                    tuple(fields[separator + 1:]),
+                )
+            )
+    except (ValueError, OverflowError) as error:
+        raise _git_metadata_mount_error() from error
+    return tuple(records)
+
+
+def _select_readonly_git_mount(
+    raw: bytes,
+    target: pathlib.Path,
+    mount_id: int,
+) -> tuple[object, ...]:
+    target_bytes = os.fsencode(target)
+    if not target.is_absolute() or target_bytes == b"/" or b"\x00" in target_bytes:
+        raise _git_metadata_mount_error()
+    records = _mountinfo_records(raw)
+    exact = [record for record in records if record[4] == target_bytes]
+    descendant_prefix = target_bytes.rstrip(b"/") + b"/"
+    if (
+        len(exact) != 1
+        or any(record[4].startswith(descendant_prefix) for record in records)
+    ):
+        raise _git_metadata_mount_error()
+    record = exact[0]
+    options = record[5]
+    propagation = record[6]
+    if (
+        record[0] != mount_id
+        or not isinstance(options, tuple)
+        or b"ro" not in options
+        or b"rw" in options
+        or propagation
+    ):
+        raise _git_metadata_mount_error()
+    return record
+
+
+def _mount_id_for_descriptor(
+    descriptor: int,
+    *,
+    deadline: float | None = None,
+) -> int:
+    raw = _read_proc_file(
+        pathlib.Path(f"/proc/self/fdinfo/{descriptor}"),
+        MAX_FDINFO_BYTES,
+        deadline=deadline,
+    )
+    values = []
+    for line in raw.splitlines():
+        key, separator, value = line.partition(b":")
+        if separator and key == b"mnt_id":
+            values.append(value.strip())
+    if len(values) != 1 or not values[0].isdigit():
+        raise _git_metadata_mount_error()
+    mount_id = int(values[0])
+    if mount_id <= 0:
+        raise _git_metadata_mount_error()
+    return mount_id
+
+
+def _open_git_metadata(
+    root: pathlib.Path,
+) -> tuple[int, int, tuple[int, int, int], tuple[int, int, int]]:
+    root_descriptor = None
+    metadata_descriptor = None
+    try:
+        root_descriptor = os.open(root, _directory_open_flags())
+        opened_root = os.fstat(root_descriptor)
+        named_root = os.stat(root, follow_symlinks=False)
+        named_metadata = os.stat(".git", dir_fd=root_descriptor, follow_symlinks=False)
+        metadata_descriptor = os.open(
+            ".git",
+            _directory_open_flags(),
+            dir_fd=root_descriptor,
+        )
+        opened_metadata = os.fstat(metadata_descriptor)
+        if (
+            opened_root.st_dev != named_root.st_dev
+            or opened_root.st_ino != named_root.st_ino
+            or not stat.S_ISDIR(opened_root.st_mode)
+            or not stat.S_ISDIR(named_root.st_mode)
+            or opened_metadata.st_dev != named_metadata.st_dev
+            or opened_metadata.st_ino != named_metadata.st_ino
+            or not stat.S_ISDIR(opened_metadata.st_mode)
+            or not stat.S_ISDIR(named_metadata.st_mode)
+        ):
+            raise OSError("workspace Git metadata changed while being opened")
+        root_identity = (opened_root.st_dev, opened_root.st_ino, opened_root.st_mode)
+        metadata_identity = (
+            opened_metadata.st_dev,
+            opened_metadata.st_ino,
+            opened_metadata.st_mode,
+        )
+        return root_descriptor, metadata_descriptor, root_identity, metadata_identity
+    except OSError as error:
+        if metadata_descriptor is not None:
+            os.close(metadata_descriptor)
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+        raise _git_metadata_mount_error() from error
+
+
+def _git_metadata_mount_snapshot(
+    root: pathlib.Path,
+    *,
+    deadline: float | None = None,
+) -> tuple[tuple[object, ...], int, int]:
+    root_descriptor, metadata_descriptor, root_identity, metadata_identity = (
+        _open_git_metadata(root)
+    )
+    try:
+        mount_id = _mount_id_for_descriptor(metadata_descriptor, deadline=deadline)
+        mountinfo = _read_proc_file(
+            pathlib.Path("/proc/self/mountinfo"),
+            MAX_MOUNTINFO_BYTES,
+            deadline=deadline,
+        )
+        record = _select_readonly_git_mount(mountinfo, root / ".git", mount_id)
+        readonly_flag = getattr(os, "ST_RDONLY", None)
+        try:
+            filesystem_flags = os.fstatvfs(metadata_descriptor).f_flag
+        except OSError as error:
+            raise _git_metadata_mount_error() from error
+        if readonly_flag is None or not filesystem_flags & readonly_flag:
+            raise _git_metadata_mount_error()
+        snapshot: tuple[object, ...] = (
+            root_identity,
+            metadata_identity,
+            mount_id,
+            record,
+        )
+        return snapshot, root_descriptor, metadata_descriptor
+    except Exception:
+        os.close(metadata_descriptor)
+        os.close(root_descriptor)
+        raise
+
+
+def _probe_readonly_git_metadata(metadata_descriptor: int) -> None:
+    name = f".steward-readonly-probe-{os.urandom(16).hex()}"
+    probe_descriptor = None
+    try:
+        probe_descriptor = os.open(
+            name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=metadata_descriptor,
+        )
+    except OSError as error:
+        if error.errno == errno.EROFS:
+            return
+        raise _git_metadata_mount_error() from error
+    finally:
+        if probe_descriptor is not None:
+            os.close(probe_descriptor)
+    try:
+        os.unlink(name, dir_fd=metadata_descriptor)
+    except OSError as error:
+        raise _git_metadata_mount_error() from error
+    raise _git_metadata_mount_error()
+
+
+def require_readonly_git_metadata_mount(
+    *,
+    deadline: float | None = None,
+) -> None:
+    if deadline is not None:
+        require_request_time(deadline)
+    first, root_descriptor, metadata_descriptor = _git_metadata_mount_snapshot(
+        WORKSPACE,
+        deadline=deadline,
+    )
+    try:
+        _probe_readonly_git_metadata(metadata_descriptor)
+    finally:
+        os.close(metadata_descriptor)
+        os.close(root_descriptor)
+    second, root_descriptor, metadata_descriptor = _git_metadata_mount_snapshot(
+        WORKSPACE,
+        deadline=deadline,
+    )
+    os.close(metadata_descriptor)
+    os.close(root_descriptor)
+    if first != second:
+        raise _git_metadata_mount_error()
 
 
 def _validate_git_metadata_tree(
@@ -1535,15 +1861,16 @@ def _read_changed_entry(path: pathlib.Path, path_text: str) -> bytes | None:
         value = os.read(descriptor, MAX_CHANGED_FILE_BYTES + 1)
         after = os.fstat(descriptor)
         current = os.lstat(path)
-        identity = lambda item: (
-            item.st_dev,
-            item.st_ino,
-            item.st_mode,
-            item.st_nlink,
-            item.st_size,
-            item.st_mtime_ns,
-            item.st_ctime_ns,
-        )
+        def identity(item: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+            return (
+                item.st_dev,
+                item.st_ino,
+                item.st_mode,
+                item.st_nlink,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+            )
         if len(value) != before.st_size or identity(before) != identity(after) or identity(after) != identity(current):
             raise WorkerError(409, "workspace_changed", "changed file identity is unstable")
         return value
@@ -2327,6 +2654,10 @@ def main() -> int:
     info = os.stat(WORKSPACE, follow_symlinks=False)
     if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o002:
         raise RuntimeError("/workspace must be a real directory that is not world-writable")
+    try:
+        require_readonly_git_metadata_mount()
+    except WorkerError as error:
+        raise RuntimeError(error.message) from error
     engine = os.environ.get("STEWARD_CODING_ENGINE", "")
     if engine not in {"codex", "claude-code"}:
         raise RuntimeError("STEWARD_CODING_ENGINE must be codex or claude-code")

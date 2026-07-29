@@ -118,8 +118,10 @@ sudo docker run -d --name steward-codex-worker --restart unless-stopped \
 ```
 
 The nested mount is intentional: `/workspace` remains writable while its contained
-`.git` directory is read-only. A linked worktree's `.git` file points outside the
-mount and is therefore not a supported version 2 input.
+`.git` directory is read-only. The worker verifies one exact private `.git` mount,
+rejects descendant mounts, and refuses readiness unless the kernel enforces it as
+read-only. A linked worktree's `.git` file points outside the mount and is
+therefore not a supported version 2 input.
 
 Restrict this container's network to the selected provider and deny Git hosting,
 private, node, management, and metadata destinations. Do not mount Git credentials

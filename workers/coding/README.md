@@ -11,9 +11,10 @@ running container with `STEWARD_CODING_ENGINE=codex` or
 `STEWARD_CODING_ENGINE=claude-code`. The worker accepts one exact `/v1/run`
 operation, never invokes a shell to construct the CLI command, requires a clean
 Git checkout by default, and does not itself invoke commit or push operations.
-Operators must still make Git metadata read-only, remove repository remotes and
-credentials, and restrict egress; the final `HEAD` check cannot prove an engine
-never committed and reset or attempted a push.
+The worker refuses startup unless `.git` is one exact private read-only mount,
+with no descendant mounts. Operators must still remove repository remotes and
+credentials and restrict egress; the final `HEAD` check cannot prove an engine
+never attempted a push.
 
 ## Authentication choices
 
@@ -70,8 +71,11 @@ docker run --rm --read-only --runtime runsc --user 65532:65532 \
 ```
 
 The parent workspace mount remains writable while the nested Git metadata mount
-is read-only. Restrict network access to the selected provider and deny Git
-hosting and private infrastructure destinations.
+is read-only. The worker proves that mount through Linux mount identity,
+filesystem flags, and an `EROFS` write probe before it reads its token or begins
+listening. A missing, writable, shared, replaced, or descendant Git metadata
+mount fails startup. Restrict network access to the selected provider and deny
+Git hosting and private infrastructure destinations.
 
 ## Request contracts
 
