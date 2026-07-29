@@ -1254,6 +1254,19 @@ func TestHermesAcceptanceReportsBoundedExecutorStartFailures(t *testing.T) {
 	}
 }
 
+func TestHermesQualificationBuildsStaticScratchRelay(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	workflow := string(readBounded(t, filepath.Join(repositoryRoot, ".github", "workflows", "ci.yml"), 2<<20))
+	acceptance := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	if !strings.Contains(workflow, `CGO_ENABLED=0 go build -o "$binary_root/steward-relay" ./cmd/steward-relay`) {
+		t.Fatal("Hermes qualification does not build its scratch-image relay with static linkage")
+	}
+	if !strings.Contains(acceptance, `'FROM scratch'`) ||
+		!strings.Contains(acceptance, `'ENTRYPOINT ["/steward-relay"]'`) {
+		t.Fatal("Hermes acceptance no longer exercises the release scratch-image boundary")
+	}
+}
+
 func TestAcceptanceGatewaysUseInvokerGroupWhenUnprivileged(t *testing.T) {
 	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
 	for _, name := range []string{

@@ -635,7 +635,7 @@ jobs:
 
           go build -o "$binary_root/steward-executor" ./cmd/steward-executor
           go build -o "$binary_root/steward-gateway" ./cmd/steward-gateway
-          go build -o "$binary_root/steward-relay" ./cmd/steward-relay
+          CGO_ENABLED=0 go build -o "$binary_root/steward-relay" ./cmd/steward-relay
           go build -o "$binary_root/stewardctl" ./cmd/stewardctl
           test -z "$(git status --porcelain=v1)"
 
