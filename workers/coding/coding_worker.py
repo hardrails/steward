@@ -141,9 +141,9 @@ def command_for(engine: str, task: str, mode: str) -> list[str]:
         ]
     permission = "plan" if mode == "read" else "acceptEdits"
     return [
-        "/usr/local/bin/claude", "-p", task, "--output-format", "json",
+        "/usr/local/bin/claude", "-p", "--output-format", "json",
         "--permission-mode", permission, "--safe-mode", "--no-session-persistence",
-        "--disable-slash-commands", "--no-chrome",
+        "--disable-slash-commands", "--no-chrome", "--", task,
     ]
 
 

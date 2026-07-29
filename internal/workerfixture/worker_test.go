@@ -234,8 +234,10 @@ func TestCodingWorkerUsesFixedSafeModeCLIArguments(t *testing.T) {
 spec=importlib.util.spec_from_file_location("worker",sys.argv[1])
 worker=importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
 commands={e+"-"+m:worker.command_for(e,"fixed task",m) for e in ("codex","claude-code") for m in ("read","write")}
-commands["boundary-help"]=worker.command_for("codex","--help","write")
-commands["boundary-bypass"]=worker.command_for("codex","--dangerously-bypass-approvals-and-sandbox","write")
+commands["boundary-codex-help"]=worker.command_for("codex","--help","write")
+commands["boundary-codex-bypass"]=worker.command_for("codex","--dangerously-bypass-approvals-and-sandbox","write")
+commands["boundary-claude-help"]=worker.command_for("claude-code","--help","write")
+commands["boundary-claude-bypass"]=worker.command_for("claude-code","--dangerously-skip-permissions","write")
 print(json.dumps(commands,sort_keys=True))
 `
 	command := exec.Command(python, "-I", "-B", "-c", harness, path)
@@ -254,7 +256,7 @@ print(json.dumps(commands,sort_keys=True))
 		if len(arguments) < 8 {
 			t.Fatalf("%s command=%v", key, arguments)
 		}
-		if strings.HasPrefix(key, "codex-") {
+		if strings.HasPrefix(key, "codex-") || strings.HasPrefix(key, "claude-code-") {
 			if arguments[len(arguments)-2] != "--" || arguments[len(arguments)-1] != "fixed task" {
 				t.Fatalf("%s command does not delimit task text: %v", key, arguments)
 			}
@@ -267,8 +269,10 @@ print(json.dumps(commands,sort_keys=True))
 		}
 	}
 	for key, task := range map[string]string{
-		"boundary-help":   "--help",
-		"boundary-bypass": "--dangerously-bypass-approvals-and-sandbox",
+		"boundary-codex-help":    "--help",
+		"boundary-codex-bypass":  "--dangerously-bypass-approvals-and-sandbox",
+		"boundary-claude-help":   "--help",
+		"boundary-claude-bypass": "--dangerously-skip-permissions",
 	} {
 		arguments := commands[key]
 		if len(arguments) < 2 || arguments[len(arguments)-2] != "--" || arguments[len(arguments)-1] != task {
