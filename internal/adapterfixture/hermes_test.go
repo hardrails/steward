@@ -228,10 +228,12 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 		},
 		{
 			profile: "developer", name: "steward-coding-worker", entrypoint: "coding_worker.py",
-			publicDigest: "0b131eeb43a3f6fd4e5ed8a16c5b4a20501860400d74fb95a7b2f4e9e73e6fac",
+			publicDigest: "e0b80e5a347293ea4eb0e4d51a1e47446e3ba191e722ff3dc61c57470b440551",
 			connectors:   []string{"steward-claude-code", "steward-codex"},
-			limits: map[string]int{"max_request_bytes": 65536, "max_response_bytes": 1048576,
-				"max_task_bytes": 16384, "max_timeout_seconds": 900},
+			limits: map[string]int{"connector_timeout_seconds": 1050, "max_changed_path_bytes": 49152,
+				"max_changed_paths": 512, "max_handoff_patch_bytes": 262144,
+				"max_portable_result_bytes": 458752, "max_request_bytes": 65536,
+				"max_response_bytes": 1048576, "max_task_bytes": 16384, "max_timeout_seconds": 900},
 		},
 	}
 	for _, test := range tests {
@@ -277,7 +279,7 @@ func TestHermesProfileSkillsAreSignedFiniteContracts(t *testing.T) {
 				t.Fatal(err)
 			}
 			if manifest.SchemaVersion != "steward.profile-skill-manifest.v1" ||
-				manifest.Version != map[string]string{"research": "2", "developer": "1"}[test.profile] ||
+				manifest.Version != map[string]string{"research": "2", "developer": "3"}[test.profile] ||
 				manifest.Name != test.name || manifest.Entrypoint != test.entrypoint ||
 				!valuesEqual(manifest.ConnectorIDs, test.connectors) || !valuesEqual(manifest.Limits, test.limits) || len(manifest.Files) != 2 {
 				t.Fatalf("unexpected profile authority: %#v", manifest)
@@ -360,6 +362,9 @@ func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *t
 				`CONNECTOR_ORIGIN = "http://steward-relay:8081"`,
 				`connector = "steward-codex" if arguments.worker == "codex" else "steward-claude-code"`,
 				`/operations/run`,
+				`"X-Steward-Task-ID": task_id`,
+				`"steward.coding-task.v2"`,
+				`"steward.git-handoff.v1"`,
 			},
 		},
 	} {
@@ -381,6 +386,359 @@ func TestHermesProfileHelpersBindLogicalEndpointsAndTreatContentAsUntrusted(t *t
 	if !strings.Contains(developerSkill, "separate security boundary") ||
 		!strings.Contains(developerSkill, "Do not install a CLI") {
 		t.Fatal("developer skill does not explain the isolated-worker boundary")
+	}
+}
+
+func TestHermesDeveloperHelperBindsTaskIdentityAndValidatesImmutableHandoffs(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	programPath := filepath.Join(hermesAdapterRoot(t), "profiles", "developer", "coding_worker.py")
+	program := `
+import argparse
+import base64
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import sys
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("steward_coding_helper", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+pending = []
+calls = []
+
+class Response:
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+    def getheader(self, name):
+        return {
+            "Content-Encoding": None,
+            "Content-Length": str(len(self.body)),
+            "Content-Type": "application/json",
+        }.get(name)
+    def read(self, maximum):
+        assert maximum in {module.MAX_RESPONSE + 1, module.MAX_PORTABLE_RESULT + 1}
+        return self.body
+
+class Connection:
+    def __init__(self, host, port, timeout):
+        assert (host, port) == ("steward-relay", 8081)
+        assert 120 <= timeout <= module.MAX_TIMEOUT + module.CONNECTOR_GRACE_SECONDS
+    def request(self, method, path, body, headers):
+        assert method == "POST"
+        assert path in {
+            "/v1/connectors/steward-codex/operations/run",
+            "/v1/connectors/steward-claude-code/operations/run",
+        }
+        assert set(headers) == {
+            "Accept", "Content-Length", "Content-Type", "X-Steward-Task-ID",
+        }
+        assert headers["Content-Length"] == str(len(body))
+        calls.append((path, json.loads(body), dict(headers)))
+    def getresponse(self):
+        status, body = pending.pop(0)
+        return Response(status, body)
+    def close(self):
+        pass
+
+class Output:
+    def __init__(self):
+        self.buffer = io.BytesIO()
+    def write(self, value):
+        return self.buffer.write(value.encode())
+    def flush(self):
+        pass
+
+module.http.client.HTTPConnection = Connection
+
+def invoke(arguments, payload, status=200):
+    pending.append((status, module.canonical_json(payload)))
+    previous_argv, previous_stdout = sys.argv, sys.stdout
+    output = Output()
+    sys.argv = ["steward-coding-worker", *arguments]
+    sys.stdout = output
+    try:
+        code = module.main()
+    finally:
+        sys.argv, sys.stdout = previous_argv, previous_stdout
+    return code, output.buffer.getvalue(), calls[-1]
+
+v1 = {
+    "schema_version": "steward.coding-result.v1",
+    "engine": "codex",
+    "mode": "read",
+    "outcome": "completed",
+    "exit_code": 0,
+    "duration_ms": 12,
+    "changed_paths": [],
+    "stdout": "inspected\n",
+    "stderr": "",
+}
+v1_arguments = [
+    "--worker", "codex",
+    "--task-id", "task-helper-v1-1234",
+    "--task", "Inspect the repository",
+    "--mode", "read",
+    "--timeout-seconds", "30",
+]
+code, output, call = invoke(v1_arguments, v1)
+assert code == 0 and json.loads(output) == v1
+assert call[0] == "/v1/connectors/steward-codex/operations/run"
+assert call[1] == {
+    "schema_version": "steward.coding-task.v1",
+    "task": "Inspect the repository",
+    "mode": "read",
+    "timeout_seconds": 30,
+}
+assert call[2]["X-Steward-Task-ID"] == "task-helper-v1-1234"
+
+patch = b"bounded immutable patch"
+base = "a" * 40
+paths = ["a.txt", "b.txt"]
+handoff = {
+    "schema_version": "steward.git-handoff.v1",
+    "object_format": "sha1",
+    "base_commit": base,
+    "base_tree": "b" * 40,
+    "result_tree": "c" * 40,
+    "patch_sha256": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    "patch_bytes": len(patch),
+    "patch_base64": base64.b64encode(patch).decode(),
+    "changed_paths": paths,
+}
+v2 = {
+    "schema_version": "steward.coding-result.v2",
+    "engine": "claude-code",
+    "mode": "write",
+    "outcome": "completed",
+    "exit_code": 0,
+    "duration_ms": 34,
+    "changed_paths": paths,
+    "stdout": "implemented\n",
+    "stderr": "",
+    "handoff": handoff,
+}
+v2_arguments = [
+    "--worker", "claude-code",
+    "--task-id", "task-helper-v2-5678",
+    "--task", "Implement the bounded change",
+    "--mode", "write",
+    "--timeout-seconds", "30",
+    "--expected-base-commit", base,
+]
+code, output, call = invoke(v2_arguments, v2)
+assert code == 0 and json.loads(output) == v2
+assert call[0] == "/v1/connectors/steward-claude-code/operations/run"
+assert call[1] == {
+    "schema_version": "steward.coding-task.v2",
+    "task": "Implement the bounded change",
+    "mode": "write",
+    "timeout_seconds": 30,
+    "expected_base_commit": base,
+}
+assert call[2]["X-Steward-Task-ID"] == "task-helper-v2-5678"
+
+arguments = argparse.Namespace(worker="claude-code", mode="write", timeout_seconds=30)
+read_arguments = argparse.Namespace(worker="claude-code", mode="read", timeout_seconds=30)
+read_result = copy.deepcopy(v2)
+read_result["mode"] = "read"
+read_result["changed_paths"] = []
+read_result["handoff"].update({
+    "result_tree": read_result["handoff"]["base_tree"],
+    "patch_sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
+    "patch_bytes": 0,
+    "patch_base64": "",
+    "changed_paths": [],
+})
+assert module.validate_result(read_result, read_arguments, base) == read_result
+modified_read = copy.deepcopy(v2)
+modified_read["mode"] = "read"
+try:
+    module.validate_result(modified_read, read_arguments, base)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted a modified read-only handoff")
+
+sha256_result = copy.deepcopy(v2)
+sha256_result["handoff"].update({
+    "object_format": "sha256",
+    "base_commit": "d" * 64,
+    "base_tree": "e" * 64,
+    "result_tree": "f" * 64,
+})
+assert module.validate_result(sha256_result, arguments, "d" * 64) == sha256_result
+
+bad_results = []
+for field, value in (
+    ("patch_base64", "AA="),
+    ("patch_sha256", "sha256:" + "0" * 64),
+    ("patch_bytes", len(patch) + 1),
+    ("base_commit", "A" * 40),
+):
+    candidate = copy.deepcopy(v2)
+    candidate["handoff"][field] = value
+    bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["changed_paths"] = list(reversed(paths))
+bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["handoff"]["changed_paths"] = ["a.txt"]
+bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["unexpected"] = True
+bad_results.append(candidate)
+candidate = copy.deepcopy(v2)
+candidate["stdout"] = "x" * (module.MAX_HANDOFF_STREAM + 1)
+bad_results.append(candidate)
+for candidate in bad_results:
+    try:
+        module.validate_result(candidate, arguments, base)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("developer helper accepted a corrupt immutable handoff")
+
+unsafe_path_sets = [
+    [".git/config"],
+    [".GITMODULES"],
+    [".g\u200cit"],
+    [".\u200cgitmodules"],
+    ["git~1/config"],
+    ["GITMOD~1"],
+    ["gitmod~4"],
+    ["GI7EBA~1"],
+    ["gi7eba~9"],
+    ["GI7EB~12"],
+    ["G~123456"],
+    ["CON.txt"],
+    ["COM1.log"],
+    ["COM¹.log"],
+    ["LPT³"],
+    ["CONIN$.txt"],
+    ["CONOUT$"],
+    ["a\\b"],
+    ["name:stream"],
+    ["bad?.txt"],
+    ["pipe|name"],
+    ["trailing."],
+    ["trailing "],
+    ["A.txt", "a.txt"],
+    sorted(["Café.txt", "Cafe\u0301.txt"]),
+]
+for unsafe_paths in unsafe_path_sets:
+    candidate = copy.deepcopy(v2)
+    candidate["changed_paths"] = unsafe_paths
+    candidate["handoff"]["changed_paths"] = unsafe_paths
+    try:
+        module.validate_result(candidate, arguments, base)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError(f"developer helper accepted non-portable paths {unsafe_paths!r}")
+
+v1_unsafe = copy.deepcopy(v1)
+v1_unsafe["changed_paths"] = ["CON.txt"]
+try:
+    module.validate_result(
+        v1_unsafe,
+        argparse.Namespace(worker="codex", mode="read", timeout_seconds=30),
+        None,
+    )
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted a non-portable version 1 path")
+
+v1_oversized = copy.deepcopy(v1)
+v1_oversized["stderr"] = "x" * (module.MAX_STREAM + 1)
+try:
+    module.validate_result(
+        v1_oversized,
+        argparse.Namespace(worker="codex", mode="read", timeout_seconds=30),
+        None,
+    )
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted an oversized version 1 stream")
+
+portable_paths = sorted([
+    ".github/workflow.yml",
+    "com10.txt",
+    "context.txt",
+    "git~x/config",
+])
+portable = copy.deepcopy(v2)
+portable["changed_paths"] = portable_paths
+portable["handoff"]["changed_paths"] = portable_paths
+assert module.validate_result(portable, arguments, base) == portable
+
+replacement_boundary = copy.deepcopy(v2)
+replacement_boundary["stdout"] = "\ufffd" * module.MAX_HANDOFF_STREAM
+assert module.validate_result(replacement_boundary, arguments, base) == replacement_boundary
+
+try:
+    module.decode_json(b'{"a":1,"a":1}')
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("developer helper accepted duplicate JSON fields")
+
+failed = copy.deepcopy(v2)
+failed["outcome"] = "failed"
+failed["exit_code"] = 7
+code, output, _ = invoke(v2_arguments, failed)
+assert code == 1 and json.loads(output) == failed
+
+pending.append((403, module.canonical_json({"error": "connector_denied", "message": "denied"})))
+previous_argv = sys.argv
+sys.argv = ["steward-coding-worker", *v1_arguments]
+try:
+    try:
+        module.main()
+    except RuntimeError as error:
+        assert "HTTP 403" in str(error)
+    else:
+        raise AssertionError("developer helper accepted a non-success response")
+finally:
+    sys.argv = previous_argv
+
+for task_id in ("-leading", "space value", "a" * 129):
+    try:
+        module.bounded_task_id(task_id)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("developer helper accepted an invalid task ID")
+
+previous_argv = sys.argv
+sys.argv = [
+    "steward-coding-worker",
+    "--worker", "codex",
+    "--task", "Missing identity",
+]
+try:
+    try:
+        module.parser().parse_args()
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("developer helper made --task-id optional")
+finally:
+    sys.argv = previous_argv
+`
+	command := exec.Command(python, "-I", "-B", "-c", program, programPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("developer helper immutable-handoff test failed: %v\n%s", err, output)
 	}
 }
 
@@ -428,6 +786,10 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 		"urllib.request.ProxyHandler({})", "RejectRedirects", "files.pythonhosted.org",
 		"qualified only on linux/amd64",
 		"docker build --network=none",
+		`hermes_set_input_tree_modes "$work/context/adapter" 0755 0644 0755`,
+		`hermes_set_input_tree_modes "$work/context/upstream" 0555 0444 0555`,
+		`hermes_set_input_tree_modes "$work/context/adapter" 0555 0444 0555`,
+		`hermes_set_input_tree_modes "$work/final-context/artifact/venv/.venv" 0555 0444 0555`,
 		`GIT_NO_REPLACE_OBJECTS=1`, `-c core.fsmonitor=false`,
 	} {
 		if !strings.Contains(builder, required) {
@@ -470,6 +832,94 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	connectorCommand := "/opt/steward/skills/steward.connector-work/connector_work.py"
 	if !strings.Contains(model, connectorCommand) || strings.Contains(model, "/opt/data/skills/steward.connector-work") {
 		t.Fatal("fixture model does not execute the immutable signed connector skill path")
+	}
+}
+
+func TestHermesBuilderNormalizesPrivateArchiveInputsBeforeSandboxing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are unavailable")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable")
+	}
+	builder := string(readBounded(
+		t,
+		filepath.Join(hermesAdapterRoot(t), "..", "..", "scripts", "build-hermes-adapter.sh"),
+		2<<20,
+	))
+	start := strings.Index(builder, "hermes_set_input_tree_modes() {")
+	end := strings.Index(builder, "# END HERMES_INPUT_TREE_MODES")
+	if start < 0 || end <= start {
+		t.Fatal("builder input mode helper markers are missing")
+	}
+	script := filepath.Join(t.TempDir(), "input-mode-helper.sh")
+	program := "#!/usr/bin/env bash\nset -euo pipefail\n" +
+		builder[start:end] + "\nhermes_set_input_tree_modes \"$@\"\n"
+	if err := os.WriteFile(script, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	tree := filepath.Join(t.TempDir(), "input")
+	nested := filepath.Join(tree, "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(nested, 0o700)
+		_ = os.Chmod(tree, 0o700)
+	})
+	regular := filepath.Join(tree, "uv.lock")
+	executable := filepath.Join(nested, "tool")
+	if err := os.WriteFile(regular, []byte("version = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tree, "lock-link")
+	if err := os.Symlink("uv.lock", link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	assertModes := func(t *testing.T, expected map[string]os.FileMode) {
+		t.Helper()
+		for path, want := range expected {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != want {
+				t.Fatalf("%s mode = %04o, want %04o", path, got, want)
+			}
+		}
+	}
+	run := func(t *testing.T, modes ...string) {
+		t.Helper()
+		command := exec.Command(bash, append([]string{script, tree}, modes...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("input mode helper failed: %v\n%s", err, output)
+		}
+	}
+
+	run(t, "0755", "0644", "0755")
+	assertModes(t, map[string]os.FileMode{
+		tree:       0o755,
+		nested:     0o755,
+		regular:    0o644,
+		executable: 0o755,
+	})
+	run(t, "0555", "0444", "0555")
+	assertModes(t, map[string]os.FileMode{
+		tree:       0o555,
+		nested:     0o555,
+		regular:    0o444,
+		executable: 0o555,
+	})
+	if info, err := os.Lstat(link); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a symlink", link)
 	}
 }
 
@@ -736,6 +1186,174 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	for name, actual := range bindings {
 		if actual != expectedBindings[name] {
 			t.Fatalf("Hermes qualification %s digest = %s, evidence binds %s", name, actual, expectedBindings[name])
+		}
+	}
+}
+
+func TestHermesAcceptanceReportsBoundedGatewayStartupDiagnostics(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	for _, contract := range []string{
+		`--unix-socket "$work/gateway/control.sock"`,
+		"http://localhost/v1/healthz",
+		"http://127.0.0.1:18091/v1/services/readiness-probe/health",
+		`kill -0 "$gateway_pid"`,
+		"Gateway remained running without healthy control and service endpoints",
+		"Gateway exited before creating its control socket",
+		`gateway_log_size=$(stat -c '%s' -- "$work/gateway.log")`,
+		"gateway_log_size <= 1048576",
+		"bounded Gateway startup diagnostics follow",
+		`tail -n 100 -- "$work/gateway.log"`,
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes acceptance startup diagnostics are missing contract %q", contract)
+		}
+	}
+}
+
+func TestHermesAcceptanceReportsBoundedRuntimeReadinessFailures(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	for _, contract := range []string{
+		"steward.hermes-readiness-diagnostic.v1",
+		`"contains_agent_content": False`,
+		"raw = sys.stdin.buffer.read(65537)",
+		"if not raw or len(raw) > 65536:",
+		"if len(raw) > 65536:",
+		`docker logs --tail 100 "$runtime"`,
+		"bounded Hermes readiness logs follow",
+		`report_hermes_readiness_failure "$runtime" exited`,
+		`report_hermes_readiness_failure "$runtime" timeout`,
+		`f"\\x{value:02x}"`,
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes runtime readiness diagnostics are missing contract %q", contract)
+		}
+	}
+}
+
+func TestHermesAcceptanceReportsBoundedExecutorStartFailures(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	for _, contract := range []string{
+		"steward.executor-start-diagnostic.v1",
+		`"contains_agent_content": False`,
+		"not 0 < len(raw) <= 65536",
+		"not 0 < len(readiness_raw) <= 65536",
+		`set(failure) - {"runtime_ref", "code", "message"}`,
+		`failures.append({"code": failure["code"], "message": failure["message"]})`,
+		`set(document) != {"error", "message"}`,
+		`not 0 < len(document["message"]) <= 4096`,
+		`start_workload 1`,
+		`start_workload 2`,
+		"Executor start diagnostics are unavailable or malformed",
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes Executor start diagnostics are missing contract %q", contract)
+		}
+	}
+}
+
+func TestHermesQualificationBuildsStaticScratchRelay(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	workflow := string(readBounded(t, filepath.Join(repositoryRoot, ".github", "workflows", "ci.yml"), 2<<20))
+	acceptance := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	if !strings.Contains(workflow, `CGO_ENABLED=0 go build -o "$binary_root/steward-relay" ./cmd/steward-relay`) {
+		t.Fatal("Hermes qualification does not build its scratch-image relay with static linkage")
+	}
+	if !strings.Contains(acceptance, `'FROM scratch'`) ||
+		!strings.Contains(acceptance, `'ENTRYPOINT ["/steward-relay"]'`) {
+		t.Fatal("Hermes acceptance no longer exercises the release scratch-image boundary")
+	}
+}
+
+func TestAcceptanceGatewaysUseInvokerGroupWhenUnprivileged(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	for _, name := range []string{
+		"egress-acceptance.sh",
+		"hermes-steward-acceptance.sh",
+		"positive-capabilities-acceptance.sh",
+	} {
+		script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", name), 2<<20))
+		currentGroup := strings.Index(script, "gid=$(id -g)\n")
+		rootFallback := strings.Index(script, "if [[ $gid == 0 ]]; then\n")
+		nobodyGroup := strings.Index(script, "gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)\n")
+		positiveGroup := strings.Index(script, `[[ $gid =~ ^[1-9][0-9]*$ ]]`)
+		if currentGroup < 0 || rootFallback < currentGroup || nobodyGroup < rootFallback || positiveGroup < nobodyGroup {
+			t.Fatalf("%s does not select the invoking non-root group before its root fallback", name)
+		}
+	}
+}
+
+func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
+	repositoryRoot := filepath.Join(hermesAdapterRoot(t), "..", "..")
+	script := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-feasibility.sh"), 2<<20))
+	for _, contract := range []string{
+		"readonly work state_root",
+		"${work##*/} == steward-hermes-feasibility.??????",
+		"-d $work && ! -L $work",
+		"${state_root##*/} == steward-hermes-state.??????",
+		"-d $state_root && ! -L $state_root",
+		`setpriv_path=$(type -P setpriv)`,
+		`sudo_path=$(type -P sudo)`,
+		`"$sudo_path" -n -- true`,
+		`privileged=("$sudo_path" -n --)`,
+		"privileged_command() {\n\t\"${privileged[@]}\" \"$@\"\n}",
+		`state_owner_command timeout 15 python3 -I - "$state_root"`,
+		`flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)`,
+		"dir_fd=directory_fd, follow_symlinks=False",
+		"st_ctime_ns",
+		"--bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs",
+		`[[ ! -e $state_root && ! -L $state_root ]]`,
+		`docker ps -aq --no-trunc --filter "name=^/${container}$"`,
+		"preserved state because qualification container absence is unverified",
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("Hermes feasibility privilege boundary is missing contract %q", contract)
+		}
+	}
+
+	allowed := map[string]bool{
+		`privileged_command chown -hR 65532:65532 -- "$state_root"`: true,
+		`privileged_command "$setpriv_path" \`:                      true,
+	}
+	allowedStateOwner := map[string]int{
+		`state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'`:                                 2,
+		`state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true`: 1,
+	}
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, `"$sudo_path"`) &&
+			!strings.HasPrefix(line, `sudo_path=$(type -P sudo) ||`) &&
+			!strings.HasPrefix(line, `"$sudo_path" -n -- true`) &&
+			line != `privileged=("$sudo_path" -n --)` {
+			t.Fatalf("Hermes feasibility bypasses its sudo bootstrap allowlist: %q", line)
+		}
+		if strings.Contains(line, "privileged_command ") {
+			if !allowed[line] {
+				t.Fatalf("Hermes feasibility uses privilege outside its state allowlist: %q", line)
+			}
+			delete(allowed, line)
+		}
+		if strings.Contains(line, `"$setpriv_path"`) && line != `privileged_command "$setpriv_path" \` {
+			t.Fatalf("Hermes feasibility invokes setpriv outside its state-owner wrapper: %q", line)
+		}
+		if strings.Contains(line, "state_owner_command ") {
+			if allowedStateOwner[line] == 0 {
+				t.Fatalf("Hermes feasibility uses the state identity outside its allowlist: %q", line)
+			}
+			allowedStateOwner[line]--
+		}
+		if strings.Contains(line, `"${privileged[@]}"`) && line != `"${privileged[@]}" "$@"` {
+			t.Fatalf("Hermes feasibility bypasses its privileged command wrapper: %q", line)
+		}
+	}
+	if len(allowed) != 0 {
+		t.Fatalf("Hermes feasibility does not exercise every privileged state operation: %#v", allowed)
+	}
+	for line, remaining := range allowedStateOwner {
+		if remaining != 0 {
+			t.Fatalf("Hermes feasibility state-identity operation %q occurs %d fewer times than required", line, remaining)
 		}
 	}
 }

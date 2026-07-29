@@ -148,6 +148,8 @@ func (s *Server) prepareRuntimeTopology(ctx context.Context, workload Workload) 
 	if workload.Runtime == nil {
 		return nil
 	}
+	allocationPending := workload.Runtime.Subnet == "" && workload.Runtime.Gateway == "" &&
+		workload.Runtime.RelayIP == "" && workload.Runtime.AgentIP == ""
 	wantNetwork := NetworkSpecFor(workload.TenantID, workload.InstanceID, workload.Runtime.Generation)
 	observed, err := s.secure.topology.InspectNetwork(ctx, wantNetwork.Name)
 	if errors.Is(err, ErrNotFound) {
@@ -158,7 +160,7 @@ func (s *Server) prepareRuntimeTopology(ctx context.Context, workload Workload) 
 		}
 		observed, err = s.secure.topology.InspectNetwork(ctx, wantNetwork.Name)
 	}
-	if err != nil || !networkEqual(observed, wantNetwork) {
+	if err != nil || !networkEqual(observed, wantNetwork) || allocationPending && !observed.ExplicitIPAM {
 		return errors.New("isolated runtime network is missing or has drifted")
 	}
 	workload.Runtime.NetworkName = observed.Name
@@ -289,7 +291,20 @@ func (s *Server) proveRuntimeAuthorityState(
 		return topologyUnavailable(runtimeTopologyRelay, "inspect trusted relay", err)
 	}
 	if !relayEqual(relay, wantRelay) || !lifecycleMatches(relay.Status, wantActive) {
-		return topologyDrift(runtimeTopologyRelay, "trusted relay does not match the committed admission fence and lifecycle")
+		return topologyDrift(
+			runtimeTopologyRelay,
+			fmt.Sprintf(
+				"trusted relay does not match the committed admission fence and lifecycle: managed=%t hardened=%t spec=%t fingerprint=%t lifecycle=%t fields=%s observed_ip=%s expected_ip=%s",
+				relay.Managed,
+				relay.Hardened,
+				relay.Spec == wantRelay,
+				relay.Fingerprint == relayFingerprint(wantRelay),
+				lifecycleMatches(relay.Status, wantActive),
+				relay.Drift,
+				relay.IPAddress,
+				wantRelay.RelayIP,
+			),
+		)
 	}
 
 	inspection, err := s.secure.gateway.InspectWithPolicy(ctx, workload.Runtime.GrantID)
@@ -315,8 +330,20 @@ func (s *Server) proveRuntimeAuthorityState(
 }
 
 func networkEqual(observed ObservedNetwork, want NetworkSpec) bool {
+	return !observed.ReservationPresent && networkShapeEqual(observed, want)
+}
+
+func networkShapeEqual(observed ObservedNetwork, want NetworkSpec) bool {
 	allocated, err := networkSpecFromIPAM(want, observed.Subnet, observed.Gateway)
 	return err == nil && observed.Managed && observed.Internal && observed.NetworkSpec == allocated
+}
+
+func explicitNetworkEqual(observed ObservedNetwork, want NetworkSpec) bool {
+	return observed.ExplicitIPAM && networkEqual(observed, want)
+}
+
+func explicitNetworkShapeEqual(observed ObservedNetwork, want NetworkSpec) bool {
+	return observed.ExplicitIPAM && networkShapeEqual(observed, want)
 }
 
 func relayEqual(observed ObservedRelay, want RelaySpec) bool {
@@ -335,7 +362,9 @@ func (s *Server) removeRuntimeTopology(ctx context.Context, workload Workload) b
 	if err := s.secure.gateway.Unregister(ctx, workload.Runtime.GrantID); err != nil {
 		return false
 	}
-	_ = s.secure.topology.RemoveNetwork(ctx, workload.Runtime.NetworkName)
+	if err := s.secure.topology.RemoveNetwork(ctx, workload.Runtime.NetworkName); err != nil && !errors.Is(err, ErrNotFound) {
+		return false
+	}
 	if _, err := s.secure.topology.InspectNetwork(ctx, workload.Runtime.NetworkName); !errors.Is(err, ErrNotFound) {
 		return false
 	}

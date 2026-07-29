@@ -816,6 +816,10 @@ func TestNetworkSpecBindsDockerAllocatedPrivateAddresses(t *testing.T) {
 		name, subnet, gateway string
 	}{
 		{"too small", "172.30.8.0/30", ""},
+		{"non-canonical", "172.30.8.1/29", ""},
+		{"public subnet", "192.0.2.0/24", ""},
+		{"partially private ten", "10.0.0.0/7", ""},
+		{"partially private one seventy two", "172.0.0.0/8", ""},
 		{"public gateway", "192.0.2.0/29", "192.0.2.1"},
 		{"outside gateway", "172.30.8.0/29", "172.30.9.1"},
 		{"invalid gateway", "172.30.8.0/29", "not-an-address"},
@@ -839,9 +843,43 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 		RelayGID: 1234, Inference: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
 		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
+	identity := NetworkSpecFor(network.TenantID, network.InstanceID, network.Generation)
+	reservationName := networkReservationName(identity)
+	const reservationID = "reservation-network-id"
+	const finalID = "final-network-id"
+	networkCreates, networkRemoves := 0, 0
+	reservationPresent, finalPresent := false, false
+	decodedLabels := func(value any) map[string]string {
+		raw, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("network labels=%#v", value)
+		}
+		labels := make(map[string]string, len(raw))
+		for key, value := range raw {
+			label, ok := value.(string)
+			if !ok {
+				t.Fatalf("network label %q=%#v", key, value)
+			}
+			labels[key] = label
+		}
+		return labels
+	}
+	networkPayload := func(name, id string, labels map[string]string) map[string]any {
+		return map[string]any{
+			"Id": id, "Name": name, "Driver": "bridge", "Scope": "local", "Internal": true, "Attachable": false,
+			"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
+			"Labels":  labels,
+			"IPAM": map[string]any{
+				"Driver": defaultIPAMDriver,
+				"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}},
+			},
+			"Containers": map[string]any{},
+		}
+	}
 	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1.41/networks/create":
+			networkCreates++
 			var create map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&create); err != nil {
 				t.Fatal(err)
@@ -850,16 +888,62 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 				create["Options"].(map[string]any)[isolatedGatewayOption] != isolatedGatewayMode {
 				t.Fatalf("network create=%#v", create)
 			}
+			if networkCreates == 1 {
+				if create["Name"] != reservationName ||
+					!exactStringMap(decodedLabels(create["Labels"]), networkLabels(identity, networkReservationAllocation, "")) {
+					t.Fatalf("subnet reservation identity=%#v", create)
+				}
+				if _, ok := create["IPAM"]; ok {
+					t.Fatalf("subnet reservation preempted Docker's allocator: %#v", create)
+				}
+				reservationPresent = true
+			} else {
+				if create["Name"] != network.Name ||
+					!exactStringMap(decodedLabels(create["Labels"]), networkLabels(identity, networkExplicitAllocation, network.Subnet)) {
+					t.Fatalf("final network identity=%#v", create)
+				}
+				ipam, ok := create["IPAM"].(map[string]any)
+				if !ok || len(ipam) != 2 || ipam["Driver"] != defaultIPAMDriver {
+					t.Fatalf("network create does not explicitly select Docker's default IPAM: %#v", create)
+				}
+				config, ok := ipam["Config"].([]any)
+				if !ok || len(config) != 1 {
+					t.Fatalf("network create does not bind one Docker-selected subnet: %#v", create)
+				}
+				allocation, ok := config[0].(map[string]any)
+				if !ok || allocation["Subnet"] != network.Subnet || len(allocation) != 1 {
+					t.Fatalf("network create does not bind the Docker-selected subnet exactly: %#v", create)
+				}
+				finalPresent = true
+			}
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1.41/networks/"):
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"Name": network.Name, "Driver": "bridge", "Internal": true, "Attachable": false,
-				"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
-				"Labels":  map[string]string{managedNetworkLabel: "true", "io.hardrails.tenant": network.TenantID, "io.hardrails.instance": network.InstanceID, networkGenerationLabel: "7"},
-				"IPAM":    map[string]any{"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}}},
-			})
+			target := strings.TrimPrefix(r.URL.Path, "/v1.41/networks/")
+			switch {
+			case target == reservationName && reservationPresent:
+				_ = json.NewEncoder(w).Encode(networkPayload(
+					reservationName, reservationID, networkLabels(identity, networkReservationAllocation, ""),
+				))
+			case target == network.Name && finalPresent:
+				_ = json.NewEncoder(w).Encode(networkPayload(
+					network.Name, finalID, networkLabels(identity, networkExplicitAllocation, network.Subnet),
+				))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1.41/networks/"):
-			w.WriteHeader(http.StatusNoContent)
+			networkRemoves++
+			target := strings.TrimPrefix(r.URL.Path, "/v1.41/networks/")
+			switch target {
+			case reservationID:
+				reservationPresent = false
+				w.WriteHeader(http.StatusNoContent)
+			case finalID:
+				finalPresent = false
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Fatalf("unexpected network removal target %q", target)
+			}
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1.41/containers/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Image": relay.Image,
@@ -882,11 +966,15 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 		}
 	})
 	ctx := context.Background()
-	if err := docker.CreateNetwork(ctx, NetworkSpecFor(network.TenantID, network.InstanceID, network.Generation)); err != nil {
+	if err := docker.CreateNetwork(ctx, identity); err != nil {
 		t.Fatal(err)
 	}
+	if networkCreates != 2 || networkRemoves != 1 {
+		t.Fatalf("network creates=%d removes=%d, want two-phase allocation", networkCreates, networkRemoves)
+	}
 	observedNetwork, err := docker.InspectNetwork(ctx, network.Name)
-	if err != nil || !observedNetwork.Managed || !observedNetwork.Internal || observedNetwork.NetworkSpec != network {
+	if err != nil || !observedNetwork.Managed || !observedNetwork.Internal || !observedNetwork.ExplicitIPAM ||
+		observedNetwork.ReservationPresent || observedNetwork.NetworkSpec != network {
 		t.Fatalf("network=%#v err=%v", observedNetwork, err)
 	}
 	observedRelay, err := docker.InspectRelay(ctx, relay.Name)
@@ -896,6 +984,9 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 	}
 	if err := docker.RemoveNetwork(ctx, network.Name); err != nil {
 		t.Fatal(err)
+	}
+	if networkRemoves != 2 {
+		t.Fatalf("network removes=%d, want reservation and final network", networkRemoves)
 	}
 }
 
@@ -1024,13 +1115,19 @@ func TestInspectRelayUsesConfiguredStaticIPBeforeFirstStart(t *testing.T) {
 
 func TestInspectNetworkRejectsInternalBridgeWithoutIsolatedGatewayMode(t *testing.T) {
 	network := testNetworkSpec("tenant-a", "agent-a", 7)
-	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, networkReservationName(network)) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"Name": network.Name, "Driver": "bridge", "Internal": true, "Attachable": false,
+			"Id": "network-id", "Name": network.Name, "Driver": "bridge", "Scope": "local", "Internal": true, "Attachable": false,
 			"Options": map[string]string{isolatedGatewayOption: "nat"},
-			"Labels": map[string]string{managedNetworkLabel: "true", "io.hardrails.tenant": network.TenantID,
-				"io.hardrails.instance": network.InstanceID, networkGenerationLabel: "7"},
-			"IPAM": map[string]any{"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}}},
+			"Labels":  networkLabels(network, networkExplicitAllocation, network.Subnet),
+			"IPAM": map[string]any{
+				"Driver": defaultIPAMDriver,
+				"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}},
+			},
 		})
 	})
 	observed, err := docker.InspectNetwork(context.Background(), network.Name)

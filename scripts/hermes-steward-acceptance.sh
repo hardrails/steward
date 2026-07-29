@@ -33,7 +33,7 @@ build_attestation=${HERMES_BUILD_ATTESTATION:-}
 	echo "hermes-steward-acceptance: set STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES only on a disposable host" >&2
 	exit 2
 }
-for command in base64 curl docker python3; do
+for command in base64 curl docker python3 stat tail; do
 	command -v "$command" >/dev/null 2>&1 || { echo "hermes-steward-acceptance: $command is required" >&2; exit 2; }
 done
 executor_addr=${STEWARD_ACCEPTANCE_EXECUTOR_ADDR:-127.0.0.1:8090}
@@ -602,7 +602,14 @@ for _ in $(seq 1 30); do
 	sleep 1
 done
 curl -fsS "$connector_origin/health" >/dev/null
-gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+gid=$(id -g)
+if [[ $gid == 0 ]]; then
+	gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+fi
+[[ $gid =~ ^[1-9][0-9]*$ ]] || {
+	echo "hermes-steward-acceptance: a non-root Gateway group is required" >&2
+	exit 1
+}
 mkdir -p "$work/gateway" "$work/grants"
 printf '%s\n' "{
   \"version\":1,
@@ -636,8 +643,38 @@ printf '%s\n' "{
 "$ctl_bin" gateway validate -config "$work/gateway.json" >/dev/null
 "$gateway_bin" -config "$work/gateway.json" >"$work/gateway.log" 2>&1 &
 gateway_pid=$!
-for _ in $(seq 1 30); do [[ -S $work/gateway/control.sock ]] && break; sleep 1; done
-[[ -S $work/gateway/control.sock ]] || { echo "hermes-steward-acceptance: Gateway did not become ready" >&2; exit 1; }
+gateway_ready=false
+for _ in $(seq 1 30); do
+	if curl --noproxy '*' --max-time 2 --unix-socket "$work/gateway/control.sock" \
+		-fsS http://localhost/v1/healthz >/dev/null 2>&1 &&
+		[[ $(curl --noproxy '*' --max-time 2 -sS -o /dev/null -w '%{http_code}' \
+			-H 'Authorization: Bearer service-secret' \
+			http://127.0.0.1:18091/v1/services/readiness-probe/health 2>/dev/null || true) == 404 ]] &&
+		kill -0 "$gateway_pid" 2>/dev/null; then
+		gateway_ready=true
+		break
+	fi
+	kill -0 "$gateway_pid" 2>/dev/null || break
+	sleep 1
+done
+if ! $gateway_ready; then
+	echo "hermes-steward-acceptance: Gateway did not become ready" >&2
+	if kill -0 "$gateway_pid" 2>/dev/null; then
+		echo "hermes-steward-acceptance: Gateway remained running without healthy control and service endpoints" >&2
+	else
+		echo "hermes-steward-acceptance: Gateway exited before creating its control socket" >&2
+	fi
+	gateway_log_size=
+	if [[ -f $work/gateway.log && ! -L $work/gateway.log ]] &&
+		gateway_log_size=$(stat -c '%s' -- "$work/gateway.log") &&
+		[[ $gateway_log_size =~ ^[0-9]{1,7}$ ]] && (( gateway_log_size <= 1048576 )); then
+		echo "hermes-steward-acceptance: bounded Gateway startup diagnostics follow" >&2
+		tail -n 100 -- "$work/gateway.log" >&2
+	else
+		echo "hermes-steward-acceptance: Gateway startup diagnostics are unavailable or oversized" >&2
+	fi
+	exit 1
+fi
 unset connector_secret
 
 "$ctl_bin" keygen -key-id site-root -private-out "$work/site.private" -public-out "$work/site.public" >/dev/null
@@ -1010,16 +1047,156 @@ PY
 	done
 }
 
+report_hermes_readiness_failure() {
+	local runtime=$1 reason=$2
+	echo "hermes-steward-acceptance: Hermes readiness failed: $reason" >&2
+	if ! docker inspect --format '{{json .State}}' "$runtime" 2>/dev/null | python3 -I -c '
+import json
+import re
+import sys
+
+reason = sys.argv[1]
+raw = sys.stdin.buffer.read(65537)
+if not raw or len(raw) > 65536:
+    raise SystemExit(1)
+try:
+    state = json.loads(raw)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if (
+    not isinstance(state, dict)
+    or reason not in {"exited", "timeout"}
+    or not isinstance(state.get("Status"), str)
+    or re.fullmatch(r"[a-z]+", state["Status"]) is None
+    or type(state.get("Running")) is not bool
+    or type(state.get("Dead")) is not bool
+    or type(state.get("OOMKilled")) is not bool
+    or type(state.get("ExitCode")) is not int
+    or not isinstance(state.get("Error"), str)
+    or len(state["Error"]) > 4096
+):
+    raise SystemExit(1)
+payload = {
+    "contains_agent_content": False,
+    "dead": state["Dead"],
+    "error": state["Error"],
+    "exit_code": state["ExitCode"],
+    "oom_killed": state["OOMKilled"],
+    "reason": reason,
+    "running": state["Running"],
+    "schema_version": "steward.hermes-readiness-diagnostic.v1",
+    "status": state["Status"],
+}
+print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+' "$reason" >&2; then
+		echo "hermes-steward-acceptance: Hermes container state is unavailable or oversized" >&2
+	fi
+	# This harness admits only fixed synthetic fixture tasks. Cap and escape its
+	# startup logs so a failed container cannot inject terminal control bytes.
+	echo "hermes-steward-acceptance: bounded Hermes readiness logs follow" >&2
+	if ! docker logs --tail 100 "$runtime" 2>&1 | python3 -I -c '
+import sys
+
+raw = sys.stdin.buffer.read(65537)
+if len(raw) > 65536:
+    raise SystemExit(1)
+escaped = "".join(
+    chr(value) if value in (9, 10, 13) or 32 <= value <= 126 else f"\\x{value:02x}"
+    for value in raw
+)
+sys.stderr.write(escaped)
+'; then
+		echo "hermes-steward-acceptance: Hermes readiness logs are unavailable or oversized" >&2
+	fi
+}
+
 wait_for_hermes() {
 	local grant=$1 runtime=$2
 	for _ in $(seq 1 120); do
-		if curl -fsS -H 'Authorization: Bearer service-secret' \
+		if curl --noproxy '*' --max-time 2 -fsS -H 'Authorization: Bearer service-secret' \
 			"http://127.0.0.1:18091/v1/services/$grant/health" >/dev/null 2>&1; then
 			return 0
 		fi
-		[[ $(docker inspect --format '{{.State.Running}}' "$runtime" 2>/dev/null) == true ]] || return 1
+		if [[ $(docker inspect --format '{{.State.Running}}' "$runtime" 2>/dev/null || true) != true ]]; then
+			report_hermes_readiness_failure "$runtime" exited
+			return 1
+		fi
 		sleep 1
 	done
+	report_hermes_readiness_failure "$runtime" timeout
+	return 1
+}
+
+start_workload() {
+	local generation=$1
+	local response=$work/start-g$generation.response.json
+	local readiness=$work/start-g$generation.readiness.json
+	local status
+	status=$(curl -sS -o "$response" -w '%{http_code}' -X POST \
+		"$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" || true)
+	if [[ $status == 200 ]]; then
+		return 0
+	fi
+	curl -sS -o "$readiness" -H "Authorization: Bearer $token" \
+		"$executor_url/v1/readiness" >/dev/null 2>&1 || true
+	echo "hermes-steward-acceptance: Executor start failed for generation $generation" >&2
+	if ! python3 -I - "$response" "$readiness" "$status" "$generation" <<'PY' >&2
+import json
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+readiness_path = pathlib.Path(sys.argv[2])
+status = sys.argv[3]
+generation = sys.argv[4]
+try:
+    raw = path.read_bytes()
+    document = json.loads(raw)
+except (OSError, ValueError):
+    raise SystemExit(1)
+if (
+    not 0 < len(raw) <= 65536
+    or set(document) != {"error", "message"}
+    or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", str(document["error"])) is None
+    or not isinstance(document["message"], str)
+    or not 0 < len(document["message"]) <= 4096
+    or re.fullmatch(r"[0-9]{3}", status) is None
+    or generation not in {"1", "2"}
+):
+    raise SystemExit(1)
+failures = []
+try:
+    readiness_raw = readiness_path.read_bytes()
+    readiness_document = json.loads(readiness_raw)
+    candidates = readiness_document["reconciliation"].get("failures", [])
+    if not 0 < len(readiness_raw) <= 65536 or not isinstance(candidates, list) or len(candidates) > 64:
+        raise ValueError
+    for failure in candidates:
+        if (
+            set(failure) - {"runtime_ref", "code", "message"}
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", str(failure.get("code", ""))) is None
+            or not isinstance(failure.get("message"), str)
+            or not 0 < len(failure["message"]) <= 4096
+        ):
+            raise ValueError
+        failures.append({"code": failure["code"], "message": failure["message"]})
+except (KeyError, OSError, TypeError, ValueError):
+    failures = []
+payload = {
+    "contains_agent_content": False,
+    "error": document["error"],
+    "failures": failures,
+    "generation": int(generation),
+    "message": document["message"],
+    "schema_version": "steward.executor-start-diagnostic.v1",
+    "status": int(status),
+}
+print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+PY
+	then
+		echo "hermes-steward-acceptance: Executor start diagnostics are unavailable or malformed" >&2
+	fi
 	return 1
 }
 
@@ -1043,7 +1220,7 @@ connector_route_policy_digest=${connector_bindings[1]}
 	exit 1
 }
 mark generation_1_admitted
-curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+start_workload 1
 mark generation_1_started
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
@@ -1122,7 +1299,7 @@ mapfile -t admission < <(extract_admission <<<"$admission_response")
 runtime_ref=${admission[0]}
 grant_id=${admission[1]}
 mark generation_2_admitted
-curl -fsS -X POST "$executor_url/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+start_workload 2
 mark generation_2_started
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]

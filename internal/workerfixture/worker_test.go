@@ -33,6 +33,34 @@ func readFile(t *testing.T, path string, maximum int64) []byte {
 	return value
 }
 
+func isolatedPythonEnvironment(t *testing.T) []string {
+	t.Helper()
+	environment := []string{
+		"LANG=C",
+		"LC_ALL=C",
+		"PYTHONDONTWRITEBYTECODE=1",
+	}
+	for _, name := range []string{
+		"HOME",
+		"PATH",
+		"TMPDIR",
+		"TMP",
+		"TEMP",
+		"SYSTEMROOT",
+	} {
+		if value, ok := os.LookupEnv(name); ok {
+			environment = append(environment, name+"="+value)
+		}
+	}
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
+			t.Fatalf("isolated Python environment inherited %s", name)
+		}
+	}
+	return environment
+}
+
 func TestWorkerImagesPinReplaceableEnginesWithoutChangingGoDependencies(t *testing.T) {
 	root := repositoryRoot(t)
 	researchDockerfile := string(readFile(t, filepath.Join(root, "workers", "research", "Dockerfile"), 64<<10))
@@ -247,6 +275,25 @@ print(json.dumps({e+"-"+m:worker.command_for(e,"fixed task",m) for e in ("codex"
 		if !strings.Contains(source, required) {
 			t.Fatalf("coding worker is missing contract %q", required)
 		}
+	}
+}
+
+func TestCodingWorkerProducesReproducibleImmutableGitHandoffs(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	root := repositoryRoot(t)
+	fixture := filepath.Join(root, "internal", "workerfixture", "coding_handoff_test.py")
+	worker := filepath.Join(root, "workers", "coding", "coding_worker.py")
+	command := exec.Command(python, "-I", "-B", "-W", "error::ResourceWarning", fixture, worker)
+	command.Env = isolatedPythonEnvironment(t)
+	raw, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("immutable coding handoff fixture failed: %v\n%s", err, raw)
+	}
+	if bytes.Contains(raw, []byte("ResourceWarning")) {
+		t.Fatalf("immutable coding handoff fixture leaked a resource:\n%s", raw)
 	}
 }
 

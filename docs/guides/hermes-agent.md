@@ -41,6 +41,12 @@ immutable skills and admitted capabilities differ:
 | `research` | Search, extract, compare sources, and report findings | Two exact research connectors and controller events; bounded internal delegation |
 | `developer` | Ask Codex or Claude Code to inspect or change a repository | Separate isolated coding worker and credential store |
 
+The qualified startup path verifies every built-in profile manifest, signature,
+public key, limits, and helper digest. The retained runtime qualification does not
+select the developer profile, cause Hermes to load its helper, call Codex or Claude
+Code, or qualify a provider-produced version 2 handoff. Coding-worker isolation,
+deterministic fixture tests, and operator review are separate evidence boundaries.
+
 Start with [web research]({{ '/guides/research-agents/' | relative_url }}) or
 [coding workers]({{ '/guides/coding-workers/' | relative_url }}) when those are
 the actual task. A profile is not a prompt preference: it selects a different
@@ -257,10 +263,11 @@ or checkout and the source transfer through your own trust process.
 ## Rerun the end-to-end qualification
 
 Run qualification only on a disposable `linux/amd64` host with Docker, the `runsc`
-gVisor runtime, Python 3, `curl`, `base64`, and standard GNU userland tools. The
-harness uses fixed loopback ports, creates and removes Docker images, networks,
-containers, and volumes, and starts temporary Steward services. Do not run it on a
-production node or alongside another Steward deployment.
+gVisor runtime, Python 3, util-linux `setpriv`, `curl`, `base64`, and standard
+GNU userland tools. The harness uses fixed loopback ports, creates and removes
+Docker images, networks, containers, and volumes, and starts temporary Steward
+services. Do not run it on a production node or alongside another Steward
+deployment.
 
 An installed Linux release includes the exact harness and automatically selects its
 packaged binaries:
@@ -280,6 +287,21 @@ must not already exist. A successful run writes owner-only, metadata-only eviden
 that binds the archive, build attestation, harness, binaries, accepted image,
 completed hostile-path checks, and verified receipt-chain heads. It does not retain
 prompts, model output, workspace contents, credentials, origins, or logs.
+
+Repository maintainers can run both harnesses on a disposable GitHub-hosted
+`linux/amd64` runner. The manual CI job installs the repository-pinned gVisor
+archive, verifies its size and SHA-512 digest, rebuilds from the exact dispatched
+commit, and uploads only the two metadata JSON files:
+
+```console
+gh workflow run ci.yml \
+  --ref BRANCH_NAME \
+  -f hermes_qualification=true
+```
+
+Download the `hermes-qualification-<commit>` artifact from that exact run and
+commit its two files without editing or reserializing them. A pull-request or push
+CI run never starts this expensive job; it is manual and opt-in.
 
 ## Inspect and import the exact output
 

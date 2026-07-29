@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      hermes_qualification:
+        description: Regenerate Hermes runtime qualification evidence
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -516,3 +522,221 @@ jobs:
       # {"status":"ok"}, then SIGTERM and assert a clean, panic-free exit.
       - name: smoke test (healthz + clean shutdown)
         run: bash scripts/smoke.sh
+
+  hermes-qualification:
+    name: Hermes Docker / gVisor qualification
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.hermes_qualification }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact qualification source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          check-latest: false
+
+      - name: Install repository-pinned gVisor runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1)"
+
+          mapfile -t gvisor < <(python3 -I - <<'PY'
+          import json
+          import pathlib
+
+          lock = json.loads(
+              pathlib.Path(
+                  "integrations/terraform/modules/aws-steward-cluster/source-lock.json"
+              ).read_text(encoding="utf-8")
+          )
+          archive = lock["gvisor"]["archives"]["amd64"]
+          print(lock["gvisor"]["version"])
+          print(archive["upstream_arch"])
+          print(archive["size"])
+          print(archive["sha512"])
+          PY
+          )
+          test "${#gvisor[@]}" -eq 4
+
+          install_root=$(mktemp -d "$RUNNER_TEMP/steward-gvisor.XXXXXX")
+          trap 'rm -rf -- "$install_root"' EXIT
+          archive="$install_root/gvisor.tar.bz2"
+          extract="$install_root/extract"
+          curl -q --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            --location --connect-timeout 15 --max-time 600 --max-filesize 209715200 \
+            --output "$archive" \
+            "https://storage.googleapis.com/gvisor/releases/release/${gvisor[0]}/${gvisor[1]}/gvisor.tar.bz2"
+          test "$(stat -c '%s' "$archive")" = "${gvisor[2]}"
+          printf '%s  %s\n' "${gvisor[3]}" "$archive" | sha512sum -c -
+
+          inventory=$(tar -tjf "$archive")
+          expected_inventory=$'containerd-shim-runsc-v1\ngvisor-bin/\ngvisor-bin/checkpointgofer\ngvisor-bin/runsc-metric-server\nrunsc'
+          test "$(printf '%s\n' "$inventory" | sort)" = "$expected_inventory"
+          install -d -m 0700 "$extract"
+          tar --no-same-owner --no-same-permissions -xjf "$archive" -C "$extract"
+          if find "$extract" \( -type l -o -type b -o -type c -o -type p -o -type s \) \
+            -print -quit | grep -q .; then
+            echo "Hermes qualification: gVisor archive contains a link or special file" >&2
+            exit 1
+          fi
+          test -x "$extract/runsc"
+          test -x "$extract/containerd-shim-runsc-v1"
+          sudo install -o root -g root -m 0755 "$extract/runsc" /usr/local/bin/runsc
+          sudo install -o root -g root -m 0755 \
+            "$extract/containerd-shim-runsc-v1" /usr/local/bin/containerd-shim-runsc-v1
+          sudo install -d -o root -g root -m 0755 /usr/local/bin/gvisor-bin
+          sudo install -o root -g root -m 0755 \
+            "$extract/gvisor-bin/checkpointgofer" \
+            "$extract/gvisor-bin/runsc-metric-server" \
+            /usr/local/bin/gvisor-bin/
+          /usr/local/bin/runsc --version | grep -Fq "release-${gvisor[0]}"
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"runsc"' && break
+            sleep 1
+          done
+          docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'
+          df -Pk "$RUNNER_TEMP"
+
+      - name: Regenerate and verify Hermes evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          qualification_root="$RUNNER_TEMP/steward-hermes-qualification"
+          upstream_root="$qualification_root/upstream"
+          evidence_root="$qualification_root/evidence"
+          build_root="$qualification_root/build"
+          binary_root="$qualification_root/bin"
+          mkdir -p "$upstream_root" "$evidence_root" "$build_root" "$binary_root"
+
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1)"
+          revision=$(python3 -I -c \
+            'import json,pathlib; print(json.loads(pathlib.Path("adapters/hermes-agent/adapter.json").read_text())["upstream"]["revision"])')
+          git -C "$upstream_root" init -q
+          git -C "$upstream_root" remote add origin \
+            https://github.com/NousResearch/hermes-agent.git
+          git -C "$upstream_root" fetch --quiet --depth=1 --no-tags origin "$revision"
+          git -C "$upstream_root" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$upstream_root" rev-parse HEAD)" = "$revision"
+
+          go build -o "$binary_root/steward-executor" ./cmd/steward-executor
+          go build -o "$binary_root/steward-gateway" ./cmd/steward-gateway
+          CGO_ENABLED=0 go build -o "$binary_root/steward-relay" ./cmd/steward-relay
+          go build -o "$binary_root/stewardctl" ./cmd/stewardctl
+          test -z "$(git status --porcelain=v1)"
+
+          STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
+          HERMES_DEBUG_KEEP_FAILED_WORK=YES \
+          HERMES_SOURCE_DIR="$upstream_root" \
+          HERMES_EVIDENCE_OUT="$evidence_root/hermes-feasibility.json" \
+          HERMES_BUILD_TIMEOUT_SECONDS=3600 \
+          HERMES_RUN_TIMEOUT_SECONDS=300 \
+            scripts/hermes-feasibility.sh
+
+          archive="$build_root/hermes-adapter-${GITHUB_SHA:0:12}.tar"
+          scripts/build-hermes-adapter.sh \
+            --non-interactive \
+            --source-dir "$upstream_root" \
+            --output "$archive" \
+            --build-timeout 3600 \
+            --save-timeout 900
+
+          STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
+          HERMES_ARCHIVE="$archive" \
+          HERMES_BUILD_ATTESTATION="$archive.attestation.json" \
+          HERMES_INTEGRATION_EVIDENCE_OUT="$evidence_root/hermes-integration.json" \
+          EXECUTOR_BIN="$binary_root/steward-executor" \
+          GATEWAY_BIN="$binary_root/steward-gateway" \
+          RELAY_BIN="$binary_root/steward-relay" \
+          STEWARDCTL_BIN="$binary_root/stewardctl" \
+            scripts/hermes-steward-acceptance.sh
+
+          python3 -I - \
+            "$evidence_root/hermes-feasibility.json" \
+            "$evidence_root/hermes-integration.json" \
+            "$GITHUB_SHA" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          feasibility_path, integration_path = map(pathlib.Path, sys.argv[1:3])
+          expected_commit = sys.argv[3]
+          for path in (feasibility_path, integration_path):
+              raw = path.read_bytes()
+              document = json.loads(raw)
+              canonical = (
+                  json.dumps(
+                      document,
+                      ensure_ascii=True,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  ).encode()
+                  + b"\n"
+              )
+              if raw != canonical:
+                  raise SystemExit(f"{path.name} is not canonical JSON")
+
+          feasibility = json.loads(feasibility_path.read_bytes())
+          integration = json.loads(integration_path.read_bytes())
+          build = integration["provenance"]["build_attestation"]
+          source = integration["provenance"]["steward_source"]
+          assert feasibility["overall"] == "passed"
+          assert integration["overall"] == "passed"
+          assert feasibility["contains_agent_content"] is False
+          assert integration["contains_agent_content"] is False
+          assert feasibility["adapter_steward_commit"] == expected_commit
+          assert build["adapter"]["steward_commit"] == expected_commit
+          assert source["commit"] == expected_commit
+          assert source["tracked_dirty"] is False
+          assert feasibility["adapter_tree"] == build["adapter"]["git_tree"]
+          assert feasibility["source_tree"] == build["source"]["git_tree"]
+          PY
+
+          install -m 0644 "$evidence_root/hermes-feasibility.json" \
+            docs/reference/evidence/hermes-feasibility.json
+          install -m 0644 "$evidence_root/hermes-integration.json" \
+            docs/reference/evidence/hermes-integration.json
+          go test ./internal/adapterfixture \
+            -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' \
+            -count=1
+
+      - name: Report bounded Hermes build diagnostics
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          build_logs=(/tmp/steward-hermes-feasibility.*/build.log)
+          if (( ${#build_logs[@]} == 0 )); then
+            echo 'No Hermes feasibility build log was retained.' >&2
+            exit 0
+          fi
+          if (( ${#build_logs[@]} != 1 )); then
+            echo 'Refusing to print ambiguous Hermes feasibility diagnostics.' >&2
+            exit 1
+          fi
+          test "$(stat -c '%s' "${build_logs[0]}")" -le 33554432
+          tail -n 250 -- "${build_logs[0]}" >&2
+
+      - name: Upload metadata-only qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hermes-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/steward-hermes-qualification/evidence/*.json
+          retention-days: 3
+          if-no-files-found: error
+          compression-level: 9

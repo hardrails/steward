@@ -2,13 +2,18 @@
 
 This optional container lets Hermes request bounded work from the official Codex
 or Claude Code CLI. It is a separate trust boundary with its own repository
-worktree and authentication state. Neither is mounted into Hermes.
+clone and authentication state. Neither is mounted into Hermes. The supported
+service runtime is Linux because immutable handoffs require Linux child-process
+containment before capture.
 
 The image pins both CLI packages in `package-lock.json`. Choose one engine per
 running container with `STEWARD_CODING_ENGINE=codex` or
 `STEWARD_CODING_ENGINE=claude-code`. The worker accepts one exact `/v1/run`
 operation, never invokes a shell to construct the CLI command, requires a clean
-Git worktree by default, and never commits or pushes changes.
+Git checkout by default, and does not itself invoke commit or push operations.
+Operators must still make Git metadata read-only, remove repository remotes and
+credentials, and restrict egress; the final `HEAD` check cannot prove an engine
+never committed and reset or attempted a push.
 
 ## Authentication choices
 
@@ -42,6 +47,12 @@ but output scanning is not a substitute for network isolation.
 
 ## Build and run
 
+Prepare a standalone clone with a contained `.git` directory. Do not use
+`git worktree add`: its `.git` file points to metadata outside the mounted path.
+Use `git clone --no-local` for a local source, detach the exact approved commit,
+remove `origin`, make the clone owned by UID/GID `65532:65532`, and confirm it is
+clean.
+
 ```console
 docker build --pull=false -t steward-coding-worker .
 docker run --rm --read-only --runtime runsc --user 65532:65532 \
@@ -52,12 +63,54 @@ docker run --rm --read-only --runtime runsc --user 65532:65532 \
   -e STEWARD_CODING_ENGINE=codex \
   -e STEWARD_WORKER_TOKEN_FILE=/run/secrets/worker-token \
   --mount type=bind,src="$PWD/repository",dst=/workspace \
+  --mount type=bind,src="$PWD/repository/.git",dst=/workspace/.git,readonly \
   --mount type=bind,src=/var/lib/steward-coding/codex-auth,dst=/home/worker/.codex \
   --mount type=bind,src="$PWD/worker-token",dst=/run/secrets/worker-token,readonly \
   steward-coding-worker
 ```
 
-Use a disposable Git worktree rather than a developer's only checkout. `read`
-mode selects Codex's read-only sandbox or Claude Code's plan mode. `write` mode
-selects workspace-write or accept-edits mode and returns the resulting changed
-paths. Review the actual diff before accepting it.
+The parent workspace mount remains writable while the nested Git metadata mount
+is read-only. Restrict network access to the selected provider and deny Git
+hosting and private infrastructure destinations.
+
+## Request contracts
+
+`steward.coding-task.v1` preserves the original summary-and-path response.
+`STEWARD_ALLOW_DIRTY_WORKSPACE=YES` is its development-only clean-check escape
+hatch.
+
+`steward.coding-task.v2` additionally requires `expected_base_commit`, always
+requires a clean checkout, ignores that escape hatch, and returns a
+`steward.git-handoff.v1`. Call it through the signed developer helper with a fresh
+one-use `--task-id`; adding `--expected-base-commit` selects version 2, while
+omitting it selects version 1. The handoff contains the object format, base commit
+and tree, one binary full-index patch, the patch's SHA-256 digest and length, a
+sorted changed-path inventory, and the result tree reproduced through a second
+temporary Git index and object directory. The source index, refs, and object
+database are not used for handoff writes.
+
+Version 2 is bounded to 512 paths, 48 KiB of path bytes, a 256 KiB patch, and a
+448 KiB canonical result. A coding request reserves at most 45 seconds for
+preflight, the requested engine budget of at most 900 seconds, 20 seconds for
+process cleanup, 45 seconds for handoff capture, and 10 seconds for response
+delivery. The signed helper and shipped Gateway coding presets use a 1,050-second
+connector ceiling, leaving 30 seconds for relay and transport scheduling, and the
+presets serialize calls with `max-concurrent=1`.
+
+Ignored output, submodules, special files, unsafe or portable-colliding paths,
+partial or sparse repositories, alternate object stores, executable Git filters,
+unstable captures, and non-reproducible patches fail closed. Changed content,
+relevant base/result blobs, streams, and raw patch bytes are scanned for protected
+credential material.
+
+After authentication and request validation, the single-threaded worker keeps its
+original listener open but accepts nothing else for the entire engine lifetime.
+Only after all engine descendants are proved stopped does it close and replace the
+listener, which drops every queued recursive connection before another request can
+run. Uncertain cleanup permanently poisons the worker and the listener is never
+rearmed.
+
+The handoff is untrusted application output. Reproducing its result tree does not
+prove the patch correct, identify the provider or model, or make it a signed
+artifact. Apply it to an independently obtained base, inspect the staged diff, and
+run repository tests before committing or publishing anything.

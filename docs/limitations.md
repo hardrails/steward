@@ -302,11 +302,29 @@ until a 15-minute reference expires; separate workers provide independent
 availability for separate tenants or trust domains.
 
 The optional coding worker runs the official Codex or Claude Code CLI in a
-separate container and reports changed paths. It does not prove a patch is correct,
-review the diff, commit, push, or merge. Subscription mode places a reusable
-first-party login in that worker's credential store. Output scanning can catch the
-exact credential and common encodings, but it cannot replace restricted worker
-egress, a disposable worktree, account controls, and credential rotation.
+separate Linux container. Its opt-in immutable handoff binds a bounded binary
+patch to one expected Git base and a reproduced result tree. That proves
+reproducible Git application, not that the patch is correct, that a named provider
+or model produced it, or that the response is a signed artifact. The standard
+connector receipt does not bind the exact nested response bytes.
+
+The supervisor does not invoke commit, push, or merge and rejects a changed final
+`HEAD`, but it cannot prove an engine never committed and reset or attempted a
+push. Operators must use a disposable standalone clone, mount its contained
+`.git` directory read-only, remove remotes and Git credentials, and deny Git-host
+egress. A linked worktree whose `.git` file points outside the mount is not a
+supported immutable-handoff input.
+
+A one-use connector task ID is a replay-control identity within Gateway's retained
+ledger scope. It does not authenticate the coding provider, model, or nested
+response.
+
+Subscription mode places a reusable first-party login in the worker's credential
+store. Stream, file, blob, and patch scanning can catch exact credential material
+and common encodings, but it cannot replace restricted worker egress, account
+controls, independent patch review, and credential rotation. Handoffs also reject
+ignored output, submodules, special files, unsupported repository configuration,
+oversized changes, and unstable workspaces rather than pretending to capture them.
 
 Controller events are at-least-once, finite-retention agent claims. They are not
 signed enforcement evidence, authorization, a complete audit log, or a large

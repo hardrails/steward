@@ -8,8 +8,9 @@ section: How-to guide
 
 Hermes can ask Codex or Claude Code to inspect or change a repository through
 Steward's developer profile. The coding CLI runs in a separate container with a
-dedicated Git worktree and authentication store. It does not run in the Hermes
-process or share Hermes state.
+disposable standalone Git clone and authentication store. It does not run in the
+Hermes process or share Hermes state. The supported worker service runs on Linux;
+version 2 handoffs depend on Linux child-process containment.
 
 That boundary is deliberate. Coding agents need broader filesystem and provider
 access than a general assistant. A separate worker makes that authority visible,
@@ -41,16 +42,32 @@ container selects exactly one engine.
 docker build --pull=false -t steward-coding-worker workers/coding
 ```
 
-Create a disposable worktree instead of mounting your only checkout:
+Create a disposable standalone clone instead of mounting your only checkout or a
+linked Git worktree. `--no-local` copies the object store rather than borrowing
+objects from the source checkout. Removing `origin` removes the inherited default
+push destination; the read-only metadata and denied Git-host egress remain the
+actual controls:
 
 ```console
-git -C /srv/projects/application worktree add /srv/steward-worktrees/application HEAD
+base_commit=$(git -C /srv/projects/application rev-parse --verify HEAD^{commit})
+sudo install -d -o 65532 -g 65532 -m 0700 /srv/steward-coding
+sudo -u '#65532' -g '#65532' \
+  git clone --no-local /srv/projects/application /srv/steward-coding/application
+sudo -u '#65532' -g '#65532' \
+  git -C /srv/steward-coding/application checkout --detach "$base_commit"
+sudo -u '#65532' -g '#65532' \
+  git -C /srv/steward-coding/application remote remove origin
 ```
 
-The worker requires a clean Git worktree by default. It never commits or pushes.
-Read mode maps to Codex's read-only sandbox or Claude Code's plan mode. Write mode
-maps to workspace-write or accept-edits and returns changed paths; review the real
-diff before accepting it.
+Version 2 requires this checkout to be clean and at the expected base commit. The
+version 1 development escape hatch does not relax that rule. Read mode maps to
+Codex's read-only sandbox or Claude Code's plan mode. Write mode maps to
+workspace-write or accept-edits.
+
+The supervisor does not invoke `git commit` or `git push`, and version 2 rejects a
+changed final `HEAD`. Those checks cannot prove that an engine never committed and
+reset or attempted a push. The read-only Git metadata mount and network policy
+below make those effects unavailable.
 
 ## 2. Authenticate the selected CLI
 
@@ -93,15 +110,22 @@ sudo docker run -d --name steward-codex-worker --restart unless-stopped \
   -p 127.0.0.1:9081:8080 \
   -e STEWARD_CODING_ENGINE=codex \
   -e STEWARD_WORKER_TOKEN_FILE=/run/secrets/worker-token \
-  --mount type=bind,src=/srv/steward-worktrees/application,dst=/workspace \
+  --mount type=bind,src=/srv/steward-coding/application,dst=/workspace \
+  --mount type=bind,src=/srv/steward-coding/application/.git,dst=/workspace/.git,readonly \
   --mount type=bind,src=/var/lib/steward-coding/codex-auth,dst=/home/worker/.codex \
   --mount type=bind,src=/etc/steward/coding-worker/token,dst=/run/secrets/worker-token,readonly \
   steward-coding-worker
 ```
 
-Restrict this container's network to the selected provider and required source
-systems. The worker scans results for exact credential material and common
-encodings, but output filtering cannot replace network isolation.
+The nested mount is intentional: `/workspace` remains writable while its contained
+`.git` directory is read-only. A linked worktree's `.git` file points outside the
+mount and is therefore not a supported version 2 input.
+
+Restrict this container's network to the selected provider and deny Git hosting,
+private, node, management, and metadata destinations. Do not mount Git credentials
+or credential-helper configuration. The worker scans engine streams, changed
+content, relevant Git blobs, and the raw patch for exact credential material and
+common encodings, but filtering cannot replace network isolation.
 
 ## 4. Connect Gateway and deploy the developer profile
 
@@ -130,7 +154,104 @@ stewardctl task run developer \
   "Ask Codex to inspect the repository, explain the failing test, and propose a fix. Do not edit files."
 ```
 
-Write mode is appropriate only when the user requested changes and the worker's
-worktree is disposable. Steward returns the worker's summary and changed paths;
-it does not declare the patch correct, merge it, or bypass repository review.
+Write mode is appropriate only when the user requested changes and the clone is
+disposable. For a portable handoff, have the developer profile call its signed
+helper with:
 
+- a fresh, unpredictable `--task-id` used for exactly one intended connector
+  call;
+- `--mode write`; and
+- `--expected-base-commit` set to the exact lowercase SHA-1 or SHA-256 commit
+  from the standalone clone.
+
+The expected base selects `steward.coding-task.v2`; omitting it preserves the
+version 1 request and result. The signed helper validates the complete version 2
+response before printing canonical JSON. A failed engine still returns its
+validated result but the helper exits nonzero.
+
+If a call ends ambiguously, preserve its task ID and investigate Gateway evidence.
+Do not automatically mint a new ID and repeat a potentially completed write.
+
+Version 2 permits at most 512 changed paths, 48 KiB of path bytes, a 256 KiB
+binary patch, and a 448 KiB canonical result. It rejects a dirty start, ignored
+output, submodules, special files, unsafe or colliding portable paths, executable
+Git filters, sparse or partial repositories, alternate object stores, an unstable
+capture, and a patch that cannot independently recreate its result tree. The
+engine timeout remains at most 900 seconds. The worker reserves another 120
+seconds across preflight, cleanup, handoff capture, and response delivery. The
+signed helper and coding connector preset allow 1,050 seconds, including a
+30-second relay and transport margin, and the preset serializes calls with
+`max-concurrent=1`.
+
+## Review a version 2 handoff offline
+
+Save the helper's exact JSON object as `coding-result.json`. Keep the independently
+approved base commit outside that response, then decode and verify the patch:
+
+```console
+approved_base_commit=REPLACE_WITH_PRE_DISPATCH_COMMIT
+jq -er '.schema_version == "steward.coding-result.v2"' coding-result.json >/dev/null
+test "$(jq -er '.handoff.base_commit' coding-result.json)" = "$approved_base_commit"
+patch_base64=$(jq -er '.handoff.patch_base64' coding-result.json)
+printf '%s' "$patch_base64" | base64 --decode >coding.patch
+test "$(base64 -w 0 coding.patch)" = "$patch_base64"
+test "$(wc -c <coding.patch | tr -d ' ')" = \
+  "$(jq -er '.handoff.patch_bytes' coding-result.json)"
+patch_sha256=$(jq -er \
+  '.handoff.patch_sha256 | select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")' \
+  coding-result.json)
+printf '%s  %s\n' "$patch_sha256" coding.patch | sha256sum -c -
+```
+
+Materialize that base from an independently trusted repository. Use temporary Git
+index and object directories, matching the worker's verification path, and require
+the response's base tree, changed-path inventories, and result tree to agree:
+
+```console
+git clone --no-checkout https://example.invalid/owner/application.git handoff-review
+git -C handoff-review checkout --detach "$approved_base_commit"
+test "$(git -C handoff-review rev-parse HEAD)" = "$approved_base_commit"
+test "$(git -C handoff-review rev-parse --show-object-format)" = \
+  "$(jq -er '.handoff.object_format' coding-result.json)"
+approved_base_tree=$(git -C handoff-review rev-parse "${approved_base_commit}^{tree}")
+test "$approved_base_tree" = \
+  "$(jq -er '.handoff.base_tree' coding-result.json)"
+review_state=$(mktemp -d)
+trap 'rm -rf "$review_state"' EXIT
+review_git_dir=$(git -C handoff-review rev-parse --absolute-git-dir)
+export GIT_DIR="$review_git_dir"
+export GIT_WORK_TREE="$PWD/handoff-review"
+export GIT_INDEX_FILE="$review_state/index"
+export GIT_OBJECT_DIRECTORY="$review_state/objects"
+export GIT_ALTERNATE_OBJECT_DIRECTORIES="$review_git_dir/objects"
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_NO_REPLACE_OBJECTS=1
+mkdir "$GIT_OBJECT_DIRECTORY"
+git -c core.hooksPath=/dev/null -c core.fsmonitor=false read-tree "$approved_base_commit"
+if test -s coding.patch; then
+  git -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null \
+    apply --cached --binary --whitespace=nowarn "$PWD/coding.patch"
+fi
+test "$(git write-tree)" = "$(jq -er '.handoff.result_tree' coding-result.json)"
+declared_paths=$(jq -cer \
+  '.changed_paths as $top | .handoff.changed_paths as $nested | select($top == $nested) | $top' \
+  coding-result.json)
+actual_paths=$(git -c core.quotePath=false diff --cached --name-only --no-renames \
+  --no-ext-diff --no-textconv "$approved_base_commit" -- | \
+  LC_ALL=C sort | jq -Rsc 'split("\n")[:-1]')
+test "$actual_paths" = "$declared_paths"
+git -c core.quotePath=false diff --cached --stat --no-renames \
+  --no-ext-diff --no-textconv \
+  "$approved_base_commit" --
+git -c core.quotePath=false diff --cached --binary --full-index --no-renames \
+  --no-ext-diff --no-textconv \
+  "$approved_base_commit" --
+```
+
+Reproducing the tree proves only that these patch bytes transform the named base
+into the named result under Git's rules. It does not establish correctness,
+provider identity, model identity, or signed artifact attestation. The current
+standard connector receipt binds authorization, route, task identity, and terminal
+status, not the exact nested response bytes. Review and test the staged result
+before committing, merging, or publishing it.

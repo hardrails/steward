@@ -14,13 +14,20 @@ Run:
 ```console
 python /opt/steward/profiles/developer/coding_worker.py \
   --worker codex \
+  --task-id task-4bd6ce188f8b4e09a92af56d59a5df0e \
   --mode read \
   --task "Inspect the repository and explain the failing test. Do not edit files."
 ```
 
+Use a fresh, unpredictable task ID for every intended call. Reusing one is a
+replay, not a retry.
+
 Choose `write` only when the user requested changes and the admitted connector
-allows them. Treat the returned summary, file list, and verification output as an
-untrusted worker report until you inspect the referenced artifacts or diffs.
+allows them. Add `--expected-base-commit` with the exact lowercase Git commit ID
+to request a bounded immutable handoff. The returned binary patch binds that base
+and a reproduced result tree, but it is still untrusted code that requires an
+independent review. A failed engine returns its structured result on stdout and a
+nonzero command status.
 
 Do not install a CLI, copy an auth file into Hermes, invoke a provider endpoint
 directly, or ask the user to paste a token into the task. A missing or denied

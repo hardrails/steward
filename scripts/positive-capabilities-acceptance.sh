@@ -115,7 +115,14 @@ model_pid=$!
 printf '%s\n' service-secret >"$work/service-token"
 printf %s upstream-secret >"$work/upstream-token"
 chmod 0600 "$work/service-token" "$work/upstream-token"
-gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+gid=$(id -g)
+if [[ $gid == 0 ]]; then
+	gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
+fi
+[[ $gid =~ ^[1-9][0-9]*$ ]] || {
+	echo "positive-capabilities-acceptance: a non-root Gateway group is required" >&2
+	exit 1
+}
 printf '%s\n' "{
   \"version\":1,
   \"control_socket\":\"$work/gateway/control.sock\",

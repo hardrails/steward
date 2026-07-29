@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type TopologyDocker interface {
@@ -36,8 +38,10 @@ type NetworkSpec struct {
 
 type ObservedNetwork struct {
 	NetworkSpec
-	Managed  bool
-	Internal bool
+	Managed            bool
+	Internal           bool
+	ExplicitIPAM       bool
+	ReservationPresent bool
 }
 
 type RelaySpec struct {
@@ -75,10 +79,21 @@ type ObservedRelay struct {
 
 const managedNetworkLabel = "io.hardrails.network.managed"
 const networkGenerationLabel = "io.hardrails.network.generation"
+const networkAllocationLabel = "io.hardrails.network.allocation"
+const networkSubnetLabel = "io.hardrails.network.subnet"
+const networkReservationForLabel = "io.hardrails.network.reservation-for"
 const managedRelayLabel = "io.hardrails.relay.managed"
 const relayFingerprintLabel = "io.hardrails.relay-sha256"
+const defaultIPAMDriver = "default"
+const networkReservationAllocation = "docker-default-reservation-v1"
+const networkExplicitAllocation = "docker-default-explicit-v1"
+const maxNetworkAllocationAttempts = 3
+const networkCleanupTimeout = 5 * time.Second
 const isolatedGatewayOption = "com.docker.network.bridge.gateway_mode_ipv4"
 const isolatedGatewayMode = "isolated"
+const bridgeIPv4Option = "com.docker.network.enable_ipv4"
+const bridgeIPv6Option = "com.docker.network.enable_ipv6"
+const dockerPoolOverlapMessage = "invalid pool request: Pool overlaps with other one on this address space"
 
 func NetworkName(tenantID, instanceID string, generation uint64) string {
 	sum := sha256.Sum256([]byte(tenantID + "\x00" + instanceID + "\x00" + strconv.FormatUint(generation, 10)))
@@ -89,6 +104,10 @@ func NetworkSpecFor(tenantID, instanceID string, generation uint64) NetworkSpec 
 	return NetworkSpec{
 		Name: NetworkName(tenantID, instanceID, generation), TenantID: tenantID, InstanceID: instanceID, Generation: generation,
 	}
+}
+
+func networkReservationName(spec NetworkSpec) string {
+	return "steward-ipam-" + strings.TrimPrefix(spec.Name, "steward-net-")
 }
 
 // networkSpecFromIPAM binds a Docker-selected private subnet to Steward's two
@@ -105,10 +124,10 @@ func networkSpecFromIPAM(identity NetworkSpec, subnet, gateway string) (NetworkS
 		return NetworkSpec{}, errors.New("network identity is invalid")
 	}
 	prefix, err := netip.ParsePrefix(subnet)
-	if err != nil || !prefix.Addr().Is4() || prefix.Bits() > 29 {
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.Bits() > 29 ||
+		!privateIPv4Prefix(prefix) {
 		return NetworkSpec{}, errors.New("Docker allocated an unsupported network subnet")
 	}
-	prefix = prefix.Masked()
 	var gatewayAddress netip.Addr
 	if gateway != "" {
 		gatewayAddress, err = netip.ParseAddr(gateway)
@@ -138,6 +157,19 @@ func networkSpecFromIPAM(identity NetworkSpec, subnet, gateway string) (NetworkS
 	return want, nil
 }
 
+func privateIPv4Prefix(prefix netip.Prefix) bool {
+	for _, private := range [...]netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+	} {
+		if prefix.Bits() >= private.Bits() && private.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
 func validRuntimeAddresses(relay, agent string) bool {
 	relayAddress, relayErr := netip.ParseAddr(relay)
 	agentAddress, agentErr := netip.ParseAddr(agent)
@@ -161,47 +193,300 @@ func (d *DockerHTTP) CreateNetwork(ctx context.Context, spec NetworkSpec) error 
 		!boundedText(spec.TenantID, 128) || !boundedText(spec.InstanceID, 256) || spec.Generation == 0 {
 		return &PolicyError{"internal network specification is invalid"}
 	}
-	body := map[string]any{
-		"Name": spec.Name, "Driver": "bridge", "CheckDuplicate": true, "Internal": true, "Attachable": false,
-		"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
-		"Labels": map[string]string{
-			managedNetworkLabel: "true", "io.hardrails.tenant": spec.TenantID,
-			"io.hardrails.instance": spec.InstanceID, networkGenerationLabel: strconv.FormatUint(spec.Generation, 10),
-		},
+	var lastErr error
+	for attempt := 0; attempt < maxNetworkAllocationAttempts; attempt++ {
+		observed, err := d.InspectNetwork(ctx, spec.Name)
+		switch {
+		case err == nil && explicitNetworkShapeEqual(observed, spec):
+			if observed.ReservationPresent {
+				if err := d.removeNetworkReservation(ctx, spec.Name); err != nil {
+					return fmt.Errorf("clean stale Docker subnet reservation: %w", err)
+				}
+			}
+			return nil
+		case err == nil:
+			return errors.New("managed runtime network already exists with drift")
+		case !errors.Is(err, ErrNotFound):
+			return fmt.Errorf("inspect managed runtime network before allocation: %w", err)
+		}
+		retry, err := d.createNetworkAttempt(ctx, spec)
+		if !retry {
+			return err
+		}
+		lastErr = err
 	}
-	return d.call(ctx, http.MethodPost, "/v1.41/networks/create", body, http.StatusCreated)
+	return fmt.Errorf("allocate Docker runtime subnet after %d attempts: %w", maxNetworkAllocationAttempts, lastErr)
 }
 
-func (d *DockerHTTP) InspectNetwork(ctx context.Context, name string) (ObservedNetwork, error) {
+func (d *DockerHTTP) createNetworkAttempt(ctx context.Context, spec NetworkSpec) (bool, error) {
+	reservation, allocated, err := d.acquireNetworkReservation(ctx, spec)
+	if err != nil {
+		return false, err
+	}
+	released := false
+	defer func() {
+		if !released {
+			d.cleanupNetworkReservationID(reservation.ID)
+		}
+	}()
+	if err := d.releaseNetworkReservation(ctx, spec, reservation.ID); err != nil {
+		return false, err
+	}
+	released = true
+	createErr := d.call(
+		ctx, http.MethodPost, "/v1.41/networks/create",
+		networkCreateBody(spec, spec.Name, networkExplicitAllocation, allocated.Subnet), http.StatusCreated,
+	)
+	observed, inspectErr := d.InspectNetwork(ctx, spec.Name)
+	switch {
+	case inspectErr == nil && explicitNetworkEqual(observed, spec):
+		return false, nil
+	case inspectErr == nil:
+		return false, errors.New("created runtime network does not match its explicit Docker IPAM allocation")
+	case !errors.Is(inspectErr, ErrNotFound):
+		if createErr != nil {
+			return false, errors.Join(createErr, fmt.Errorf("inspect created runtime network: %w", inspectErr))
+		}
+		return false, fmt.Errorf("inspect created runtime network: %w", inspectErr)
+	case createErr == nil:
+		return false, errors.New("Docker reported runtime network creation but the network is absent")
+	case dockerPoolOverlap(createErr):
+		return true, createErr
+	default:
+		return false, createErr
+	}
+}
+
+func dockerPoolOverlap(err error) bool {
+	var apiErr *dockerAPIError
+	return errors.As(err, &apiErr) && apiErr.status == http.StatusForbidden &&
+		apiErr.message == dockerPoolOverlapMessage
+}
+
+func (d *DockerHTTP) acquireNetworkReservation(
+	ctx context.Context, spec NetworkSpec,
+) (dockerNetworkInspect, NetworkSpec, error) {
+	name := networkReservationName(spec)
+	reservation, err := d.inspectDockerNetwork(ctx, name)
+	if errors.Is(err, ErrNotFound) {
+		createErr := d.call(
+			ctx, http.MethodPost, "/v1.41/networks/create",
+			networkCreateBody(spec, name, networkReservationAllocation, ""), http.StatusCreated,
+		)
+		reservation, err = d.inspectDockerNetwork(ctx, name)
+		if err != nil {
+			if createErr != nil {
+				return dockerNetworkInspect{}, NetworkSpec{}, errors.Join(
+					createErr, fmt.Errorf("inspect Docker subnet reservation: %w", err),
+				)
+			}
+			return dockerNetworkInspect{}, NetworkSpec{}, fmt.Errorf("inspect Docker subnet reservation: %w", err)
+		}
+	} else if err != nil {
+		return dockerNetworkInspect{}, NetworkSpec{}, fmt.Errorf("inspect existing Docker subnet reservation: %w", err)
+	}
+	allocated, err := reservationAllocation(reservation, spec)
+	if err != nil {
+		return dockerNetworkInspect{}, NetworkSpec{}, err
+	}
+	return reservation, allocated, nil
+}
+
+func (d *DockerHTTP) releaseNetworkReservation(ctx context.Context, spec NetworkSpec, id string) error {
+	removeErr := d.call(ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(id), nil, http.StatusNoContent)
+	reservation, inspectErr := d.inspectDockerNetwork(ctx, networkReservationName(spec))
+	if errors.Is(inspectErr, ErrNotFound) {
+		return nil
+	}
+	if inspectErr != nil {
+		if removeErr != nil {
+			return errors.Join(removeErr, fmt.Errorf("prove Docker subnet reservation removal: %w", inspectErr))
+		}
+		return fmt.Errorf("prove Docker subnet reservation removal: %w", inspectErr)
+	}
+	if reservation.ID != id {
+		return errors.New("Docker subnet reservation identity changed during removal")
+	}
+	if _, err := reservationAllocation(reservation, spec); err != nil {
+		return err
+	}
+	if removeErr != nil {
+		return fmt.Errorf("release Docker subnet reservation: %w", removeErr)
+	}
+	return errors.New("Docker subnet reservation remained after removal")
+}
+
+func (d *DockerHTTP) cleanupNetworkReservationID(id string) {
+	if id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), networkCleanupTimeout)
+	defer cancel()
+	_ = d.call(ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(id), nil, http.StatusNoContent)
+}
+
+func networkCreateBody(spec NetworkSpec, name, allocation, subnet string) map[string]any {
+	labels := networkLabels(spec, allocation, subnet)
+	body := map[string]any{
+		"Name": name, "Driver": "bridge", "CheckDuplicate": true, "Internal": true, "Attachable": false, "EnableIPv6": false,
+		"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
+		"Labels":  labels,
+	}
+	if allocation == networkExplicitAllocation {
+		body["IPAM"] = map[string]any{
+			"Driver": defaultIPAMDriver,
+			"Config": []map[string]string{{"Subnet": subnet}},
+		}
+	}
+	return body
+}
+
+func networkLabels(spec NetworkSpec, allocation, subnet string) map[string]string {
+	labels := map[string]string{
+		managedNetworkLabel: "true", "io.hardrails.tenant": spec.TenantID,
+		"io.hardrails.instance": spec.InstanceID, networkGenerationLabel: strconv.FormatUint(spec.Generation, 10),
+		networkAllocationLabel: allocation,
+	}
+	if allocation == networkReservationAllocation {
+		labels[networkReservationForLabel] = spec.Name
+	}
+	if allocation == networkExplicitAllocation {
+		labels[networkSubnetLabel] = subnet
+	}
+	return labels
+}
+
+func legacyNetworkLabels(spec NetworkSpec) map[string]string {
+	return map[string]string{
+		managedNetworkLabel: "true", "io.hardrails.tenant": spec.TenantID,
+		"io.hardrails.instance": spec.InstanceID, networkGenerationLabel: strconv.FormatUint(spec.Generation, 10),
+	}
+}
+
+type dockerNetworkInspect struct {
+	ID         string            `json:"Id"`
+	Name       string            `json:"Name"`
+	Driver     string            `json:"Driver"`
+	Scope      string            `json:"Scope"`
+	Internal   bool              `json:"Internal"`
+	Attachable bool              `json:"Attachable"`
+	Ingress    bool              `json:"Ingress"`
+	ConfigOnly bool              `json:"ConfigOnly"`
+	EnableIPv6 bool              `json:"EnableIPv6"`
+	Options    map[string]string `json:"Options"`
+	Labels     map[string]string `json:"Labels"`
+	Containers map[string]struct {
+		Name        string `json:"Name"`
+		IPv4Address string `json:"IPv4Address"`
+	} `json:"Containers"`
+	IPAM struct {
+		Driver  string            `json:"Driver"`
+		Options map[string]string `json:"Options"`
+		Config  []struct {
+			Subnet             string            `json:"Subnet"`
+			IPRange            string            `json:"IPRange"`
+			Gateway            string            `json:"Gateway"`
+			AuxiliaryAddresses map[string]string `json:"AuxiliaryAddresses"`
+		} `json:"Config"`
+	} `json:"IPAM"`
+}
+
+func (d *DockerHTTP) inspectDockerNetwork(ctx context.Context, name string) (dockerNetworkInspect, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/v1.41/networks/"+pathEscape(name), nil)
 	if err != nil {
-		return ObservedNetwork{}, err
+		return dockerNetworkInspect{}, err
 	}
 	response, err := d.client.Do(req)
 	if err != nil {
-		return ObservedNetwork{}, err
+		return dockerNetworkInspect{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
-		return ObservedNetwork{}, ErrNotFound
+		return dockerNetworkInspect{}, ErrNotFound
 	}
 	if response.StatusCode != http.StatusOK {
-		return ObservedNetwork{}, dockerError(response)
+		return dockerNetworkInspect{}, dockerError(response)
 	}
-	var payload struct {
-		Name       string            `json:"Name"`
-		Driver     string            `json:"Driver"`
-		Internal   bool              `json:"Internal"`
-		Attachable bool              `json:"Attachable"`
-		Options    map[string]string `json:"Options"`
-		Labels     map[string]string `json:"Labels"`
-		IPAM       struct {
-			Config []struct{ Subnet, Gateway string }
-		} `json:"IPAM"`
-	}
+	var payload dockerNetworkInspect
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+		return dockerNetworkInspect{}, err
+	}
+	return payload, nil
+}
+
+func networkEnvelopeMatches(payload dockerNetworkInspect, name string, labels map[string]string) bool {
+	return payload.ID != "" && payload.Name == name && payload.Driver == "bridge" && payload.Scope == "local" &&
+		payload.Internal && !payload.Attachable && !payload.Ingress && !payload.ConfigOnly && !payload.EnableIPv6 &&
+		hardenedNetworkOptions(payload.Options) &&
+		exactStringMap(payload.Labels, labels) && payload.IPAM.Driver == defaultIPAMDriver &&
+		len(payload.IPAM.Options) == 0 && len(payload.IPAM.Config) == 1 &&
+		payload.IPAM.Config[0].IPRange == "" && len(payload.IPAM.Config[0].AuxiliaryAddresses) == 0
+}
+
+func hardenedNetworkOptions(options map[string]string) bool {
+	if options[isolatedGatewayOption] != isolatedGatewayMode {
+		return false
+	}
+	for key, value := range options {
+		switch key {
+		case isolatedGatewayOption:
+			if value != isolatedGatewayMode {
+				return false
+			}
+		case bridgeIPv4Option:
+			if value != "true" {
+				return false
+			}
+		case bridgeIPv6Option:
+			if value != "false" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func reservationAllocation(payload dockerNetworkInspect, spec NetworkSpec) (NetworkSpec, error) {
+	if !networkEnvelopeMatches(
+		payload, networkReservationName(spec), networkLabels(spec, networkReservationAllocation, ""),
+	) || len(payload.Containers) != 0 {
+		return NetworkSpec{}, errors.New("Docker subnet reservation is drifted or in use")
+	}
+	allocated, err := networkSpecFromIPAM(spec, payload.IPAM.Config[0].Subnet, payload.IPAM.Config[0].Gateway)
+	if err != nil {
+		return NetworkSpec{}, err
+	}
+	return allocated, nil
+}
+
+func (d *DockerHTTP) InspectNetwork(ctx context.Context, name string) (ObservedNetwork, error) {
+	payload, err := d.inspectDockerNetwork(ctx, name)
+	if err != nil {
 		return ObservedNetwork{}, err
 	}
+	observed, err := observedNetworkFromPayload(payload)
+	if err != nil {
+		return ObservedNetwork{}, err
+	}
+	reservation, reservationErr := d.inspectDockerNetwork(ctx, networkReservationName(observed.NetworkSpec))
+	if errors.Is(reservationErr, ErrNotFound) {
+		return observed, nil
+	}
+	if reservationErr != nil {
+		return ObservedNetwork{}, fmt.Errorf("inspect Docker subnet reservation: %w", reservationErr)
+	}
+	if _, err := reservationAllocation(reservation, NetworkSpecFor(
+		observed.TenantID, observed.InstanceID, observed.Generation,
+	)); err != nil {
+		return ObservedNetwork{}, err
+	}
+	observed.ReservationPresent = true
+	return observed, nil
+}
+
+func observedNetworkFromPayload(payload dockerNetworkInspect) (ObservedNetwork, error) {
 	generation, err := strconv.ParseUint(payload.Labels[networkGenerationLabel], 10, 64)
 	if err != nil {
 		return ObservedNetwork{}, errors.New("managed network has invalid generation label")
@@ -217,15 +502,128 @@ func (d *DockerHTTP) InspectNetwork(ctx context.Context, name string) (ObservedN
 	if err != nil {
 		return ObservedNetwork{}, err
 	}
+	internal := payload.Name == observed.Name && payload.Driver == "bridge" && payload.Scope == "local" &&
+		payload.Internal && !payload.Attachable && !payload.Ingress && !payload.ConfigOnly && !payload.EnableIPv6 &&
+		hardenedNetworkOptions(payload.Options)
+	explicitIPAM := networkEnvelopeMatches(
+		payload, observed.Name, networkLabels(observed, networkExplicitAllocation, observed.Subnet),
+	)
+	legacyIPAM := networkEnvelopeMatches(payload, observed.Name, legacyNetworkLabels(observed))
 	return ObservedNetwork{
-		NetworkSpec: observed,
-		Managed:     payload.Labels[managedNetworkLabel] == "true" && !payload.Attachable,
-		Internal:    payload.Internal && payload.Driver == "bridge" && payload.Options[isolatedGatewayOption] == isolatedGatewayMode,
+		NetworkSpec:  observed,
+		Managed:      explicitIPAM || legacyIPAM,
+		Internal:     internal,
+		ExplicitIPAM: explicitIPAM,
 	}, nil
 }
 
 func (d *DockerHTTP) RemoveNetwork(ctx context.Context, name string) error {
-	return d.call(ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(name), nil, http.StatusNoContent)
+	final, finalErr := d.managedNetworkForRemoval(ctx, name)
+	finalMissing := errors.Is(finalErr, ErrNotFound)
+	if finalErr != nil && !finalMissing {
+		return finalErr
+	}
+	reservation, reservationPresent, err := d.networkReservationForRemoval(ctx, name)
+	if err != nil {
+		return err
+	}
+	var removeErrors []error
+	if reservationPresent {
+		if err := d.removeVerifiedNetwork(ctx, reservation, "Docker subnet reservation"); err != nil {
+			removeErrors = append(removeErrors, err)
+		}
+	}
+	if !finalMissing {
+		if err := d.removeVerifiedNetwork(ctx, final, "managed runtime network"); err != nil {
+			removeErrors = append(removeErrors, err)
+		}
+	}
+	if len(removeErrors) != 0 {
+		return errors.Join(removeErrors...)
+	}
+	if finalMissing {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DockerHTTP) removeNetworkReservation(ctx context.Context, finalName string) error {
+	reservation, present, err := d.networkReservationForRemoval(ctx, finalName)
+	if err != nil || !present {
+		return err
+	}
+	return d.removeVerifiedNetwork(ctx, reservation, "Docker subnet reservation")
+}
+
+func (d *DockerHTTP) managedNetworkForRemoval(ctx context.Context, name string) (dockerNetworkInspect, error) {
+	payload, err := d.inspectDockerNetwork(ctx, name)
+	if err != nil {
+		return dockerNetworkInspect{}, err
+	}
+	observed, err := observedNetworkFromPayload(payload)
+	if err != nil {
+		return dockerNetworkInspect{}, err
+	}
+	want := NetworkSpecFor(observed.TenantID, observed.InstanceID, observed.Generation)
+	if !networkEqual(observed, want) || observed.Name != name {
+		return dockerNetworkInspect{}, errors.New("refusing to remove a drifted or foreign runtime network")
+	}
+	return payload, nil
+}
+
+func (d *DockerHTTP) networkReservationForRemoval(
+	ctx context.Context, finalName string,
+) (dockerNetworkInspect, bool, error) {
+	if !strings.HasPrefix(finalName, "steward-net-") || len(finalName) != len("steward-net-")+sha256.Size*2 {
+		return dockerNetworkInspect{}, false, nil
+	}
+	reservationName := "steward-ipam-" + strings.TrimPrefix(finalName, "steward-net-")
+	reservation, err := d.inspectDockerNetwork(ctx, reservationName)
+	if errors.Is(err, ErrNotFound) {
+		return dockerNetworkInspect{}, false, nil
+	}
+	if err != nil {
+		return dockerNetworkInspect{}, false, fmt.Errorf("inspect Docker subnet reservation during cleanup: %w", err)
+	}
+	generation, err := strconv.ParseUint(reservation.Labels[networkGenerationLabel], 10, 64)
+	if err != nil {
+		return dockerNetworkInspect{}, false, errors.New("Docker subnet reservation has invalid generation label")
+	}
+	spec := NetworkSpecFor(
+		reservation.Labels["io.hardrails.tenant"], reservation.Labels["io.hardrails.instance"], generation,
+	)
+	if spec.Name != finalName {
+		return dockerNetworkInspect{}, false, errors.New("Docker subnet reservation does not belong to the requested runtime network")
+	}
+	if _, err := reservationAllocation(reservation, spec); err != nil {
+		return dockerNetworkInspect{}, false, err
+	}
+	return reservation, true, nil
+}
+
+func (d *DockerHTTP) removeVerifiedNetwork(
+	ctx context.Context, payload dockerNetworkInspect, boundary string,
+) error {
+	removeErr := d.call(
+		ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(payload.ID), nil, http.StatusNoContent,
+	)
+	after, inspectErr := d.inspectDockerNetwork(ctx, payload.Name)
+	if errors.Is(inspectErr, ErrNotFound) {
+		return nil
+	}
+	if inspectErr != nil {
+		if removeErr != nil {
+			return errors.Join(removeErr, fmt.Errorf("prove %s removal: %w", boundary, inspectErr))
+		}
+		return fmt.Errorf("prove %s removal: %w", boundary, inspectErr)
+	}
+	if after.ID != payload.ID {
+		return fmt.Errorf("%s identity changed during removal", boundary)
+	}
+	if removeErr != nil {
+		return fmt.Errorf("remove %s: %w", boundary, removeErr)
+	}
+	return fmt.Errorf("%s remained after removal", boundary)
 }
 
 func (d *DockerHTTP) CreateRelay(ctx context.Context, spec RelaySpec) error {
