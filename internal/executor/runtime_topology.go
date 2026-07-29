@@ -291,7 +291,20 @@ func (s *Server) proveRuntimeAuthorityState(
 		return topologyUnavailable(runtimeTopologyRelay, "inspect trusted relay", err)
 	}
 	if !relayEqual(relay, wantRelay) || !lifecycleMatches(relay.Status, wantActive) {
-		return topologyDrift(runtimeTopologyRelay, "trusted relay does not match the committed admission fence and lifecycle")
+		return topologyDrift(
+			runtimeTopologyRelay,
+			fmt.Sprintf(
+				"trusted relay does not match the committed admission fence and lifecycle: managed=%t hardened=%t spec=%t fingerprint=%t lifecycle=%t fields=%s observed_ip=%s expected_ip=%s",
+				relay.Managed,
+				relay.Hardened,
+				relay.Spec == wantRelay,
+				relay.Fingerprint == relayFingerprint(wantRelay),
+				lifecycleMatches(relay.Status, wantActive),
+				relay.Drift,
+				relay.IPAddress,
+				wantRelay.RelayIP,
+			),
+		)
 	}
 
 	inspection, err := s.secure.gateway.InspectWithPolicy(ctx, workload.Runtime.GrantID)
