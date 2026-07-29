@@ -37,7 +37,7 @@ controls that belong to Steward's trust contract:
 | --- | --- |
 | Load an approved offline image | Use Docker Engine's ImageLoad API, then inspect the result. |
 | Prevent host-gateway reachability | Require and inspect isolated gateway mode on an internal Docker bridge. Never fall back silently. |
-| Allocate per-instance network addresses | Let Docker reserve a non-conflicting subnet from the operator-configured daemon address pools, inspect and release that reservation, then recreate the managed network with the observed subnet explicitly configured through Docker's built-in `default` IPAM driver. This makes fixed relay and agent addresses portable across supported Docker versions without deriving a subnet from tenant text or maintaining a second IPAM database. An isolated network normally has no Docker-reported gateway. If Docker reports one, accept it only when it is a private host address inside the subnet, not the network or broadcast address; Steward then excludes it from the relay and agent addresses. Bind the observed subnet, optional gateway, relay IP, and agent IP into the workload fingerprint and fence. |
+| Allocate per-instance network addresses | Let Docker reserve a non-conflicting subnet from the operator-configured daemon address pools on a deterministic, phase-labeled, empty reservation network. Inspect its complete private IPv4 allocation, remove that immutable network ID and prove the reservation name absent, then create a separately named final network with the observed subnet explicitly configured through Docker's built-in `default` IPAM driver. Mark the final network and exact subnet immutably so a fresh admission never adopts an interrupted or legacy automatic allocation. Docker remains the collision authority: an exact pool-overlap response retries the reservation handoff at most three times; other failures stop immediately. This makes fixed relay and agent addresses portable across supported Docker versions without deriving a subnet from tenant text or maintaining a second IPAM database. An isolated network normally has no Docker-reported gateway. If Docker reports one, accept it only when the whole canonical subnet remains inside one RFC 1918 range and the gateway is a private host address inside it; Steward then excludes the gateway from relay and agent addresses. Bind the final observed subnet, optional gateway, relay IP, and agent IP into the workload fingerprint and fence. |
 | Bound container logs and swap | Configure Docker's `local` log driver and Linux control-group (cgroup) memory/swap fields, then inspect for drift—differences from the required settings. |
 | Reserve aggregate host and tenant resources | Reconstruct memory, CPU, PID, and workload reservations from labels on every managed Docker container, including stopped containers, and add fixed relay overhead. Keep Docker as the restart-persistent inventory instead of trusting process-local counters. |
 | Bound persistent state | Keep Docker local-volume state disabled on shared hosts because it has no portable hard byte or inode quota. Do not emulate a kernel or filesystem quota with userspace accounting. |
@@ -61,6 +61,14 @@ images.
 - Docker address-pool configuration limits how many capability networks the host
   can create. Steward detects allocation and identity drift but does not replace
   Docker's collision handling.
+- Reservation and final networks have distinct deterministic names and immutable
+  phase labels. Cleanup validates both complete envelopes before deleting their
+  immutable Docker IDs, and a replacement at either name is never deleted.
+- Existing unmarked managed networks remain valid only for already committed
+  runtime fences. Fresh admission requires the explicit-allocation marker. A
+  process kill while a prepared journal is pending can leave an empty,
+  self-identifying reservation for the existing operator reconciliation flow;
+  it is never treated as a final capability network.
 - An absent Docker gateway is the normal result for an isolated bridge and does not
   weaken host-gateway isolation. If Docker reports a gateway, Steward validates and
   records it as network metadata; it does not enable a host route.

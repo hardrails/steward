@@ -64,6 +64,8 @@ type secureDocker struct {
 	volume             *ObservedStateVolume
 	volumeErr          error
 	network            *ObservedNetwork
+	networkRemoveCalls int
+	networkRemoveErr   error
 	relay              *ObservedRelay
 }
 
@@ -103,7 +105,14 @@ func (d *secureDocker) CreateNetwork(_ context.Context, spec NetworkSpec) error 
 	d.network = &ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true, ExplicitIPAM: true}
 	return nil
 }
-func (d *secureDocker) RemoveNetwork(context.Context, string) error { d.network = nil; return nil }
+func (d *secureDocker) RemoveNetwork(context.Context, string) error {
+	d.networkRemoveCalls++
+	if d.networkRemoveErr != nil {
+		return d.networkRemoveErr
+	}
+	d.network = nil
+	return nil
+}
 func (d *secureDocker) CreateRelay(_ context.Context, spec RelaySpec) error {
 	d.relay = &ObservedRelay{Spec: spec, Fingerprint: relayFingerprint(spec), Managed: true, Hardened: true, Status: "created"}
 	return nil
@@ -1863,6 +1872,7 @@ func TestDestroyRecoversOneReconciledMissingWorkload(t *testing.T) {
 		len(report.Failures) != 1 || report.Failures[0].Code != "workload_missing" {
 		t.Fatalf("reconcile report=%#v err=%v", report, err)
 	}
+	docker.network = nil
 	request := httptest.NewRequest(http.MethodDelete, "/v1/workloads/"+runtimeRef, nil)
 	request.SetPathValue("id", runtimeRef)
 	request.Header.Set("Authorization", "Bearer secret")
@@ -1872,7 +1882,8 @@ func TestDestroyRecoversOneReconciledMissingWorkload(t *testing.T) {
 		t.Fatalf("recovery status=%d body=%s", response.Code, response.Body.String())
 	}
 	record, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
-	if !ok || record.Present || docker.network != nil || docker.relay != nil || len(grants.grants) != 0 {
+	if !ok || record.Present || docker.network != nil || docker.relay != nil || len(grants.grants) != 0 ||
+		docker.networkRemoveCalls == 0 {
 		t.Fatalf("record=%#v network=%#v relay=%#v grants=%#v", record, docker.network, docker.relay, grants.grants)
 	}
 	server.reconcileMu.RLock()

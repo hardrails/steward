@@ -398,8 +398,10 @@ type dockerNetworkInspect struct {
 		Driver  string            `json:"Driver"`
 		Options map[string]string `json:"Options"`
 		Config  []struct {
-			Subnet  string `json:"Subnet"`
-			Gateway string `json:"Gateway"`
+			Subnet             string            `json:"Subnet"`
+			IPRange            string            `json:"IPRange"`
+			Gateway            string            `json:"Gateway"`
+			AuxiliaryAddresses map[string]string `json:"AuxiliaryAddresses"`
 		} `json:"Config"`
 	} `json:"IPAM"`
 }
@@ -432,7 +434,8 @@ func networkEnvelopeMatches(payload dockerNetworkInspect, name string, labels ma
 		payload.Internal && !payload.Attachable && !payload.Ingress && !payload.ConfigOnly && !payload.EnableIPv6 &&
 		exactStringMap(payload.Options, map[string]string{isolatedGatewayOption: isolatedGatewayMode}) &&
 		exactStringMap(payload.Labels, labels) && payload.IPAM.Driver == defaultIPAMDriver &&
-		len(payload.IPAM.Options) == 0 && len(payload.IPAM.Config) == 1
+		len(payload.IPAM.Options) == 0 && len(payload.IPAM.Config) == 1 &&
+		payload.IPAM.Config[0].IPRange == "" && len(payload.IPAM.Config[0].AuxiliaryAddresses) == 0
 }
 
 func reservationAllocation(payload dockerNetworkInspect, spec NetworkSpec) (NetworkSpec, error) {
@@ -505,90 +508,112 @@ func observedNetworkFromPayload(payload dockerNetworkInspect) (ObservedNetwork, 
 }
 
 func (d *DockerHTTP) RemoveNetwork(ctx context.Context, name string) error {
-	finalErr := d.removeManagedNetwork(ctx, name)
-	reservationErr := d.removeNetworkReservation(ctx, name)
-	if finalErr != nil && reservationErr != nil {
-		if errors.Is(finalErr, ErrNotFound) {
-			return reservationErr
-		}
-		return errors.Join(finalErr, reservationErr)
-	}
-	if finalErr != nil {
+	final, finalErr := d.managedNetworkForRemoval(ctx, name)
+	finalMissing := errors.Is(finalErr, ErrNotFound)
+	if finalErr != nil && !finalMissing {
 		return finalErr
 	}
-	return reservationErr
-}
-
-func (d *DockerHTTP) removeManagedNetwork(ctx context.Context, name string) error {
-	payload, err := d.inspectDockerNetwork(ctx, name)
+	reservation, reservationPresent, err := d.networkReservationForRemoval(ctx, name)
 	if err != nil {
 		return err
 	}
-	observed, err := observedNetworkFromPayload(payload)
-	if err != nil {
-		return err
-	}
-	want := NetworkSpecFor(observed.TenantID, observed.InstanceID, observed.Generation)
-	if !networkEqual(observed, want) || observed.Name != name {
-		return errors.New("refusing to remove a drifted or foreign runtime network")
-	}
-	removeErr := d.call(ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(payload.ID), nil, http.StatusNoContent)
-	after, inspectErr := d.inspectDockerNetwork(ctx, name)
-	if errors.Is(inspectErr, ErrNotFound) {
-		return nil
-	}
-	if inspectErr != nil {
-		if removeErr != nil {
-			return errors.Join(removeErr, fmt.Errorf("prove managed runtime network removal: %w", inspectErr))
+	var removeErrors []error
+	if reservationPresent {
+		if err := d.removeVerifiedNetwork(ctx, reservation, "Docker subnet reservation"); err != nil {
+			removeErrors = append(removeErrors, err)
 		}
-		return fmt.Errorf("prove managed runtime network removal: %w", inspectErr)
 	}
-	if after.ID != payload.ID {
-		return errors.New("managed runtime network identity changed during removal")
+	if !finalMissing {
+		if err := d.removeVerifiedNetwork(ctx, final, "managed runtime network"); err != nil {
+			removeErrors = append(removeErrors, err)
+		}
 	}
-	if removeErr != nil {
-		return fmt.Errorf("remove managed runtime network: %w", removeErr)
+	if len(removeErrors) != 0 {
+		return errors.Join(removeErrors...)
 	}
-	return errors.New("managed runtime network remained after removal")
+	if finalMissing {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (d *DockerHTTP) removeNetworkReservation(ctx context.Context, finalName string) error {
+	reservation, present, err := d.networkReservationForRemoval(ctx, finalName)
+	if err != nil || !present {
+		return err
+	}
+	return d.removeVerifiedNetwork(ctx, reservation, "Docker subnet reservation")
+}
+
+func (d *DockerHTTP) managedNetworkForRemoval(ctx context.Context, name string) (dockerNetworkInspect, error) {
+	payload, err := d.inspectDockerNetwork(ctx, name)
+	if err != nil {
+		return dockerNetworkInspect{}, err
+	}
+	observed, err := observedNetworkFromPayload(payload)
+	if err != nil {
+		return dockerNetworkInspect{}, err
+	}
+	want := NetworkSpecFor(observed.TenantID, observed.InstanceID, observed.Generation)
+	if !networkEqual(observed, want) || observed.Name != name {
+		return dockerNetworkInspect{}, errors.New("refusing to remove a drifted or foreign runtime network")
+	}
+	return payload, nil
+}
+
+func (d *DockerHTTP) networkReservationForRemoval(
+	ctx context.Context, finalName string,
+) (dockerNetworkInspect, bool, error) {
 	if !strings.HasPrefix(finalName, "steward-net-") || len(finalName) != len("steward-net-")+sha256.Size*2 {
-		return nil
+		return dockerNetworkInspect{}, false, nil
 	}
 	reservationName := "steward-ipam-" + strings.TrimPrefix(finalName, "steward-net-")
 	reservation, err := d.inspectDockerNetwork(ctx, reservationName)
 	if errors.Is(err, ErrNotFound) {
-		return nil
+		return dockerNetworkInspect{}, false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("inspect Docker subnet reservation during cleanup: %w", err)
+		return dockerNetworkInspect{}, false, fmt.Errorf("inspect Docker subnet reservation during cleanup: %w", err)
 	}
 	generation, err := strconv.ParseUint(reservation.Labels[networkGenerationLabel], 10, 64)
 	if err != nil {
-		return errors.New("Docker subnet reservation has invalid generation label")
+		return dockerNetworkInspect{}, false, errors.New("Docker subnet reservation has invalid generation label")
 	}
 	spec := NetworkSpecFor(
 		reservation.Labels["io.hardrails.tenant"], reservation.Labels["io.hardrails.instance"], generation,
 	)
 	if spec.Name != finalName {
-		return errors.New("Docker subnet reservation does not belong to the requested runtime network")
+		return dockerNetworkInspect{}, false, errors.New("Docker subnet reservation does not belong to the requested runtime network")
 	}
 	if _, err := reservationAllocation(reservation, spec); err != nil {
-		return err
+		return dockerNetworkInspect{}, false, err
 	}
-	if err := d.call(
-		ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(reservation.ID), nil, http.StatusNoContent,
-	); err != nil {
-		if _, inspectErr := d.inspectDockerNetwork(ctx, reservationName); errors.Is(inspectErr, ErrNotFound) {
-			return nil
+	return reservation, true, nil
+}
+
+func (d *DockerHTTP) removeVerifiedNetwork(
+	ctx context.Context, payload dockerNetworkInspect, boundary string,
+) error {
+	removeErr := d.call(
+		ctx, http.MethodDelete, "/v1.41/networks/"+pathEscape(payload.ID), nil, http.StatusNoContent,
+	)
+	after, inspectErr := d.inspectDockerNetwork(ctx, payload.Name)
+	if errors.Is(inspectErr, ErrNotFound) {
+		return nil
+	}
+	if inspectErr != nil {
+		if removeErr != nil {
+			return errors.Join(removeErr, fmt.Errorf("prove %s removal: %w", boundary, inspectErr))
 		}
-		return fmt.Errorf("remove Docker subnet reservation during cleanup: %w", err)
+		return fmt.Errorf("prove %s removal: %w", boundary, inspectErr)
 	}
-	if _, err := d.inspectDockerNetwork(ctx, reservationName); !errors.Is(err, ErrNotFound) {
-		return errors.New("Docker subnet reservation remained after cleanup")
+	if after.ID != payload.ID {
+		return fmt.Errorf("%s identity changed during removal", boundary)
 	}
-	return nil
+	if removeErr != nil {
+		return fmt.Errorf("remove %s: %w", boundary, removeErr)
+	}
+	return fmt.Errorf("%s remained after removal", boundary)
 }
 
 func (d *DockerHTTP) CreateRelay(ctx context.Context, spec RelaySpec) error {

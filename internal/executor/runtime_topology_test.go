@@ -26,6 +26,7 @@ type topologyFixture struct {
 	createNetworkErr  error
 	inspectRelayErr   error
 	createRelayErr    error
+	removeNetworkErr  error
 	removeNetworkNoop bool
 	removeRelayNoop   bool
 	startErrAt        int
@@ -105,6 +106,9 @@ func (f *topologyFixture) CreateNetwork(_ context.Context, spec NetworkSpec) err
 	return nil
 }
 func (f *topologyFixture) RemoveNetwork(context.Context, string) error {
+	if f.removeNetworkErr != nil {
+		return f.removeNetworkErr
+	}
 	if !f.removeNetworkNoop {
 		f.network = nil
 	}
@@ -349,6 +353,27 @@ func TestRuntimeTopologyNoopWithoutGrant(t *testing.T) {
 	}
 }
 
+func TestRuntimeTopologyGrandfathersLegacyNetworkOnlyForCommittedAllocation(t *testing.T) {
+	addresses := testNetworkSpec("tenant-a", "agent-a", 2)
+	legacy := &ObservedNetwork{NetworkSpec: addresses, Managed: true, Internal: true}
+	pending := runtimeTopologyWorkload()
+	pending.Runtime.Subnet, pending.Runtime.Gateway = "", ""
+	pending.Runtime.RelayIP, pending.Runtime.AgentIP = "", ""
+	pendingDocker := &topologyFixture{network: legacy}
+	if err := runtimeTopologyServer(
+		pendingDocker, &gatewayFixture{grants: map[string]gateway.Grant{}},
+	).prepareRuntimeTopology(context.Background(), pending); err == nil {
+		t.Fatal("fresh admission adopted an unmarked legacy network")
+	}
+	committed := runtimeTopologyWorkload()
+	committedDocker := &topologyFixture{network: legacy}
+	if err := runtimeTopologyServer(
+		committedDocker, &gatewayFixture{grants: map[string]gateway.Grant{}},
+	).prepareRuntimeTopology(context.Background(), committed); err != nil {
+		t.Fatalf("committed legacy allocation was not grandfathered: %v", err)
+	}
+}
+
 func TestRuntimeTopologyPreparationAndCompletionFailures(t *testing.T) {
 	workload := runtimeTopologyWorkload()
 	for _, test := range []struct {
@@ -455,6 +480,13 @@ func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 		grants.unregisterErr = errors.New("delete")
 		if server.removeRuntimeTopology(context.Background(), workload) {
 			t.Fatal("grant delete failure accepted")
+		}
+	})
+	t.Run("reservation cleanup failure", func(t *testing.T) {
+		docker, _, server := makeReady()
+		docker.removeNetworkErr = errors.New("reservation cleanup")
+		if server.removeRuntimeTopology(context.Background(), workload) {
+			t.Fatal("reservation cleanup failure accepted")
 		}
 	})
 }
