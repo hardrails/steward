@@ -55,3 +55,18 @@ func TestOpenAPIContainsEveryFixedV1Value(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthoringSchemaIncludesTheExactRuntimePair(t *testing.T) {
+	raw, err := os.ReadFile("../../schemas/agent.cue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`engine: "agent-service"`,
+		`adapter_contract: "steward.agent-service.v1"`,
+	} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("agent authoring schema is missing %q", required)
+		}
+	}
+}

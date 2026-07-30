@@ -4,10 +4,14 @@
 #Agent: {
   schema: "steward.agent.v1"
   name: =~"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
-  runtime: {
+  runtime: ({
     engine: "hermes"
+    adapter_contract: "steward.hermes-agent.v1"
+  } | {
+    engine: "agent-service"
+    adapter_contract: "steward.agent-service.v1"
+  }) & {
     image: string & =~"@sha256:[0-9a-f]{64}$"
-    adapter_contract: string
   }
   tool_profile?: "workspace" | "research" | "developer"
   model: route: string & !=""
