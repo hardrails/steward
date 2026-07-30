@@ -131,6 +131,21 @@ class PDFExtractionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "unsupported_source")
         run.assert_not_called()
 
+    def test_public_url_boundary_rejects_ambiguous_paths_before_dns(self) -> None:
+        for invalid_url in (
+            "https://valid.example/source with-space",
+            "https://valid.example/a\\b",
+        ):
+            with self.subTest(invalid_url=invalid_url):
+                with mock.patch.object(
+                    worker,
+                    "resolve_public_addresses",
+                ) as resolve:
+                    with self.assertRaises(worker.WorkerError) as raised:
+                        worker.public_destination(invalid_url)
+                self.assertEqual(raised.exception.code, "invalid_source_url")
+                resolve.assert_not_called()
+
     def test_extract_batch_remains_fail_fast_without_partial_results(self) -> None:
         failure = worker.WorkerError(502, "unsupported_source", "source failed")
         with mock.patch.object(
@@ -451,13 +466,16 @@ class TotalBatchExtractionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "invalid_source_url")
         start.assert_not_called()
 
-        with mock.patch.object(worker, "start_v2_source_process") as start:
-            with self.assertRaises(worker.WorkerError) as raised:
-                worker.extract_v2(
-                    {"urls": ["https://valid.example/source with-space"]}
-                )
-        self.assertEqual(raised.exception.code, "invalid_source_url")
-        start.assert_not_called()
+        for invalid_url in (
+            "https://valid.example/source with-space",
+            "https://valid.example/a\\b",
+        ):
+            with self.subTest(invalid_url=invalid_url):
+                with mock.patch.object(worker, "start_v2_source_process") as start:
+                    with self.assertRaises(worker.WorkerError) as raised:
+                        worker.extract_v2({"urls": [invalid_url]})
+                self.assertEqual(raised.exception.code, "invalid_source_url")
+                start.assert_not_called()
 
         for code in ("invalid_source_url", "invalid_request", "upstream_unavailable"):
             with self.subTest(code=code):
@@ -481,7 +499,7 @@ class TotalBatchExtractionTests(unittest.TestCase):
         urls = []
         for index in range(10):
             prefix = f"https://source-{index}.example/"
-            urls.append(prefix + ("\\" * (2048 - len(prefix.encode("utf-8")))))
+            urls.append(prefix + ("a" * (2048 - len(prefix.encode("utf-8")))))
         raw_content = "\\" * (worker.MAX_V2_SOURCE_TEXT + 4096)
         with mock.patch.object(
             worker,

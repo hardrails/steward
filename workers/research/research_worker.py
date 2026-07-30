@@ -351,12 +351,29 @@ def extract_pdf_text(raw: bytes, *, wall_seconds: float = PDF_WALL_SECONDS) -> t
 
 
 def public_url_shape(value: object) -> tuple[str, urllib.parse.SplitResult, str, int]:
-    if not isinstance(value, str) or len(value.encode()) > 2048:
+    if not isinstance(value, str):
         raise WorkerError(400, "invalid_source_url", "source URL is invalid")
-    parsed = urllib.parse.urlsplit(value)
+    try:
+        encoded = value.encode()
+    except UnicodeError as error:
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid") from error
+    if (
+        len(encoded) > 2048
+        or "\\" in value
+        or any(
+            ord(character) <= 0x20 or ord(character) == 0x7F
+            for character in value
+        )
+    ):
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+    except (UnicodeError, ValueError) as error:
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid") from error
     if (
         parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
+        or not hostname
         or parsed.username
         or parsed.password
         or parsed.fragment
@@ -366,7 +383,7 @@ def public_url_shape(value: object) -> tuple[str, urllib.parse.SplitResult, str,
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError as error:
         raise WorkerError(400, "invalid_source_url", "source URL contains an invalid port") from error
-    host = parsed.hostname.rstrip(".").lower()
+    host = hostname.rstrip(".").lower()
     return value, parsed, host, port
 
 
@@ -651,11 +668,6 @@ def extract(payload: dict[str, object]) -> dict[str, object]:
 
 
 def validate_extract_v2_url(value: object) -> str:
-    if isinstance(value, str) and any(
-        ord(character) <= 0x20 or ord(character) == 0x7F
-        for character in value
-    ):
-        raise WorkerError(400, "invalid_source_url", "source URL is invalid")
     try:
         url, _parsed, _host, _port = public_url_shape(value)
     except (UnicodeError, ValueError) as error:
