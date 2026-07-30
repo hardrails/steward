@@ -33,6 +33,8 @@ MAX_REDIRECTS = 5
 V2_MAX_CONCURRENCY = 4
 V2_SOURCE_SECONDS = 15
 V2_BATCH_SECONDS = 50
+V2_CLEANUP_RESERVE_SECONDS = 1
+V2_MAX_PENDING_REAPS = 32
 MAX_PDF_PAGES = 200
 MAX_PDF_RECOVERY_OBJECTS = 1000
 MAX_PDF_CHILD_RESPONSE = (MAX_SOURCE_TEXT * 2) + (8 << 10)
@@ -58,6 +60,7 @@ V2_SOURCE_MEDIA_TYPES = frozenset({
     "text/plain",
     "application/pdf",
 })
+V2_PENDING_REAPS: list[subprocess.Popen[bytes]] = []
 
 
 class WorkerError(Exception):
@@ -783,10 +786,19 @@ def stop_v2_source_process(
             pass
     if source.process.poll() is None:
         try:
-            source.process.wait(timeout=1)
+            source.process.wait(timeout=0.05)
         except subprocess.TimeoutExpired:
-            source.process.kill()
-            source.process.wait()
+            if source.process not in V2_PENDING_REAPS:
+                V2_PENDING_REAPS.append(source.process)
+
+
+def reap_v2_source_processes() -> None:
+    V2_PENDING_REAPS[:] = [
+        process for process in V2_PENDING_REAPS
+        if process.poll() is None
+    ]
+    if len(V2_PENDING_REAPS) >= V2_MAX_PENDING_REAPS:
+        raise RuntimeError("v2 source process reaping capacity is exhausted")
 
 
 def decode_v2_source_result(source: V2SourceProcess) -> dict[str, object]:
@@ -846,7 +858,12 @@ def run_v2_source_processes(
 ) -> list[dict[str, object]]:
     if process_factory is None:
         process_factory = start_v2_source_process
-    batch_deadline = time.monotonic() + V2_BATCH_SECONDS
+    reap_v2_source_processes()
+    cleanup_reserve = min(
+        float(V2_CLEANUP_RESERVE_SECONDS),
+        V2_BATCH_SECONDS / 4,
+    )
+    batch_deadline = time.monotonic() + V2_BATCH_SECONDS - cleanup_reserve
     outcomes: list[dict[str, object] | None] = [None] * len(urls)
     running: list[V2SourceProcess] = []
     next_index = 0
@@ -910,6 +927,7 @@ def run_v2_source_processes(
         for source in running:
             stop_v2_source_process(selector, source, kill=True)
         selector.close()
+        reap_v2_source_processes()
     if any(outcome is None for outcome in outcomes):
         raise RuntimeError("v2 extraction did not produce every outcome")
     return [outcome for outcome in outcomes if outcome is not None]

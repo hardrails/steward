@@ -564,6 +564,40 @@ class TotalBatchExtractionTests(unittest.TestCase):
                 worker.remaining_source_seconds(99)
         self.assertEqual(raised.exception.code, "source_unavailable")
 
+    def test_v2_never_waits_indefinitely_for_a_killed_child(self) -> None:
+        class StuckProcess:
+            pid = 12345
+            stdout = None
+
+            def poll(self) -> None:
+                return None
+
+            def wait(self, *, timeout: float) -> None:
+                self.timeout = timeout
+                raise subprocess.TimeoutExpired(cmd="source", timeout=timeout)
+
+        process = StuckProcess()
+        source = worker.V2SourceProcess(
+            index=0,
+            requested_url="https://source.example/report",
+            process=process,
+            deadline=time.monotonic(),
+            output=bytearray(),
+            stdout_fd=None,
+        )
+        selector = worker.selectors.DefaultSelector()
+        try:
+            with (
+                mock.patch.object(worker, "V2_PENDING_REAPS", []) as pending,
+                mock.patch.object(worker.os, "killpg") as kill_group,
+            ):
+                worker.stop_v2_source_process(selector, source, kill=True)
+                self.assertEqual(process.timeout, 0.05)
+                self.assertEqual(pending, [process])
+                kill_group.assert_called_once_with(process.pid, worker.signal.SIGKILL)
+        finally:
+            selector.close()
+
 
 if __name__ == "__main__":
     unittest.main()

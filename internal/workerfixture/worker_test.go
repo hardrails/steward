@@ -531,6 +531,7 @@ print(json.dumps(result,sort_keys=True))
 	source := string(readFile(t, path, 1<<20))
 	for _, required := range []string{
 		`MAX_V2_SOURCE_TEXT = 32 << 10`, `V2_SOURCE_SECONDS = 15`, `V2_BATCH_SECONDS = 50`,
+		`V2_CLEANUP_RESERVE_SECONDS = 1`,
 		`V2_MAX_CONCURRENCY = 4`, `V2_SOURCE_CHILD_MODE = "--extract-source-v2"`,
 		`start_new_session=True`, `os.killpg`, `"/v2/extract"`, `"source_media_type"`,
 	} {
