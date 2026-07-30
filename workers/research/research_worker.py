@@ -651,7 +651,10 @@ def extract(payload: dict[str, object]) -> dict[str, object]:
 
 
 def validate_extract_v2_url(value: object) -> str:
-    if isinstance(value, str) and any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+    if isinstance(value, str) and any(
+        ord(character) <= 0x20 or ord(character) == 0x7F
+        for character in value
+    ):
         raise WorkerError(400, "invalid_source_url", "source URL is invalid")
     try:
         url, _parsed, _host, _port = public_url_shape(value)

@@ -451,6 +451,14 @@ class TotalBatchExtractionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "invalid_source_url")
         start.assert_not_called()
 
+        with mock.patch.object(worker, "start_v2_source_process") as start:
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.extract_v2(
+                    {"urls": ["https://valid.example/source with-space"]}
+                )
+        self.assertEqual(raised.exception.code, "invalid_source_url")
+        start.assert_not_called()
+
         for code in ("invalid_source_url", "invalid_request", "upstream_unavailable"):
             with self.subTest(code=code):
                 failure = worker.WorkerError(502, code, "whole-call failure")
