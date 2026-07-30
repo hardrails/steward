@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/gateway"
 )
 
@@ -284,8 +285,15 @@ func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 
 func TestGatewayAgentServicePresetsAreFinite(t *testing.T) {
 	hermes, ok := gatewayAgentServicePreset("hermes")
-	if !ok || hermes.ServiceID != "hermes-api" || hermes.OperationID != "hermes.run" {
+	if !ok || hermes.ServiceID != "hermes-api" || hermes.OperationID != "hermes.run" ||
+		hermes.InvocationPath != "/v1/runs" || hermes.StatusPathPrefix != "/v1/runs/" {
 		t.Fatalf("Hermes preset=%#v ok=%t", hermes, ok)
+	}
+	portable, ok := gatewayAgentServicePreset(agentservice.RuntimeEngine)
+	if !ok || portable.ServiceID != agentservice.ServiceID || portable.OperationID != agentservice.OperationID ||
+		portable.InvocationPath != agentservice.InvocationPath ||
+		portable.StatusPathPrefix != agentservice.StatusPathPrefix {
+		t.Fatalf("portable agent service preset=%#v ok=%t", portable, ok)
 	}
 	if contract, ok := gatewayAgentServicePreset("openclaw"); ok || contract != (agentServicePreset{}) {
 		t.Fatalf("retired OpenClaw preset=%#v ok=%t", contract, ok)
@@ -503,6 +511,28 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	if trustedLifecycle.TaskProtocol != gateway.TaskProtocolLifecycleV1 || trustedLifecycle.StatusPathPrefix != "/v1/runs/" ||
 		trustedLifecycle.PolicyDigest != gateway.ServiceOperationDigest(lifecycle) {
 		t.Fatalf("trusted lifecycle=%#v", trustedLifecycle)
+	}
+
+	output.Reset()
+	if err := run([]string{
+		"gateway", "service", "set", "-config", path, "-agent", agentservice.RuntimeEngine,
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var portable gateway.ServiceOperation
+	for _, candidate := range loaded.ServiceOperations {
+		if candidate.ID == agentservice.OperationID {
+			portable = candidate
+		}
+	}
+	if portable.ServiceID != agentservice.ServiceID || portable.Path != agentservice.InvocationPath ||
+		portable.StatusPathPrefix != agentservice.StatusPathPrefix ||
+		portable.TaskProtocol != gateway.TaskProtocolLifecycleV1 {
+		t.Fatalf("portable agent service operation=%#v output=%q", portable, output.String())
 	}
 
 	if err := run([]string{

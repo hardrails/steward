@@ -9,8 +9,31 @@ import (
 	"testing"
 
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/gateway"
 )
+
+func TestAgentServiceContractReturnsExactPortableBoundary(t *testing.T) {
+	var output bytes.Buffer
+	if err := agentServiceCommand([]string{"contract"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var descriptor agentservice.Descriptor
+	if err := json.Unmarshal(output.Bytes(), &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.SchemaVersion != agentservice.DescriptorSchemaV1 ||
+		descriptor.Runtime.Engine != agentservice.RuntimeEngine ||
+		descriptor.Runtime.AdapterContract != agentservice.AdapterContractV1 ||
+		descriptor.Service.ID != agentservice.ServiceID ||
+		descriptor.Service.InvocationPath != agentservice.InvocationPath ||
+		descriptor.Limits.MaxResponseBytes != agentservice.MaxResponseBytes {
+		t.Fatalf("agent service descriptor = %+v", descriptor)
+	}
+	if err := agentServiceCommand([]string{"contract", "extra"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("agent service contract accepted an argument")
+	}
+}
 
 func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "steward-agent-service-")
