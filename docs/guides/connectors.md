@@ -31,6 +31,7 @@ Steward also includes fixed presets for its optional research and coding workers
 | --- | --- | --- |
 | `research-search` | `steward-research-search` | `POST /v1/search` |
 | `research-extract` | `steward-research-extract` | `POST /v1/extract` |
+| `research-extract-v2` | `steward-research-extract-v2` | `POST /v2/extract` |
 | `browser-search` | `steward-browser-search` | `POST /v1/search` |
 | `browser-read` | `steward-browser-read` | `POST /v1/read` |
 | `codex-worker` | `steward-codex` | `POST /v1/run` |
@@ -42,6 +43,10 @@ name the separately deployed worker origin and credential file. Follow the
 [browser research]({{ '/guides/browser-research/' | relative_url }}), or
 [coding worker]({{ '/guides/coding-workers/' | relative_url }}) guide for the
 complete boundary.
+
+`research-extract` preserves the worker's fail-fast v1 contract.
+`research-extract-v2` is a separate identity for new orchestrators that need one
+ordered, bounded outcome per URL without discarding successful sibling sources.
 
 For a connector that requires independent approval of each effect, enable a fifth
 layer: a tenant-scoped action authority signs a short-lived **action permit** for

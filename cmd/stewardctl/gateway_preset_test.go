@@ -21,6 +21,7 @@ func TestAgentServiceConnectorPresetsOwnFiniteContracts(t *testing.T) {
 	}{
 		{"research-search", "steward-research-search", "search=POST:/v1/search", 8, 64 << 10, 1 << 20, 30, 64},
 		{"research-extract", "steward-research-extract", "extract=POST:/v1/extract", 4, 64 << 10, 4 << 20, 60, 64},
+		{"research-extract-v2", "steward-research-extract-v2", "extract=POST:/v2/extract", 2, 64 << 10, 1 << 20, 60, 64},
 		{"browser-search", "steward-browser-search", "search=POST:/v1/search", 4, 64 << 10, 1 << 20, 45, 64},
 		{"browser-read", "steward-browser-read", "read=POST:/v1/read", 2, 64 << 10, 1 << 20, 180, 32},
 		{"codex-worker", "steward-codex", "run=POST:/v1/run", 1, 64 << 10, 1 << 20, 1050, 16},

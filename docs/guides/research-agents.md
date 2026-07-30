@@ -78,10 +78,11 @@ sudo docker run -d --name steward-research-worker --restart unless-stopped \
 ```
 
 The lightweight worker is not a crawler, browser, or search engine. It extracts
-bounded text from HTML, XHTML, and plain-text responses; it does not execute
-JavaScript. The SearXNG upstream may be omitted when only extraction is needed. See the
+bounded text from HTML, XHTML, plain-text, and PDF responses; it does not execute
+JavaScript or perform OCR. The SearXNG upstream may be omitted when only
+extraction is needed. See the
 [worker reference](https://github.com/hardrails/steward/tree/main/workers/research)
-for its complete environment contract.
+for its complete environment and versioned protocol contract.
 
 ## 2. Run the browser worker
 
@@ -154,6 +155,16 @@ sudo stewardctl gateway connector set \
 
 sudo systemctl restart steward-gateway
 ```
+
+The bundled Hermes research profile continues to use the fail-fast v1 connector
+shown above. A new orchestrator that needs one ordered outcome per requested URL
+can configure `-preset research-extract-v2` at the same worker origin instead.
+That preset owns connector ID `steward-research-extract-v2`, fixes
+`POST /v2/extract`, caps the normalized response at 1 MiB, and reserves ten
+seconds between the worker's 50-second batch deadline and Gateway's 60-second
+call deadline. Do not silently substitute it for the v1 connector in an existing
+signed profile; declare the new connector identity in that application's
+manifest, intent, and site policy.
 
 Gateway validates the whole candidate configuration before replacing it. The
 tenant budget reserves durable connector-receipt capacity; it is not an API spend

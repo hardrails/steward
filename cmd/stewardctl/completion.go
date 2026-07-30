@@ -427,6 +427,7 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 				"browser-read",
 				"browser-search",
 				"research-extract",
+				"research-extract-v2",
 				"research-search",
 			}, current)
 		}

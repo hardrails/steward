@@ -424,3 +424,122 @@ print(json.dumps({"dns":dns,"redirect":redirect,"seen":seen},sort_keys=True))
 		t.Fatalf("research destination enforcement=%s", raw)
 	}
 }
+
+func TestResearchWorkerV2ReturnsStrictOrderedTotalOutcomes(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	path := filepath.Join(repositoryRoot(t), "workers", "research", "research_worker.py")
+	harness := `import base64,importlib.util,json,os,subprocess,sys,time
+spec=importlib.util.spec_from_file_location("worker",sys.argv[1])
+worker=importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+urls=["https://slow.example/report","https://rejected.example/report","https://fast.example/report"]
+def start(index,url,batch,raw=None,delay=0,hang=False):
+  if hang:
+    arguments=[sys.executable,"-I","-c","import time; time.sleep(60)"]
+  else:
+    encoded=base64.b64encode(raw).decode("ascii")
+    script="import base64,sys,time;time.sleep(float(sys.argv[1]));sys.stdout.buffer.write(base64.b64decode(sys.argv[2]))"
+    arguments=[sys.executable,"-I","-c",script,str(delay),encoded]
+  process=subprocess.Popen(arguments,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True,start_new_session=True)
+  descriptor=process.stdout.fileno(); os.set_blocking(descriptor,False)
+  return worker.V2SourceProcess(index=index,requested_url=url,process=process,deadline=min(batch,time.monotonic()+worker.V2_SOURCE_SECONDS),output=bytearray(),stdout_fd=descriptor)
+def outcome(url,disposition):
+  if disposition=="failed":
+    return {"requested_url":url,"disposition":"failed","failure_code":"source_rejected"}
+  return {"requested_url":url,"disposition":"extracted","resolved_url":url+"/final","source_media_type":"application/pdf","title":"Report","content":"bounded","content_type":"text/plain","content_truncated":False}
+values={urls[0]:outcome(urls[0],"extracted"),urls[1]:outcome(urls[1],"failed"),urls[2]:outcome(urls[2],"extracted")}
+def factory(index,url,batch):
+  raw=json.dumps(values[url],ensure_ascii=False,separators=(",",":"),sort_keys=True).encode()
+  return start(index,url,batch,raw,0.08 if url==urls[0] else 0.01)
+outcomes=worker.run_v2_source_processes(urls,factory)
+success_keys={"requested_url","disposition","resolved_url","source_media_type","title","content","content_type","content_truncated"}
+failure_keys={"requested_url","disposition","failure_code"}
+exact=set(outcomes[0])==success_keys and set(outcomes[1])==failure_keys and "message" not in outcomes[1]
+def malformed(index,url,batch):
+  return start(index,url,batch,b'{"unexpected":true}')
+protocol="accepted"
+try: worker.run_v2_source_processes([urls[0]],malformed)
+except RuntimeError: protocol="rejected"
+original_source,original_batch=worker.V2_SOURCE_SECONDS,worker.V2_BATCH_SECONDS
+worker.V2_SOURCE_SECONDS,worker.V2_BATCH_SECONDS=0.05,0.12
+hung=[f"https://hung-{index}.example/report" for index in range(10)]
+started=time.monotonic()
+deadline=worker.run_v2_source_processes(hung,lambda index,url,batch:start(index,url,batch,hang=True))
+elapsed=time.monotonic()-started
+worker.V2_SOURCE_SECONDS,worker.V2_BATCH_SECONDS=original_source,original_batch
+private=worker.extract_v2({"urls":["http://127.0.0.1/private"]})["outcomes"][0]
+result={"schema":"steward.research-extract-result.v2","outcomes":outcomes,"exact":exact,"protocol":protocol,"deadline_codes":[item["failure_code"] for item in deadline],"elapsed":elapsed,"private":private,"serialized":len(json.dumps({"schema_version":"steward.research-extract-result.v2","outcomes":outcomes},ensure_ascii=False,separators=(",",":"),sort_keys=True).encode())}
+print(json.dumps(result,sort_keys=True))
+`
+	command := exec.Command(python, "-I", "-B", "-c", harness, path)
+	command.Env = isolatedPythonEnvironment(t)
+	raw, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Schema   string `json:"schema"`
+		Outcomes []struct {
+			RequestedURL     string `json:"requested_url"`
+			Disposition      string `json:"disposition"`
+			ResolvedURL      string `json:"resolved_url"`
+			SourceMediaType  string `json:"source_media_type"`
+			ContentType      string `json:"content_type"`
+			ContentTruncated bool   `json:"content_truncated"`
+			FailureCode      string `json:"failure_code"`
+		} `json:"outcomes"`
+		Exact         bool     `json:"exact"`
+		Protocol      string   `json:"protocol"`
+		DeadlineCodes []string `json:"deadline_codes"`
+		Elapsed       float64  `json:"elapsed"`
+		Private       struct {
+			RequestedURL string `json:"requested_url"`
+			Disposition  string `json:"disposition"`
+			FailureCode  string `json:"failure_code"`
+		} `json:"private"`
+		Serialized int `json:"serialized"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Schema != "steward.research-extract-result.v2" || len(value.Outcomes) != 3 ||
+		value.Outcomes[0].RequestedURL != "https://slow.example/report" ||
+		value.Outcomes[1].RequestedURL != "https://rejected.example/report" ||
+		value.Outcomes[2].RequestedURL != "https://fast.example/report" ||
+		value.Outcomes[0].Disposition != "extracted" || value.Outcomes[1].Disposition != "failed" ||
+		value.Outcomes[0].ResolvedURL != "https://slow.example/report/final" ||
+		value.Outcomes[0].SourceMediaType != "application/pdf" ||
+		value.Outcomes[0].ContentType != "text/plain" || value.Outcomes[0].ContentTruncated ||
+		value.Outcomes[1].FailureCode != "source_rejected" || !value.Exact ||
+		value.Protocol != "rejected" || value.Serialized > 1<<20 {
+		t.Fatalf("v2 extraction contract=%s", raw)
+	}
+	if len(value.DeadlineCodes) != 10 || value.Elapsed >= 1 {
+		t.Fatalf("v2 deadline contract=%s", raw)
+	}
+	for _, code := range value.DeadlineCodes {
+		if code != "source_unavailable" {
+			t.Fatalf("v2 deadline returned %q: %s", code, raw)
+		}
+	}
+	if value.Private.RequestedURL != "http://127.0.0.1/private" ||
+		value.Private.Disposition != "failed" || value.Private.FailureCode != "private_source_denied" {
+		t.Fatalf("v2 private destination contract=%s", raw)
+	}
+	source := string(readFile(t, path, 1<<20))
+	for _, required := range []string{
+		`MAX_V2_SOURCE_TEXT = 32 << 10`, `V2_SOURCE_SECONDS = 15`, `V2_BATCH_SECONDS = 50`,
+		`V2_CLEANUP_RESERVE_SECONDS = 1`,
+		`V2_MAX_CONCURRENCY = 4`, `V2_SOURCE_CHILD_MODE = "--extract-source-v2"`,
+		`start_new_session=True`, `os.killpg`, `"/v2/extract"`, `"source_media_type"`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("v2 research worker is missing contract %q", required)
+		}
+	}
+	if strings.Contains(source, "ThreadPoolExecutor") {
+		t.Fatal("v2 research worker can wait indefinitely on a thread-pool future")
+	}
+}
