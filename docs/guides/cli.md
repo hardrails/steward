@@ -289,9 +289,10 @@ stewardctl control operations status -no-context \
 ## Enable shell completion
 
 Completion covers commands, nested subcommands, common flags, saved context names,
-and the built-in `hermes` Gateway service preset. It runs the local
-`stewardctl` binary and makes no network request. For example, after
-`stewardctl gateway service set -agent ` it offers only the closed Hermes preset.
+and the built-in Gateway service presets. It runs the local `stewardctl` binary
+and makes no network request. At the
+`stewardctl gateway service set -agent ` value, it offers the closed Hermes
+preset and the neutral `agent-service` transport preset.
 
 Install and activate completion for the current shell:
 

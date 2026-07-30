@@ -656,11 +656,14 @@ sudo stewardctl gateway service trust \
   > hermes-service-trust.json
 ```
 
-The `-agent hermes` preset selects only
-the compiled-in service ID, operation, `POST /v1/runs` path, lifecycle status
-prefix, and hardened limits. They cannot be combined with `-service-id`,
-`-operation`, or `-lifecycle`. Use the explicit flags below for another finite
-service or when an operator has deliberately chosen different limits.
+The `-agent hermes` preset selects the compiled-in Hermes service ID, operation,
+`POST /v1/runs` path, lifecycle status prefix, and hardened limits. The
+`-agent agent-service` preset selects the neutral `agent-api`, `agent.invoke`,
+`POST /v1/invocations`, and `/v1/invocations/` status prefix. Inspect its full
+fixed deployment and HTTP boundary with `stewardctl agent service contract`.
+Presets cannot be combined with `-service-id`, `-operation`, or `-lifecycle`.
+Use the explicit flags below for another finite service or when an operator has
+deliberately chosen different limits.
 
 `set` replaces every operation for the named service and preserves other service,
 connector, route, and action-authority configuration. Repeat `-operation` and add
