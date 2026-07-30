@@ -469,20 +469,23 @@ class TotalBatchExtractionTests(unittest.TestCase):
                 worker.extract_v2({"urls": [requested_url]})
 
     def test_v2_bounds_normalized_text_and_the_total_response(self) -> None:
-        urls = [f"https://source-{index}.example/report" for index in range(10)]
-        raw_content = ("\x00\\\"\n" * (worker.MAX_V2_SOURCE_TEXT // 4 + 2048))
+        self.assertEqual(worker.normalized_v2_text("\x00safe")[0], " safe")
+        urls = []
+        for index in range(10):
+            prefix = f"https://source-{index}.example/"
+            urls.append(prefix + ("\\" * (2048 - len(prefix.encode("utf-8")))))
+        raw_content = "\\" * (worker.MAX_V2_SOURCE_TEXT + 4096)
         with mock.patch.object(
             worker,
             "fetch_public_page",
             side_effect=lambda url, *, deadline, include_source_media: (
                 url,
-                "Report",
+                "\x00" * 2048,
                 raw_content,
                 "text/plain",
             ),
         ):
             sample = worker.extract_v2_outcome(urls[0], time.monotonic() + 1)
-        self.assertNotIn("\x00", sample["content"])
         replies = {
             url: {
                 **sample,

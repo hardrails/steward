@@ -284,12 +284,23 @@ separate.
 
 ## Research and coding workers add trust boundaries
 
-The optional lightweight research worker normalizes SearXNG results and extracts bounded text
-from public HTML, XHTML, and plain-text pages. It rejects non-public DNS answers,
-pins the selected address for each connection, and rechecks every redirect. It
-does not execute JavaScript or provide browser-grade rendering. Retrieved text
-remains untrusted and can contain prompt injection. Source URLs and multiple
-documents improve review; they do not prove an agent's conclusion.
+The optional lightweight research worker normalizes SearXNG results and extracts
+bounded text from public HTML, XHTML, plain-text, and PDF sources. It rejects
+non-public DNS answers, pins the selected address for each connection, and
+rechecks every redirect. Its v2 total-batch route preserves input order and
+turns only a closed set of source-local failures into message-free outcomes;
+request, authentication, service, protocol, and overall response-size failures
+still reject the whole call. It does not execute JavaScript, perform OCR, or
+provide browser-grade rendering. Retrieved text remains untrusted and can
+contain prompt injection. Source URLs and multiple documents improve review;
+they do not prove an agent's conclusion.
+
+V2 uses bounded source subprocesses so a blocking resolver or parser can be
+killed without wedging the worker request. Those subprocesses retain the parent
+UID and container filesystem. Stripping their environment and inherited file
+descriptors does not prevent them from opening a guessable token file readable
+by that UID, so they are not a credential-isolation boundary. The separately
+sandboxed worker container remains the credential and network boundary.
 
 The separate browser research worker executes JavaScript for short-lived opaque
 source references in fresh credential-free Chromium processes. It blocks
