@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import io
 import json
 import pathlib
 import subprocess
+import threading
+import time
 import unittest
 import urllib.parse
 from unittest import mock
@@ -190,6 +193,373 @@ class PDFExtractionTests(unittest.TestCase):
         self.assertTrue(connection.closed)
         self.assertEqual((url, title), ("https://source.example/report.pdf", ""))
         self.assertIn("Authoritative source", content)
+
+
+class TotalBatchExtractionTests(unittest.TestCase):
+    def fixture_process_factory(
+        self,
+        replies: dict[str, object],
+        *,
+        delays: dict[str, float] | None = None,
+        hanging: set[str] | None = None,
+        launched: list[subprocess.Popen[bytes]] | None = None,
+    ) -> object:
+        delays = delays or {}
+        hanging = hanging or set()
+
+        def factory(index: int, requested_url: str, batch_deadline: float) -> worker.V2SourceProcess:
+            if requested_url in hanging:
+                script = "import time; time.sleep(60)"
+                arguments = [worker.sys.executable, "-I", "-c", script]
+            else:
+                value = replies[requested_url]
+                raw = value if isinstance(value, bytes) else json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
+                encoded = base64.b64encode(raw).decode("ascii")
+                script = (
+                    "import base64,sys,time;"
+                    "time.sleep(float(sys.argv[1]));"
+                    "sys.stdout.buffer.write(base64.b64decode(sys.argv[2]))"
+                )
+                arguments = [
+                    worker.sys.executable,
+                    "-I",
+                    "-c",
+                    script,
+                    str(delays.get(requested_url, 0)),
+                    encoded,
+                ]
+            process = subprocess.Popen(
+                arguments,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+            if process.stdout is None:
+                self.fail("fixture process has no stdout")
+            stdout_fd = process.stdout.fileno()
+            worker.os.set_blocking(stdout_fd, False)
+            if launched is not None:
+                launched.append(process)
+            return worker.V2SourceProcess(
+                index=index,
+                requested_url=requested_url,
+                process=process,
+                deadline=min(
+                    batch_deadline,
+                    time.monotonic() + worker.V2_SOURCE_SECONDS,
+                ),
+                output=bytearray(),
+                stdout_fd=stdout_fd,
+            )
+
+        return factory
+
+    @staticmethod
+    def extracted_outcome(
+        requested_url: str,
+        *,
+        resolved_url: str | None = None,
+        title: str = "",
+        content: str = "bounded",
+        truncated: bool = False,
+        source_media_type: str = "text/html",
+    ) -> dict[str, object]:
+        return {
+            "requested_url": requested_url,
+            "disposition": "extracted",
+            "resolved_url": resolved_url or requested_url,
+            "source_media_type": source_media_type,
+            "title": title,
+            "content": content,
+            "content_type": "text/plain",
+            "content_truncated": truncated,
+        }
+
+    def test_v2_returns_one_ordered_outcome_per_url(self) -> None:
+        urls = [
+            "https://slow.example/source",
+            "https://rejected.example/source",
+            "https://fast.example/source",
+        ]
+
+        replies = {
+            urls[0]: self.extracted_outcome(
+                urls[0],
+                resolved_url="https://resolved.example/slow",
+                title="Slow",
+                content="first",
+            ),
+            urls[1]: {
+                "requested_url": urls[1],
+                "disposition": "failed",
+                "failure_code": "source_rejected",
+            },
+            urls[2]: self.extracted_outcome(urls[2], title="Fast", content="third"),
+        }
+        factory = self.fixture_process_factory(
+            replies,
+            delays={urls[0]: 0.08, urls[2]: 0.01},
+        )
+        with mock.patch.object(worker, "start_v2_source_process", side_effect=factory):
+            result = worker.extract_v2({"urls": urls})
+
+        self.assertEqual(result["schema_version"], "steward.research-extract-result.v2")
+        self.assertEqual(
+            [outcome["requested_url"] for outcome in result["outcomes"]],
+            urls,
+        )
+        self.assertEqual(
+            [outcome["disposition"] for outcome in result["outcomes"]],
+            ["extracted", "failed", "extracted"],
+        )
+        self.assertEqual(
+            result["outcomes"][0],
+            {
+                "requested_url": urls[0],
+                "disposition": "extracted",
+                "resolved_url": "https://resolved.example/slow",
+                "source_media_type": "text/html",
+                "title": "Slow",
+                "content": "first",
+                "content_type": "text/plain",
+                "content_truncated": False,
+            },
+        )
+        self.assertEqual(
+            result["outcomes"][1],
+            {
+                "requested_url": urls[1],
+                "disposition": "failed",
+                "failure_code": "source_rejected",
+            },
+        )
+        self.assertNotIn("diagnostic", json.dumps(result))
+
+    def test_v2_real_child_keeps_private_destination_failure_local(self) -> None:
+        requested_url = "http://127.0.0.1/private"
+        result = worker.extract_v2({"urls": [requested_url]})
+        self.assertEqual(
+            result,
+            {
+                "schema_version": "steward.research-extract-result.v2",
+                "outcomes": [
+                    {
+                        "requested_url": requested_url,
+                        "disposition": "failed",
+                        "failure_code": "private_source_denied",
+                    }
+                ],
+            },
+        )
+
+    def test_v2_source_failures_are_values_under_http_200(self) -> None:
+        urls = ["https://one.example/source", "https://two.example/source"]
+        server = worker.http.server.HTTPServer(("127.0.0.1", 0), worker.Handler)
+        server.worker_token = b"fixture-worker-token"
+        server.search_upstream = None
+        serving = threading.Thread(target=server.handle_request)
+        body = json.dumps({"urls": urls}, separators=(",", ":")).encode()
+        replies = {
+            urls[0]: self.extracted_outcome(urls[0], title="One", content="first"),
+            urls[1]: {
+                "requested_url": urls[1],
+                "disposition": "failed",
+                "failure_code": "source_rejected",
+            },
+        }
+        factory = self.fixture_process_factory(replies)
+
+        try:
+            with mock.patch.object(worker, "start_v2_source_process", side_effect=factory):
+                serving.start()
+                connection = worker.http.client.HTTPConnection(
+                    "127.0.0.1",
+                    server.server_port,
+                    timeout=2,
+                )
+                try:
+                    connection.request(
+                        "POST",
+                        "/v2/extract",
+                        body=body,
+                        headers={
+                            "Authorization": "Bearer fixture-worker-token",
+                            "Content-Type": "application/json",
+                            "Content-Length": str(len(body)),
+                        },
+                    )
+                    response = connection.getresponse()
+                    response_body = response.read()
+                finally:
+                    connection.close()
+        finally:
+            server.server_close()
+            serving.join(2)
+
+        self.assertFalse(serving.is_alive())
+        self.assertEqual(response.status, 200)
+        result = json.loads(response_body)
+        self.assertEqual(
+            [outcome["disposition"] for outcome in result["outcomes"]],
+            ["extracted", "failed"],
+        )
+        self.assertEqual(result["outcomes"][1]["failure_code"], "source_rejected")
+        self.assertNotIn(b"private upstream detail", response_body)
+
+    def test_v2_failure_codes_are_closed_and_message_free(self) -> None:
+        expected = {
+            "source_unresolvable",
+            "private_source_denied",
+            "source_unavailable",
+            "invalid_source_redirect",
+            "source_rejected",
+            "unsupported_source",
+            "source_too_large",
+            "pdf_extraction_timeout",
+        }
+        self.assertEqual(worker.V2_SOURCE_FAILURE_CODES, expected)
+        for code in sorted(expected):
+            with self.subTest(code=code):
+                failure = worker.WorkerError(502, code, f"sensitive {code} details")
+                with mock.patch.object(worker, "fetch_public_page", side_effect=failure):
+                    outcome = worker.extract_v2_outcome(
+                        "https://source.example/report",
+                        time.monotonic() + worker.V2_BATCH_SECONDS,
+                    )
+                self.assertEqual(
+                    outcome,
+                    {
+                        "requested_url": "https://source.example/report",
+                        "disposition": "failed",
+                        "failure_code": code,
+                    },
+                )
+
+    def test_v2_request_and_protocol_failures_reject_the_whole_call(self) -> None:
+        with mock.patch.object(worker, "start_v2_source_process") as start:
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.extract_v2(
+                    {"urls": ["https://valid.example/source", "file:///etc/passwd"]}
+                )
+        self.assertEqual(raised.exception.code, "invalid_source_url")
+        start.assert_not_called()
+
+        for code in ("invalid_source_url", "invalid_request", "upstream_unavailable"):
+            with self.subTest(code=code):
+                failure = worker.WorkerError(502, code, "whole-call failure")
+                with mock.patch.object(worker, "fetch_public_page", side_effect=failure):
+                    with self.assertRaises(worker.WorkerError) as raised:
+                        worker.extract_v2_outcome(
+                            "https://source.example/report",
+                            time.monotonic() + worker.V2_BATCH_SECONDS,
+                        )
+                self.assertIs(raised.exception, failure)
+
+        requested_url = "https://source.example/report"
+        factory = self.fixture_process_factory({requested_url: b'{"unexpected":true}'})
+        with mock.patch.object(worker, "start_v2_source_process", side_effect=factory):
+            with self.assertRaisesRegex(RuntimeError, "invalid outcome"):
+                worker.extract_v2({"urls": [requested_url]})
+
+    def test_v2_bounds_normalized_text_and_the_total_response(self) -> None:
+        urls = [f"https://source-{index}.example/report" for index in range(10)]
+        raw_content = ("\x00\\\"\n" * (worker.MAX_V2_SOURCE_TEXT // 4 + 2048))
+        with mock.patch.object(
+            worker,
+            "fetch_public_page",
+            side_effect=lambda url, *, deadline, include_source_media: (
+                url,
+                "Report",
+                raw_content,
+                "text/plain",
+            ),
+        ):
+            sample = worker.extract_v2_outcome(urls[0], time.monotonic() + 1)
+        self.assertNotIn("\x00", sample["content"])
+        replies = {
+            url: {
+                **sample,
+                "requested_url": url,
+                "resolved_url": url,
+            }
+            for url in urls
+        }
+        factory = self.fixture_process_factory(replies)
+        with mock.patch.object(worker, "start_v2_source_process", side_effect=factory):
+            result = worker.extract_v2({"urls": urls})
+
+        for outcome in result["outcomes"]:
+            self.assertEqual(len(outcome["content"].encode("utf-8")), worker.MAX_V2_SOURCE_TEXT)
+            self.assertTrue(outcome["content_truncated"])
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        self.assertLessEqual(len(encoded), worker.MAX_RESPONSE)
+
+    def test_v2_never_exceeds_its_fixed_concurrency(self) -> None:
+        urls = [f"https://source-{index}.example/report" for index in range(10)]
+        replies = {url: self.extracted_outcome(url) for url in urls}
+        launched: list[subprocess.Popen[bytes]] = []
+        base_factory = self.fixture_process_factory(
+            replies,
+            delays={url: 0.2 for url in urls},
+            launched=launched,
+        )
+        maximum = 0
+
+        def factory(index: int, requested_url: str, batch_deadline: float) -> worker.V2SourceProcess:
+            nonlocal maximum
+            source = base_factory(index, requested_url, batch_deadline)
+            active = sum(process.poll() is None for process in launched)
+            maximum = max(maximum, active)
+            return source
+
+        with mock.patch.object(worker, "start_v2_source_process", side_effect=factory):
+            result = worker.extract_v2({"urls": urls})
+
+        self.assertEqual(len(result["outcomes"]), len(urls))
+        self.assertEqual(maximum, worker.V2_MAX_CONCURRENCY)
+
+    def test_v2_kills_hung_sources_within_the_shared_deadline(self) -> None:
+        urls = [f"https://hung-{index}.example/report" for index in range(10)]
+        launched: list[subprocess.Popen[bytes]] = []
+        factory = self.fixture_process_factory(
+            {},
+            hanging=set(urls),
+            launched=launched,
+        )
+        started = time.monotonic()
+        with (
+            mock.patch.object(worker, "start_v2_source_process", side_effect=factory),
+            mock.patch.object(worker, "V2_SOURCE_SECONDS", 0.08),
+            mock.patch.object(worker, "V2_BATCH_SECONDS", 0.2),
+        ):
+            result = worker.extract_v2({"urls": urls})
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1)
+        self.assertEqual(
+            [outcome["failure_code"] for outcome in result["outcomes"]],
+            ["source_unavailable"] * len(urls),
+        )
+        self.assertTrue(launched)
+        self.assertTrue(all(process.poll() is not None for process in launched))
+
+    def test_expired_source_deadline_uses_existing_failure_code(self) -> None:
+        with mock.patch.object(worker.time, "monotonic", return_value=100):
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.remaining_source_seconds(99)
+        self.assertEqual(raised.exception.code, "source_unavailable")
 
 
 if __name__ == "__main__":
