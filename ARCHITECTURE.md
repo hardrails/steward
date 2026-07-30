@@ -10,6 +10,8 @@ Steward is the open-source agent application runtime and enforcement plane betwe
 an untrusted containerized AI agent and managed external authority. It owns:
 
 - a portable, versioned application contract for qualified agent runtimes;
+- a neutral, versioned service contract for portable agent health, invocation,
+  and bounded results;
 - deterministic, explainable agent placement artifacts;
 - state-snapshot fork lineage and bounded lifetime declarations;
 - signed workload and site-policy admission;
@@ -23,7 +25,8 @@ an untrusted containerized AI agent and managed external authority. It owns:
 - pinned, hardened bootstrap of an optional management-cluster substrate; and
 - offline verification.
 
-Steward does not own model serving, agent reasoning or prompt graphs,
+Steward does not own model serving, agent reasoning, prompt or workflow graphs,
+agent-team formation, product semantic schemas, report generation,
 general-purpose cluster scheduling, secret storage, single sign-on,
 software-provenance issuance, or arbitrary computer use.
 
@@ -197,6 +200,21 @@ Connector routes can require an action permit. Permit verification binds current
 runtime state, signed site policy, action authority, operation-policy digest,
 request digest, task identity, expiry, and optional influence context.
 
+### Portable agent service API
+
+The `agent-service-v1` runtime profile fixes one dependency-free container and
+HTTP boundary: command `serve`, state under `/state`, and private service
+`agent-api:8080`. Its public OpenAPI contract defines exact health, invocation,
+and lifecycle paths with a 64 KiB request ceiling and 1 MiB status/result
+ceiling.
+
+Gateway reaches this API only through the existing admitted private service
+grant and tenant-signed task protocol. The service contract supplies no public
+ingress, workflow language, prompts, tools, provider credentials, result
+evaluation, or artifact store. A terminal response remains untrusted agent
+output. Steward's signed dispatch and observation evidence proves what was
+authorized and reported, not whether the work was correct.
+
 ### Control API
 
 Control exposes tenant, operator, enrollment, node, command, operations, attention,
@@ -341,9 +359,9 @@ Steward uses these ownership rungs:
   operator-selected identity, secret storage, telemetry, provenance, and
   model-serving systems connected through narrow contracts.
 - `do-nothing`: general-purpose scheduling, visual workflow builders, agent
-  catalogs, release promotion
-  coordinators, secret vaults, and workflow engines until a demonstrated customer
-  enforcement requirement cannot be composed from existing systems.
+  catalogs, release promotion coordinators, team formation, semantic layers,
+  report builders, secret vaults, and workflow engines until a demonstrated
+  customer enforcement requirement cannot be composed from existing systems.
 
 ## Verification before commit
 
