@@ -15,8 +15,8 @@ import re
 import socket
 import ssl
 import stat
+import subprocess
 import sys
-import time
 import urllib.parse
 
 MAX_REQUEST = 64 << 10
@@ -25,6 +25,13 @@ MAX_RESPONSE = 1 << 20
 MAX_SOURCE_TEXT = 256 << 10
 UPSTREAM_TIMEOUT = 45
 MAX_REDIRECTS = 5
+MAX_PDF_PAGES = 200
+MAX_PDF_RECOVERY_OBJECTS = 1000
+MAX_PDF_CHILD_RESPONSE = (MAX_SOURCE_TEXT * 2) + (8 << 10)
+PDF_CPU_SECONDS = 4
+PDF_WALL_SECONDS = 5
+PDF_MEMORY_BYTES = 128 << 20
+PDF_CHILD_MODE = "--extract-pdf"
 
 
 class WorkerError(Exception):
@@ -33,6 +40,10 @@ class WorkerError(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+
+class PDFInputRejected(Exception):
+    """The bounded PDF helper rejected application content."""
 
 
 def read_secret(path_text: str, label: str, required: bool = True) -> bytes | None:
@@ -134,6 +145,145 @@ def clean_text(value: object, maximum: int) -> str:
     if len(encoded) <= maximum:
         return value
     return encoded[:maximum].decode("utf-8", "ignore")
+
+
+def normalize_pdf_fragment(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    printable = "".join(
+        " " if ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F else character
+        for character in value
+    )
+    return " ".join(printable.split())
+
+
+def parse_pdf_payload(raw: bytes) -> dict[str, str]:
+    if not raw.startswith(b"%PDF-"):
+        raise PDFInputRejected("PDF header is invalid")
+
+    import io
+    import logging
+
+    from pypdf import PdfReader
+
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    reader = PdfReader(
+        io.BytesIO(raw),
+        strict=True,
+        root_object_recovery_limit=MAX_PDF_RECOVERY_OBJECTS,
+    )
+    try:
+        if reader.is_encrypted:
+            raise PDFInputRejected("encrypted PDFs are not supported")
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise PDFInputRejected("PDF page count exceeded its bound")
+
+        parts: list[str] = []
+        used = 0
+
+        class OutputLimitReached(Exception):
+            pass
+
+        def visit_text(
+            text: str,
+            _current_matrix: object,
+            _text_matrix: object,
+            _font_dictionary: object,
+            _font_size: object,
+        ) -> None:
+            nonlocal used
+            fragment = normalize_pdf_fragment(text)
+            if not fragment:
+                return
+            prefix = "\n" if parts else ""
+            bounded = clean_text(prefix + fragment, MAX_SOURCE_TEXT - used)
+            if bounded:
+                parts.append(bounded)
+                used += len(bounded.encode("utf-8"))
+            if used >= MAX_SOURCE_TEXT:
+                raise OutputLimitReached
+
+        for page in reader.pages:
+            try:
+                page.extract_text(visitor_text=visit_text)
+            except OutputLimitReached:
+                break
+        content = "".join(parts)
+        if not content:
+            raise PDFInputRejected("PDF contains no extractable text")
+        return {"title": "", "content": content}
+    finally:
+        reader.close()
+
+
+def constrain_pdf_process() -> None:
+    import resource
+
+    for limit, maximum in (
+        (resource.RLIMIT_AS, PDF_MEMORY_BYTES),
+        (resource.RLIMIT_CORE, 0),
+        (resource.RLIMIT_CPU, PDF_CPU_SECONDS),
+        (resource.RLIMIT_FSIZE, MAX_PDF_CHILD_RESPONSE),
+        (resource.RLIMIT_NOFILE, 16),
+    ):
+        _soft, hard = resource.getrlimit(limit)
+        bounded = maximum if hard == resource.RLIM_INFINITY else min(maximum, hard)
+        resource.setrlimit(limit, (bounded, bounded))
+
+
+def pdf_child() -> int:
+    try:
+        constrain_pdf_process()
+        raw = sys.stdin.buffer.read(MAX_UPSTREAM + 1)
+        if not raw or len(raw) > MAX_UPSTREAM:
+            return 1
+        result = parse_pdf_payload(raw)
+        body = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+        if len(body) > MAX_PDF_CHILD_RESPONSE:
+            return 1
+        sys.stdout.buffer.write(body)
+        return 0
+    except Exception:
+        return 1
+
+
+def extract_pdf_text(raw: bytes) -> tuple[str, str]:
+    if not raw.startswith(b"%PDF-"):
+        raise WorkerError(502, "unsupported_source", "PDF source has an invalid header")
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", os.path.abspath(__file__), PDF_CHILD_MODE],
+            input=raw,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=PDF_WALL_SECONDS,
+            check=False,
+            close_fds=True,
+            cwd="/",
+            env={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        raise WorkerError(502, "pdf_extraction_timeout", "PDF text extraction exceeded 5 seconds") from None
+    except OSError:
+        raise WorkerError(502, "unsupported_source", "PDF text extraction is unavailable") from None
+    if completed.returncode != 0 or len(completed.stdout) > MAX_PDF_CHILD_RESPONSE:
+        raise WorkerError(502, "unsupported_source", "PDF source could not be safely extracted")
+    try:
+        result = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise WorkerError(502, "unsupported_source", "PDF source could not be safely extracted") from None
+    if (
+        not isinstance(result, dict)
+        or set(result) != {"title", "content"}
+        or not isinstance(result.get("title"), str)
+        or not isinstance(result.get("content"), str)
+    ):
+        raise WorkerError(502, "unsupported_source", "PDF source could not be safely extracted")
+    title = clean_text(result["title"], 2048)
+    content = clean_text(result["content"], MAX_SOURCE_TEXT)
+    if not content:
+        raise WorkerError(502, "unsupported_source", "PDF source contains no extractable text")
+    return title, content
 
 
 def public_destination(value: object) -> tuple[str, urllib.parse.SplitResult, list[str]]:
@@ -257,7 +407,7 @@ def request_public_page(
         connection = connection_type(parsed.hostname, address, port)
         try:
             connection.request("GET", path, headers={
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,text/plain;q=0.8",
                 "Accept-Encoding": "identity",
                 "User-Agent": "steward-research-worker/1",
             })
@@ -289,11 +439,14 @@ def fetch_public_page(value: object) -> tuple[str, str, str]:
             if response.headers.get("Content-Encoding", "identity").lower() != "identity":
                 raise WorkerError(502, "unsupported_source", "compressed public source is not accepted")
             content_type = response.headers.get_content_type().lower()
-            if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
+            if content_type not in {"text/html", "application/xhtml+xml", "application/pdf", "text/plain"}:
                 raise WorkerError(502, "unsupported_source", "public source content type is not supported")
             raw = response.read(MAX_UPSTREAM + 1)
             if len(raw) > MAX_UPSTREAM:
                 raise WorkerError(502, "source_too_large", "public source exceeded 4 MiB")
+            if content_type == "application/pdf":
+                title, content = extract_pdf_text(raw)
+                return url, title, content
             charset = response.headers.get_content_charset() or "utf-8"
             try:
                 decoded = raw.decode(charset, "replace")
@@ -449,6 +602,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == [PDF_CHILD_MODE]:
+        raise SystemExit(pdf_child())
+    if sys.argv[1:]:
+        print("research-worker: unsupported arguments", file=sys.stderr)
+        raise SystemExit(1)
     try:
         raise SystemExit(main())
     except RuntimeError as error:
