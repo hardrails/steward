@@ -137,6 +137,11 @@ class PDFExtractionTests(unittest.TestCase):
             "https://valid.example/source\u00a0with-space",
             "https://valid.example/caf\u00e9",
             "https://valid.example/a\\b",
+            f"https://{'a' * 64}.example/source",
+            "https://a..example/source",
+            "https://-a.example/source",
+            "https://a-.example/source",
+            "https://a.example../source",
         ):
             with self.subTest(invalid_url=invalid_url):
                 with mock.patch.object(
@@ -147,6 +152,25 @@ class PDFExtractionTests(unittest.TestCase):
                         worker.public_destination(invalid_url)
                 self.assertEqual(raised.exception.code, "invalid_source_url")
                 resolve.assert_not_called()
+
+    def test_public_url_boundary_accepts_encoded_international_uri_forms(self) -> None:
+        for valid_url, expected_host in (
+            (
+                "https://xn--caf-dma.example/caf%C3%A9",
+                "xn--caf-dma.example",
+            ),
+            (
+                "https://[2606:4700:4700::1111]/source",
+                "2606:4700:4700::1111",
+            ),
+            (
+                "https://valid.example./source",
+                "valid.example",
+            ),
+        ):
+            with self.subTest(valid_url=valid_url):
+                _url, _parsed, host, _port = worker.public_url_shape(valid_url)
+                self.assertEqual(host, expected_host)
 
     def test_extract_batch_remains_fail_fast_without_partial_results(self) -> None:
         failure = worker.WorkerError(502, "unsupported_source", "source failed")
@@ -473,6 +497,8 @@ class TotalBatchExtractionTests(unittest.TestCase):
             "https://valid.example/source\u00a0with-space",
             "https://valid.example/caf\u00e9",
             "https://valid.example/a\\b",
+            f"https://{'a' * 64}.example/source",
+            "https://a..example/source",
         ):
             with self.subTest(invalid_url=invalid_url):
                 with mock.patch.object(worker, "start_v2_source_process") as start:
