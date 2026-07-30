@@ -350,13 +350,52 @@ def extract_pdf_text(raw: bytes, *, wall_seconds: float = PDF_WALL_SECONDS) -> t
     return title, content
 
 
-def public_url_shape(value: object) -> tuple[str, urllib.parse.SplitResult, str, int]:
-    if not isinstance(value, str) or len(value.encode()) > 2048:
+def normalized_url_host(hostname: str) -> str:
+    host = hostname[:-1] if hostname.endswith(".") else hostname
+    if not host or len(host) > 253 or "%" in host:
         raise WorkerError(400, "invalid_source_url", "source URL is invalid")
-    parsed = urllib.parse.urlsplit(value)
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if any(
+            not 1 <= len(label) <= 63
+            or label[0] == "-"
+            or label[-1] == "-"
+            or any(
+                not (character.isascii() and (character.isalnum() or character == "-"))
+                for character in label
+            )
+            for label in labels
+        ):
+            raise WorkerError(400, "invalid_source_url", "source URL is invalid")
+    return host.lower()
+
+
+def public_url_shape(value: object) -> tuple[str, urllib.parse.SplitResult, str, int]:
+    if not isinstance(value, str):
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid")
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeError as error:
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid") from error
+    if (
+        len(encoded) > 2048
+        or "\\" in value
+        or any(
+            ord(character) <= 0x20 or ord(character) == 0x7F
+            for character in value
+        )
+    ):
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+    except (UnicodeError, ValueError) as error:
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid") from error
     if (
         parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
+        or not hostname
         or parsed.username
         or parsed.password
         or parsed.fragment
@@ -366,7 +405,7 @@ def public_url_shape(value: object) -> tuple[str, urllib.parse.SplitResult, str,
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError as error:
         raise WorkerError(400, "invalid_source_url", "source URL contains an invalid port") from error
-    host = parsed.hostname.rstrip(".").lower()
+    host = normalized_url_host(hostname)
     return value, parsed, host, port
 
 
@@ -387,7 +426,7 @@ def public_destination(value: object) -> tuple[str, urllib.parse.SplitResult, li
 def resolve_public_addresses(host: str, port: int) -> list[str]:
     try:
         records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as error:
+    except (socket.gaierror, UnicodeError) as error:
         raise WorkerError(400, "source_unresolvable", "source hostname could not be resolved") from error
     addresses = []
     for record in records:
@@ -651,11 +690,6 @@ def extract(payload: dict[str, object]) -> dict[str, object]:
 
 
 def validate_extract_v2_url(value: object) -> str:
-    if isinstance(value, str) and any(
-        ord(character) <= 0x20 or ord(character) == 0x7F
-        for character in value
-    ):
-        raise WorkerError(400, "invalid_source_url", "source URL is invalid")
     try:
         url, _parsed, _host, _port = public_url_shape(value)
     except (UnicodeError, ValueError) as error:
