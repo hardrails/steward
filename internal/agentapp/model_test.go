@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/agentservice"
 )
 
 func validDefinition() Definition {
@@ -25,6 +26,17 @@ func validDefinition() Definition {
 		Placement: Placement{Architectures: []string{"amd64"}, Isolation: "hardened", RequiredLabels: []Label{{Key: "zone", Value: "west"}}},
 		State:     State{Persistent: true}, Lifetime: Lifetime{Mode: "service"},
 	}
+}
+
+func validPortableServiceDefinition() Definition {
+	definition := validDefinition()
+	definition.Runtime = Runtime{
+		Engine:          agentservice.RuntimeEngine,
+		Image:           "example.invalid/agent-service@sha256:" + strings.Repeat("a", 64),
+		AdapterContract: agentservice.AdapterContractV1,
+	}
+	definition.Skills = nil
+	return definition
 }
 
 func TestBuildIsDeterministicAndTamperEvident(t *testing.T) {
@@ -84,6 +96,24 @@ func TestToolProfilesRequireTheirExactPositiveCapabilities(t *testing.T) {
 	}
 }
 
+func TestPortableServiceDefinitionAcceptsOnlyTheNeutralAdapterContract(t *testing.T) {
+	definition := validPortableServiceDefinition()
+	if err := definition.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*Definition){
+		func(value *Definition) { value.Runtime.AdapterContract = "steward.agent-service.v2" },
+		func(value *Definition) { value.Runtime.Engine = "custom" },
+		func(value *Definition) { value.ToolProfile = "research" },
+	} {
+		changed := definition
+		mutate(&changed)
+		if err := changed.Validate(); err == nil {
+			t.Fatalf("invalid portable service definition accepted: %+v", changed)
+		}
+	}
+}
+
 func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	bundle, err := Build(validDefinition(), nil)
 	if err != nil {
@@ -121,8 +151,12 @@ func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 			ServiceIDs: []string{"hermes-api"},
 		}},
 	}
+	profile, ok := admission.DefaultProfiles().Lookup(admission.ProfileRef{ID: "hermes-v1", Version: "v1"})
+	if !ok {
+		t.Fatal("missing built-in Hermes profile")
+	}
 	verified := admission.VerifiedCapsuleImport{
-		Capsule: capsule, SitePolicy: policy, Profile: admission.DefaultProfiles()[1],
+		Capsule: capsule, SitePolicy: policy, Profile: profile,
 		CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
 		PublisherKeyID: "publisher-a", SiteRootKeyID: "site-root",
 	}
