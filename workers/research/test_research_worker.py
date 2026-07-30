@@ -134,6 +134,8 @@ class PDFExtractionTests(unittest.TestCase):
     def test_public_url_boundary_rejects_ambiguous_paths_before_dns(self) -> None:
         for invalid_url in (
             "https://valid.example/source with-space",
+            "https://valid.example/source\u00a0with-space",
+            "https://valid.example/caf\u00e9",
             "https://valid.example/a\\b",
         ):
             with self.subTest(invalid_url=invalid_url):
@@ -468,6 +470,8 @@ class TotalBatchExtractionTests(unittest.TestCase):
 
         for invalid_url in (
             "https://valid.example/source with-space",
+            "https://valid.example/source\u00a0with-space",
+            "https://valid.example/caf\u00e9",
             "https://valid.example/a\\b",
         ):
             with self.subTest(invalid_url=invalid_url):

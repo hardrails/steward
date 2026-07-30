@@ -354,7 +354,7 @@ def public_url_shape(value: object) -> tuple[str, urllib.parse.SplitResult, str,
     if not isinstance(value, str):
         raise WorkerError(400, "invalid_source_url", "source URL is invalid")
     try:
-        encoded = value.encode()
+        encoded = value.encode("ascii")
     except UnicodeError as error:
         raise WorkerError(400, "invalid_source_url", "source URL is invalid") from error
     if (
