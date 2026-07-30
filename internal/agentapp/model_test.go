@@ -248,6 +248,75 @@ func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	}
 }
 
+func TestBuildIntentSupportsPortableAgentService(t *testing.T) {
+	bundle, err := Build(validPortableServiceDefinition(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule := admission.ProfileCapsule{
+		SchemaVersion: admission.SchemaV1, CapsuleID: "portable-a", PublisherKeyID: "publisher-a",
+		Profile: admission.ProfileRef{ID: agentservice.ProfileID, Version: agentservice.ProfileVersion},
+		Image: admission.ImageIdentity{
+			Repository: "example.invalid/agent-service", ManifestDigest: "sha256:" + strings.Repeat("a", 64),
+			ConfigDigest: "sha256:" + strings.Repeat("b", 64),
+			Platform:     admission.Platform{OS: "linux", Architecture: "amd64"},
+		},
+		Command:      []string{agentservice.Command},
+		Resources:    admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256},
+		Capabilities: admission.Capabilities{State: true, Inference: true, Service: true},
+		State:        admission.StateShape{SchemaVersion: "v1", Path: agentservice.StatePath},
+		Service:      admission.ServiceShape{ID: agentservice.ServiceID, Port: agentservice.ServicePort},
+	}
+	policy := admission.SitePolicy{
+		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
+		Publishers: []admission.PublisherRule{{
+			KeyID: "publisher-a", PublicKey: base64.StdEncoding.EncodeToString(public),
+			AllowedProfiles:     []admission.ProfileRef{capsule.Profile},
+			AllowedRepositories: []string{"example.invalid/agent-service"},
+			ResourceCeiling:     capsule.Resources,
+		}},
+		Tenants: []admission.TenantRule{{
+			TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-a"},
+			ResourceCeiling: capsule.Resources, InferenceRouteIDs: []string{"local"},
+			InferenceModelAliases: []string{"default"}, ServiceIDs: []string{agentservice.ServiceID},
+		}},
+	}
+	profile, ok := admission.DefaultProfiles().Lookup(capsule.Profile)
+	if !ok {
+		t.Fatal("missing built-in portable agent service profile")
+	}
+	verified := admission.VerifiedCapsuleImport{
+		Capsule: capsule, SitePolicy: policy, Profile: profile,
+		CapsuleDigest:  "sha256:" + strings.Repeat("c", 64),
+		PolicyDigest:   "sha256:" + strings.Repeat("d", 64),
+		PublisherKeyID: "publisher-a", SiteRootKeyID: "site-root",
+	}
+	intent, err := BuildIntent(bundle, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.ServiceID != agentservice.ServiceID || intent.StateDisposition != "new" ||
+		intent.InferenceRouteID != "local" || intent.ModelAlias != "default" {
+		t.Fatalf("portable agent service intent = %+v", intent)
+	}
+	digest, err := DigestJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{
+		Schema: SnapshotSchema, ID: "snap-portable", BundleDigest: digest,
+		RuntimeEngine: agentservice.RuntimeEngine, StateDigest: "sha256:" + strings.Repeat("e", 64),
+		SourceNodeID: "node-a", SourceLineage: "lineage-a", CreatedAt: "2026-07-29T00:00:00Z",
+	}
+	if _, err := Fork(bundle, snapshot, "portable-fork", "agent-b", "lineage-b", 0, "", time.Now()); err != nil {
+		t.Fatalf("portable agent service state fork rejected: %v", err)
+	}
+}
+
 func TestDecodeDefinitionRejectsUnknownDuplicateAndUnpinned(t *testing.T) {
 	definition := validDefinition()
 	raw, _ := json.Marshal(definition)
