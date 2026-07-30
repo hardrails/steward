@@ -48,8 +48,8 @@ func buildIntent(
 		return admission.InstanceIntent{}, errors.New("agent admission generation must be positive")
 	}
 	capsule := verified.Capsule
-	profileID, serviceID := agentRuntimeAdmissionContract(bundle.Definition)
-	if capsule.Profile != (admission.ProfileRef{ID: profileID, Version: "v1"}) {
+	profile, serviceID := agentRuntimeAdmissionContract(bundle.Definition)
+	if capsule.Profile != profile {
 		return admission.InstanceIntent{}, errors.New("agent runtime does not match the authenticated capsule profile")
 	}
 	expectedImage := capsule.Image.Repository + "@" + capsule.Image.ManifestDigest
@@ -119,14 +119,16 @@ func buildIntent(
 	return intent, nil
 }
 
-func agentRuntimeAdmissionContract(definition Definition) (string, string) {
+func agentRuntimeAdmissionContract(definition Definition) (admission.ProfileRef, string) {
 	if definition.Runtime.Engine == agentservice.RuntimeEngine {
-		return agentservice.ProfileID, agentservice.ServiceID
+		return admission.ProfileRef{
+			ID: agentservice.ProfileID, Version: agentservice.ProfileVersion,
+		}, agentservice.ServiceID
 	}
 	profileID := map[string]string{
 		"workspace": "hermes-v1", "research": "hermes-research-v1", "developer": "hermes-developer-v1",
 	}[definition.EffectiveToolProfile()]
-	return profileID, "hermes-api"
+	return admission.ProfileRef{ID: profileID, Version: "v1"}, "hermes-api"
 }
 
 func defaultEffectMode(policy admission.SitePolicy, tenantID string) (string, error) {

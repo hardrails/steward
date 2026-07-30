@@ -48,20 +48,20 @@ published host port, or mutable files outside `/state` and `/tmp`.
 
 ## Implement the three endpoints
 
-Health identifies the exact deployed release:
+Health identifies the exact adapter contract and current readiness:
 
 ```json
 {
   "schema_version": "steward.agent-health.v1",
   "status": "ready",
-  "adapter_contract": "steward.agent-service.v1",
-  "deployment_id": "research-worker",
-  "release_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  "adapter_contract": "steward.agent-service.v1"
 }
 ```
 
 Return HTTP 200 only for `ready`. Return HTTP 503 with `not_ready` or `draining`
-when the service cannot accept another invocation.
+when the service cannot accept another invocation. Steward proves the admitted
+image and deployment identity independently; the worker does not need ambient
+container metadata or a self-asserted copy of that authority.
 
 Invocation requests are strict JSON objects of at most 64 KiB:
 

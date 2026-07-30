@@ -24,7 +24,7 @@ servers:
     description: Development view of the private `agent-api` service.
 tags:
   - name: health
-    description: Identify the immutable deployment release and readiness state.
+    description: Report compatibility and readiness without duplicating deployment authority.
   - name: invocations
     description: Accept and observe one bounded, caller-identified agent invocation.
 paths:
@@ -32,14 +32,16 @@ paths:
     get:
       tags: [health]
       operationId: getPortableAgentHealth
-      summary: Inspect deployment identity and readiness
+      summary: Inspect adapter compatibility and readiness
       description: |
-        Returns the exact adapter contract, deployment identity, and immutable
-        release digest. A ready service returns 200. A service that cannot
-        accept new invocations returns 503 with `not_ready` or `draining`.
+        Returns the exact adapter contract and readiness state. Steward already
+        binds the admitted deployment and immutable image outside the worker, so
+        the worker does not repeat unverifiable deployment metadata. A ready
+        service returns 200. A service that cannot accept new invocations
+        returns 503 with `not_ready` or `draining`.
       responses:
         "200":
-          description: The exact deployment release is ready for invocations.
+          description: The service implements the exact adapter and is ready for invocations.
           headers:
             Cache-Control:
               $ref: "#/components/headers/NoStore"
@@ -171,10 +173,6 @@ components:
         minimum: 1
         maximum: 60
   schemas:
-    SHA256Digest:
-      type: string
-      pattern: "^sha256:[a-f0-9]{64}$"
-      example: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     BoundedID:
       type: string
       minLength: 1
@@ -187,8 +185,6 @@ components:
         - schema_version
         - status
         - adapter_contract
-        - deployment_id
-        - release_digest
       properties:
         schema_version:
           type: string
@@ -199,10 +195,6 @@ components:
         adapter_contract:
           type: string
           enum: [steward.agent-service.v1]
-        deployment_id:
-          $ref: "#/components/schemas/BoundedID"
-        release_digest:
-          $ref: "#/components/schemas/SHA256Digest"
     AgentInvocation:
       type: object
       additionalProperties: false

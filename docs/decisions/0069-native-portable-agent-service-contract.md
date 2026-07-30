@@ -42,8 +42,8 @@ The `agent-service-v1@v1` runtime profile fixes:
 
 The HTTP interface fixes only:
 
-- `GET /v1/healthz`, which reports readiness, deployment identity, and immutable
-  release digest;
+- `GET /v1/healthz`, which reports readiness and the exact adapter contract
+  without duplicating deployment identity already enforced outside the worker;
 - `POST /v1/invocations`, which accepts one strict request of at most 64 KiB and
   binds a caller-selected idempotency identity; and
 - `GET /v1/invocations/{run_id}`, which reports the existing five-state lifecycle

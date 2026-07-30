@@ -54,6 +54,11 @@ func TestOpenAPIContainsEveryFixedV1Value(t *testing.T) {
 			t.Fatalf("agent service OpenAPI is missing fixed contract value %q", required)
 		}
 	}
+	for _, forbidden := range []string{"deployment_id", "release_digest"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("agent service health requires uninjected worker metadata %q", forbidden)
+		}
+	}
 }
 
 func TestAuthoringSchemaIncludesTheExactRuntimePair(t *testing.T) {
@@ -64,6 +69,8 @@ func TestAuthoringSchemaIncludesTheExactRuntimePair(t *testing.T) {
 	for _, required := range []string{
 		`engine: "agent-service"`,
 		`adapter_contract: "steward.agent-service.v1"`,
+		`if runtime.engine == "agent-service"`,
+		`tool_profile?: "workspace"`,
 	} {
 		if !strings.Contains(string(raw), required) {
 			t.Fatalf("agent authoring schema is missing %q", required)

@@ -14,6 +14,9 @@
     image: string & =~"@sha256:[0-9a-f]{64}$"
   }
   tool_profile?: "workspace" | "research" | "developer"
+  if runtime.engine == "agent-service" {
+    tool_profile?: "workspace"
+  }
   model: route: string & !=""
   skills?: [...string]
   mcp_servers?: [...string]
