@@ -2,6 +2,7 @@ package agentservice
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,28 @@ func TestV1IsStableAndReturnsIndependentValues(t *testing.T) {
 	} {
 		if !strings.Contains(string(raw), required) {
 			t.Fatalf("descriptor %s does not contain %s", raw, required)
+		}
+	}
+}
+
+func TestOpenAPIContainsEveryFixedV1Value(t *testing.T) {
+	raw, err := os.ReadFile("../../openapi/steward-agent-service.v1.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		AdapterContractV1,
+		HealthSchemaV1,
+		InvocationSchemaV1,
+		HealthPath,
+		InvocationPath,
+		StatusPathPrefix,
+		"agent-api:8080",
+		"x-steward-max-body-bytes: 65536",
+		"x-steward-max-body-bytes: 1048576",
+	} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("agent service OpenAPI is missing fixed contract value %q", required)
 		}
 	}
 }
