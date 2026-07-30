@@ -14,6 +14,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/ocibundle"
 	"github.com/hardrails/steward/internal/securefile"
@@ -161,6 +162,11 @@ func agentPublicationContractFor(runtime, toolProfile string) (agentPublicationC
 			return agentPublicationContract{}, false
 		}
 		ref = admission.ProfileRef{ID: profileID, Version: "v1"}
+	case agentservice.RuntimeEngine:
+		if toolProfile != "workspace" {
+			return agentPublicationContract{}, false
+		}
+		ref = admission.ProfileRef{ID: agentservice.ProfileID, Version: agentservice.ProfileVersion}
 	default:
 		return agentPublicationContract{}, false
 	}
