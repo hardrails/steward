@@ -147,7 +147,7 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "deployment", ""}); !slices.Equal(candidates, []string{"apply", "list", "pause", "remove", "resume", "status", "wait"}) {
 		t.Fatalf("agent deployment candidates=%v", candidates)
 	}
-	if candidates := stewardctlCompletionCandidates([]string{"agent", "service", ""}); !slices.Equal(candidates, []string{"activate"}) {
+	if candidates := stewardctlCompletionCandidates([]string{"agent", "service", ""}); !slices.Equal(candidates, []string{"activate", "contract"}) {
 		t.Fatalf("agent service candidates=%v", candidates)
 	}
 	for command, expected := range map[string]string{
