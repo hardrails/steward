@@ -15,6 +15,7 @@ before signing, import, or admission.
 | Profile | Linux identity | Writable state | Command | Local service |
 | --- | --- | --- | --- | --- |
 | `generic-v1@v1` | `65532:65532` | `/state` (`v1`) | Publisher-defined | Publisher-defined |
+| `agent-service-v1@v1` | `65532:65532` | `/state` (`v1`) | `serve` | `agent-api` on `8080` |
 | `hermes-v1@v1` | `65532:65532` | `/opt/data` (`v1`) | `serve` | `hermes-api` on `8766` |
 | `hermes-research-v1@v1` | `65532:65532` | `/opt/data` (`v1`) | `serve` | `hermes-api` on `8766` |
 | `hermes-developer-v1@v1` | `65532:65532` | `/opt/data` (`v1`) | `serve` | `hermes-api` on `8766` |
@@ -42,3 +43,10 @@ The generic profile is intentionally different: its publisher chooses the
 command and optional service contract, while Steward still fixes the Linux
 identity and state path. Use a named profile when you want an audited adapter
 contract instead of a general container contract.
+
+The `agent-service-v1` profile fixes only a portable process and HTTP boundary.
+It does not qualify an agent's reasoning, prompts, tools, output, or external
+effects. The image must start with `serve`, keep mutable state under `/state`,
+and expose `steward.agent-service.v1` on `agent-api:8080`. See the
+[agent service protocol](https://github.com/hardrails/steward/blob/main/openapi/steward-agent-service.v1.yaml)
+for the bounded health, invocation, and result shapes.

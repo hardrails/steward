@@ -320,6 +320,7 @@ func TestDefaultProfilesIncludeFixedAgentStateLayouts(t *testing.T) {
 	profiles := DefaultProfiles()
 	for _, test := range []struct{ id, path string }{
 		{"generic-v1", "/state"},
+		{"agent-service-v1", "/state"},
 		{"hermes-v1", "/opt/data"},
 	} {
 		profile, ok := profiles.Lookup(ProfileRef{ID: test.id, Version: "v1"})
@@ -348,6 +349,30 @@ func TestValidateProfileContractRejectsRuntimeSpecificDrift(t *testing.T) {
 		mutate(&changed)
 		if _, err := ValidateProfileContract(changed, DefaultProfiles()); err == nil {
 			t.Fatalf("drifted capsule accepted: %#v", changed)
+		}
+	}
+}
+
+func TestPortableAgentServiceProfileFixesItsRuntimeBoundary(t *testing.T) {
+	capsule := ProfileCapsule{
+		Profile: ProfileRef{ID: "agent-service-v1", Version: "v1"}, Command: []string{"serve"},
+		State:   StateShape{SchemaVersion: "v1", Path: "/state"},
+		Service: ServiceShape{ID: "agent-api", Port: 8080},
+	}
+	if _, err := ValidateProfileContract(capsule, DefaultProfiles()); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*ProfileCapsule){
+		func(value *ProfileCapsule) { value.Command = []string{"sh"} },
+		func(value *ProfileCapsule) { value.State.Path = "/workspace" },
+		func(value *ProfileCapsule) { value.Service.ID = "other-api" },
+		func(value *ProfileCapsule) { value.Service.Port = 8766 },
+	} {
+		changed := capsule
+		changed.Command = append([]string(nil), capsule.Command...)
+		mutate(&changed)
+		if _, err := ValidateProfileContract(changed, DefaultProfiles()); err == nil {
+			t.Fatalf("drifted portable agent service profile accepted: %#v", changed)
 		}
 	}
 }
