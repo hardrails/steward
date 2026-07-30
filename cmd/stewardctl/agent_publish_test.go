@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -107,9 +109,66 @@ func TestAgentPublishRejectsBundleArchiveIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestAgentPublishEmitsFixedPortableServiceProfile(t *testing.T) {
+	directory := t.TempDir()
+	archive, manifestDigest, _, _ := writeImageImportArchive(t, directory)
+	siteDirectory := filepath.Join(directory, "site")
+	if err := siteCommand([]string{
+		"init", siteDirectory, "-tenant-id", "tenant-a",
+		"-repository", "registry.example/agent", "-service-id", agentservice.ServiceID,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	bundle := publishedAgentBundle(t, agentservice.RuntimeEngine, "registry.example/agent@"+manifestDigest)
+	raw, err := agentapp.MarshalCanonical(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(directory, "agent.bundle.json")
+	if err := os.WriteFile(bundlePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capsulePath := filepath.Join(directory, "capsule.dsse.json")
+	if err := agentCommand([]string{
+		"publish", siteDirectory, "-bundle", bundlePath, "-archive", archive, "-out", capsulePath,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	verifiedSite, err := verifySitePackage(siteDirectory, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyRaw, err := os.ReadFile(filepath.Join(siteDirectory, "public", "site-policy.dsse.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsuleRaw, err := os.ReadFile(capsulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := admission.VerifyCapsuleForImport(
+		capsuleRaw, policyRaw, map[string]ed25519.PublicKey{"site-root-1": verifiedSite.rootKey},
+		timeNow().UTC(), admission.DefaultProfiles(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Capsule.Profile != (admission.ProfileRef{
+		ID: agentservice.ProfileID, Version: agentservice.ProfileVersion,
+	}) || verified.Capsule.Service != (admission.ServiceShape{
+		ID: agentservice.ServiceID, Port: agentservice.ServicePort,
+	}) || !slices.Equal(verified.Capsule.Command, []string{agentservice.Command}) ||
+		verified.Capsule.State.Path != agentservice.StatePath {
+		t.Fatalf("portable service capsule = %+v", verified.Capsule)
+	}
+}
+
 func publishedAgentBundle(t *testing.T, runtime, image string) agentapp.Bundle {
 	t.Helper()
-	contract := map[string]string{"hermes": "steward.hermes-agent.v1"}[runtime]
+	contract := map[string]string{
+		"hermes":                   "steward.hermes-agent.v1",
+		agentservice.RuntimeEngine: agentservice.AdapterContractV1,
+	}[runtime]
 	definition := agentapp.Definition{
 		Schema: agentapp.DefinitionSchema, Name: "workspace-auditor",
 		Runtime: agentapp.Runtime{Engine: runtime, Image: image, AdapterContract: contract},

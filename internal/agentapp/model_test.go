@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/agentservice"
 )
 
 func validDefinition() Definition {
@@ -25,6 +26,17 @@ func validDefinition() Definition {
 		Placement: Placement{Architectures: []string{"amd64"}, Isolation: "hardened", RequiredLabels: []Label{{Key: "zone", Value: "west"}}},
 		State:     State{Persistent: true}, Lifetime: Lifetime{Mode: "service"},
 	}
+}
+
+func validPortableServiceDefinition() Definition {
+	definition := validDefinition()
+	definition.Runtime = Runtime{
+		Engine:          agentservice.RuntimeEngine,
+		Image:           "example.invalid/agent-service@sha256:" + strings.Repeat("a", 64),
+		AdapterContract: agentservice.AdapterContractV1,
+	}
+	definition.Skills = nil
+	return definition
 }
 
 func TestBuildIsDeterministicAndTamperEvident(t *testing.T) {
@@ -84,6 +96,24 @@ func TestToolProfilesRequireTheirExactPositiveCapabilities(t *testing.T) {
 	}
 }
 
+func TestPortableServiceDefinitionAcceptsOnlyTheNeutralAdapterContract(t *testing.T) {
+	definition := validPortableServiceDefinition()
+	if err := definition.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*Definition){
+		func(value *Definition) { value.Runtime.AdapterContract = "steward.agent-service.v2" },
+		func(value *Definition) { value.Runtime.Engine = "custom" },
+		func(value *Definition) { value.ToolProfile = "research" },
+	} {
+		changed := definition
+		mutate(&changed)
+		if err := changed.Validate(); err == nil {
+			t.Fatalf("invalid portable service definition accepted: %+v", changed)
+		}
+	}
+}
+
 func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	bundle, err := Build(validDefinition(), nil)
 	if err != nil {
@@ -121,8 +151,12 @@ func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 			ServiceIDs: []string{"hermes-api"},
 		}},
 	}
+	profile, ok := admission.DefaultProfiles().Lookup(admission.ProfileRef{ID: "hermes-v1", Version: "v1"})
+	if !ok {
+		t.Fatal("missing built-in Hermes profile")
+	}
 	verified := admission.VerifiedCapsuleImport{
-		Capsule: capsule, SitePolicy: policy, Profile: admission.DefaultProfiles()[1],
+		Capsule: capsule, SitePolicy: policy, Profile: profile,
 		CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
 		PublisherKeyID: "publisher-a", SiteRootKeyID: "site-root",
 	}
@@ -211,6 +245,75 @@ func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
 	}
 	if _, err := defaultEffectMode(admission.SitePolicy{}, "tenant-a"); err == nil {
 		t.Fatal("missing tenant policy accepted")
+	}
+}
+
+func TestBuildIntentSupportsPortableAgentService(t *testing.T) {
+	bundle, err := Build(validPortableServiceDefinition(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule := admission.ProfileCapsule{
+		SchemaVersion: admission.SchemaV1, CapsuleID: "portable-a", PublisherKeyID: "publisher-a",
+		Profile: admission.ProfileRef{ID: agentservice.ProfileID, Version: agentservice.ProfileVersion},
+		Image: admission.ImageIdentity{
+			Repository: "example.invalid/agent-service", ManifestDigest: "sha256:" + strings.Repeat("a", 64),
+			ConfigDigest: "sha256:" + strings.Repeat("b", 64),
+			Platform:     admission.Platform{OS: "linux", Architecture: "amd64"},
+		},
+		Command:      []string{agentservice.Command},
+		Resources:    admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256},
+		Capabilities: admission.Capabilities{State: true, Inference: true, Service: true},
+		State:        admission.StateShape{SchemaVersion: "v1", Path: agentservice.StatePath},
+		Service:      admission.ServiceShape{ID: agentservice.ServiceID, Port: agentservice.ServicePort},
+	}
+	policy := admission.SitePolicy{
+		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
+		Publishers: []admission.PublisherRule{{
+			KeyID: "publisher-a", PublicKey: base64.StdEncoding.EncodeToString(public),
+			AllowedProfiles:     []admission.ProfileRef{capsule.Profile},
+			AllowedRepositories: []string{"example.invalid/agent-service"},
+			ResourceCeiling:     capsule.Resources,
+		}},
+		Tenants: []admission.TenantRule{{
+			TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-a"},
+			ResourceCeiling: capsule.Resources, InferenceRouteIDs: []string{"local"},
+			InferenceModelAliases: []string{"default"}, ServiceIDs: []string{agentservice.ServiceID},
+		}},
+	}
+	profile, ok := admission.DefaultProfiles().Lookup(capsule.Profile)
+	if !ok {
+		t.Fatal("missing built-in portable agent service profile")
+	}
+	verified := admission.VerifiedCapsuleImport{
+		Capsule: capsule, SitePolicy: policy, Profile: profile,
+		CapsuleDigest:  "sha256:" + strings.Repeat("c", 64),
+		PolicyDigest:   "sha256:" + strings.Repeat("d", 64),
+		PublisherKeyID: "publisher-a", SiteRootKeyID: "site-root",
+	}
+	intent, err := BuildIntent(bundle, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.ServiceID != agentservice.ServiceID || intent.StateDisposition != "new" ||
+		intent.InferenceRouteID != "local" || intent.ModelAlias != "default" {
+		t.Fatalf("portable agent service intent = %+v", intent)
+	}
+	digest, err := DigestJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{
+		Schema: SnapshotSchema, ID: "snap-portable", BundleDigest: digest,
+		RuntimeEngine: agentservice.RuntimeEngine, StateDigest: "sha256:" + strings.Repeat("e", 64),
+		SourceNodeID: "node-a", SourceLineage: "lineage-a", CreatedAt: "2026-07-29T00:00:00Z",
+	}
+	if _, err := Fork(bundle, snapshot, "portable-fork", "agent-b", "lineage-b", 0, "", time.Now()); err != nil {
+		t.Fatalf("portable agent service state fork rejected: %v", err)
 	}
 }
 

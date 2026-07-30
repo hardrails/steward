@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -81,7 +82,9 @@ func TestSiteInitCreatesAndVerifiesSeparatedAuthorityPackage(t *testing.T) {
 	}
 	if policy.Publishers[0].AllowedRepositories[0] != "registry.internal/agents" ||
 		!slices.Equal(policy.Publishers[0].AllowedProfiles, []admission.ProfileRef{
-			{ID: "generic-v1", Version: "v1"}, {ID: "hermes-v1", Version: "v1"},
+			{ID: "generic-v1", Version: "v1"},
+			{ID: agentservice.ProfileID, Version: agentservice.ProfileVersion},
+			{ID: "hermes-v1", Version: "v1"},
 			{ID: "hermes-research-v1", Version: "v1"}, {ID: "hermes-developer-v1", Version: "v1"},
 		}) || policy.Publishers[0].ResourceCeiling != (admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256}) ||
 		!slices.Equal(policy.Tenants[0].InferenceRouteIDs, []string{"local"}) ||

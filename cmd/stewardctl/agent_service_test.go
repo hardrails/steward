@@ -9,8 +9,31 @@ import (
 	"testing"
 
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/gateway"
 )
+
+func TestAgentServiceContractReturnsExactPortableBoundary(t *testing.T) {
+	var output bytes.Buffer
+	if err := agentServiceCommand([]string{"contract"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var descriptor agentservice.Descriptor
+	if err := json.Unmarshal(output.Bytes(), &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.SchemaVersion != agentservice.DescriptorSchemaV1 ||
+		descriptor.Runtime.Engine != agentservice.RuntimeEngine ||
+		descriptor.Runtime.AdapterContract != agentservice.AdapterContractV1 ||
+		descriptor.Service.ID != agentservice.ServiceID ||
+		descriptor.Service.InvocationPath != agentservice.InvocationPath ||
+		descriptor.Limits.MaxResponseBytes != agentservice.MaxResponseBytes {
+		t.Fatalf("agent service descriptor = %+v", descriptor)
+	}
+	if err := agentServiceCommand([]string{"contract", "extra"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("agent service contract accepted an argument")
+	}
+}
 
 func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "steward-agent-service-")
@@ -27,32 +50,7 @@ func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testi
 	if err := os.WriteFile(bundlePath, bundleRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	serviceToken := filepath.Join(directory, "gateway.token")
-	if err := os.WriteFile(serviceToken, []byte("gateway-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	receiptPrivate := filepath.Join(directory, "receipts.private.pem")
-	receiptPublic := filepath.Join(directory, "receipts.public")
-	if err := keygen([]string{"-private-out", receiptPrivate, "-public-out", receiptPublic}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	config := gateway.Config{
-		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8091",
-		ServiceTokenFile: serviceToken, StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
-		ExecutorGID: os.Getgid(), RelayGID: os.Getgid(), ConnectorReceiptFile: filepath.Join(directory, "receipts.ndjson"),
-		ConnectorReceiptKeyFile: receiptPrivate, ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
-	}
-	if config.ExecutorGID == 0 {
-		config.ExecutorGID, config.RelayGID = 1, 1
-	}
-	configRaw, err := json.Marshal(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(directory, "gateway.json")
-	if err := os.WriteFile(configPath, configRaw, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	configPath := writeAgentServiceTestConfig(t, directory)
 	trustPath := filepath.Join(directory, "service-trust.json")
 	arguments := []string{
 		"activate", "-bundle", bundlePath, "-config", configPath,
@@ -128,4 +126,82 @@ func TestAgentServiceActivateConfiguresPresetAndExportsRecoverableTrust(t *testi
 	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "output path is invalid") {
 		t.Fatalf("root trust output error = %v", err)
 	}
+}
+
+func TestAgentServiceActivateConfiguresPortableRuntimePreset(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "steward-portable-service-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	bundle := publishedAgentBundle(
+		t, agentservice.RuntimeEngine,
+		"registry.example/portable-agent@sha256:"+strings.Repeat("a", 64),
+	)
+	bundleRaw, err := agentapp.MarshalCanonical(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(directory, "agent.bundle.json")
+	if err := os.WriteFile(bundlePath, bundleRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeAgentServiceTestConfig(t, directory)
+	trustPath := filepath.Join(directory, "service-trust.json")
+	var output bytes.Buffer
+	if err := agentServiceCommand([]string{
+		"activate", "-bundle", bundlePath, "-config", configPath,
+		"-tenant-id", "tenant-a", "-node-id", "node-a", "-trust-out", trustPath,
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var summary agentServiceActivationSummary
+	if err := json.Unmarshal(output.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Runtime != agentservice.RuntimeEngine || summary.ServiceID != agentservice.ServiceID {
+		t.Fatalf("portable service activation summary = %+v", summary)
+	}
+	loaded, _, _, _, err := gateway.LoadConfig(configPath)
+	if err != nil || len(loaded.ServiceOperations) != 1 {
+		t.Fatalf("load portable service Gateway config: operations=%+v err=%v", loaded.ServiceOperations, err)
+	}
+	operation := loaded.ServiceOperations[0]
+	if operation.ServiceID != agentservice.ServiceID || operation.ID != agentservice.OperationID ||
+		operation.Path != agentservice.InvocationPath ||
+		operation.StatusPathPrefix != agentservice.StatusPathPrefix ||
+		operation.TaskProtocol != agentservice.TaskProtocol {
+		t.Fatalf("portable service operation = %+v", operation)
+	}
+}
+
+func writeAgentServiceTestConfig(t *testing.T, directory string) string {
+	t.Helper()
+	serviceToken := filepath.Join(directory, "gateway.token")
+	if err := os.WriteFile(serviceToken, []byte("gateway-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptPrivate := filepath.Join(directory, "receipts.private.pem")
+	receiptPublic := filepath.Join(directory, "receipts.public")
+	if err := keygen([]string{"-private-out", receiptPrivate, "-public-out", receiptPublic}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	config := gateway.Config{
+		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8091",
+		ServiceTokenFile: serviceToken, StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
+		ExecutorGID: os.Getgid(), RelayGID: os.Getgid(), ConnectorReceiptFile: filepath.Join(directory, "receipts.ndjson"),
+		ConnectorReceiptKeyFile: receiptPrivate, ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
+	}
+	if config.ExecutorGID == 0 {
+		config.ExecutorGID, config.RelayGID = 1, 1
+	}
+	configRaw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "gateway.json")
+	if err := os.WriteFile(configPath, configRaw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
 }

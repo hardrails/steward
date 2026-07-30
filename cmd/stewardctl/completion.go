@@ -29,7 +29,7 @@ var completionTree = map[string][]string{
 	"agent":                       {"create", "init", "template", "validate", "build", "publish", "authorize", "service", "plan", "apply", "deploy", "deployment", "fork", "doctor"},
 	"agent template":              {"list", "show", "workspace", "research", "developer"},
 	"agent template show":         {"workspace", "research", "developer"},
-	"agent service":               {"activate"},
+	"agent service":               {"activate", "contract"},
 	"agent deployment":            {"apply", "wait", "status", "list", "pause", "resume", "remove"},
 	"workroom":                    {"create", "list", "show", "delete", "session", "artifact", "memory"},
 	"workroom session":            {"create"},

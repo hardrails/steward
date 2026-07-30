@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/agentservice"
 )
 
 // BuildIntent joins a portable agent bundle to one already authenticated
@@ -47,11 +48,8 @@ func buildIntent(
 		return admission.InstanceIntent{}, errors.New("agent admission generation must be positive")
 	}
 	capsule := verified.Capsule
-	profileID := map[string]string{
-		"workspace": "hermes-v1", "research": "hermes-research-v1", "developer": "hermes-developer-v1",
-	}[bundle.Definition.EffectiveToolProfile()]
-	serviceID := map[string]string{"hermes": "hermes-api"}[bundle.Definition.Runtime.Engine]
-	if capsule.Profile != (admission.ProfileRef{ID: profileID, Version: "v1"}) {
+	profile, serviceID := agentRuntimeAdmissionContract(bundle.Definition)
+	if capsule.Profile != profile {
 		return admission.InstanceIntent{}, errors.New("agent runtime does not match the authenticated capsule profile")
 	}
 	expectedImage := capsule.Image.Repository + "@" + capsule.Image.ManifestDigest
@@ -119,6 +117,18 @@ func buildIntent(
 		return admission.InstanceIntent{}, fmt.Errorf("agent admission policy: %w", err)
 	}
 	return intent, nil
+}
+
+func agentRuntimeAdmissionContract(definition Definition) (admission.ProfileRef, string) {
+	if definition.Runtime.Engine == agentservice.RuntimeEngine {
+		return admission.ProfileRef{
+			ID: agentservice.ProfileID, Version: agentservice.ProfileVersion,
+		}, agentservice.ServiceID
+	}
+	profileID := map[string]string{
+		"workspace": "hermes-v1", "research": "hermes-research-v1", "developer": "hermes-developer-v1",
+	}[definition.EffectiveToolProfile()]
+	return admission.ProfileRef{ID: profileID, Version: "v1"}, "hermes-api"
 }
 
 func defaultEffectMode(policy admission.SitePolicy, tenantID string) (string, error) {

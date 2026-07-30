@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -191,13 +192,19 @@ func (value Definition) Validate() error {
 	if err := ValidateName(value.Name); err != nil {
 		return err
 	}
-	wantContract := map[string]string{"hermes": "steward.hermes-agent.v1"}
+	wantContract := map[string]string{
+		"hermes":                   "steward.hermes-agent.v1",
+		agentservice.RuntimeEngine: agentservice.AdapterContractV1,
+	}
 	contract, ok := wantContract[value.Runtime.Engine]
 	if !ok || value.Runtime.AdapterContract != contract {
-		return errors.New("runtime must select hermes with its exact Steward adapter contract")
+		return errors.New("runtime must select a supported engine with its exact Steward adapter contract")
 	}
 	if !validImage(value.Runtime.Image) {
 		return errors.New("runtime image must be a bounded OCI reference pinned by sha256 digest")
+	}
+	if value.Runtime.Engine == agentservice.RuntimeEngine && value.EffectiveToolProfile() != "workspace" {
+		return errors.New("agent-service runtime accepts only the neutral workspace tool profile")
 	}
 	switch value.EffectiveToolProfile() {
 	case "workspace":

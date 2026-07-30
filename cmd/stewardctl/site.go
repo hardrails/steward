@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -316,6 +317,7 @@ func buildSitePackage(siteID, tenantID, repository string, serviceIDs, connector
 			KeyID: "publisher-1", PublicKey: base64.StdEncoding.EncodeToString(keys["publisher"].public),
 			AllowedProfiles: []admission.ProfileRef{
 				{ID: "generic-v1", Version: "v1"},
+				{ID: agentservice.ProfileID, Version: agentservice.ProfileVersion},
 				{ID: "hermes-v1", Version: "v1"},
 				{ID: "hermes-research-v1", Version: "v1"},
 				{ID: "hermes-developer-v1", Version: "v1"},

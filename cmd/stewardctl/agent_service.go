@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/hardrails/steward/internal/agentapp"
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/gateway"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -28,10 +29,20 @@ type agentServiceActivationSummary struct {
 }
 
 func agentServiceCommand(arguments []string, stdout io.Writer) error {
-	if len(arguments) == 0 || arguments[0] != "activate" {
-		return errors.New("agent service requires activate")
+	if len(arguments) == 0 {
+		return errors.New("agent service requires activate or contract")
 	}
-	return agentServiceActivate(arguments[1:], stdout)
+	switch arguments[0] {
+	case "activate":
+		return agentServiceActivate(arguments[1:], stdout)
+	case "contract":
+		if len(arguments) != 1 {
+			return errors.New("agent service contract accepts no arguments")
+		}
+		return writeAgentJSON(stdout, agentservice.V1())
+	default:
+		return errors.New("agent service requires activate or contract")
+	}
 }
 
 func agentServiceActivate(arguments []string, stdout io.Writer) error {

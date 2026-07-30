@@ -1,0 +1,351 @@
+openapi: 3.0.3
+info:
+  title: Steward Portable Agent Service API
+  version: "1.0.0"
+  description: |
+    Runtime-neutral HTTP contract implemented by an image using the
+    `steward.agent-service.v1` adapter contract. Steward fixes the image command
+    to `serve`, mutable state to `/state`, and the private service to
+    `agent-api:8080`. This API is reached only through an admitted private
+    service grant; it is not a public tenant ingress API.
+
+    Steward Gateway authenticates and durably spends the signed task before
+    dispatch. The agent service owns only an idempotent invocation identity,
+    bounded lifecycle reporting, and its application-specific result. A
+    completed status is an agent assertion, not proof that the work is correct.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Steward
+    url: https://github.com/hardrails/steward
+servers:
+  - url: http://127.0.0.1:8080
+    description: Development view of the private `agent-api` service.
+tags:
+  - name: health
+    description: Report compatibility and readiness without duplicating deployment authority.
+  - name: invocations
+    description: Accept and observe one bounded, caller-identified agent invocation.
+paths:
+  /v1/healthz:
+    get:
+      tags: [health]
+      operationId: getPortableAgentHealth
+      summary: Inspect adapter compatibility and readiness
+      description: |
+        Returns the exact adapter contract and readiness state. Steward already
+        binds the admitted deployment and immutable image outside the worker, so
+        the worker does not repeat unverifiable deployment metadata. A ready
+        service returns 200. A service that cannot accept new invocations
+        returns 503 with `not_ready` or `draining`.
+      responses:
+        "200":
+          description: The service implements the exact adapter and is ready for invocations.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHealth"
+        "503":
+          description: The deployment is starting, degraded, or draining.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHealth"
+  /v1/invocations:
+    post:
+      tags: [invocations]
+      operationId: createPortableAgentInvocation
+      summary: Accept one exact portable agent invocation
+      description: |
+        Accepts one strict JSON request no larger than 65536 bytes. The
+        `invocation_id` is a caller-selected idempotency key. An exact replay
+        returns the original `run_id`; reusing it with different request bytes
+        returns 409 and never starts replacement work.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentInvocation"
+      responses:
+        "200":
+          description: An exact replay returned the previously accepted run identity.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationAccepted"
+        "202":
+          description: The new invocation was accepted for finite execution.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "409":
+          $ref: "#/components/responses/InvocationConflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/CapacityUnavailable"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/invocations/{run_id}:
+    parameters:
+      - $ref: "#/components/parameters/RunID"
+    get:
+      tags: [invocations]
+      operationId: getPortableAgentInvocation
+      summary: Observe one invocation lifecycle and bounded result
+      description: |
+        Returns one JSON object no larger than 1048576 bytes. `queued` and
+        `running` are transient. `completed`, `failed`, and `cancelled` are
+        terminal and must remain byte-stable for the retained run lifetime so
+        Gateway can recover and compare terminal evidence after interruption.
+      responses:
+        "200":
+          description: Current lifecycle state and, when terminal, the bounded agent result.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationStatus"
+        "404":
+          $ref: "#/components/responses/InvocationNotFound"
+        "429":
+          $ref: "#/components/responses/CapacityUnavailable"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+components:
+  parameters:
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      description: Exact service-generated run identity returned at invocation acceptance.
+      schema:
+        $ref: "#/components/schemas/BoundedID"
+  headers:
+    NoStore:
+      description: Prevents intermediary storage of agent lifecycle content.
+      schema:
+        type: string
+        enum: [no-store]
+    NoSniff:
+      description: Prevents response content-type sniffing.
+      schema:
+        type: string
+        enum: [nosniff]
+    RetryAfter:
+      description: Whole seconds before the caller should make another bounded attempt.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 60
+  schemas:
+    BoundedID:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    AgentHealth:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - status
+        - adapter_contract
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.agent-health.v1]
+        status:
+          type: string
+          enum: [ready, not_ready, draining]
+        adapter_contract:
+          type: string
+          enum: [steward.agent-service.v1]
+    AgentInvocation:
+      type: object
+      additionalProperties: false
+      x-steward-max-body-bytes: 65536
+      required: [schema_version, invocation_id, input]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.agent-invocation.v1]
+        invocation_id:
+          allOf:
+            - $ref: "#/components/schemas/BoundedID"
+          description: Stable caller identity used for exact-request idempotency.
+        input:
+          description: Application-defined JSON input. Steward does not interpret its semantics.
+    InvocationAccepted:
+      type: object
+      additionalProperties: false
+      required: [run_id]
+      properties:
+        run_id:
+          $ref: "#/components/schemas/BoundedID"
+    InvocationStatus:
+      type: object
+      additionalProperties: false
+      x-steward-max-body-bytes: 1048576
+      required: [schema_version, invocation_id, run_id, status]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.agent-invocation.v1]
+        invocation_id:
+          $ref: "#/components/schemas/BoundedID"
+        run_id:
+          $ref: "#/components/schemas/BoundedID"
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        result:
+          description: Application-defined JSON result, normally present only for `completed`.
+        error:
+          allOf:
+            - $ref: "#/components/schemas/AgentFailure"
+          description: Bounded agent-authored failure, normally present only for `failed`.
+    AgentFailure:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4096
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4096
+  responses:
+    InvalidRequest:
+      description: The request is malformed, ambiguous, or uses an invalid invocation identity.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvocationConflict:
+      description: The invocation identity is already bound to different exact request bytes.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RequestTooLarge:
+      description: The exact invocation request exceeds 65536 bytes.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnsupportedMediaType:
+      description: The request is not an unencoded `application/json` body.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    CapacityUnavailable:
+      description: The deployment's finite invocation capacity is currently full.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServiceUnavailable:
+      description: The deployment cannot currently accept or report invocations.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvocationNotFound:
+      description: No invocation exists for the exact run identity.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

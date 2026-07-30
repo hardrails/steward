@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/agentservice"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -1401,6 +1402,11 @@ func (r StaticRegistry) Lookup(ref ProfileRef) (Profile, bool) {
 func DefaultProfiles() StaticRegistry {
 	return StaticRegistry{
 		{Ref: ProfileRef{ID: "generic-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/state", StateSchemaVersion: "v1"},
+		{
+			Ref: ProfileRef{ID: agentservice.ProfileID, Version: agentservice.ProfileVersion},
+			UID: 65532, GID: 65532, StatePath: agentservice.StatePath, StateSchemaVersion: "v1",
+			Command: []string{agentservice.Command}, ServiceID: agentservice.ServiceID, ServicePort: agentservice.ServicePort,
+		},
 		{Ref: ProfileRef{ID: "hermes-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},
 		{Ref: ProfileRef{ID: "hermes-research-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},
 		{Ref: ProfileRef{ID: "hermes-developer-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1", Command: []string{"serve"}, ServiceID: "hermes-api", ServicePort: 8766},

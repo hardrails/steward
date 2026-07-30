@@ -1,6 +1,6 @@
 ---
 title: APIs and protocol schemas
-description: Authoritative Steward Control, supervisor, Executor, and Gateway OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
+description: Authoritative Steward Control, supervisor, Executor, Gateway, and portable agent service OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
 section: Reference
 ---
 
@@ -14,10 +14,22 @@ is a defect, not an extension clients should use.
 - [Steward Control OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-control.v1.yaml)
 - [Steward Executor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-executor.v1.yaml)
 - [Steward Gateway task lifecycle OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-gateway.v1.yaml)
+- [Portable agent service OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-agent-service.v1.yaml)
 - [Raw supervisor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward.v1.yaml)
 - [Raw Steward Control YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-control.v1.yaml)
 - [Raw Executor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-executor.v1.yaml)
 - [Raw Gateway task lifecycle YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-gateway.v1.yaml)
+- [Raw portable agent service YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-agent-service.v1.yaml)
+
+## Portable agent service API
+
+An image using `steward.agent-service.v1` exposes `GET /v1/healthz`,
+`POST /v1/invocations`, and `GET /v1/invocations/{run_id}` on its private
+`agent-api:8080` service. Gateway maps the invocation and status paths to its
+existing tenant-signed service-task lifecycle. The worker contract is not a
+public management endpoint and defines no workflow or result semantics. See
+[Run a portable agent service]({{ '/guides/portable-agent-services/' |
+relative_url }}) for the fixed deployment boundary.
 
 ## Steward Control API
 
