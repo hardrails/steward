@@ -54,6 +54,144 @@ def pdf_with_text(text: str) -> bytes:
     return bytes(document)
 
 
+class SearchTests(unittest.TestCase):
+    def test_brave_search_normalizes_only_public_results(self) -> None:
+        response = {
+            "web": {
+                "results": [
+                    {
+                        "description": "Decision-relevant excerpt",
+                        "title": "Primary source",
+                        "url": "https://source.example/report",
+                    },
+                    {
+                        "description": "Ignore private destinations",
+                        "title": "Private source",
+                        "url": "http://127.0.0.1/private",
+                    },
+                ]
+            }
+        }
+        with (
+            mock.patch.object(worker, "upstream_json", return_value=response) as upstream,
+            mock.patch.object(
+                worker,
+                "public_url",
+                side_effect=[
+                    "https://source.example/report",
+                    worker.WorkerError(400, "private_source_denied", "private"),
+                ],
+            ),
+        ):
+            result = worker.search(
+                {"query": "Colusa data center zoning", "limit": 5},
+                None,
+                b"brave-fixture-key",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "schema_version": "steward.research-search-result.v1",
+                "results": [
+                    {
+                        "engine": "brave",
+                        "snippet": "Decision-relevant excerpt",
+                        "title": "Primary source",
+                        "url": "https://source.example/report",
+                    }
+                ],
+            },
+        )
+        upstream.assert_called_once_with(
+            worker.BRAVE_API_BASE,
+            "GET",
+            "/res/v1/web/search?q=Colusa+data+center+zoning&count=5",
+            None,
+            subscription_token=b"brave-fixture-key",
+            retryable_statuses=worker.BRAVE_TRANSIENT_STATUS_CODES,
+            retry_delays_seconds=worker.BRAVE_RETRY_DELAYS_SECONDS,
+        )
+
+    def test_upstream_retries_only_configured_transient_statuses(self) -> None:
+        class Response:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self._body = body
+
+            def read(self, maximum: int) -> bytes:
+                self.maximum = maximum
+                return self._body
+
+        class Connection:
+            def __init__(self, response: Response) -> None:
+                self.response = response
+                self.closed = False
+
+            def request(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def getresponse(self) -> Response:
+                return self.response
+
+            def close(self) -> None:
+                self.closed = True
+
+        first = Connection(Response(502, b'{"error":"retry"}'))
+        second = Connection(Response(200, b'{"result":"ok"}'))
+        with (
+            mock.patch.object(
+                worker.http.client,
+                "HTTPSConnection",
+                side_effect=[first, second],
+            ) as connections,
+            mock.patch.object(worker.time, "sleep") as sleep,
+        ):
+            result = worker.upstream_json(
+                worker.BRAVE_API_BASE,
+                "GET",
+                "/res/v1/web/search?q=retry",
+                None,
+                retryable_statuses=frozenset({502}),
+                retry_delays_seconds=(1.0,),
+            )
+
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(connections.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+
+    def test_search_keeps_keyless_searx_path_when_brave_is_not_configured(self) -> None:
+        upstream_base = urllib.parse.urlsplit("https://search.example")
+        response = {
+            "results": [
+                {
+                    "content": "Public search result",
+                    "engine": "fixture",
+                    "title": "Source",
+                    "url": "https://source.example/report",
+                }
+            ]
+        }
+        with (
+            mock.patch.object(worker, "upstream_json", return_value=response) as upstream,
+            mock.patch.object(worker, "public_url", return_value="https://source.example/report"),
+        ):
+            result = worker.search(
+                {"query": "Colusa site diligence", "limit": 5},
+                upstream_base,
+            )
+
+        self.assertEqual(result["results"][0]["engine"], "fixture")
+        upstream.assert_called_once_with(
+            upstream_base,
+            "GET",
+            "/search?q=Colusa+site+diligence&format=json",
+            None,
+        )
+
+
 class PDFExtractionTests(unittest.TestCase):
     @unittest.skipUnless(PYPDF_AVAILABLE, "pypdf is installed in the research worker image")
     def test_child_extracts_text_with_bounded_output(self) -> None:

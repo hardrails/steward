@@ -17,11 +17,15 @@
 
 set -e
 
-before=$(git stash list | wc -l)
-git stash push --keep-index --include-untracked --quiet -m "pre-commit: autostash"
-after=$(git stash list | wc -l)
 stashed=0
-[ "$after" -gt "$before" ] && stashed=1
+# A staged-only commit needs no stash. Creating one anyway records the index
+# snapshot and can make the later restore conflict with that same index.
+if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+	before=$(git stash list | wc -l)
+	git stash push --keep-index --include-untracked --quiet -m "pre-commit: autostash"
+	after=$(git stash list | wc -l)
+	[ "$after" -gt "$before" ] && stashed=1
+fi
 
 restore() {
 	if [ "$stashed" -eq 1 ]; then

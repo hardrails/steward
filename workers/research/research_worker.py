@@ -29,6 +29,9 @@ MAX_RESPONSE = 1 << 20
 MAX_SOURCE_TEXT = 256 << 10
 MAX_V2_SOURCE_TEXT = 32 << 10
 UPSTREAM_TIMEOUT = 45
+BRAVE_API_BASE = urllib.parse.urlsplit("https://api.search.brave.com")
+BRAVE_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+BRAVE_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 MAX_REDIRECTS = 5
 V2_MAX_CONCURRENCY = 4
 V2_SOURCE_SECONDS = 15
@@ -159,6 +162,9 @@ def upstream_json(
     path: str,
     payload: object | None,
     token: bytes | None = None,
+    subscription_token: bytes | None = None,
+    retryable_statuses: frozenset[int] = frozenset(),
+    retry_delays_seconds: tuple[float, ...] = (),
 ) -> object:
     body = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
     headers = {"Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": "steward-research-worker/1"}
@@ -166,24 +172,44 @@ def upstream_json(
         headers.update({"Content-Type": "application/json", "Content-Length": str(len(body))})
     if token is not None:
         headers["Authorization"] = "Bearer " + token.decode("ascii")
+    if subscription_token is not None:
+        headers["X-Subscription-Token"] = subscription_token.decode("ascii")
+    if (
+        type(retryable_statuses) is not frozenset
+        or any(type(status) is not int for status in retryable_statuses)
+        or type(retry_delays_seconds) is not tuple
+        or any(
+            type(delay) is not float or not 0.0 < delay <= 5.0
+            for delay in retry_delays_seconds
+        )
+    ):
+        raise RuntimeError("upstream retry policy is invalid")
     connection_type = http.client.HTTPSConnection if base.scheme == "https" else http.client.HTTPConnection
-    connection = connection_type(base.hostname, base.port, timeout=UPSTREAM_TIMEOUT)
-    try:
-        connection.request(method, path, body=body, headers=headers)
-        response = connection.getresponse()
-        content = response.read(MAX_UPSTREAM + 1)
-        if len(content) > MAX_UPSTREAM:
-            raise WorkerError(502, "upstream_response_too_large", "research upstream exceeded 4 MiB")
-        if response.status < 200 or response.status >= 300:
-            raise WorkerError(502, "upstream_rejected", f"research upstream returned HTTP {response.status}")
+    for attempt in range(len(retry_delays_seconds) + 1):
+        connection = connection_type(base.hostname, base.port, timeout=UPSTREAM_TIMEOUT)
         try:
-            return json.loads(content)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise WorkerError(502, "invalid_upstream_response", "research upstream returned invalid JSON") from error
-    except (OSError, TimeoutError, http.client.HTTPException) as error:
-        raise WorkerError(502, "upstream_unavailable", "research upstream is unavailable") from error
-    finally:
-        connection.close()
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            content = response.read(MAX_UPSTREAM + 1)
+            if len(content) > MAX_UPSTREAM:
+                raise WorkerError(502, "upstream_response_too_large", "research upstream exceeded 4 MiB")
+            if response.status < 200 or response.status >= 300:
+                if (
+                    response.status in retryable_statuses
+                    and attempt < len(retry_delays_seconds)
+                ):
+                    time.sleep(retry_delays_seconds[attempt])
+                    continue
+                raise WorkerError(502, "upstream_rejected", f"research upstream returned HTTP {response.status}")
+            try:
+                return json.loads(content)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise WorkerError(502, "invalid_upstream_response", "research upstream returned invalid JSON") from error
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
+            raise WorkerError(502, "upstream_unavailable", "research upstream is unavailable") from error
+        finally:
+            connection.close()
+    raise AssertionError("upstream retry loop exhausted without a terminal result")
 
 
 def clean_text(value: object, maximum: int) -> str:
@@ -642,15 +668,21 @@ def fetch_public_page(
     raise WorkerError(502, "invalid_source_redirect", "public source redirect was rejected")
 
 
-def search(payload: dict[str, object], upstream: urllib.parse.SplitResult | None) -> dict[str, object]:
-    if upstream is None:
-        raise WorkerError(503, "search_not_configured", "search upstream is not configured")
+def search(
+    payload: dict[str, object],
+    upstream: urllib.parse.SplitResult | None,
+    brave_api_key: bytes | None = None,
+) -> dict[str, object]:
     if set(payload) != {"query", "limit"} or not isinstance(payload.get("query"), str) or type(payload.get("limit")) is not int:
         raise WorkerError(400, "invalid_request", "search requires exact query and limit fields")
     query = payload["query"]
     limit = payload["limit"]
     if not query.strip() or query != query.strip() or len(query.encode()) > 2048 or not 1 <= limit <= 20:
         raise WorkerError(400, "invalid_request", "search query or limit is outside its bound")
+    if brave_api_key is not None:
+        return search_brave(query, limit, brave_api_key)
+    if upstream is None:
+        raise WorkerError(503, "search_not_configured", "search upstream is not configured")
     encoded = urllib.parse.urlencode({"q": query, "format": "json"})
     value = upstream_json(upstream, "GET", request_path(upstream, "/search", encoded), None)
     if not isinstance(value, dict) or not isinstance(value.get("results"), list):
@@ -670,6 +702,44 @@ def search(payload: dict[str, object], upstream: urllib.parse.SplitResult | None
             "url": url,
             "snippet": clean_text(item.get("content"), 8192),
             "engine": clean_text(item.get("engine"), 128),
+        })
+    return {"schema_version": "steward.research-search-result.v1", "results": results}
+
+
+def search_brave(query: str, limit: int, api_key: bytes) -> dict[str, object]:
+    """Normalize Brave Web Search into the fixed research-search v1 result."""
+
+    value = upstream_json(
+        BRAVE_API_BASE,
+        "GET",
+        request_path(
+            BRAVE_API_BASE,
+            "/res/v1/web/search",
+            urllib.parse.urlencode({"q": query, "count": limit}),
+        ),
+        None,
+        subscription_token=api_key,
+        retryable_statuses=BRAVE_TRANSIENT_STATUS_CODES,
+        retry_delays_seconds=BRAVE_RETRY_DELAYS_SECONDS,
+    )
+    web = value.get("web") if isinstance(value, dict) else None
+    if not isinstance(web, dict) or not isinstance(web.get("results"), list):
+        raise WorkerError(502, "invalid_upstream_response", "Brave response has no web result list")
+    results = []
+    for item in web["results"]:
+        if len(results) >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        try:
+            url = public_url(item.get("url"))
+        except WorkerError:
+            continue
+        results.append({
+            "title": clean_text(item.get("title"), 2048),
+            "url": url,
+            "snippet": clean_text(item.get("description"), 8192),
+            "engine": "brave",
         })
     return {"schema_version": "steward.research-search-result.v1", "results": results}
 
@@ -986,7 +1056,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.authorize()
             payload = self.read_payload()
             if self.path == "/v1/search":
-                result = search(payload, self.server.search_upstream)
+                result = search(
+                    payload,
+                    self.server.search_upstream,
+                    self.server.brave_api_key,
+                )
             elif self.path == "/v1/extract":
                 result = extract(payload)
             elif self.path == "/v2/extract":
@@ -1051,6 +1125,11 @@ class Server(http.server.HTTPServer):
         super().__init__(address, Handler)
         self.worker_token = read_secret(os.environ.get("STEWARD_WORKER_TOKEN_FILE", ""), "worker token")
         self.search_upstream = parse_upstream(os.environ.get("STEWARD_SEARCH_URL", ""), "search upstream")
+        self.brave_api_key = read_secret(
+            os.environ.get("STEWARD_BRAVE_API_KEY_FILE", ""),
+            "Brave Search API key",
+            required=False,
+        )
 
 
 def main() -> int:
