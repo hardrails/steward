@@ -30,6 +30,8 @@ MAX_SOURCE_TEXT = 256 << 10
 MAX_V2_SOURCE_TEXT = 32 << 10
 UPSTREAM_TIMEOUT = 45
 BRAVE_API_BASE = urllib.parse.urlsplit("https://api.search.brave.com")
+BRAVE_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+BRAVE_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 MAX_REDIRECTS = 5
 V2_MAX_CONCURRENCY = 4
 V2_SOURCE_SECONDS = 15
@@ -161,6 +163,8 @@ def upstream_json(
     payload: object | None,
     token: bytes | None = None,
     subscription_token: bytes | None = None,
+    retryable_statuses: frozenset[int] = frozenset(),
+    retry_delays_seconds: tuple[float, ...] = (),
 ) -> object:
     body = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
     headers = {"Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": "steward-research-worker/1"}
@@ -170,24 +174,42 @@ def upstream_json(
         headers["Authorization"] = "Bearer " + token.decode("ascii")
     if subscription_token is not None:
         headers["X-Subscription-Token"] = subscription_token.decode("ascii")
+    if (
+        type(retryable_statuses) is not frozenset
+        or any(type(status) is not int for status in retryable_statuses)
+        or type(retry_delays_seconds) is not tuple
+        or any(
+            type(delay) is not float or not 0.0 < delay <= 5.0
+            for delay in retry_delays_seconds
+        )
+    ):
+        raise RuntimeError("upstream retry policy is invalid")
     connection_type = http.client.HTTPSConnection if base.scheme == "https" else http.client.HTTPConnection
-    connection = connection_type(base.hostname, base.port, timeout=UPSTREAM_TIMEOUT)
-    try:
-        connection.request(method, path, body=body, headers=headers)
-        response = connection.getresponse()
-        content = response.read(MAX_UPSTREAM + 1)
-        if len(content) > MAX_UPSTREAM:
-            raise WorkerError(502, "upstream_response_too_large", "research upstream exceeded 4 MiB")
-        if response.status < 200 or response.status >= 300:
-            raise WorkerError(502, "upstream_rejected", f"research upstream returned HTTP {response.status}")
+    for attempt in range(len(retry_delays_seconds) + 1):
+        connection = connection_type(base.hostname, base.port, timeout=UPSTREAM_TIMEOUT)
         try:
-            return json.loads(content)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise WorkerError(502, "invalid_upstream_response", "research upstream returned invalid JSON") from error
-    except (OSError, TimeoutError, http.client.HTTPException) as error:
-        raise WorkerError(502, "upstream_unavailable", "research upstream is unavailable") from error
-    finally:
-        connection.close()
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            content = response.read(MAX_UPSTREAM + 1)
+            if len(content) > MAX_UPSTREAM:
+                raise WorkerError(502, "upstream_response_too_large", "research upstream exceeded 4 MiB")
+            if response.status < 200 or response.status >= 300:
+                if (
+                    response.status in retryable_statuses
+                    and attempt < len(retry_delays_seconds)
+                ):
+                    time.sleep(retry_delays_seconds[attempt])
+                    continue
+                raise WorkerError(502, "upstream_rejected", f"research upstream returned HTTP {response.status}")
+            try:
+                return json.loads(content)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise WorkerError(502, "invalid_upstream_response", "research upstream returned invalid JSON") from error
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
+            raise WorkerError(502, "upstream_unavailable", "research upstream is unavailable") from error
+        finally:
+            connection.close()
+    raise AssertionError("upstream retry loop exhausted without a terminal result")
 
 
 def clean_text(value: object, maximum: int) -> str:
@@ -697,6 +719,8 @@ def search_brave(query: str, limit: int, api_key: bytes) -> dict[str, object]:
         ),
         None,
         subscription_token=api_key,
+        retryable_statuses=BRAVE_TRANSIENT_STATUS_CODES,
+        retry_delays_seconds=BRAVE_RETRY_DELAYS_SECONDS,
     )
     web = value.get("web") if isinstance(value, dict) else None
     if not isinstance(web, dict) or not isinstance(web.get("results"), list):

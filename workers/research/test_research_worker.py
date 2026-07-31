@@ -109,7 +109,58 @@ class SearchTests(unittest.TestCase):
             "/res/v1/web/search?q=Colusa+data+center+zoning&count=5",
             None,
             subscription_token=b"brave-fixture-key",
+            retryable_statuses=worker.BRAVE_TRANSIENT_STATUS_CODES,
+            retry_delays_seconds=worker.BRAVE_RETRY_DELAYS_SECONDS,
         )
+
+    def test_upstream_retries_only_configured_transient_statuses(self) -> None:
+        class Response:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self._body = body
+
+            def read(self, maximum: int) -> bytes:
+                self.maximum = maximum
+                return self._body
+
+        class Connection:
+            def __init__(self, response: Response) -> None:
+                self.response = response
+                self.closed = False
+
+            def request(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def getresponse(self) -> Response:
+                return self.response
+
+            def close(self) -> None:
+                self.closed = True
+
+        first = Connection(Response(502, b'{"error":"retry"}'))
+        second = Connection(Response(200, b'{"result":"ok"}'))
+        with (
+            mock.patch.object(
+                worker.http.client,
+                "HTTPSConnection",
+                side_effect=[first, second],
+            ) as connections,
+            mock.patch.object(worker.time, "sleep") as sleep,
+        ):
+            result = worker.upstream_json(
+                worker.BRAVE_API_BASE,
+                "GET",
+                "/res/v1/web/search?q=retry",
+                None,
+                retryable_statuses=frozenset({502}),
+                retry_delays_seconds=(1.0,),
+            )
+
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(connections.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
 
     def test_search_keeps_keyless_searx_path_when_brave_is_not_configured(self) -> None:
         upstream_base = urllib.parse.urlsplit("https://search.example")
