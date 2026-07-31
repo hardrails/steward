@@ -55,20 +55,22 @@ def pdf_with_text(text: str) -> bytes:
 
 
 class SearchTests(unittest.TestCase):
-    def test_tavily_search_normalizes_only_public_results(self) -> None:
+    def test_brave_search_normalizes_only_public_results(self) -> None:
         response = {
-            "results": [
-                {
-                    "content": "Decision-relevant excerpt",
-                    "title": "Primary source",
-                    "url": "https://source.example/report",
-                },
-                {
-                    "content": "Ignore private destinations",
-                    "title": "Private source",
-                    "url": "http://127.0.0.1/private",
-                },
-            ]
+            "web": {
+                "results": [
+                    {
+                        "description": "Decision-relevant excerpt",
+                        "title": "Primary source",
+                        "url": "https://source.example/report",
+                    },
+                    {
+                        "description": "Ignore private destinations",
+                        "title": "Private source",
+                        "url": "http://127.0.0.1/private",
+                    },
+                ]
+            }
         }
         with (
             mock.patch.object(worker, "upstream_json", return_value=response) as upstream,
@@ -84,7 +86,7 @@ class SearchTests(unittest.TestCase):
             result = worker.search(
                 {"query": "Colusa data center zoning", "limit": 5},
                 None,
-                b"tavily-fixture-key",
+                b"brave-fixture-key",
             )
 
         self.assertEqual(
@@ -93,7 +95,7 @@ class SearchTests(unittest.TestCase):
                 "schema_version": "steward.research-search-result.v1",
                 "results": [
                     {
-                        "engine": "tavily",
+                        "engine": "brave",
                         "snippet": "Decision-relevant excerpt",
                         "title": "Primary source",
                         "url": "https://source.example/report",
@@ -102,22 +104,14 @@ class SearchTests(unittest.TestCase):
             },
         )
         upstream.assert_called_once_with(
-            worker.TAVILY_API_BASE,
-            "POST",
-            "/search",
-            {
-                "auto_parameters": False,
-                "include_answer": False,
-                "include_images": False,
-                "include_raw_content": False,
-                "max_results": 5,
-                "query": "Colusa data center zoning",
-                "search_depth": "basic",
-            },
-            token=b"tavily-fixture-key",
+            worker.BRAVE_API_BASE,
+            "GET",
+            "/res/v1/web/search?q=Colusa+data+center+zoning&count=5",
+            None,
+            subscription_token=b"brave-fixture-key",
         )
 
-    def test_search_keeps_keyless_searx_path_when_tavily_is_not_configured(self) -> None:
+    def test_search_keeps_keyless_searx_path_when_brave_is_not_configured(self) -> None:
         upstream_base = urllib.parse.urlsplit("https://search.example")
         response = {
             "results": [

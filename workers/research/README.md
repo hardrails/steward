@@ -3,7 +3,7 @@
 This optional container gives agents fixed `/v1/search`, `/v1/extract`, and
 `/v2/extract` surfaces without giving them search credentials or unrestricted
 network access. It adapts a SearXNG JSON API by default, and automatically uses
-the Tavily Search API when an owner-only Tavily key file is configured. Both
+the Brave Search API when an owner-only Brave key file is configured. Both
 paths normalize to the same fixed result contract before directly extracting
 bounded text from public HTTP(S) HTML, XHTML, plain-text, and PDF sources.
 
@@ -112,10 +112,10 @@ Plain HTTP search upstreams are rejected by default. A loopback or private deplo
 may opt in with `STEWARD_ALLOW_INSECURE_UPSTREAM=YES`; protect that network from
 other tenants.
 
-To use Tavily instead of the keyless SearXNG path, mount an owner-only API-key
-file and set `STEWARD_TAVILY_API_KEY_FILE` to it. The worker sends that key only
-to `https://api.tavily.com/search`; the key never enters an agent request,
-response, log, or extracted source artifact. Tavily results are still subjected
+To use Brave instead of the keyless SearXNG path, mount an owner-only API-key
+file and set `STEWARD_BRAVE_API_KEY_FILE` to it. The worker sends that key only
+to `https://api.search.brave.com/res/v1/web/search`; the key never enters an agent request,
+response, log, or extracted source artifact. Brave results are still subjected
 to the same public-destination validation as SearXNG results. If the configured
 provider rejects a request or returns no usable results, the fixed search
 contract reports the bounded error or empty list; it does not substitute

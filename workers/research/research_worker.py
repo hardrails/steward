@@ -29,7 +29,7 @@ MAX_RESPONSE = 1 << 20
 MAX_SOURCE_TEXT = 256 << 10
 MAX_V2_SOURCE_TEXT = 32 << 10
 UPSTREAM_TIMEOUT = 45
-TAVILY_API_BASE = urllib.parse.urlsplit("https://api.tavily.com")
+BRAVE_API_BASE = urllib.parse.urlsplit("https://api.search.brave.com")
 MAX_REDIRECTS = 5
 V2_MAX_CONCURRENCY = 4
 V2_SOURCE_SECONDS = 15
@@ -160,6 +160,7 @@ def upstream_json(
     path: str,
     payload: object | None,
     token: bytes | None = None,
+    subscription_token: bytes | None = None,
 ) -> object:
     body = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
     headers = {"Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": "steward-research-worker/1"}
@@ -167,6 +168,8 @@ def upstream_json(
         headers.update({"Content-Type": "application/json", "Content-Length": str(len(body))})
     if token is not None:
         headers["Authorization"] = "Bearer " + token.decode("ascii")
+    if subscription_token is not None:
+        headers["X-Subscription-Token"] = subscription_token.decode("ascii")
     connection_type = http.client.HTTPSConnection if base.scheme == "https" else http.client.HTTPConnection
     connection = connection_type(base.hostname, base.port, timeout=UPSTREAM_TIMEOUT)
     try:
@@ -646,7 +649,7 @@ def fetch_public_page(
 def search(
     payload: dict[str, object],
     upstream: urllib.parse.SplitResult | None,
-    tavily_api_key: bytes | None = None,
+    brave_api_key: bytes | None = None,
 ) -> dict[str, object]:
     if set(payload) != {"query", "limit"} or not isinstance(payload.get("query"), str) or type(payload.get("limit")) is not int:
         raise WorkerError(400, "invalid_request", "search requires exact query and limit fields")
@@ -654,8 +657,8 @@ def search(
     limit = payload["limit"]
     if not query.strip() or query != query.strip() or len(query.encode()) > 2048 or not 1 <= limit <= 20:
         raise WorkerError(400, "invalid_request", "search query or limit is outside its bound")
-    if tavily_api_key is not None:
-        return search_tavily(query, limit, tavily_api_key)
+    if brave_api_key is not None:
+        return search_brave(query, limit, brave_api_key)
     if upstream is None:
         raise WorkerError(503, "search_not_configured", "search upstream is not configured")
     encoded = urllib.parse.urlencode({"q": query, "format": "json"})
@@ -681,28 +684,25 @@ def search(
     return {"schema_version": "steward.research-search-result.v1", "results": results}
 
 
-def search_tavily(query: str, limit: int, api_key: bytes) -> dict[str, object]:
-    """Normalize Tavily's credentialed agent-search response into v1 results."""
+def search_brave(query: str, limit: int, api_key: bytes) -> dict[str, object]:
+    """Normalize Brave Web Search into the fixed research-search v1 result."""
 
     value = upstream_json(
-        TAVILY_API_BASE,
-        "POST",
-        request_path(TAVILY_API_BASE, "/search"),
-        {
-            "auto_parameters": False,
-            "include_answer": False,
-            "include_images": False,
-            "include_raw_content": False,
-            "max_results": limit,
-            "query": query,
-            "search_depth": "basic",
-        },
-        token=api_key,
+        BRAVE_API_BASE,
+        "GET",
+        request_path(
+            BRAVE_API_BASE,
+            "/res/v1/web/search",
+            urllib.parse.urlencode({"q": query, "count": limit}),
+        ),
+        None,
+        subscription_token=api_key,
     )
-    if not isinstance(value, dict) or not isinstance(value.get("results"), list):
-        raise WorkerError(502, "invalid_upstream_response", "Tavily response has no result list")
+    web = value.get("web") if isinstance(value, dict) else None
+    if not isinstance(web, dict) or not isinstance(web.get("results"), list):
+        raise WorkerError(502, "invalid_upstream_response", "Brave response has no web result list")
     results = []
-    for item in value["results"]:
+    for item in web["results"]:
         if len(results) >= limit:
             break
         if not isinstance(item, dict):
@@ -714,8 +714,8 @@ def search_tavily(query: str, limit: int, api_key: bytes) -> dict[str, object]:
         results.append({
             "title": clean_text(item.get("title"), 2048),
             "url": url,
-            "snippet": clean_text(item.get("content"), 8192),
-            "engine": "tavily",
+            "snippet": clean_text(item.get("description"), 8192),
+            "engine": "brave",
         })
     return {"schema_version": "steward.research-search-result.v1", "results": results}
 
@@ -1035,7 +1035,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result = search(
                     payload,
                     self.server.search_upstream,
-                    self.server.tavily_api_key,
+                    self.server.brave_api_key,
                 )
             elif self.path == "/v1/extract":
                 result = extract(payload)
@@ -1101,9 +1101,9 @@ class Server(http.server.HTTPServer):
         super().__init__(address, Handler)
         self.worker_token = read_secret(os.environ.get("STEWARD_WORKER_TOKEN_FILE", ""), "worker token")
         self.search_upstream = parse_upstream(os.environ.get("STEWARD_SEARCH_URL", ""), "search upstream")
-        self.tavily_api_key = read_secret(
-            os.environ.get("STEWARD_TAVILY_API_KEY_FILE", ""),
-            "Tavily API key",
+        self.brave_api_key = read_secret(
+            os.environ.get("STEWARD_BRAVE_API_KEY_FILE", ""),
+            "Brave Search API key",
             required=False,
         )
 
