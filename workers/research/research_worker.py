@@ -29,6 +29,7 @@ MAX_RESPONSE = 1 << 20
 MAX_SOURCE_TEXT = 256 << 10
 MAX_V2_SOURCE_TEXT = 32 << 10
 UPSTREAM_TIMEOUT = 45
+TAVILY_API_BASE = urllib.parse.urlsplit("https://api.tavily.com")
 MAX_REDIRECTS = 5
 V2_MAX_CONCURRENCY = 4
 V2_SOURCE_SECONDS = 15
@@ -642,15 +643,21 @@ def fetch_public_page(
     raise WorkerError(502, "invalid_source_redirect", "public source redirect was rejected")
 
 
-def search(payload: dict[str, object], upstream: urllib.parse.SplitResult | None) -> dict[str, object]:
-    if upstream is None:
-        raise WorkerError(503, "search_not_configured", "search upstream is not configured")
+def search(
+    payload: dict[str, object],
+    upstream: urllib.parse.SplitResult | None,
+    tavily_api_key: bytes | None = None,
+) -> dict[str, object]:
     if set(payload) != {"query", "limit"} or not isinstance(payload.get("query"), str) or type(payload.get("limit")) is not int:
         raise WorkerError(400, "invalid_request", "search requires exact query and limit fields")
     query = payload["query"]
     limit = payload["limit"]
     if not query.strip() or query != query.strip() or len(query.encode()) > 2048 or not 1 <= limit <= 20:
         raise WorkerError(400, "invalid_request", "search query or limit is outside its bound")
+    if tavily_api_key is not None:
+        return search_tavily(query, limit, tavily_api_key)
+    if upstream is None:
+        raise WorkerError(503, "search_not_configured", "search upstream is not configured")
     encoded = urllib.parse.urlencode({"q": query, "format": "json"})
     value = upstream_json(upstream, "GET", request_path(upstream, "/search", encoded), None)
     if not isinstance(value, dict) or not isinstance(value.get("results"), list):
@@ -670,6 +677,45 @@ def search(payload: dict[str, object], upstream: urllib.parse.SplitResult | None
             "url": url,
             "snippet": clean_text(item.get("content"), 8192),
             "engine": clean_text(item.get("engine"), 128),
+        })
+    return {"schema_version": "steward.research-search-result.v1", "results": results}
+
+
+def search_tavily(query: str, limit: int, api_key: bytes) -> dict[str, object]:
+    """Normalize Tavily's credentialed agent-search response into v1 results."""
+
+    value = upstream_json(
+        TAVILY_API_BASE,
+        "POST",
+        request_path(TAVILY_API_BASE, "/search"),
+        {
+            "auto_parameters": False,
+            "include_answer": False,
+            "include_images": False,
+            "include_raw_content": False,
+            "max_results": limit,
+            "query": query,
+            "search_depth": "basic",
+        },
+        token=api_key,
+    )
+    if not isinstance(value, dict) or not isinstance(value.get("results"), list):
+        raise WorkerError(502, "invalid_upstream_response", "Tavily response has no result list")
+    results = []
+    for item in value["results"]:
+        if len(results) >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        try:
+            url = public_url(item.get("url"))
+        except WorkerError:
+            continue
+        results.append({
+            "title": clean_text(item.get("title"), 2048),
+            "url": url,
+            "snippet": clean_text(item.get("content"), 8192),
+            "engine": "tavily",
         })
     return {"schema_version": "steward.research-search-result.v1", "results": results}
 
@@ -986,7 +1032,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.authorize()
             payload = self.read_payload()
             if self.path == "/v1/search":
-                result = search(payload, self.server.search_upstream)
+                result = search(
+                    payload,
+                    self.server.search_upstream,
+                    self.server.tavily_api_key,
+                )
             elif self.path == "/v1/extract":
                 result = extract(payload)
             elif self.path == "/v2/extract":
@@ -1051,6 +1101,11 @@ class Server(http.server.HTTPServer):
         super().__init__(address, Handler)
         self.worker_token = read_secret(os.environ.get("STEWARD_WORKER_TOKEN_FILE", ""), "worker token")
         self.search_upstream = parse_upstream(os.environ.get("STEWARD_SEARCH_URL", ""), "search upstream")
+        self.tavily_api_key = read_secret(
+            os.environ.get("STEWARD_TAVILY_API_KEY_FILE", ""),
+            "Tavily API key",
+            required=False,
+        )
 
 
 def main() -> int:

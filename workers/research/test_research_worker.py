@@ -54,6 +54,99 @@ def pdf_with_text(text: str) -> bytes:
     return bytes(document)
 
 
+class SearchTests(unittest.TestCase):
+    def test_tavily_search_normalizes_only_public_results(self) -> None:
+        response = {
+            "results": [
+                {
+                    "content": "Decision-relevant excerpt",
+                    "title": "Primary source",
+                    "url": "https://source.example/report",
+                },
+                {
+                    "content": "Ignore private destinations",
+                    "title": "Private source",
+                    "url": "http://127.0.0.1/private",
+                },
+            ]
+        }
+        with (
+            mock.patch.object(worker, "upstream_json", return_value=response) as upstream,
+            mock.patch.object(
+                worker,
+                "public_url",
+                side_effect=[
+                    "https://source.example/report",
+                    worker.WorkerError(400, "private_source_denied", "private"),
+                ],
+            ),
+        ):
+            result = worker.search(
+                {"query": "Colusa data center zoning", "limit": 5},
+                None,
+                b"tavily-fixture-key",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "schema_version": "steward.research-search-result.v1",
+                "results": [
+                    {
+                        "engine": "tavily",
+                        "snippet": "Decision-relevant excerpt",
+                        "title": "Primary source",
+                        "url": "https://source.example/report",
+                    }
+                ],
+            },
+        )
+        upstream.assert_called_once_with(
+            worker.TAVILY_API_BASE,
+            "POST",
+            "/search",
+            {
+                "auto_parameters": False,
+                "include_answer": False,
+                "include_images": False,
+                "include_raw_content": False,
+                "max_results": 5,
+                "query": "Colusa data center zoning",
+                "search_depth": "basic",
+            },
+            token=b"tavily-fixture-key",
+        )
+
+    def test_search_keeps_keyless_searx_path_when_tavily_is_not_configured(self) -> None:
+        upstream_base = urllib.parse.urlsplit("https://search.example")
+        response = {
+            "results": [
+                {
+                    "content": "Public search result",
+                    "engine": "fixture",
+                    "title": "Source",
+                    "url": "https://source.example/report",
+                }
+            ]
+        }
+        with (
+            mock.patch.object(worker, "upstream_json", return_value=response) as upstream,
+            mock.patch.object(worker, "public_url", return_value="https://source.example/report"),
+        ):
+            result = worker.search(
+                {"query": "Colusa site diligence", "limit": 5},
+                upstream_base,
+            )
+
+        self.assertEqual(result["results"][0]["engine"], "fixture")
+        upstream.assert_called_once_with(
+            upstream_base,
+            "GET",
+            "/search?q=Colusa+site+diligence&format=json",
+            None,
+        )
+
+
 class PDFExtractionTests(unittest.TestCase):
     @unittest.skipUnless(PYPDF_AVAILABLE, "pypdf is installed in the research worker image")
     def test_child_extracts_text_with_bounded_output(self) -> None:
