@@ -5,7 +5,7 @@ This optional container gives agents fixed `/v1/search`, `/v1/extract`, and
 network access. It adapts a SearXNG JSON API by default, and automatically uses
 the Brave Search API when an owner-only Brave key file is configured. Both
 paths normalize to the same fixed result contract before directly extracting
-bounded text from public HTTP(S) HTML, XHTML, plain-text, and PDF sources.
+bounded text from public HTTP(S) HTML, XHTML, plain-text, JSON, and PDF sources.
 
 The worker is intentionally not a crawler or browser. Before each request and
 redirect, it resolves the hostname, rejects the destination if any returned
@@ -60,7 +60,10 @@ URL, in request order, even when completion order differs:
 
 An extracted outcome has exactly the fields shown. `source_media_type` is the
 accepted upstream representation: `text/html`, `application/xhtml+xml`,
-`text/plain`, or `application/pdf`. `content_type` is always `text/plain` and
+`text/plain`, `application/json`, another `application/*+json` media type, or
+`application/pdf`. JSON is parsed and serialized with stable key ordering before
+it leaves the worker. JSON is limited to 8,192 values and 64 levels, and strings
+must be valid UTF-8 scalar text. `content_type` is always `text/plain` and
 describes the normalized output. Content is limited to 32 KiB of valid UTF-8;
 unsafe control characters are replaced with spaces, and `content_truncated`
 states whether the 32 KiB cap removed text.
