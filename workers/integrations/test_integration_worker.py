@@ -412,7 +412,7 @@ class HTTPContractTests(unittest.TestCase):
                 b"POST /v1/connections/google-drive/reconcile HTTP/1.1\r\n"
                 b"Authorization: Bearer worker-token-value\r\n"
                 b"Content-Type: application/json\r\n"
-                b"Content-Length: 52\r\n\r\n"
+                b"Content-Length: 43\r\n\r\n"
                 b'{"external_user_id":"ryu_abcdefghijklmnop"}'
             )
             time.sleep(0.05)
