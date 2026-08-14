@@ -1,6 +1,6 @@
 ---
 title: APIs and protocol schemas
-description: Authoritative Steward Control, supervisor, Executor, Gateway, and portable agent service OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
+description: Authoritative Steward Control, supervisor, Executor, Gateway, managed integration worker, and portable agent service OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
 section: Reference
 ---
 
@@ -14,12 +14,26 @@ is a defect, not an extension clients should use.
 - [Steward Control OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-control.v1.yaml)
 - [Steward Executor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-executor.v1.yaml)
 - [Steward Gateway task lifecycle OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-gateway.v1.yaml)
+- [Managed integration worker OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-integrations.v1.yaml)
 - [Portable agent service OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-agent-service.v1.yaml)
 - [Raw supervisor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward.v1.yaml)
 - [Raw Steward Control YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-control.v1.yaml)
 - [Raw Executor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-executor.v1.yaml)
 - [Raw Gateway task lifecycle YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-gateway.v1.yaml)
+- [Raw managed integration worker YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-integrations.v1.yaml)
 - [Raw portable agent service YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-agent-service.v1.yaml)
+
+## Managed integration worker API
+
+The optional private worker exposes one health route and four reviewed Google
+Drive connection operations. It holds managed-auth broker credentials, returns a
+short-lived Connect Link for immediate browser navigation, reconciles and revokes
+opaque account handles, and lists bounded file metadata through one frozen
+provider request. It never returns broker access tokens, provider credentials,
+file content, or a general proxy/action/MCP surface. See the
+[worker README](https://github.com/hardrails/steward/tree/main/workers/integrations)
+and [managed-auth decision]({{ '/decisions/0071-use-replaceable-managed-auth-broker/' |
+relative_url }}).
 
 ## Portable agent service API
 

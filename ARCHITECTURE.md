@@ -23,6 +23,7 @@ an untrusted containerized AI agent and managed external authority. It owns:
 - signed Executor and Gateway evidence;
 - outbound node control through public protocols; and
 - pinned, hardened bootstrap of an optional management-cluster substrate; and
+- finite managed integration operations with credentials outside workloads; and
 - offline verification.
 
 Steward does not own model serving, agent reasoning, prompt or workflow graphs,
@@ -148,6 +149,19 @@ Executor's signed command uplink.
 
 Do not add product features to this compatibility path. New workload execution,
 authority, and evidence behavior belongs in Executor and Gateway.
+
+### optional integration workers
+
+Integration workers adapt a credential broker or provider API to a small reviewed
+operation set. They hold worker and broker credentials in owner-only mounts,
+normalize bounded results, and expose neither raw credentials nor a general proxy,
+MCP server, or changing vendor action catalog. Product control planes may retain
+only opaque account handles. The first worker uses Pipedream Connect for managed
+Google Drive authorization and freezes runtime access to file metadata listing.
+
+These workers reuse a commercial credential lifecycle but remain replaceable.
+Steward owns their authority, request, response, network, and evidence contracts;
+it does not outsource those boundaries to the broker.
 
 ## Cluster substrate
 
