@@ -24,6 +24,7 @@ MAX_RESPONSE = 1 << 20
 UPSTREAM_TIMEOUT_SECONDS = 30
 CONNECT_TOKEN_SECONDS = 600
 MAX_CONCURRENCY = 8
+CLIENT_READ_TIMEOUT_SECONDS = 5
 PIPEDREAM_API_ORIGIN = "https://api.pipedream.com"
 GOOGLE_DRIVE_APP = "google_drive"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
@@ -316,23 +317,19 @@ class PipedreamClient:
         token, raw_accounts = self._accounts(user, scope)
         accounts = [safe for item in raw_accounts if (safe := self._safe_account(item, user)) is not None]
         accounts.sort(key=lambda item: (str(item["created_at"]), str(item["account_id"])), reverse=True)
-        selected = next((item for item in accounts if item["healthy"]), accounts[0] if accounts else None)
+        selected = next((item for item in accounts if self._account_ready(item)), None)
+        if selected is None:
+            selected = next((item for item in accounts if item["healthy"]), accounts[0] if accounts else None)
         if selected is None:
             return token, {
                 "schema_version": "steward.managed-connection.v1",
                 "integration": "google-drive",
                 "status": "not_connected",
             }
-        drive_scopes = {
-            scope
-            for scope in selected["authorized_scopes"]
-            if scope.startswith("https://www.googleapis.com/auth/drive")
-        }
-        has_required_scope = drive_scopes == {GOOGLE_DRIVE_SCOPE}
         return token, {
             "schema_version": "steward.managed-connection.v1",
             "integration": "google-drive",
-            "status": "ready" if selected["healthy"] and has_required_scope else "needs_attention",
+            "status": "ready" if self._account_ready(selected) else "needs_attention",
             "account_id": selected["account_id"],
             "account_name": selected["account_name"],
             "authorized_scopes": selected["authorized_scopes"],
@@ -340,9 +337,27 @@ class PipedreamClient:
             "healthy": selected["healthy"],
         }
 
+    @staticmethod
+    def _account_ready(account: Mapping[str, object]) -> bool:
+        scopes = account.get("authorized_scopes", [])
+        drive_scopes = {
+            scope
+            for scope in scopes
+            if isinstance(scope, str) and scope.startswith("https://www.googleapis.com/auth/drive")
+        }
+        return account.get("healthy") is True and drive_scopes == {GOOGLE_DRIVE_SCOPE}
+
+    def _owned_account(self, user: str, requested_account: str, scope: str) -> tuple[str, dict[str, object]]:
+        token, raw_accounts = self._accounts(user, scope)
+        for value in raw_accounts:
+            account = self._safe_account(value, user)
+            if account is not None and account["account_id"] == requested_account:
+                return token, account
+        raise WorkerError(404, "connection_not_found", "managed connection was not found")
+
     def list_drive_metadata(self, user: str, requested_account: str) -> dict[str, object]:
-        token, connection = self.reconcile(user, "connect:accounts:read connect:proxy")
-        if connection.get("status") != "ready" or connection.get("account_id") != requested_account:
+        token, connection = self._owned_account(user, requested_account, "connect:accounts:read connect:proxy")
+        if not self._account_ready(connection):
             raise WorkerError(409, "connection_not_ready", "Google Drive connection is not ready for this app")
         encoded_target = base64.urlsafe_b64encode(GOOGLE_DRIVE_TARGET.encode()).decode().rstrip("=")
         query = urllib.parse.urlencode({"account_id": requested_account, "external_user_id": user})
@@ -384,9 +399,9 @@ class PipedreamClient:
         }
 
     def revoke(self, user: str, requested_account: str) -> dict[str, object]:
-        token, connection = self.reconcile(user, "connect:accounts:read connect:accounts:write")
-        if connection.get("account_id") != requested_account:
-            raise WorkerError(404, "connection_not_found", "managed connection was not found")
+        token, _connection = self._owned_account(
+            user, requested_account, "connect:accounts:read connect:accounts:write"
+        )
         self._request(
             "DELETE",
             f"/v1/connect/{self.project_id}/accounts/{urllib.parse.quote(requested_account, safe='')}",
@@ -481,13 +496,22 @@ class IntegrationServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, address: tuple[str, int], token: bytes, client: PipedreamClient) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        token: bytes,
+        client: PipedreamClient,
+        *,
+        client_read_timeout: float = CLIENT_READ_TIMEOUT_SECONDS,
+    ) -> None:
         super().__init__(address, Handler)
         self.worker_token = token
         self.client = client
+        self.client_read_timeout = client_read_timeout
         self._concurrency = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
     def process_request(self, request: object, client_address: object) -> None:
+        request.settimeout(self.client_read_timeout)  # type: ignore[attr-defined]
         self._concurrency.acquire()
         try:
             super().process_request(request, client_address)  # type: ignore[arg-type]

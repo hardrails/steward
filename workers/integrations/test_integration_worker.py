@@ -11,8 +11,10 @@ import importlib.util
 import json
 import os
 import pathlib
+import socket
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from collections.abc import Iterator
@@ -217,6 +219,20 @@ class PipedreamClientTests(unittest.TestCase):
             _token, result = client.reconcile("ryu_abcdefghijklmnop")
         self.assertEqual(result["status"], "needs_attention")
 
+    def test_reconcile_prefers_ready_account_over_newer_over_scoped_account(self) -> None:
+        with broker_client() as (client, state):
+            ready = connected_account()
+            ready["created_at"] = "2026-08-13T00:00:00Z"
+            broader = connected_account(
+                identifier="apn_broader123",
+                scopes=[worker.GOOGLE_DRIVE_SCOPE, "https://www.googleapis.com/auth/drive"],
+            )
+            broader["created_at"] = "2026-08-14T00:00:00Z"
+            state.accounts = [broader, ready]
+            _token, result = client.reconcile("ryu_abcdefghijklmnop")
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["account_id"], "apn_owned123")
+
     def test_list_metadata_freezes_target_and_bounds_output(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
@@ -253,10 +269,21 @@ class PipedreamClientTests(unittest.TestCase):
     def test_list_metadata_rejects_unowned_account_before_proxy(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
-            with self.assertRaisesRegex(worker.WorkerError, "not ready") as caught:
+            with self.assertRaisesRegex(worker.WorkerError, "not found") as caught:
                 client.list_drive_metadata("ryu_abcdefghijklmnop", "apn_other123")
-        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.status, 404)
         self.assertFalse(any("/proxy/" in request["path"] for request in state.requests))
+
+    def test_list_metadata_uses_requested_owned_account_when_multiple_exist(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_account(identifier="apn_newer123"), connected_account()]
+            result = client.list_drive_metadata("ryu_abcdefghijklmnop", "apn_owned123")
+        self.assertEqual(result["schema_version"], "steward.google-drive-metadata.v1")
+        proxy_request = state.requests[-1]
+        self.assertEqual(
+            urllib.parse.parse_qs(urllib.parse.urlsplit(proxy_request["path"]).query)["account_id"],
+            ["apn_owned123"],
+        )
 
     def test_revoke_verifies_ownership_then_uses_write_scope(self) -> None:
         with broker_client() as (client, state):
@@ -288,8 +315,13 @@ class StubClient:
 
 
 @contextlib.contextmanager
-def integration_server() -> Iterator[int]:
-    server = worker.IntegrationServer(("127.0.0.1", 0), b"worker-token-value", StubClient())
+def integration_server(*, client_read_timeout: float = worker.CLIENT_READ_TIMEOUT_SECONDS) -> Iterator[int]:
+    server = worker.IntegrationServer(
+        ("127.0.0.1", 0),
+        b"worker-token-value",
+        StubClient(),
+        client_read_timeout=client_read_timeout,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -320,6 +352,23 @@ def call_worker(port: int, path: str, body: bytes, *, token: str = "worker-token
 
 
 class HTTPContractTests(unittest.TestCase):
+    def test_slow_unauthenticated_clients_release_all_worker_slots(self) -> None:
+        sockets: list[socket.socket] = []
+        with integration_server(client_read_timeout=0.05) as port:
+            for _index in range(worker.MAX_CONCURRENCY):
+                client = socket.create_connection(("127.0.0.1", port), timeout=1)
+                client.sendall(b"POST /v1/connections/google-drive/reconcile HTTP/1.1\r\n")
+                sockets.append(client)
+            time.sleep(0.15)
+            status, _body, _headers = call_worker(
+                port,
+                "/v1/connections/google-drive/reconcile",
+                b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+            )
+        for client in sockets:
+            client.close()
+        self.assertEqual(status, 200)
+
     def test_routes_require_worker_auth_and_exact_request_fields(self) -> None:
         with integration_server() as port:
             status, body, _headers = call_worker(
