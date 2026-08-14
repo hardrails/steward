@@ -11,6 +11,8 @@ import json
 import os
 import pathlib
 import re
+import socket
+import socketserver
 import ssl
 import stat
 import sys
@@ -24,6 +26,7 @@ MAX_RESPONSE = 1 << 20
 UPSTREAM_TIMEOUT_SECONDS = 30
 CONNECT_TOKEN_SECONDS = 600
 MAX_CONCURRENCY = 8
+MAX_HEALTH_CONCURRENCY = 2
 CLIENT_READ_TIMEOUT_SECONDS = 5
 PIPEDREAM_API_ORIGIN = "https://api.pipedream.com"
 GOOGLE_DRIVE_APP = "google_drive"
@@ -348,11 +351,16 @@ class PipedreamClient:
         return account.get("healthy") is True and drive_scopes == {GOOGLE_DRIVE_SCOPE}
 
     def _owned_account(self, user: str, requested_account: str, scope: str) -> tuple[str, dict[str, object]]:
-        token, raw_accounts = self._accounts(user, scope)
-        for value in raw_accounts:
-            account = self._safe_account(value, user)
-            if account is not None and account["account_id"] == requested_account:
-                return token, account
+        token = self.access_token(scope)
+        query = urllib.parse.urlencode({"include_credentials": "false"})
+        value = self._request(
+            "GET",
+            f"/v1/connect/{self.project_id}/accounts/{urllib.parse.quote(requested_account, safe='')}?{query}",
+            token=token,
+        )
+        account = self._safe_account(value, user)
+        if account is not None and account["account_id"] == requested_account:
+            return token, account
         raise WorkerError(404, "connection_not_found", "managed connection was not found")
 
     def list_drive_metadata(self, user: str, requested_account: str) -> dict[str, object]:
@@ -509,9 +517,37 @@ class IntegrationServer(http.server.ThreadingHTTPServer):
         self.client = client
         self.client_read_timeout = client_read_timeout
         self._concurrency = threading.BoundedSemaphore(MAX_CONCURRENCY)
+        self._health_concurrency = threading.BoundedSemaphore(MAX_HEALTH_CONCURRENCY)
+
+    @staticmethod
+    def _is_health_request(request: object) -> bool:
+        try:
+            prefix = request.recv(64, socket.MSG_PEEK | socket.MSG_DONTWAIT)  # type: ignore[attr-defined]
+        except (BlockingIOError, OSError):
+            return False
+        return prefix.startswith(b"GET /healthz HTTP/1.")
+
+    def _process_health_request(self, request: object, client_address: object) -> None:
+        try:
+            socketserver.ThreadingMixIn.process_request_thread(  # type: ignore[arg-type]
+                self, request, client_address
+            )
+        finally:
+            self._health_concurrency.release()
 
     def process_request(self, request: object, client_address: object) -> None:
         request.settimeout(self.client_read_timeout)  # type: ignore[attr-defined]
+        if self._is_health_request(request):
+            if not self._health_concurrency.acquire(blocking=False):
+                self.shutdown_request(request)  # type: ignore[arg-type]
+                return
+            threading.Thread(
+                target=self._process_health_request,
+                args=(request, client_address),
+                daemon=True,
+                name="steward-integration-health",
+            ).start()
+            return
         self._concurrency.acquire()
         try:
             super().process_request(request, client_address)  # type: ignore[arg-type]

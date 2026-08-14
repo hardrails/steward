@@ -94,6 +94,18 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/v1/connect/proj_test/accounts?"):
             self._respond(200, {"data": self.state.accounts, "page_info": {"count": len(self.state.accounts)}})
             return
+        if self.path.startswith("/v1/connect/proj_test/accounts/"):
+            account = next(
+                (
+                    value
+                    for value in self.state.accounts
+                    if isinstance(value, dict)
+                    and self.path.split("?", 1)[0].endswith("/" + str(value.get("id")))
+                ),
+                None,
+            )
+            self._respond(200, account if account is not None else {"error": "not found"})
+            return
         if self.path.startswith("/v1/connect/proj_test/proxy/"):
             value: dict[str, object] = {"files": self.state.files}
             if self.state.next_page_token is not None:
@@ -284,6 +296,10 @@ class PipedreamClientTests(unittest.TestCase):
             urllib.parse.parse_qs(urllib.parse.urlsplit(proxy_request["path"]).query)["account_id"],
             ["apn_owned123"],
         )
+        account_request = state.requests[1]
+        parsed_account = urllib.parse.urlsplit(account_request["path"])
+        self.assertEqual(parsed_account.path, "/v1/connect/proj_test/accounts/apn_owned123")
+        self.assertEqual(urllib.parse.parse_qs(parsed_account.query), {"include_credentials": ["false"]})
 
     def test_revoke_verifies_ownership_then_uses_write_scope(self) -> None:
         with broker_client() as (client, state):
@@ -315,11 +331,15 @@ class StubClient:
 
 
 @contextlib.contextmanager
-def integration_server(*, client_read_timeout: float = worker.CLIENT_READ_TIMEOUT_SECONDS) -> Iterator[int]:
+def integration_server(
+    *,
+    client: object | None = None,
+    client_read_timeout: float = worker.CLIENT_READ_TIMEOUT_SECONDS,
+) -> Iterator[int]:
     server = worker.IntegrationServer(
         ("127.0.0.1", 0),
         b"worker-token-value",
-        StubClient(),
+        client or StubClient(),
         client_read_timeout=client_read_timeout,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -352,6 +372,59 @@ def call_worker(port: int, path: str, body: bytes, *, token: str = "worker-token
 
 
 class HTTPContractTests(unittest.TestCase):
+    def test_health_remains_ready_when_all_operation_slots_are_busy(self) -> None:
+        class BlockingClient(StubClient):
+            def __init__(self) -> None:
+                self.entered = 0
+                self.all_entered = threading.Event()
+                self.release = threading.Event()
+                self.lock = threading.Lock()
+
+            def reconcile(self, user: str) -> tuple[str, dict[str, object]]:
+                with self.lock:
+                    self.entered += 1
+                    if self.entered == worker.MAX_CONCURRENCY:
+                        self.all_entered.set()
+                self.release.wait(timeout=2)
+                return super().reconcile(user)
+
+        blocking = BlockingClient()
+        results: list[int] = []
+
+        def call_operation(port: int) -> None:
+            status, _body, _headers = call_worker(
+                port,
+                "/v1/connections/google-drive/reconcile",
+                b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+            )
+            results.append(status)
+
+        with integration_server(client=blocking) as port:
+            threads = [
+                threading.Thread(target=call_operation, args=(port,))
+                for _index in range(worker.MAX_CONCURRENCY)
+            ]
+            for thread in threads:
+                thread.start()
+            self.assertTrue(blocking.all_entered.wait(timeout=1))
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
+            try:
+                started = time.monotonic()
+                connection.request("GET", "/healthz")
+                response = connection.getresponse()
+                body = json.loads(response.read())
+                elapsed = time.monotonic() - started
+            finally:
+                connection.close()
+                blocking.release.set()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["status"], "ready")
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(results, [200] * worker.MAX_CONCURRENCY)
+
     def test_slow_unauthenticated_clients_release_all_worker_slots(self) -> None:
         sockets: list[socket.socket] = []
         with integration_server(client_read_timeout=0.05) as port:
