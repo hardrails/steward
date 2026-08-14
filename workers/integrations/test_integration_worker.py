@@ -407,6 +407,15 @@ class HTTPContractTests(unittest.TestCase):
             for thread in threads:
                 thread.start()
             self.assertTrue(blocking.all_entered.wait(timeout=1))
+            overflow = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+            overflow.sendall(
+                b"POST /v1/connections/google-drive/reconcile HTTP/1.1\r\n"
+                b"Authorization: Bearer worker-token-value\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 52\r\n\r\n"
+                b'{"external_user_id":"ryu_abcdefghijklmnop"}'
+            )
+            time.sleep(0.05)
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
             try:
                 started = time.monotonic()
@@ -416,6 +425,7 @@ class HTTPContractTests(unittest.TestCase):
                 elapsed = time.monotonic() - started
             finally:
                 connection.close()
+                overflow.close()
                 blocking.release.set()
             for thread in threads:
                 thread.join(timeout=2)

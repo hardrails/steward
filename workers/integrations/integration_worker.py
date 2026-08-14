@@ -548,7 +548,9 @@ class IntegrationServer(http.server.ThreadingHTTPServer):
                 name="steward-integration-health",
             ).start()
             return
-        self._concurrency.acquire()
+        if not self._concurrency.acquire(blocking=False):
+            self.shutdown_request(request)  # type: ignore[arg-type]
+            return
         try:
             super().process_request(request, client_address)  # type: ignore[arg-type]
         except BaseException:
