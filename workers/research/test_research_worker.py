@@ -626,6 +626,28 @@ class TotalBatchExtractionTests(unittest.TestCase):
         self.assertEqual(result["outcomes"][1]["failure_code"], "source_rejected")
         self.assertNotIn(b"private upstream detail", response_body)
 
+    def test_v2_accepts_canonical_public_json_extraction(self) -> None:
+        requested_url = "https://source.example/data"
+        with mock.patch.object(
+            worker,
+            "fetch_public_page",
+            return_value=(
+                requested_url,
+                "",
+                '{\n  "address": "2861 Niagara Avenue"\n}',
+                "application/json",
+            ),
+        ):
+            outcome = worker.extract_v2_outcome(
+                requested_url,
+                time.monotonic() + worker.V2_BATCH_SECONDS,
+            )
+
+        self.assertEqual(outcome["disposition"], "extracted")
+        self.assertEqual(outcome["source_media_type"], "application/json")
+        self.assertEqual(outcome["content_type"], "text/plain")
+        self.assertIn("2861 Niagara Avenue", outcome["content"])
+
     def test_v2_failure_codes_are_closed_and_message_free(self) -> None:
         expected = {
             "source_unresolvable",

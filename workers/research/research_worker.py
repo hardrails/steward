@@ -64,6 +64,7 @@ V2_SOURCE_MEDIA_TYPES = frozenset({
     "application/xhtml+xml",
     "text/plain",
     "application/pdf",
+    "application/json",
 })
 V2_PENDING_REAPS: list[subprocess.Popen[bytes]] = []
 
@@ -691,7 +692,7 @@ def fetch_public_page(
                     url,
                     "",
                     content,
-                    content_type,
+                    "application/json",
                     include_source_media=include_source_media,
                 )
             if content_type == "text/plain":
