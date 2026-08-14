@@ -448,18 +448,20 @@ class Connection:
   def close(self): pass
 responses=[
   Response(b'{"z":2,"a":{"value":1}}',"application/json"),
+  Response(b'{"type":"Feature"}',"application/geo+json"),
   Response(b'{bad',"application/geo+json"),
   Response((b'['*2000)+b'0'+(b']'*2000),"application/json"),
   Response(b'"\\ud800"',"application/json"),
 ]
 worker.public_destination=lambda value:(value,urllib.parse.urlsplit(value),["93.184.216.34"])
-worker.request_public_page=lambda parsed,addresses:(responses.pop(0),Connection())
+worker.request_public_page=lambda parsed,addresses,deadline=None:(responses.pop(0),Connection())
 url,title,content,media=worker.fetch_public_page("https://api.example/data",include_source_media=True)
+v2=worker.extract_v2_outcome("https://api.example/feature",worker.time.monotonic()+1)
 failures=[]
 for suffix in ("bad","deep","surrogate"):
   try: worker.fetch_public_page("https://api.example/"+suffix)
   except worker.WorkerError as error: failures.append(error.code)
-print(json.dumps({"url":url,"title":title,"content":content,"media":media,"failures":failures},sort_keys=True))
+print(json.dumps({"url":url,"title":title,"content":content,"media":media,"v2":v2,"failures":failures},sort_keys=True))
 `
 	command := exec.Command(python, "-I", "-B", "-c", harness, path)
 	command.Env = isolatedPythonEnvironment(t)
@@ -468,10 +470,15 @@ print(json.dumps({"url":url,"title":title,"content":content,"media":media,"failu
 		t.Fatal(err)
 	}
 	var result struct {
-		URL      string   `json:"url"`
-		Title    string   `json:"title"`
-		Content  string   `json:"content"`
-		Media    string   `json:"media"`
+		URL     string `json:"url"`
+		Title   string `json:"title"`
+		Content string `json:"content"`
+		Media   string `json:"media"`
+		V2      struct {
+			Disposition string `json:"disposition"`
+			Media       string `json:"source_media_type"`
+			Content     string `json:"content"`
+		} `json:"v2"`
 		Failures []string `json:"failures"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
@@ -480,6 +487,8 @@ print(json.dumps({"url":url,"title":title,"content":content,"media":media,"failu
 	if result.URL != "https://api.example/data" || result.Title != "" ||
 		result.Content != "{\n  \"a\": {\n    \"value\": 1\n  },\n  \"z\": 2\n}" ||
 		result.Media != "application/json" ||
+		result.V2.Disposition != "extracted" || result.V2.Media != "application/json" ||
+		result.V2.Content != "{\n  \"type\": \"Feature\"\n}" ||
 		strings.Join(result.Failures, ",") != "unsupported_source,unsupported_source,unsupported_source" {
 		t.Fatalf("public JSON normalization=%s", raw)
 	}
