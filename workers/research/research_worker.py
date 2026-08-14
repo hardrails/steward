@@ -546,7 +546,10 @@ def request_public_page(
             connection = connection_type(parsed.hostname, address, port, remaining_source_seconds(deadline))
         try:
             connection.request("GET", path, headers={
-                "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,text/plain;q=0.8",
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/json,"
+                    "application/*+json;q=0.95,application/pdf;q=0.9,text/plain;q=0.8"
+                ),
                 "Accept-Encoding": "identity",
                 "User-Agent": "steward-research-worker/1",
             })
@@ -619,7 +622,14 @@ def fetch_public_page(
             if response.headers.get("Content-Encoding", "identity").lower() != "identity":
                 raise WorkerError(502, "unsupported_source", "compressed public source is not accepted")
             content_type = response.headers.get_content_type().lower()
-            if content_type not in {"text/html", "application/xhtml+xml", "application/pdf", "text/plain"}:
+            json_content = content_type == "application/json" or (
+                content_type.startswith("application/") and content_type.endswith("+json")
+            )
+            if (
+                content_type
+                not in {"text/html", "application/xhtml+xml", "application/pdf", "text/plain"}
+                and not json_content
+            ):
                 raise WorkerError(502, "unsupported_source", "public source content type is not supported")
             constrain_connection_to_deadline(connection, deadline)
             raw = response.read(MAX_UPSTREAM + 1)
@@ -645,6 +655,28 @@ def fetch_public_page(
                 decoded = raw.decode(charset, "replace")
             except LookupError as error:
                 raise WorkerError(502, "unsupported_source", "public source character set is not supported") from error
+            if json_content:
+                try:
+                    value = json.loads(decoded)
+                except json.JSONDecodeError as error:
+                    raise WorkerError(
+                        502,
+                        "unsupported_source",
+                        "public JSON source returned invalid JSON",
+                    ) from error
+                normalized = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                return public_page_result(
+                    url,
+                    "",
+                    clean_text(normalized, MAX_SOURCE_TEXT),
+                    content_type,
+                    include_source_media=include_source_media,
+                )
             if content_type == "text/plain":
                 return public_page_result(
                     url,

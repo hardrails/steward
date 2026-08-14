@@ -425,6 +425,59 @@ print(json.dumps({"dns":dns,"redirect":redirect,"seen":seen},sort_keys=True))
 	}
 }
 
+func TestResearchWorkerNormalizesPublicJSONAndRejectsInvalidJSON(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	path := filepath.Join(repositoryRoot(t), "workers", "research", "research_worker.py")
+	harness := `import importlib.util,json,sys,urllib.parse
+spec=importlib.util.spec_from_file_location("worker",sys.argv[1])
+worker=importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+class Headers:
+  def __init__(self,content_type): self.content_type=content_type
+  def get_all(self,name,default): return default
+  def get(self,name,default=None): return "identity" if name=="Content-Encoding" else default
+  def get_content_type(self): return self.content_type
+  def get_content_charset(self): return "utf-8"
+class Response:
+  status=200
+  def __init__(self,body,content_type): self.body=body; self.headers=Headers(content_type)
+  def read(self,maximum): return self.body
+class Connection:
+  def close(self): pass
+responses=[Response(b'{"z":2,"a":{"value":1}}',"application/json"),Response(b'{bad',"application/geo+json")]
+worker.public_destination=lambda value:(value,urllib.parse.urlsplit(value),["93.184.216.34"])
+worker.request_public_page=lambda parsed,addresses:(responses.pop(0),Connection())
+url,title,content,media=worker.fetch_public_page("https://api.example/data",include_source_media=True)
+invalid="accepted"
+try: worker.fetch_public_page("https://api.example/bad")
+except worker.WorkerError as error: invalid=error.code
+print(json.dumps({"url":url,"title":title,"content":content,"media":media,"invalid":invalid},sort_keys=True))
+`
+	command := exec.Command(python, "-I", "-B", "-c", harness, path)
+	command.Env = isolatedPythonEnvironment(t)
+	raw, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		URL     string `json:"url"`
+		Title   string `json:"title"`
+		Content string `json:"content"`
+		Media   string `json:"media"`
+		Invalid string `json:"invalid"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.URL != "https://api.example/data" || result.Title != "" ||
+		result.Content != "{\n  \"a\": {\n    \"value\": 1\n  },\n  \"z\": 2\n}" ||
+		result.Media != "application/json" || result.Invalid != "unsupported_source" {
+		t.Fatalf("public JSON normalization=%s", raw)
+	}
+}
+
 func TestResearchWorkerV2ReturnsStrictOrderedTotalOutcomes(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
