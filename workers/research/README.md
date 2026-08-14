@@ -59,9 +59,10 @@ URL, in request order, even when completion order differs:
 ```
 
 An extracted outcome has exactly the fields shown. `source_media_type` is the
-accepted upstream representation: `text/html`, `application/xhtml+xml`,
-`text/plain`, `application/json`, another `application/*+json` media type, or
-`application/pdf`. JSON is parsed and serialized with stable key ordering before
+accepted upstream representation for HTML, plain text, and PDF: `text/html`,
+`application/xhtml+xml`, `text/plain`, or `application/pdf`. Every accepted JSON
+representation, including `application/*+json`, is reported canonically as
+`application/json`. JSON is parsed and serialized with stable key ordering before
 it leaves the worker. JSON is limited to 8,192 values and 64 levels, and strings
 must be valid UTF-8 scalar text. `content_type` is always `text/plain` and
 describes the normalized output. Content is limited to 32 KiB of valid UTF-8;
