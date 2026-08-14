@@ -27,6 +27,8 @@ MAX_REQUEST = 64 << 10
 MAX_UPSTREAM = 4 << 20
 MAX_RESPONSE = 1 << 20
 MAX_SOURCE_TEXT = 256 << 10
+MAX_JSON_NODES = 8192
+MAX_JSON_DEPTH = 64
 MAX_V2_SOURCE_TEXT = 32 << 10
 UPSTREAM_TIMEOUT = 45
 BRAVE_API_BASE = urllib.parse.urlsplit("https://api.search.brave.com")
@@ -219,6 +221,26 @@ def clean_text(value: object, maximum: int) -> str:
     if len(encoded) <= maximum:
         return value
     return encoded[:maximum].decode("utf-8", "ignore")
+
+
+def normalized_json_text(decoded: str) -> str:
+    value = json.loads(decoded)
+    pending: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    while pending:
+        item, depth = pending.pop()
+        nodes += 1
+        if nodes > MAX_JSON_NODES or depth > MAX_JSON_DEPTH:
+            raise ValueError("public JSON structure exceeded its bound")
+        if isinstance(item, str):
+            item.encode("utf-8")
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                key.encode("utf-8")
+                pending.append((child, depth + 1))
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def normalized_v2_text(value: str) -> tuple[str, bool]:
@@ -657,23 +679,18 @@ def fetch_public_page(
                 raise WorkerError(502, "unsupported_source", "public source character set is not supported") from error
             if json_content:
                 try:
-                    value = json.loads(decoded)
-                except json.JSONDecodeError as error:
+                    normalized = normalized_json_text(decoded)
+                    content = clean_text(normalized, MAX_SOURCE_TEXT)
+                except (ValueError, RecursionError, UnicodeError) as error:
                     raise WorkerError(
                         502,
                         "unsupported_source",
-                        "public JSON source returned invalid JSON",
+                        "public JSON source could not be safely normalized",
                     ) from error
-                normalized = json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
                 return public_page_result(
                     url,
                     "",
-                    clean_text(normalized, MAX_SOURCE_TEXT),
+                    content,
                     content_type,
                     include_source_media=include_source_media,
                 )
