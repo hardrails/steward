@@ -722,7 +722,11 @@ def search_brave(query: str, limit: int, api_key: bytes) -> dict[str, object]:
         retryable_statuses=BRAVE_TRANSIENT_STATUS_CODES,
         retry_delays_seconds=BRAVE_RETRY_DELAYS_SECONDS,
     )
-    web = value.get("web") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or value.get("type") != "search":
+        raise WorkerError(502, "invalid_upstream_response", "Brave response is not a search result")
+    if "web" not in value:
+        return {"schema_version": "steward.research-search-result.v1", "results": []}
+    web = value["web"]
     if not isinstance(web, dict) or not isinstance(web.get("results"), list):
         raise WorkerError(502, "invalid_upstream_response", "Brave response has no web result list")
     results = []
