@@ -57,6 +57,7 @@ def pdf_with_text(text: str) -> bytes:
 class SearchTests(unittest.TestCase):
     def test_brave_search_normalizes_only_public_results(self) -> None:
         response = {
+            "type": "search",
             "web": {
                 "results": [
                     {
@@ -112,6 +113,39 @@ class SearchTests(unittest.TestCase):
             retryable_statuses=worker.BRAVE_TRANSIENT_STATUS_CODES,
             retry_delays_seconds=worker.BRAVE_RETRY_DELAYS_SECONDS,
         )
+
+    def test_brave_search_normalizes_valid_zero_result_response(self) -> None:
+        response = {
+            "query": {"original": "site:example.invalid unavailable topic"},
+            "type": "search",
+        }
+        with mock.patch.object(worker, "upstream_json", return_value=response):
+            result = worker.search(
+                {"query": "site:example.invalid unavailable topic", "limit": 5},
+                None,
+                b"brave-fixture-key",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "schema_version": "steward.research-search-result.v1",
+                "results": [],
+            },
+        )
+
+    def test_brave_search_rejects_non_search_and_malformed_web_responses(self) -> None:
+        for response in ({}, {"type": "search", "web": {}}):
+            with (
+                self.subTest(response=response),
+                mock.patch.object(worker, "upstream_json", return_value=response),
+                self.assertRaisesRegex(worker.WorkerError, "Brave response"),
+            ):
+                worker.search(
+                    {"query": "bounded query", "limit": 5},
+                    None,
+                    b"brave-fixture-key",
+                )
 
     def test_upstream_retries_only_configured_transient_statuses(self) -> None:
         class Response:
