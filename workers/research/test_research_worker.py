@@ -135,7 +135,7 @@ class SearchTests(unittest.TestCase):
         )
 
     def test_brave_search_rejects_non_search_and_malformed_web_responses(self) -> None:
-        for response in ({}, {"type": "search", "web": {}}):
+        for response in ({}, {"type": "search", "web": None}, {"type": "search", "web": {}}):
             with (
                 self.subTest(response=response),
                 mock.patch.object(worker, "upstream_json", return_value=response),
