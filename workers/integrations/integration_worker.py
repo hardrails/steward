@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import socketserver
 import ssl
 import stat
@@ -469,6 +470,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(raw) != length:
             self._json(400, {"error": {"code": "invalid_request", "message": "request body is incomplete"}})
             return
+        self.worker.request_parsed(self.request)
         try:
             value = json.loads(raw)
             if self.path == "/v1/connections/google-drive/connect-link":
@@ -513,15 +515,42 @@ class IntegrationServer(http.server.ThreadingHTTPServer):
         self.client = client
         self.client_read_timeout = client_read_timeout
         self._concurrency = threading.BoundedSemaphore(MAX_CONCURRENCY)
+        self._deadline_lock = threading.Lock()
+        self._deadlines: dict[int, threading.Timer] = {}
+
+    def handle_error(self, _request: object, _client_address: object) -> None:
+        return
+
+    @staticmethod
+    def _expire_request(request: object) -> None:
+        try:
+            request.shutdown(socket.SHUT_RDWR)  # type: ignore[attr-defined]
+        except OSError:
+            return
+
+    def _cancel_deadline(self, request: object) -> None:
+        with self._deadline_lock:
+            timer = self._deadlines.pop(id(request), None)
+        if timer is not None:
+            timer.cancel()
+
+    def request_parsed(self, request: object) -> None:
+        self._cancel_deadline(request)
 
     def process_request(self, request: object, client_address: object) -> None:
         request.settimeout(self.client_read_timeout)  # type: ignore[attr-defined]
         if not self._concurrency.acquire(blocking=False):
             self.shutdown_request(request)  # type: ignore[arg-type]
             return
+        timer = threading.Timer(self.client_read_timeout, self._expire_request, args=(request,))
+        timer.daemon = True
+        with self._deadline_lock:
+            self._deadlines[id(request)] = timer
+        timer.start()
         try:
             super().process_request(request, client_address)  # type: ignore[arg-type]
         except BaseException:
+            self._cancel_deadline(request)
             self._concurrency.release()
             raise
 
@@ -529,62 +558,29 @@ class IntegrationServer(http.server.ThreadingHTTPServer):
         try:
             super().process_request_thread(request, client_address)  # type: ignore[arg-type]
         finally:
+            self._cancel_deadline(request)
             self._concurrency.release()
 
 
-class HealthHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "steward-integration-health"
-    protocol_version = "HTTP/1.1"
-
-    def log_message(self, _format: str, *_arguments: object) -> None:
-        return
-
-    def do_GET(self) -> None:
-        if self.path != "/healthz":
-            self.send_error(404)
-            return
-        raw = b'{"schema_version":"steward.integration-health.v1","status":"ready"}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(raw)
+class HealthHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        body = b'{"schema_version":"steward.integration-health.v1","status":"ready"}'
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode("ascii")
+            + b"Cache-Control: no-store\r\n"
+            b"X-Content-Type-Options: nosniff\r\n"
+            b"Connection: close\r\n\r\n"
+            + body
+        )
+        self.request.settimeout(CLIENT_READ_TIMEOUT_SECONDS)
+        self.request.sendall(response)
 
 
-class HealthServer(http.server.ThreadingHTTPServer):
-    daemon_threads = True
-    request_queue_size = 4
-
-    def __init__(
-        self,
-        address: tuple[str, int],
-        *,
-        client_read_timeout: float = CLIENT_READ_TIMEOUT_SECONDS,
-    ) -> None:
-        super().__init__(address, HealthHandler)
-        self.client_read_timeout = client_read_timeout
-        self._concurrency = threading.BoundedSemaphore(MAX_HEALTH_CONCURRENCY)
-
-    def process_request(self, request: object, client_address: object) -> None:
-        request.settimeout(self.client_read_timeout)  # type: ignore[attr-defined]
-        if not self._concurrency.acquire(blocking=False):
-            self.shutdown_request(request)  # type: ignore[arg-type]
-            return
-        try:
-            super().process_request(request, client_address)  # type: ignore[arg-type]
-        except BaseException:
-            self._concurrency.release()
-            raise
-
-    def process_request_thread(self, request: object, client_address: object) -> None:
-        try:
-            socketserver.ThreadingMixIn.process_request_thread(  # type: ignore[arg-type]
-                self, request, client_address
-            )
-        finally:
-            self._concurrency.release()
+class HealthServer(socketserver.TCPServer):
+    allow_reuse_address = True
+    request_queue_size = MAX_HEALTH_CONCURRENCY
 
 
 def main() -> int:
@@ -602,7 +598,7 @@ def main() -> int:
         api_origin=os.environ.get("STEWARD_PIPEDREAM_API_ORIGIN", PIPEDREAM_API_ORIGIN),
     )
     server = IntegrationServer(("0.0.0.0", 8080), worker_token, client)
-    health_server = HealthServer(("0.0.0.0", 8081))
+    health_server = HealthServer(("0.0.0.0", 8081), HealthHandler)
     health_thread = threading.Thread(
         target=health_server.serve_forever,
         kwargs={"poll_interval": 0.25},

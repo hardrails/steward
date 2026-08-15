@@ -345,7 +345,7 @@ def integration_server(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield server.server_port
+        yield int(server.server_address[1])
     finally:
         server.shutdown()
         server.server_close()
@@ -353,15 +353,12 @@ def integration_server(
 
 
 @contextlib.contextmanager
-def health_server(*, client_read_timeout: float = worker.CLIENT_READ_TIMEOUT_SECONDS) -> Iterator[int]:
-    server = worker.HealthServer(
-        ("127.0.0.1", 0),
-        client_read_timeout=client_read_timeout,
-    )
+def health_server() -> Iterator[int]:
+    server = worker.HealthServer(("127.0.0.1", 0), worker.HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield server.server_port
+        yield int(server.server_address[1])
     finally:
         server.shutdown()
         server.server_close()
@@ -434,7 +431,7 @@ class HTTPContractTests(unittest.TestCase):
             time.sleep(0.05)
             fragmented = socket.create_connection(("127.0.0.1", health_port), timeout=0.5)
             fragmented.sendall(b"GET /hea")
-            time.sleep(0.05)
+            fragmented_response = fragmented.recv(4096)
             connection = http.client.HTTPConnection("127.0.0.1", health_port, timeout=0.5)
             try:
                 started = time.monotonic()
@@ -442,8 +439,6 @@ class HTTPContractTests(unittest.TestCase):
                 response = connection.getresponse()
                 body = json.loads(response.read())
                 elapsed = time.monotonic() - started
-                fragmented.sendall(b"lthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                fragmented_response = fragmented.recv(4096)
             finally:
                 connection.close()
                 fragmented.close()
@@ -463,9 +458,12 @@ class HTTPContractTests(unittest.TestCase):
         with integration_server(client_read_timeout=0.05) as port:
             for _index in range(worker.MAX_CONCURRENCY):
                 client = socket.create_connection(("127.0.0.1", port), timeout=1)
-                client.sendall(b"POST /v1/connections/google-drive/reconcile HTTP/1.1\r\n")
+                client.sendall(b"P")
                 sockets.append(client)
-            time.sleep(0.15)
+            time.sleep(0.03)
+            for client in sockets:
+                client.sendall(b"O")
+            time.sleep(0.08)
             status, _body, _headers = call_worker(
                 port,
                 "/v1/connections/google-drive/reconcile",
