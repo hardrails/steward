@@ -39,6 +39,10 @@ Run it read-only as UID/GID `65532:65532`, drop all capabilities, apply
 `no-new-privileges`, and provide egress only to `api.pipedream.com:443`. Pipedream
 performs the provider request, so the worker does not need direct Google egress.
 
+Provider operations listen on private port `8080`. Readiness is served on a separate
+private listener at `http://steward-integrations:8081/healthz`, so slow or saturated
+provider work cannot delay the deployment probe. Neither listener should be published.
+
 Every non-health endpoint requires `Authorization: Bearer <worker token>` and an
 exact bounded JSON body. Responses set `Cache-Control: no-store`; request logging
 is disabled so connect URLs cannot enter an access log.

@@ -352,6 +352,22 @@ def integration_server(
         thread.join(timeout=2)
 
 
+@contextlib.contextmanager
+def health_server(*, client_read_timeout: float = worker.CLIENT_READ_TIMEOUT_SECONDS) -> Iterator[int]:
+    server = worker.HealthServer(
+        ("127.0.0.1", 0),
+        client_read_timeout=client_read_timeout,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def call_worker(port: int, path: str, body: bytes, *, token: str = "worker-token-value") -> tuple[int, dict[str, Any], dict[str, str]]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
@@ -399,7 +415,7 @@ class HTTPContractTests(unittest.TestCase):
             )
             results.append(status)
 
-        with integration_server(client=blocking) as port:
+        with integration_server(client=blocking) as port, health_server() as health_port:
             threads = [
                 threading.Thread(target=call_operation, args=(port,))
                 for _index in range(worker.MAX_CONCURRENCY)
@@ -416,15 +432,21 @@ class HTTPContractTests(unittest.TestCase):
                 b'{"external_user_id":"ryu_abcdefghijklmnop"}'
             )
             time.sleep(0.05)
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
+            fragmented = socket.create_connection(("127.0.0.1", health_port), timeout=0.5)
+            fragmented.sendall(b"GET /hea")
+            time.sleep(0.05)
+            connection = http.client.HTTPConnection("127.0.0.1", health_port, timeout=0.5)
             try:
                 started = time.monotonic()
                 connection.request("GET", "/healthz")
                 response = connection.getresponse()
                 body = json.loads(response.read())
                 elapsed = time.monotonic() - started
+                fragmented.sendall(b"lthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                fragmented_response = fragmented.recv(4096)
             finally:
                 connection.close()
+                fragmented.close()
                 overflow.close()
                 blocking.release.set()
             for thread in threads:
@@ -432,6 +454,7 @@ class HTTPContractTests(unittest.TestCase):
 
         self.assertEqual(response.status, 200)
         self.assertEqual(body["status"], "ready")
+        self.assertIn(b"200 OK", fragmented_response)
         self.assertLess(elapsed, 0.5)
         self.assertEqual(results, [200] * worker.MAX_CONCURRENCY)
 

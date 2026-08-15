@@ -23,6 +23,9 @@ tags:
 paths:
   /healthz:
     get:
+      servers:
+        - url: http://steward-integrations:8081
+          description: Dedicated private readiness listener
       tags: [health]
       operationId: integrationWorkerHealth
       summary: Read process readiness
