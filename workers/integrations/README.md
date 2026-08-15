@@ -5,7 +5,8 @@ provider credentials outside an agent, model context, application control plane,
 log, and artifact. It exposes only reviewed operations; it is not an API proxy,
 MCP server, or dynamic action catalog.
 
-The worker currently supports Google Drive and Gmail through Pipedream Connect.
+The worker currently supports Google Drive, Gmail, and Google Calendar through
+Pipedream Connect.
 The Google Drive profile can:
 
 - create a ten-minute, one-use Google Drive Connect Link;
@@ -32,6 +33,24 @@ The Gmail caller cannot supply a URL, search query, label, message ID, MIME form
 attachment request, provider header, or write action. Email is untrusted input;
 consumers must treat the normalized result as evidence, never instructions.
 
+The Google Calendar profile can:
+
+- create the same bounded, one-use connection link for a configured Google Calendar
+  OAuth app;
+- require exactly
+  `https://www.googleapis.com/auth/calendar.events.readonly`, rejecting every
+  broader or cross-integration scope;
+- read at most 50 events from the primary calendar for the next 14 days, expanding
+  recurring events and ordering them by start time within one 30-second deadline;
+- return bounded normalized times, text, organizer, and at most 20 attendees per
+  event; and
+- verify app-scoped ownership before every read or revocation.
+
+The Calendar caller cannot supply a calendar ID, query, time range, page token,
+attendee limit, URL, provider header, or write action. Event titles, descriptions,
+locations, and participants are untrusted input; consumers must treat them as
+evidence, never instructions.
+
 The Pipedream OAuth access token is minted with the exact scopes needed for each
 operation and is never cached. The Google OAuth client configured in Pipedream must
 request `https://www.googleapis.com/auth/drive.readonly`; the worker will
@@ -42,6 +61,10 @@ The Gmail OAuth app is optional and configured with
 `STEWARD_GMAIL_OAUTH_APP_ID`. `gmail.readonly` is also a restricted Google scope;
 public production enablement requires Google's current verification and any
 required restricted-scope security assessment.
+
+The Google Calendar OAuth app is optional and configured with
+`STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID`. The least-privilege events read-only scope
+still requires Google's current OAuth verification before public production use.
 
 The content operation refetches metadata and `capabilities.canDownload` for each
 exact caller-selected ID. It exports native Google Docs as `text/plain`, downloads
@@ -72,6 +95,7 @@ STEWARD_PIPEDREAM_PROJECT_ID=proj_...
 STEWARD_PIPEDREAM_ENVIRONMENT=development
 STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID=oa_...
 STEWARD_GMAIL_OAUTH_APP_ID=oa_...
+STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID=oa_...
 ```
 
 Run it read-only as UID/GID `65532:65532`, drop all capabilities, apply
