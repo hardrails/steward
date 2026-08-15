@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import http.client
 import http.server
@@ -17,6 +18,7 @@ import ssl
 import stat
 import sys
 import threading
+import unicodedata
 import urllib.parse
 from collections.abc import Mapping
 
@@ -32,8 +34,17 @@ ACCOUNT_PAGE_SIZE = 100
 MAX_ACCOUNT_RESULTS = 1000
 PIPEDREAM_API_ORIGIN = "https://api.pipedream.com"
 GOOGLE_DRIVE_APP = "google_drive"
-GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
+GOOGLE_DRIVE_CONTENT_FIELDS = (
+    "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
+)
+GOOGLE_DOCUMENT_MEDIA_TYPE = "application/vnd.google-apps.document"
+GOOGLE_TEXT_EXPORT_MEDIA_TYPE = "text/plain"
+SUPPORTED_TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/markdown"})
+MAX_CONTENT_FILES = 10
+MAX_FILE_CONTENT_BYTES = 64 << 10
+MAX_TOTAL_CONTENT_BYTES = 640 << 10
 GOOGLE_DRIVE_TARGET = (
     "https://www.googleapis.com/drive/v3/files?"
     + urllib.parse.urlencode(
@@ -48,14 +59,23 @@ EXTERNAL_USER_RE = re.compile(r"^ryu_[A-Za-z0-9_-]{16,120}$")
 ACCOUNT_RE = re.compile(r"^apn_[A-Za-z0-9]+$")
 PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
+FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 
 
 class WorkerError(Exception):
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        *,
+        upstream_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.upstream_status = upstream_status
 
 
 def read_secret(path_text: str, label: str) -> bytes:
@@ -114,6 +134,21 @@ def account_id(value: object) -> str:
     return value
 
 
+def file_ids(value: object) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= MAX_CONTENT_FILES
+        or any(not isinstance(item, str) or FILE_ID_RE.fullmatch(item) is None for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise WorkerError(
+            400,
+            "invalid_file_ids",
+            "file IDs must be one through ten unique canonical identifiers",
+        )
+    return tuple(value)
+
+
 class PipedreamClient:
     def __init__(
         self,
@@ -158,9 +193,48 @@ class PipedreamClient:
         payload: object | None = None,
         token: str | None = None,
     ) -> object:
-        body = None if payload is None else json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        raw, media_type = self._request_bytes(
+            method,
+            path,
+            payload=payload,
+            token=token,
+            maximum_bytes=MAX_UPSTREAM,
+        )
+        if not raw:
+            return {}
+        if media_type != "application/json":
+            raise WorkerError(
+                502,
+                "invalid_broker_response",
+                "managed-auth broker returned a non-JSON response",
+            )
+        try:
+            return json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise WorkerError(
+                502,
+                "invalid_broker_response",
+                "managed-auth broker returned invalid JSON",
+            ) from error
+
+    def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: object | None = None,
+        token: str | None = None,
+        maximum_bytes: int,
+    ) -> tuple[bytes, str]:
+        if not 1 <= maximum_bytes <= MAX_UPSTREAM:
+            raise ValueError("managed-auth response bound is invalid")
+        body = (
+            None
+            if payload is None
+            else json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        )
         headers = {
-            "Accept": "application/json",
+            "Accept": "*/*",
             "Accept-Encoding": "identity",
             "User-Agent": "steward-integration-worker/1",
         }
@@ -180,21 +254,29 @@ class PipedreamClient:
         try:
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
-            raw = response.read(MAX_UPSTREAM + 1)
-            if len(raw) > MAX_UPSTREAM:
-                raise WorkerError(502, "broker_response_too_large", "managed-auth broker response exceeded 2 MiB")
+            raw = response.read(maximum_bytes + 1)
+            if len(raw) > maximum_bytes:
+                raise WorkerError(
+                    502,
+                    "broker_response_too_large",
+                    "managed-auth broker response exceeded the operation bound",
+                )
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise WorkerError(
+                    502,
+                    "invalid_broker_response",
+                    "managed-auth broker returned encoded content",
+                )
             if response.status < 200 or response.status >= 300:
                 code = "broker_rate_limited" if response.status == 429 else "broker_rejected"
                 status = 503 if response.status == 429 or response.status >= 500 else 502
-                raise WorkerError(status, code, f"managed-auth broker returned HTTP {response.status}")
-            if not raw:
-                return {}
-            if response.headers.get_content_type() != "application/json":
-                raise WorkerError(502, "invalid_broker_response", "managed-auth broker returned a non-JSON response")
-            try:
-                return json.loads(raw)
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise WorkerError(502, "invalid_broker_response", "managed-auth broker returned invalid JSON") from error
+                raise WorkerError(
+                    status,
+                    code,
+                    f"managed-auth broker returned HTTP {response.status}",
+                    upstream_status=response.status,
+                )
+            return raw, response.headers.get_content_type().lower()
         except WorkerError:
             raise
         except (OSError, TimeoutError, http.client.HTTPException) as error:
@@ -446,6 +528,240 @@ class PipedreamClient:
             "has_more": bool(next_token),
         }
 
+    def read_drive_content(
+        self,
+        user: str,
+        requested_account: str,
+        requested_file_ids: tuple[str, ...],
+    ) -> dict[str, object]:
+        selected_ids = file_ids(list(requested_file_ids))
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+        )
+        if not self._account_ready(connection):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Google Drive connection is not ready for this app",
+            )
+        results: list[dict[str, object]] = []
+        total_content_bytes = 0
+        for selected_id in selected_ids:
+            metadata = self._drive_file_metadata(
+                token,
+                user=user,
+                account=requested_account,
+                selected_id=selected_id,
+            )
+            if metadata is None:
+                results.append({"file_id": selected_id, "status": "not_found"})
+                continue
+            result = self._drive_file_content(
+                token,
+                user=user,
+                account=requested_account,
+                metadata=metadata,
+            )
+            content_bytes = result.get("content_bytes", 0)
+            if isinstance(content_bytes, int) and not isinstance(content_bytes, bool):
+                total_content_bytes += content_bytes
+            if total_content_bytes > MAX_TOTAL_CONTENT_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Google Drive content exceeded the aggregate operation bound",
+                )
+            results.append(result)
+        return {
+            "schema_version": "steward.google-drive-content.v1",
+            "integration": "google-drive",
+            "results": results,
+            "result_count": len(results),
+        }
+
+    def _drive_file_metadata(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        selected_id: str,
+    ) -> dict[str, object] | None:
+        target = (
+            "https://www.googleapis.com/drive/v3/files/"
+            + urllib.parse.quote(selected_id, safe="")
+            + "?"
+            + urllib.parse.urlencode(
+                {
+                    "fields": GOOGLE_DRIVE_CONTENT_FIELDS,
+                    "supportsAllDrives": "true",
+                }
+            )
+        )
+        try:
+            value = self._proxy_json(
+                token,
+                user=user,
+                account=account,
+                target=target,
+            )
+        except WorkerError as error:
+            if error.upstream_status == 404:
+                return None
+            raise
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Drive returned invalid file metadata",
+            )
+        required = ("id", "name", "mimeType", "webViewLink")
+        normalized: dict[str, object] = {}
+        for field in (*required, "modifiedTime", "size"):
+            item = value.get(field)
+            if item is None:
+                continue
+            if not isinstance(item, str) or len(item.encode()) > 4096:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Google Drive returned invalid file metadata",
+                )
+            normalized[field] = item
+        capabilities = value.get("capabilities")
+        if (
+            any(field not in normalized for field in required)
+            or normalized["id"] != selected_id
+            or not isinstance(capabilities, Mapping)
+            or not isinstance(capabilities.get("canDownload"), bool)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Drive returned invalid file metadata",
+            )
+        view_url = urllib.parse.urlsplit(str(normalized["webViewLink"]))
+        if (
+            view_url.scheme != "https"
+            or view_url.hostname != "drive.google.com"
+            or view_url.username
+            or view_url.password
+            or view_url.fragment
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Drive returned an unsafe file link",
+            )
+        normalized["canDownload"] = capabilities["canDownload"]
+        return normalized
+
+    def _drive_file_content(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        metadata: Mapping[str, object],
+    ) -> dict[str, object]:
+        common = {
+            "file_id": metadata["id"],
+            "name": metadata["name"],
+            "media_type": metadata["mimeType"],
+            "modified_at": metadata.get("modifiedTime"),
+            "view_url": metadata["webViewLink"],
+        }
+        if metadata["canDownload"] is not True:
+            return {**common, "status": "not_downloadable"}
+        provider_media_type = str(metadata["mimeType"])
+        selected_id = str(metadata["id"])
+        if provider_media_type == GOOGLE_DOCUMENT_MEDIA_TYPE:
+            target = (
+                "https://www.googleapis.com/drive/v3/files/"
+                + urllib.parse.quote(selected_id, safe="")
+                + "/export?"
+                + urllib.parse.urlencode({"mimeType": GOOGLE_TEXT_EXPORT_MEDIA_TYPE})
+            )
+            expected_response_types = {GOOGLE_TEXT_EXPORT_MEDIA_TYPE}
+        elif provider_media_type in SUPPORTED_TEXT_MEDIA_TYPES:
+            target = (
+                "https://www.googleapis.com/drive/v3/files/"
+                + urllib.parse.quote(selected_id, safe="")
+                + "?"
+                + urllib.parse.urlencode({"alt": "media", "supportsAllDrives": "true"})
+            )
+            expected_response_types = {provider_media_type, "text/plain"}
+        else:
+            return {**common, "status": "unsupported"}
+        try:
+            raw, response_media_type = self._proxy_bytes(
+                token,
+                user=user,
+                account=account,
+                target=target,
+                maximum_bytes=MAX_FILE_CONTENT_BYTES,
+            )
+        except WorkerError as error:
+            if error.code == "broker_response_too_large":
+                return {**common, "status": "too_large"}
+            if error.upstream_status == 404:
+                return {"file_id": selected_id, "status": "not_found"}
+            raise
+        if response_media_type not in expected_response_types:
+            return {**common, "status": "invalid_text"}
+        try:
+            text = unicodedata.normalize("NFC", raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return {**common, "status": "invalid_text"}
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if any(ord(character) < 0x20 and character not in "\t\n" for character in text):
+            return {**common, "status": "invalid_text"}
+        normalized = text.encode("utf-8")
+        if len(normalized) > MAX_FILE_CONTENT_BYTES:
+            return {**common, "status": "too_large"}
+        return {
+            **common,
+            "status": "succeeded",
+            "content": text,
+            "content_bytes": len(normalized),
+            "content_sha256": "sha256:" + hashlib.sha256(normalized).hexdigest(),
+        }
+
+    def _proxy_json(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        target: str,
+    ) -> object:
+        path = self._proxy_path(user=user, account=account, target=target)
+        return self._request("GET", path, token=token)
+
+    def _proxy_bytes(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        target: str,
+        maximum_bytes: int,
+    ) -> tuple[bytes, str]:
+        path = self._proxy_path(user=user, account=account, target=target)
+        return self._request_bytes(
+            "GET",
+            path,
+            token=token,
+            maximum_bytes=maximum_bytes,
+        )
+
+    def _proxy_path(self, *, user: str, account: str, target: str) -> str:
+        encoded_target = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+        query = urllib.parse.urlencode({"account_id": account, "external_user_id": user})
+        return f"/v1/connect/{self.project_id}/proxy/{encoded_target}?{query}"
+
     def revoke(self, user: str, requested_account: str) -> dict[str, object]:
         token, _connection = self._owned_account(
             user, requested_account, "connect:accounts:read connect:accounts:write"
@@ -475,7 +791,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.server  # type: ignore[return-value]
 
     def _json(self, status: int, value: object) -> None:
-        raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
         if len(raw) > MAX_RESPONSE:
             status = 500
             raw = b'{"error":{"code":"response_too_large","message":"worker response exceeded 1 MiB"}}'
@@ -524,6 +845,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.list_drive_metadata(
                     external_user(body["external_user_id"]), account_id(body["account_id"])
+                )
+            elif self.path == "/v1/connections/google-drive/content":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id", "file_ids"}),
+                )
+                result = self.worker.client.read_drive_content(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    file_ids(body["file_ids"]),
                 )
             elif self.path == "/v1/connections/google-drive/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))

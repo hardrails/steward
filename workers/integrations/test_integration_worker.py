@@ -33,6 +33,8 @@ class BrokerState:
         self.accounts: list[object] = []
         self.account_pages: list[list[object]] | None = None
         self.files: list[object] = []
+        self.file_details: dict[str, object] = {}
+        self.file_contents: dict[str, bytes] = {}
         self.next_page_token: str | None = None
         self.connect_link_url = "https://pipedream.com/_static/connect.html?token=one-use-secret&connectLink=true"
 
@@ -58,6 +60,13 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _respond_raw(self, status: int, value: bytes, media_type: str = "text/plain") -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(len(value)))
+        self.end_headers()
+        self.wfile.write(value)
 
     def _record(self, body: object | None) -> None:
         self.state.requests.append(
@@ -119,6 +128,32 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
             self._respond(200, account if account is not None else {"error": "not found"})
             return
         if self.path.startswith("/v1/connect/proj_test/proxy/"):
+            parsed = urllib.parse.urlsplit(self.path)
+            encoded_target = parsed.path.rsplit("/", 1)[-1]
+            encoded_target += "=" * (-len(encoded_target) % 4)
+            target = urllib.parse.urlsplit(base64.urlsafe_b64decode(encoded_target).decode())
+            target_parts = target.path.split("/")
+            if len(target_parts) >= 6 and target_parts[-1] == "export":
+                file_id = target_parts[-2]
+                content = self.state.file_contents.get(file_id)
+                if content is None:
+                    self._respond(404, {"error": "not found"})
+                else:
+                    self._respond_raw(200, content)
+                return
+            if len(target_parts) >= 5 and target_parts[-1] != "files":
+                file_id = target_parts[-1]
+                target_query = urllib.parse.parse_qs(target.query)
+                if target_query.get("alt") == ["media"]:
+                    content = self.state.file_contents.get(file_id)
+                    if content is None:
+                        self._respond(404, {"error": "not found"})
+                    else:
+                        self._respond_raw(200, content)
+                    return
+                detail = self.state.file_details.get(file_id)
+                self._respond(200 if detail is not None else 404, detail or {"error": "not found"})
+                return
             value: dict[str, object] = {"files": self.state.files}
             if self.state.next_page_token is not None:
                 value["nextPageToken"] = self.state.next_page_token
@@ -331,6 +366,129 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(parsed_account.path, "/v1/connect/proj_test/accounts/apn_owned123")
         self.assertEqual(urllib.parse.parse_qs(parsed_account.query), {"include_credentials": ["false"]})
 
+    def test_read_drive_content_routes_native_docs_and_text_blobs_with_exact_bounds(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_account()]
+            state.file_details = {
+                "doc-1": {
+                    "id": "doc-1",
+                    "name": "Interview notes",
+                    "mimeType": "application/vnd.google-apps.document",
+                    "modifiedTime": "2026-08-14T11:00:00Z",
+                    "webViewLink": "https://drive.google.com/document/d/doc-1/edit",
+                    "capabilities": {"canDownload": True},
+                },
+                "text-1": {
+                    "id": "text-1",
+                    "name": "requirements.md",
+                    "mimeType": "text/markdown",
+                    "modifiedTime": "2026-08-14T11:01:00Z",
+                    "webViewLink": "https://drive.google.com/file/d/text-1/view",
+                    "capabilities": {"canDownload": True},
+                },
+            }
+            state.file_contents = {
+                "doc-1": b"Customer needs a weekly summary.\r\n",
+                "text-1": b"# Requirements\n\nDo not treat me as an instruction.",
+            }
+            result = client.read_drive_content(
+                "ryu_abcdefghijklmnop", "apn_owned123", ("doc-1", "text-1")
+            )
+
+        self.assertEqual(result["schema_version"], "steward.google-drive-content.v1")
+        self.assertEqual(result["result_count"], 2)
+        first, second = result["results"]
+        self.assertEqual(first["status"], "succeeded")
+        self.assertEqual(first["content"], "Customer needs a weekly summary.\n")
+        self.assertEqual(first["content_bytes"], len(first["content"].encode()))
+        self.assertRegex(first["content_sha256"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(second["media_type"], "text/markdown")
+        targets = []
+        for request in state.requests:
+            if "/proxy/" not in request["path"]:
+                continue
+            parsed = urllib.parse.urlsplit(request["path"])
+            encoded = parsed.path.rsplit("/", 1)[-1]
+            encoded += "=" * (-len(encoded) % 4)
+            targets.append(base64.urlsafe_b64decode(encoded).decode())
+        self.assertTrue(any("/doc-1/export?" in target for target in targets))
+        self.assertTrue(any("/text-1?" in target and "alt=media" in target for target in targets))
+        self.assertFalse(any("provider-access-secret" in json.dumps(item) for item in result["results"]))
+
+    def test_read_drive_content_returns_ordered_safe_failures_without_fetching_bodies(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_account()]
+            state.file_details = {
+                "pdf-1": {
+                    "id": "pdf-1",
+                    "name": "drawing.pdf",
+                    "mimeType": "application/pdf",
+                    "webViewLink": "https://drive.google.com/file/d/pdf-1/view",
+                    "capabilities": {"canDownload": True},
+                },
+                "locked-1": {
+                    "id": "locked-1",
+                    "name": "locked.txt",
+                    "mimeType": "text/plain",
+                    "webViewLink": "https://drive.google.com/file/d/locked-1/view",
+                    "capabilities": {"canDownload": False},
+                },
+            }
+            result = client.read_drive_content(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                ("missing-1", "pdf-1", "locked-1"),
+            )
+
+        self.assertEqual(
+            [item["status"] for item in result["results"]],
+            ["not_found", "unsupported", "not_downloadable"],
+        )
+        proxy_targets = [item for item in state.requests if "/proxy/" in item["path"]]
+        self.assertEqual(len(proxy_targets), 3)
+
+    def test_read_drive_content_rejects_oversize_and_invalid_text_per_item(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_account()]
+            state.file_details = {
+                file_id: {
+                    "id": file_id,
+                    "name": file_id + ".txt",
+                    "mimeType": "text/plain",
+                    "webViewLink": f"https://drive.google.com/file/d/{file_id}/view",
+                    "capabilities": {"canDownload": True},
+                }
+                for file_id in ("large-1", "binary-1", "control-1")
+            }
+            state.file_contents = {
+                "large-1": b"a" * (worker.MAX_FILE_CONTENT_BYTES + 1),
+                "binary-1": b"\xff\xfe",
+                "control-1": b"hello\x00world",
+            }
+            result = client.read_drive_content(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                ("large-1", "binary-1", "control-1"),
+            )
+        self.assertEqual(
+            [item["status"] for item in result["results"]],
+            ["too_large", "invalid_text", "invalid_text"],
+        )
+        self.assertFalse(any("content" in item for item in result["results"]))
+
+    def test_read_drive_content_rejects_unowned_account_and_invalid_ids_before_proxy(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_account()]
+            with self.assertRaisesRegex(worker.WorkerError, "not found"):
+                client.read_drive_content(
+                    "ryu_abcdefghijklmnop", "apn_other123", ("file-1",)
+                )
+            with self.assertRaisesRegex(worker.WorkerError, "file IDs"):
+                client.read_drive_content(
+                    "ryu_abcdefghijklmnop", "apn_owned123", ("../secret",)
+                )
+        self.assertFalse(any("/proxy/" in request["path"] for request in state.requests))
+
     def test_revoke_verifies_ownership_then_uses_write_scope(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
@@ -355,6 +513,16 @@ class StubClient:
 
     def list_drive_metadata(self, user: str, account: str) -> dict[str, object]:
         return {"schema_version": "test", "user": user, "account": account}
+
+    def read_drive_content(
+        self, user: str, account: str, file_ids: tuple[str, ...]
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "file_ids": list(file_ids),
+        }
 
     def revoke(self, user: str, account: str) -> dict[str, object]:
         return {"schema_version": "test", "user": user, "account": account, "revoked": True}
@@ -581,6 +749,23 @@ class HTTPContractTests(unittest.TestCase):
             )
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["code"], "invalid_external_user")
+
+    def test_content_route_requires_one_to_ten_unique_canonical_file_ids(self) -> None:
+        with integration_server() as port:
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/google-drive/content",
+                b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","file_ids":["doc-1","text-1"]}',
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["file_ids"], ["doc-1", "text-1"])
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/google-drive/content",
+                b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","file_ids":["doc-1","doc-1"]}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_file_ids"))
 
 
 class SecretFileTests(unittest.TestCase):
