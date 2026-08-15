@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import datetime
 import http.client
 import http.server
 import importlib.util
@@ -40,6 +41,9 @@ class BrokerState:
         self.gmail_messages: list[object] = []
         self.gmail_message_details: dict[str, object] = {}
         self.gmail_next_page_token: str | None = None
+        self.calendar_events: list[object] = []
+        self.calendar_next_page_token: str | None = None
+        self.calendar_time_zone = "America/Los_Angeles"
         self.connect_link_url = "https://pipedream.com/_static/connect.html?token=one-use-secret&connectLink=true"
 
 
@@ -148,6 +152,18 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                 detail = self.state.gmail_message_details.get(message_id)
                 self._respond(200 if detail is not None else 404, detail or {"error": "not found"})
                 return
+            if (
+                target.hostname == "www.googleapis.com"
+                and target.path == "/calendar/v3/calendars/primary/events"
+            ):
+                calendar_value: dict[str, object] = {
+                    "items": self.state.calendar_events,
+                    "timeZone": self.state.calendar_time_zone,
+                }
+                if self.state.calendar_next_page_token is not None:
+                    calendar_value["nextPageToken"] = self.state.calendar_next_page_token
+                self._respond(200, calendar_value)
+                return
             if len(target_parts) >= 6 and target_parts[-1] == "export":
                 file_id = target_parts[-2]
                 content = self.state.file_contents.get(file_id)
@@ -207,6 +223,7 @@ def broker_client() -> Iterator[tuple[Any, BrokerState]]:
             environment="development",
             oauth_app_id="oa_test",
             gmail_oauth_app_id="oa_gmailtest",
+            google_calendar_oauth_app_id="oa_calendartest",
             api_origin=f"http://127.0.0.1:{server.server_port}",
         )
         yield client, server.state
@@ -246,6 +263,55 @@ def connected_gmail_account(
     value["name"] = "Operations Inbox"
     value["app"] = {"name_slug": "gmail"}
     return value
+
+
+def connected_calendar_account(
+    *,
+    scopes: list[str] | None = None,
+    identifier: str = "apn_owned123",
+) -> dict[str, object]:
+    value = connected_account(
+        scopes=scopes or [worker.GOOGLE_CALENDAR_SCOPE],
+        identifier=identifier,
+    )
+    value["name"] = "Operations Calendar"
+    value["app"] = {"name_slug": "google_calendar"}
+    return value
+
+
+def calendar_event(event_id: str = "event_1") -> dict[str, object]:
+    return {
+        "id": event_id,
+        "status": "confirmed",
+        "summary": "Customer renewal review",
+        "description": "Review renewal risks and next steps.",
+        "location": "Conference room A",
+        "eventType": "default",
+        "transparency": "opaque",
+        "visibility": "default",
+        "start": {
+            "dateTime": "2026-08-16T09:00:00-07:00",
+            "timeZone": "America/Los_Angeles",
+        },
+        "end": {
+            "dateTime": "2026-08-16T09:30:00-07:00",
+            "timeZone": "America/Los_Angeles",
+        },
+        "organizer": {
+            "email": "ops@example.com",
+            "displayName": "Operations",
+            "self": True,
+        },
+        "attendees": [
+            {
+                "email": "customer@example.com",
+                "displayName": "Customer",
+                "responseStatus": "accepted",
+                "optional": False,
+            }
+        ],
+        "attendeesOmitted": False,
+    }
 
 
 def gmail_message(
@@ -293,6 +359,7 @@ class PipedreamClientTests(unittest.TestCase):
         )
         self.assertEqual(gmail_only.oauth_app_ids["google-drive"], "")
         self.assertEqual(gmail_only.oauth_app_ids["gmail"], "oa_gmailtest")
+        self.assertEqual(gmail_only.oauth_app_ids["google-calendar"], "")
         with self.assertRaisesRegex(RuntimeError, "at least one"):
             worker.PipedreamClient(
                 client_id=b"client-id-value",
@@ -303,6 +370,20 @@ class PipedreamClientTests(unittest.TestCase):
                 gmail_oauth_app_id="",
                 api_origin="https://broker.invalid",
             )
+
+        calendar_only = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="",
+            google_calendar_oauth_app_id="oa_calendartest",
+            api_origin="https://broker.invalid",
+        )
+        self.assertEqual(
+            calendar_only.oauth_app_ids["google-calendar"],
+            "oa_calendartest",
+        )
 
     def test_connect_link_uses_exact_scopes_and_returns_only_one_use_url(self) -> None:
         with broker_client() as (client, state):
@@ -351,6 +432,45 @@ class PipedreamClientTests(unittest.TestCase):
         )
         self.assertEqual(account_query["app"], ["gmail"])
         self.assertEqual(account_query["oauth_app_id"], ["oa_gmailtest"])
+
+    def test_calendar_connect_and_reconcile_are_profile_scoped(self) -> None:
+        with broker_client() as (client, state):
+            link = client.connect_link("ryu_abcdefghijklmnop", "google-calendar")
+            state.accounts = [connected_calendar_account()]
+            _token, connection = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="google-calendar",
+            )
+
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(link["connect_url"])).query
+        )
+        self.assertEqual(link["integration"], "google-calendar")
+        self.assertEqual(query["app"], ["google_calendar"])
+        self.assertEqual(query["oauthAppId"], ["oa_calendartest"])
+        self.assertEqual(connection["status"], "ready")
+        self.assertEqual(connection["required_scope"], worker.GOOGLE_CALENDAR_SCOPE)
+
+    def test_calendar_rejects_every_broader_or_cross_integration_scope(self) -> None:
+        with broker_client() as (client, state):
+            for extra_scope in (
+                "https://www.googleapis.com/auth/calendar",
+                "https://www.googleapis.com/auth/calendar.readonly",
+                "https://www.googleapis.com/auth/calendar.events",
+                worker.GMAIL_SCOPE,
+                worker.GOOGLE_DRIVE_SCOPE,
+            ):
+                with self.subTest(extra_scope=extra_scope):
+                    state.accounts = [
+                        connected_calendar_account(
+                            scopes=[worker.GOOGLE_CALENDAR_SCOPE, extra_scope]
+                        )
+                    ]
+                    _token, result = client.reconcile(
+                        "ryu_abcdefghijklmnop",
+                        integration="google-calendar",
+                    )
+                    self.assertEqual(result["status"], "needs_attention")
 
     def test_unconfigured_gmail_fails_without_contacting_broker(self) -> None:
         with broker_client() as (client, state):
@@ -1038,6 +1158,130 @@ class PipedreamClientTests(unittest.TestCase):
                     "apn_owned123",
                 )
 
+    def test_read_upcoming_calendar_freezes_primary_window_and_normalizes_events(self) -> None:
+        now = datetime.datetime(2026, 8, 15, 16, 0, tzinfo=datetime.UTC)
+        with broker_client() as (client, state):
+            state.accounts = [connected_calendar_account()]
+            state.calendar_events = [calendar_event()]
+            state.calendar_next_page_token = "more-events"
+            result = client.read_upcoming_calendar(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                now=now,
+            )
+
+        self.assertEqual(
+            result["schema_version"],
+            "steward.google-calendar-upcoming-events.v1",
+        )
+        self.assertEqual(result["calendar"], "primary")
+        self.assertEqual(result["window_start"], "2026-08-15T16:00:00Z")
+        self.assertEqual(result["window_end"], "2026-08-29T16:00:00Z")
+        self.assertTrue(result["has_more"])
+        event = result["results"][0]
+        self.assertEqual(event["summary"], "Customer renewal review")
+        self.assertEqual(event["start"]["kind"], "date_time")
+        self.assertEqual(event["organizer"]["email"], "ops@example.com")
+        self.assertEqual(event["attendees"][0]["response_status"], "accepted")
+
+        proxy_request = next(
+            request
+            for request in state.requests
+            if "/proxy/" in request["path"]
+        )
+        encoded = urllib.parse.urlsplit(proxy_request["path"]).path.rsplit("/", 1)[-1]
+        encoded += "=" * (-len(encoded) % 4)
+        target = urllib.parse.urlsplit(base64.urlsafe_b64decode(encoded).decode())
+        self.assertEqual(target.hostname, "www.googleapis.com")
+        self.assertEqual(target.path, "/calendar/v3/calendars/primary/events")
+        self.assertEqual(
+            urllib.parse.parse_qs(target.query),
+            {
+                "fields": [worker.GOOGLE_CALENDAR_FIELDS],
+                "maxAttendees": ["20"],
+                "maxResults": ["50"],
+                "orderBy": ["startTime"],
+                "showDeleted": ["false"],
+                "singleEvents": ["true"],
+                "timeMax": ["2026-08-29T16:00:00Z"],
+                "timeMin": ["2026-08-15T16:00:00Z"],
+            },
+        )
+
+    def test_read_upcoming_calendar_supports_all_day_events(self) -> None:
+        event = calendar_event()
+        event["start"] = {"date": "2026-08-18"}
+        event["end"] = {"date": "2026-08-19"}
+        event.pop("organizer")
+        event.pop("attendees")
+        with broker_client() as (client, state):
+            state.accounts = [connected_calendar_account()]
+            state.calendar_events = [event]
+            result = client.read_upcoming_calendar(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+            )
+        self.assertEqual(
+            result["results"][0]["start"],
+            {"kind": "date", "value": "2026-08-18"},
+        )
+        self.assertIsNone(result["results"][0]["organizer"])
+        self.assertEqual(result["results"][0]["attendees"], [])
+
+    def test_read_upcoming_calendar_rejects_broader_scope_before_proxy(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [
+                connected_calendar_account(
+                    scopes=[
+                        worker.GOOGLE_CALENDAR_SCOPE,
+                        "https://www.googleapis.com/auth/calendar.readonly",
+                    ]
+                )
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "not ready"):
+                client.read_upcoming_calendar(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+        self.assertFalse(any("/proxy/" in request["path"] for request in state.requests))
+
+    def test_read_upcoming_calendar_rejects_duplicates_and_invalid_page_tokens(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_calendar_account()]
+            state.calendar_events = [calendar_event(), calendar_event()]
+            with self.assertRaisesRegex(worker.WorkerError, "duplicate"):
+                client.read_upcoming_calendar(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+            state.calendar_events = []
+            state.calendar_next_page_token = "bad\nsecret"
+            with self.assertRaisesRegex(worker.WorkerError, "page token"):
+                client.read_upcoming_calendar(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+    def test_read_upcoming_calendar_rejects_unbounded_or_invalid_event_content(self) -> None:
+        cases: tuple[tuple[str, object], ...] = (
+            ("description", "x" * ((16 << 10) + 1)),
+            ("attendees", [{}] * (worker.MAX_CALENDAR_ATTENDEES + 1)),
+            ("start", {"dateTime": "2026-08-16T09:00:00"}),
+        )
+        with broker_client() as (client, state):
+            state.accounts = [connected_calendar_account()]
+            for field, invalid in cases:
+                with self.subTest(field=field):
+                    event = calendar_event()
+                    event[field] = invalid
+                    state.calendar_events = [event]
+                    with self.assertRaises(worker.WorkerError):
+                        client.read_upcoming_calendar(
+                            "ryu_abcdefghijklmnop",
+                            "apn_owned123",
+                        )
+
     def test_revoke_verifies_ownership_then_uses_write_scope(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
@@ -1093,6 +1337,14 @@ class StubClient:
             "user": user,
             "account": account,
             "integration": "gmail",
+        }
+
+    def read_upcoming_calendar(self, user: str, account: str) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "integration": "google-calendar",
         }
 
     def revoke(
@@ -1371,6 +1623,38 @@ class HTTPContractTests(unittest.TestCase):
                 port,
                 "/v1/connections/gmail/recent-messages",
                 b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","q":"from:ceo"}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+
+    def test_calendar_routes_dispatch_only_exact_finite_operations(self) -> None:
+        with integration_server() as port:
+            for path, payload in (
+                (
+                    "/v1/connections/google-calendar/connect-link",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/google-calendar/reconcile",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/google-calendar/upcoming-events",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/google-calendar/revoke",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+            ):
+                with self.subTest(path=path):
+                    status, body, _headers = call_worker(port, path, payload)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["integration"], "google-calendar")
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/google-calendar/upcoming-events",
+                b'{"account_id":"apn_owned123","calendar_id":"other","external_user_id":"ryu_abcdefghijklmnop"}',
             )
             self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
 

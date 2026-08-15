@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import hmac
 import http.client
@@ -41,6 +42,8 @@ GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 GMAIL_APP = "gmail"
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_FULL_ACCESS_SCOPE = "https://mail.google.com/"
+GOOGLE_CALENDAR_APP = "google_calendar"
+GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
 GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
 GOOGLE_DRIVE_CONTENT_FIELDS = (
     "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
@@ -65,6 +68,11 @@ MAX_GMAIL_MESSAGE_BYTES = 32 << 10
 MAX_GMAIL_TOTAL_BYTES = 240 << 10
 MAX_GMAIL_PARTS = 100
 MAX_GMAIL_PART_DEPTH = 12
+GOOGLE_CALENDAR_WINDOW_DAYS = 14
+MAX_CALENDAR_EVENTS = 50
+MAX_CALENDAR_ATTENDEES = 20
+MAX_CALENDAR_EVENT_BYTES = 32 << 10
+MAX_CALENDAR_TOTAL_BYTES = 240 << 10
 GMAIL_MESSAGE_FIELDS = (
     "id,threadId,labelIds,snippet,internalDate,"
     "payload(filename,headers,mimeType,body(data,size),parts)"
@@ -78,6 +86,12 @@ GMAIL_LIST_TARGET = (
             "q": "newer_than:30d",
         }
     )
+)
+GOOGLE_CALENDAR_FIELDS = (
+    "nextPageToken,timeZone,items(id,status,summary,description,location,eventType,"
+    "transparency,visibility,attendeesOmitted,start(date,dateTime,timeZone),"
+    "end(date,dateTime,timeZone),organizer(displayName,email,self),"
+    "attendees(displayName,email,self,responseStatus,optional))"
 )
 GOOGLE_DRIVE_TARGET = (
     "https://www.googleapis.com/drive/v3/files?"
@@ -94,6 +108,7 @@ ACCOUNT_RE = re.compile(r"^apn_[A-Za-z0-9]+$")
 PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+CALENDAR_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,1024}$")
 
 INTEGRATION_PROFILES = {
     "google-drive": {
@@ -105,6 +120,11 @@ INTEGRATION_PROFILES = {
         "app": GMAIL_APP,
         "default_name": "Gmail",
         "required_scope": GMAIL_SCOPE,
+    },
+    "google-calendar": {
+        "app": GOOGLE_CALENDAR_APP,
+        "default_name": "Google Calendar",
+        "required_scope": GOOGLE_CALENDAR_SCOPE,
     },
 }
 REVIEWED_IDENTITY_SCOPES = frozenset(
@@ -363,6 +383,7 @@ class PipedreamClient:
         environment: str,
         oauth_app_id: str,
         gmail_oauth_app_id: str = "",
+        google_calendar_oauth_app_id: str = "",
         api_origin: str = PIPEDREAM_API_ORIGIN,
     ) -> None:
         if not PROJECT_RE.fullmatch(project_id):
@@ -373,7 +394,15 @@ class PipedreamClient:
             raise RuntimeError("Google Drive OAuth app ID is invalid")
         if gmail_oauth_app_id and not OAUTH_APP_RE.fullmatch(gmail_oauth_app_id):
             raise RuntimeError("Gmail OAuth app ID is invalid")
-        if not oauth_app_id and not gmail_oauth_app_id:
+        if google_calendar_oauth_app_id and not OAUTH_APP_RE.fullmatch(
+            google_calendar_oauth_app_id
+        ):
+            raise RuntimeError("Google Calendar OAuth app ID is invalid")
+        if (
+            not oauth_app_id
+            and not gmail_oauth_app_id
+            and not google_calendar_oauth_app_id
+        ):
             raise RuntimeError("at least one managed OAuth app ID is required")
         parsed = urllib.parse.urlsplit(api_origin)
         allow_http = os.environ.get("STEWARD_ALLOW_INSECURE_UPSTREAM", "NO") == "YES"
@@ -395,6 +424,7 @@ class PipedreamClient:
         self.oauth_app_ids = {
             "google-drive": oauth_app_id,
             "gmail": gmail_oauth_app_id,
+            "google-calendar": google_calendar_oauth_app_id,
         }
         self.origin = parsed
 
@@ -1197,6 +1227,352 @@ class PipedreamClient:
             "has_more": next_page_token is not None,
         }
 
+    def read_upcoming_calendar(
+        self,
+        user: str,
+        requested_account: str,
+        *,
+        now: datetime.datetime | None = None,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="google-calendar",
+            deadline=deadline,
+        )
+        if not self._account_ready(connection, GOOGLE_CALENDAR_SCOPE):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Google Calendar connection is not ready for this app",
+            )
+        window_start = now or datetime.datetime.now(datetime.UTC)
+        if window_start.tzinfo is None or window_start.utcoffset() is None:
+            raise ValueError("calendar clock must be timezone-aware")
+        window_start = window_start.astimezone(datetime.UTC).replace(microsecond=0)
+        window_end = window_start + datetime.timedelta(days=GOOGLE_CALENDAR_WINDOW_DAYS)
+        parameters = {
+            "fields": GOOGLE_CALENDAR_FIELDS,
+            "maxAttendees": str(MAX_CALENDAR_ATTENDEES),
+            "maxResults": str(MAX_CALENDAR_EVENTS),
+            "orderBy": "startTime",
+            "showDeleted": "false",
+            "singleEvents": "true",
+            "timeMax": self._rfc3339(window_end),
+            "timeMin": self._rfc3339(window_start),
+        }
+        target = (
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events?"
+            + urllib.parse.urlencode(parameters)
+        )
+        value = self._proxy_json(
+            token,
+            user=user,
+            account=requested_account,
+            target=target,
+            deadline=deadline,
+        )
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned an invalid event list",
+            )
+        raw_events = value.get("items", [])
+        page_token = value.get("nextPageToken")
+        calendar_time_zone = value.get("timeZone", "")
+        if (
+            not isinstance(raw_events, list)
+            or len(raw_events) > MAX_CALENDAR_EVENTS
+            or not isinstance(calendar_time_zone, str)
+            or not 1 <= len(calendar_time_zone.encode()) <= 256
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar exceeded the upcoming-event result bound",
+            )
+        if page_token is not None and (
+            not isinstance(page_token, str)
+            or not 1 <= len(page_token) <= 4096
+            or any(
+                ord(character) < 0x21 or ord(character) > 0x7E
+                for character in page_token
+            )
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned an invalid page token",
+            )
+        results: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        total_bytes = 0
+        for raw_event in raw_events:
+            event = self._calendar_event(raw_event)
+            event_id = str(event["event_id"])
+            if event_id in seen_ids:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Google Calendar returned duplicate event identifiers",
+                )
+            seen_ids.add(event_id)
+            event_bytes = len(
+                json.dumps(
+                    event,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
+            )
+            if event_bytes > MAX_CALENDAR_EVENT_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Google Calendar event content exceeded its bound",
+                )
+            total_bytes += event_bytes
+            if total_bytes > MAX_CALENDAR_TOTAL_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Google Calendar content exceeded the aggregate operation bound",
+                )
+            results.append(event)
+        return {
+            "schema_version": "steward.google-calendar-upcoming-events.v1",
+            "integration": "google-calendar",
+            "calendar": "primary",
+            "calendar_time_zone": self._safe_text(
+                calendar_time_zone,
+                maximum_bytes=256,
+                provider="Google Calendar",
+            ),
+            "window_start": self._rfc3339(window_start),
+            "window_end": self._rfc3339(window_end),
+            "results": results,
+            "result_count": len(results),
+            "has_more": page_token is not None,
+        }
+
+    @staticmethod
+    def _rfc3339(value: datetime.datetime) -> str:
+        return value.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _calendar_event(cls, value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned invalid event content",
+            )
+        event_id = value.get("id")
+        status = value.get("status")
+        event_type = value.get("eventType", "default")
+        transparency = value.get("transparency", "opaque")
+        visibility = value.get("visibility", "default")
+        attendees_omitted = value.get("attendeesOmitted", False)
+        if (
+            not isinstance(event_id, str)
+            or CALENDAR_EVENT_ID_RE.fullmatch(event_id) is None
+            or status not in {"confirmed", "tentative", "cancelled"}
+            or event_type not in {
+                "birthday",
+                "default",
+                "focusTime",
+                "fromGmail",
+                "outOfOffice",
+                "workingLocation",
+            }
+            or transparency not in {"opaque", "transparent"}
+            or visibility not in {"confidential", "default", "private", "public"}
+            or not isinstance(attendees_omitted, bool)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned invalid event content",
+            )
+        attendees = value.get("attendees", [])
+        if not isinstance(attendees, list) or len(attendees) > MAX_CALENDAR_ATTENDEES:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar exceeded the attendee result bound",
+            )
+        result: dict[str, object] = {
+            "event_id": event_id,
+            "status": status,
+            "event_type": event_type,
+            "transparency": transparency,
+            "visibility": visibility,
+            "summary": cls._safe_text(
+                cls._optional_text(value.get("summary")),
+                maximum_bytes=4096,
+                provider="Google Calendar",
+            ),
+            "description": cls._safe_text(
+                cls._optional_text(value.get("description")),
+                maximum_bytes=16 << 10,
+                provider="Google Calendar",
+            ),
+            "location": cls._safe_text(
+                cls._optional_text(value.get("location")),
+                maximum_bytes=4096,
+                provider="Google Calendar",
+            ),
+            "start": cls._calendar_when(value.get("start")),
+            "end": cls._calendar_when(value.get("end")),
+            "attendees": [
+                cls._calendar_person(item, attendee=True) for item in attendees
+            ],
+            "attendees_omitted": attendees_omitted,
+        }
+        organizer = value.get("organizer")
+        result["organizer"] = (
+            None
+            if organizer is None
+            else cls._calendar_person(organizer, attendee=False)
+        )
+        return result
+
+    @staticmethod
+    def _optional_text(value: object) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned invalid event text",
+            )
+        return value
+
+    @classmethod
+    def _calendar_when(cls, value: object) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned an invalid event time",
+            )
+        date_value = value.get("date")
+        date_time = value.get("dateTime")
+        time_zone = value.get("timeZone")
+        if (date_value is None) == (date_time is None):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned an invalid event time",
+            )
+        if date_value is not None:
+            if (
+                not isinstance(date_value, str)
+                or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", date_value)
+                or time_zone is not None
+            ):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Google Calendar returned an invalid all-day event time",
+                )
+            try:
+                datetime.date.fromisoformat(date_value)
+            except ValueError:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Google Calendar returned an invalid all-day event time",
+                ) from None
+            return {"kind": "date", "value": date_value}
+        if not isinstance(date_time, str) or (
+            time_zone is not None
+            and (not isinstance(time_zone, str) or len(time_zone.encode()) > 256)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned an invalid timed event",
+            )
+        try:
+            parsed = datetime.datetime.fromisoformat(date_time.replace("Z", "+00:00"))
+        except ValueError:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned an invalid timed event",
+            ) from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned a timezone-free event",
+            )
+        result = {"kind": "date_time", "value": date_time}
+        if time_zone is not None:
+            result["time_zone"] = cls._safe_text(
+                time_zone,
+                maximum_bytes=256,
+                provider="Google Calendar",
+            )
+        return result
+
+    @classmethod
+    def _calendar_person(cls, value: object, *, attendee: bool) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned invalid participant data",
+            )
+        email = value.get("email", "")
+        display_name = value.get("displayName", "")
+        self_value = value.get("self", False)
+        if (
+            not isinstance(email, str)
+            or not isinstance(display_name, str)
+            or not isinstance(self_value, bool)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Calendar returned invalid participant data",
+            )
+        result: dict[str, object] = {
+            "email": cls._safe_text(
+                email,
+                maximum_bytes=1024,
+                provider="Google Calendar",
+            ),
+            "display_name": cls._safe_text(
+                display_name,
+                maximum_bytes=1024,
+                provider="Google Calendar",
+            ),
+            "self": self_value,
+        }
+        if attendee:
+            response_status = value.get("responseStatus", "needsAction")
+            optional = value.get("optional", False)
+            if response_status not in {
+                "accepted",
+                "declined",
+                "needsAction",
+                "tentative",
+            } or not isinstance(optional, bool):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Google Calendar returned invalid attendee data",
+                )
+            result["response_status"] = response_status
+            result["optional"] = optional
+        return result
+
     def _gmail_message(self, value: object, expected_id: str) -> dict[str, object]:
         if not isinstance(value, Mapping) or value.get("id") != expected_id:
             raise WorkerError(
@@ -1290,7 +1666,12 @@ class PipedreamClient:
         return selected
 
     @staticmethod
-    def _safe_text(value: str, *, maximum_bytes: int) -> str:
+    def _safe_text(
+        value: str,
+        *,
+        maximum_bytes: int,
+        provider: str = "Gmail",
+    ) -> str:
         normalized = unicodedata.normalize("NFC", value).replace("\r\n", "\n").replace("\r", "\n")
         encoded = normalized.encode("utf-8")
         if (
@@ -1300,7 +1681,7 @@ class PipedreamClient:
             raise WorkerError(
                 502,
                 "invalid_provider_response",
-                "Gmail returned invalid message text",
+                f"{provider} returned invalid text",
             )
         return normalized
 
@@ -1498,6 +1879,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     "gmail",
                 )
+            elif self.path == "/v1/connections/google-calendar/connect-link":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.connect_link(
+                    external_user(body["external_user_id"]),
+                    "google-calendar",
+                )
             elif self.path == "/v1/connections/google-drive/reconcile":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 _token, result = self.worker.client.reconcile(external_user(body["external_user_id"]))
@@ -1507,8 +1894,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     integration="gmail",
                 )
+            elif self.path == "/v1/connections/google-calendar/reconcile":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                _token, result = self.worker.client.reconcile(
+                    external_user(body["external_user_id"]),
+                    integration="google-calendar",
+                )
             elif self.path == "/v1/connections/google-drive/files":
-                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id"}),
+                )
                 result = self.worker.client.list_drive_metadata(
                     external_user(body["external_user_id"]), account_id(body["account_id"])
                 )
@@ -1531,6 +1927,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     account_id(body["account_id"]),
                 )
+            elif self.path == "/v1/connections/google-calendar/upcoming-events":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id"}),
+                )
+                result = self.worker.client.read_upcoming_calendar(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                )
             elif self.path == "/v1/connections/google-drive/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.revoke(
@@ -1543,6 +1948,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     account_id(body["account_id"]),
                     "gmail",
                 )
+            elif self.path == "/v1/connections/google-calendar/revoke":
+                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                result = self.worker.client.revoke(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    "google-calendar",
+                )
             else:
                 raise WorkerError(404, "not_found", "route not found")
             self._json(
@@ -1554,6 +1966,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     in {
                         "/v1/connections/google-drive/content",
                         "/v1/connections/gmail/recent-messages",
+                        "/v1/connections/google-calendar/upcoming-events",
                     }
                     else MAX_RESPONSE
                 ),
@@ -1667,6 +2080,9 @@ def main() -> int:
         environment=os.environ.get("STEWARD_PIPEDREAM_ENVIRONMENT", ""),
         oauth_app_id=os.environ.get("STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID", ""),
         gmail_oauth_app_id=os.environ.get("STEWARD_GMAIL_OAUTH_APP_ID", ""),
+        google_calendar_oauth_app_id=os.environ.get(
+            "STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID", ""
+        ),
         api_origin=os.environ.get("STEWARD_PIPEDREAM_API_ORIGIN", PIPEDREAM_API_ORIGIN),
     )
     server = IntegrationServer(("0.0.0.0", 8080), worker_token, client)
