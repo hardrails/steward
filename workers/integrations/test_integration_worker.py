@@ -415,6 +415,47 @@ def call_worker(port: int, path: str, body: bytes, *, token: str = "worker-token
 
 
 class HTTPContractTests(unittest.TestCase):
+    def test_admission_deadline_race_has_one_unambiguous_winner(self) -> None:
+        class FakeRequest:
+            def __init__(self) -> None:
+                self.expired = False
+
+            def shutdown(self, _how: int) -> None:
+                self.expired = True
+
+        server = worker.IntegrationServer(
+            ("127.0.0.1", 0),
+            b"worker-token-value",
+            StubClient(),
+        )
+        try:
+            for _index in range(100):
+                request = FakeRequest()
+                timer = threading.Timer(60, lambda: None)
+                with server._deadline_lock:
+                    server._deadlines[id(request)] = timer
+                barrier = threading.Barrier(3)
+                admitted: list[bool] = []
+
+                def parse() -> None:
+                    barrier.wait()
+                    admitted.append(server.request_parsed(request))
+
+                def expire() -> None:
+                    barrier.wait()
+                    server._expire_request(request)
+
+                parse_thread = threading.Thread(target=parse)
+                expire_thread = threading.Thread(target=expire)
+                parse_thread.start()
+                expire_thread.start()
+                barrier.wait()
+                parse_thread.join(timeout=1)
+                expire_thread.join(timeout=1)
+                self.assertEqual(admitted, [not request.expired])
+        finally:
+            server.server_close()
+
     def test_health_remains_ready_when_all_operation_slots_are_busy(self) -> None:
         class BlockingClient(StubClient):
             def __init__(self) -> None:

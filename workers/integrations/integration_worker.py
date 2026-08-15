@@ -510,7 +510,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(raw) != length:
             self._json(400, {"error": {"code": "invalid_request", "message": "request body is incomplete"}})
             return
-        self.worker.request_parsed(self.request)
+        if not self.worker.request_parsed(self.request):
+            return
         try:
             value = json.loads(raw)
             if self.path == "/v1/connections/google-drive/connect-link":
@@ -561,21 +562,26 @@ class IntegrationServer(http.server.ThreadingHTTPServer):
     def handle_error(self, _request: object, _client_address: object) -> None:
         return
 
-    @staticmethod
-    def _expire_request(request: object) -> None:
-        try:
-            request.shutdown(socket.SHUT_RDWR)  # type: ignore[attr-defined]
-        except OSError:
-            return
+    def _expire_request(self, request: object) -> None:
+        with self._deadline_lock:
+            timer = self._deadlines.pop(id(request), None)
+            if timer is None:
+                return
+            try:
+                request.shutdown(socket.SHUT_RDWR)  # type: ignore[attr-defined]
+            except OSError:
+                return
 
-    def _cancel_deadline(self, request: object) -> None:
+    def _cancel_deadline(self, request: object) -> bool:
         with self._deadline_lock:
             timer = self._deadlines.pop(id(request), None)
         if timer is not None:
             timer.cancel()
+            return True
+        return False
 
-    def request_parsed(self, request: object) -> None:
-        self._cancel_deadline(request)
+    def request_parsed(self, request: object) -> bool:
+        return self._cancel_deadline(request)
 
     def process_request(self, request: object, client_address: object) -> None:
         request.settimeout(self.client_read_timeout)  # type: ignore[attr-defined]
