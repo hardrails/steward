@@ -171,7 +171,8 @@ paths:
       description: |
         Verifies app-scoped account ownership and readiness, refetches metadata for
         one through ten exact file IDs, and chooses only reviewed Drive download or
-        export targets. Google Docs are exported as plain text; UTF-8 plain-text and
+        export targets within one shared 30-second batch deadline. Google Docs are
+        exported as plain text; UTF-8 plain-text and
         Markdown blobs are downloaded directly. Every requested ID receives one
         ordered outcome. No caller URL, query, MIME override, export format, folder,
         provider credential, or silently truncated content is accepted.
@@ -537,6 +538,7 @@ components:
           type: integer
           minimum: 0
           maximum: 65536
+          description: The response contains at most 327680 normalized content bytes in aggregate.
         content_sha256:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'

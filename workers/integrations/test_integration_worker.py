@@ -19,6 +19,7 @@ import unittest
 import urllib.parse
 from collections.abc import Iterator
 from typing import Any
+from unittest import mock
 
 MODULE_PATH = pathlib.Path(__file__).with_name("integration_worker.py")
 SPEC = importlib.util.spec_from_file_location("steward_integration_worker", MODULE_PATH)
@@ -475,6 +476,104 @@ class PipedreamClientTests(unittest.TestCase):
             ["too_large", "invalid_text", "invalid_text"],
         )
         self.assertFalse(any("content" in item for item in result["results"]))
+
+    def test_read_drive_content_worst_case_escaping_stays_within_response_bound(self) -> None:
+        selected_ids = tuple(f"escaped-{index}" for index in range(worker.MAX_CONTENT_FILES))
+        per_file_bytes = worker.MAX_TOTAL_CONTENT_BYTES // len(selected_ids)
+        with broker_client() as (client, state):
+            state.accounts = [connected_account()]
+            state.file_details = {
+                file_id: {
+                    "id": file_id,
+                    "name": '"' * worker.GOOGLE_DRIVE_CONTENT_FIELD_BYTES["name"],
+                    "mimeType": "text/plain",
+                    "webViewLink": f"https://drive.google.com/file/d/{file_id}/view",
+                    "capabilities": {"canDownload": True},
+                }
+                for file_id in selected_ids
+            }
+            state.file_contents = {
+                file_id: b'"' * per_file_bytes for file_id in selected_ids
+            }
+            result = client.read_drive_content(
+                "ryu_abcdefghijklmnop", "apn_owned123", selected_ids
+            )
+
+        serialized = json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        self.assertEqual(
+            sum(int(item["content_bytes"]) for item in result["results"]),
+            worker.MAX_TOTAL_CONTENT_BYTES,
+        )
+        self.assertLessEqual(len(serialized), worker.MAX_RESPONSE)
+
+    def test_read_drive_content_uses_one_deadline_for_the_whole_batch(self) -> None:
+        class DeadlineClient(worker.PipedreamClient):
+            def __init__(self) -> None:
+                self.deadlines: list[float] = []
+
+            def _owned_account(
+                self,
+                user: str,
+                requested_account: str,
+                scope: str,
+                *,
+                deadline: float | None = None,
+            ) -> tuple[str, dict[str, object]]:
+                del user, requested_account, scope
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                return "token", {
+                    "healthy": True,
+                    "authorized_scopes": [worker.GOOGLE_DRIVE_SCOPE],
+                }
+
+            def _drive_file_metadata(
+                self,
+                token: str,
+                *,
+                user: str,
+                account: str,
+                selected_id: str,
+                deadline: float,
+            ) -> dict[str, object]:
+                del token, user, account
+                self.deadlines.append(deadline)
+                return {
+                    "id": selected_id,
+                    "name": selected_id,
+                    "mimeType": "application/pdf",
+                    "webViewLink": f"https://drive.google.com/file/d/{selected_id}/view",
+                    "canDownload": True,
+                }
+
+            def _drive_file_content(
+                self,
+                token: str,
+                *,
+                user: str,
+                account: str,
+                metadata: dict[str, object],
+                deadline: float,
+            ) -> dict[str, object]:
+                del token, user, account
+                self.deadlines.append(deadline)
+                return {"file_id": metadata["id"], "status": "unsupported"}
+
+        client = DeadlineClient()
+        with mock.patch.object(worker.time, "monotonic", return_value=100.0):
+            client.read_drive_content(
+                "ryu_abcdefghijklmnop", "apn_owned123", ("one", "two")
+            )
+
+        self.assertEqual(
+            client.deadlines,
+            [100.0 + worker.CONTENT_BATCH_TIMEOUT_SECONDS] * 5,
+        )
 
     def test_read_drive_content_rejects_unowned_account_and_invalid_ids_before_proxy(self) -> None:
         with broker_client() as (client, state):

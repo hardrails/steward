@@ -18,6 +18,7 @@ import ssl
 import stat
 import sys
 import threading
+import time
 import unicodedata
 import urllib.parse
 from collections.abc import Mapping
@@ -26,6 +27,7 @@ MAX_REQUEST = 16 << 10
 MAX_UPSTREAM = 2 << 20
 MAX_RESPONSE = 1 << 20
 UPSTREAM_TIMEOUT_SECONDS = 30
+CONTENT_BATCH_TIMEOUT_SECONDS = 30
 CONNECT_TOKEN_SECONDS = 600
 MAX_CONCURRENCY = 8
 MAX_HEALTH_CONCURRENCY = 2
@@ -39,12 +41,20 @@ GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,we
 GOOGLE_DRIVE_CONTENT_FIELDS = (
     "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
 )
+GOOGLE_DRIVE_CONTENT_FIELD_BYTES = {
+    "id": 256,
+    "name": 1024,
+    "mimeType": 256,
+    "modifiedTime": 64,
+    "size": 32,
+    "webViewLink": 4096,
+}
 GOOGLE_DOCUMENT_MEDIA_TYPE = "application/vnd.google-apps.document"
 GOOGLE_TEXT_EXPORT_MEDIA_TYPE = "text/plain"
 SUPPORTED_TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/markdown"})
 MAX_CONTENT_FILES = 10
 MAX_FILE_CONTENT_BYTES = 64 << 10
-MAX_TOTAL_CONTENT_BYTES = 640 << 10
+MAX_TOTAL_CONTENT_BYTES = 320 << 10
 GOOGLE_DRIVE_TARGET = (
     "https://www.googleapis.com/drive/v3/files?"
     + urllib.parse.urlencode(
@@ -192,6 +202,7 @@ class PipedreamClient:
         *,
         payload: object | None = None,
         token: str | None = None,
+        deadline: float | None = None,
     ) -> object:
         raw, media_type = self._request_bytes(
             method,
@@ -199,6 +210,7 @@ class PipedreamClient:
             payload=payload,
             token=token,
             maximum_bytes=MAX_UPSTREAM,
+            deadline=deadline,
         )
         if not raw:
             return {}
@@ -225,6 +237,7 @@ class PipedreamClient:
         payload: object | None = None,
         token: str | None = None,
         maximum_bytes: int,
+        deadline: float | None = None,
     ) -> tuple[bytes, str]:
         if not 1 <= maximum_bytes <= MAX_UPSTREAM:
             raise ValueError("managed-auth response bound is invalid")
@@ -245,10 +258,19 @@ class PipedreamClient:
             headers["Authorization"] = "Bearer " + token
             headers["X-PD-Environment"] = self.environment
         connection_type = http.client.HTTPSConnection if self.origin.scheme == "https" else http.client.HTTPConnection
+        timeout = UPSTREAM_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+            if timeout <= 0:
+                raise WorkerError(
+                    503,
+                    "operation_deadline_exceeded",
+                    "managed integration operation exceeded its deadline",
+                )
         connection = connection_type(
             self.origin.hostname,
             self.origin.port,
-            timeout=UPSTREAM_TIMEOUT_SECONDS,
+            timeout=timeout,
             **({"context": ssl.create_default_context()} if self.origin.scheme == "https" else {}),
         )
         try:
@@ -284,7 +306,7 @@ class PipedreamClient:
         finally:
             connection.close()
 
-    def access_token(self, scope: str) -> str:
+    def access_token(self, scope: str, *, deadline: float | None = None) -> str:
         result = self._request(
             "POST",
             "/v1/oauth/token",
@@ -294,6 +316,7 @@ class PipedreamClient:
                 "grant_type": "client_credentials",
                 "scope": scope,
             },
+            deadline=deadline,
         )
         if not isinstance(result, dict):
             raise WorkerError(502, "invalid_broker_response", "managed-auth broker token response is invalid")
@@ -472,13 +495,21 @@ class PipedreamClient:
         }
         return account.get("healthy") is True and drive_scopes == {GOOGLE_DRIVE_SCOPE}
 
-    def _owned_account(self, user: str, requested_account: str, scope: str) -> tuple[str, dict[str, object]]:
-        token = self.access_token(scope)
+    def _owned_account(
+        self,
+        user: str,
+        requested_account: str,
+        scope: str,
+        *,
+        deadline: float | None = None,
+    ) -> tuple[str, dict[str, object]]:
+        token = self.access_token(scope, deadline=deadline)
         query = urllib.parse.urlencode({"include_credentials": "false"})
         value = self._request(
             "GET",
             f"/v1/connect/{self.project_id}/accounts/{urllib.parse.quote(requested_account, safe='')}?{query}",
             token=token,
+            deadline=deadline,
         )
         account = self._safe_account(value, user)
         if account is not None and account["account_id"] == requested_account:
@@ -535,10 +566,12 @@ class PipedreamClient:
         requested_file_ids: tuple[str, ...],
     ) -> dict[str, object]:
         selected_ids = file_ids(list(requested_file_ids))
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
         token, connection = self._owned_account(
             user,
             requested_account,
             "connect:accounts:read connect:proxy",
+            deadline=deadline,
         )
         if not self._account_ready(connection):
             raise WorkerError(
@@ -554,6 +587,7 @@ class PipedreamClient:
                 user=user,
                 account=requested_account,
                 selected_id=selected_id,
+                deadline=deadline,
             )
             if metadata is None:
                 results.append({"file_id": selected_id, "status": "not_found"})
@@ -563,6 +597,7 @@ class PipedreamClient:
                 user=user,
                 account=requested_account,
                 metadata=metadata,
+                deadline=deadline,
             )
             content_bytes = result.get("content_bytes", 0)
             if isinstance(content_bytes, int) and not isinstance(content_bytes, bool):
@@ -588,6 +623,7 @@ class PipedreamClient:
         user: str,
         account: str,
         selected_id: str,
+        deadline: float,
     ) -> dict[str, object] | None:
         target = (
             "https://www.googleapis.com/drive/v3/files/"
@@ -606,6 +642,7 @@ class PipedreamClient:
                 user=user,
                 account=account,
                 target=target,
+                deadline=deadline,
             )
         except WorkerError as error:
             if error.upstream_status == 404:
@@ -623,7 +660,10 @@ class PipedreamClient:
             item = value.get(field)
             if item is None:
                 continue
-            if not isinstance(item, str) or len(item.encode()) > 4096:
+            if (
+                not isinstance(item, str)
+                or len(item.encode()) > GOOGLE_DRIVE_CONTENT_FIELD_BYTES[field]
+            ):
                 raise WorkerError(
                     502,
                     "invalid_provider_response",
@@ -665,6 +705,7 @@ class PipedreamClient:
         user: str,
         account: str,
         metadata: Mapping[str, object],
+        deadline: float,
     ) -> dict[str, object]:
         common = {
             "file_id": metadata["id"],
@@ -702,6 +743,7 @@ class PipedreamClient:
                 account=account,
                 target=target,
                 maximum_bytes=MAX_FILE_CONTENT_BYTES,
+                deadline=deadline,
             )
         except WorkerError as error:
             if error.code == "broker_response_too_large":
@@ -736,9 +778,10 @@ class PipedreamClient:
         user: str,
         account: str,
         target: str,
+        deadline: float | None = None,
     ) -> object:
         path = self._proxy_path(user=user, account=account, target=target)
-        return self._request("GET", path, token=token)
+        return self._request("GET", path, token=token, deadline=deadline)
 
     def _proxy_bytes(
         self,
@@ -748,6 +791,7 @@ class PipedreamClient:
         account: str,
         target: str,
         maximum_bytes: int,
+        deadline: float | None = None,
     ) -> tuple[bytes, str]:
         path = self._proxy_path(user=user, account=account, target=target)
         return self._request_bytes(
@@ -755,6 +799,7 @@ class PipedreamClient:
             path,
             token=token,
             maximum_bytes=maximum_bytes,
+            deadline=deadline,
         )
 
     def _proxy_path(self, *, user: str, account: str, target: str) -> str:
