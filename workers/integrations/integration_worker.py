@@ -11,12 +11,12 @@ import http.server
 import json
 import os
 import pathlib
-import queue
 import re
 import socket
 import socketserver
 import ssl
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -71,7 +71,6 @@ ACCOUNT_RE = re.compile(r"^apn_[A-Za-z0-9]+$")
 PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
-_DNS_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 
 class WorkerError(Exception):
@@ -169,6 +168,49 @@ def _deadline_error() -> WorkerError:
     )
 
 
+def _resolver_process(host: str, port: int) -> subprocess.Popen[bytes]:
+    script = (
+        "import json,socket,sys;"
+        "json.dump(socket.getaddrinfo(sys.argv[1],int(sys.argv[2]),"
+        "type=socket.SOCK_STREAM),sys.stdout,separators=(',',':'))"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-I", "-c", script, host, str(port)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _validated_resolved_addresses(value: object) -> tuple[tuple[int, int, int, str, tuple], ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 64:
+        raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
+    result: list[tuple[int, int, int, str, tuple]] = []
+    for item in value:
+        if (
+            not isinstance(item, list)
+            or len(item) != 5
+            or not all(isinstance(item[index], int) for index in range(3))
+            or not isinstance(item[3], str)
+            or not isinstance(item[4], list)
+            or len(item[4]) not in {2, 4}
+            or not isinstance(item[4][0], str)
+            or not isinstance(item[4][1], int)
+        ):
+            raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
+        family, socket_type, protocol = item[:3]
+        if family not in {socket.AF_INET, socket.AF_INET6} or socket_type != socket.SOCK_STREAM:
+            raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
+        try:
+            socket.inet_pton(family, item[4][0])
+        except OSError:
+            raise WorkerError(
+                503, "broker_unavailable", "managed-auth broker is unavailable"
+            ) from None
+        result.append((family, socket_type, protocol, item[3], tuple(item[4])))
+    return tuple(result)
+
+
 def _resolved_addresses(
     host: str,
     port: int,
@@ -180,35 +222,37 @@ def _resolved_addresses(
     if deadline is None:
         return tuple(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
     remaining = deadline - time.monotonic()
-    if remaining <= 0 or not _DNS_SLOTS.acquire(timeout=remaining):
+    if remaining <= 0:
         raise _deadline_error()
-    result: queue.Queue[object] = queue.Queue(maxsize=1)
-
-    def resolve() -> None:
-        try:
-            result.put(tuple(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
-        except BaseException as error:
-            result.put(error)
-        finally:
-            _DNS_SLOTS.release()
-
-    threading.Thread(target=resolve, daemon=True, name="managed-upstream-dns").start()
+    process = _resolver_process(host, port)
     try:
-        resolved = result.get(timeout=max(0.0, deadline - time.monotonic()))
-    except queue.Empty as error:
+        raw, _stderr = process.communicate(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+    except subprocess.TimeoutExpired as error:
         raise _deadline_error() from error
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
     if time.monotonic() >= deadline:
         raise _deadline_error()
-    if isinstance(resolved, BaseException):
+    if process.returncode != 0 or len(raw) > 64 << 10:
         raise WorkerError(
             503,
             "broker_unavailable",
             "managed-auth broker is unavailable",
-        ) from resolved
-    addresses = tuple(resolved)
-    if not addresses:
-        raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
-    return addresses
+        )
+    try:
+        return _validated_resolved_addresses(json.loads(raw))
+    except (UnicodeError, json.JSONDecodeError):
+        raise WorkerError(
+            503, "broker_unavailable", "managed-auth broker is unavailable"
+        ) from None
 
 
 def _open_resolved_socket(

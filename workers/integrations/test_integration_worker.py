@@ -632,11 +632,36 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
 
     def test_upstream_deadline_is_enforced_before_dns_returns(self) -> None:
-        release_dns = threading.Event()
+        class BlockingProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.terminated = False
 
-        def blocking_resolution(*_args: object, **_kwargs: object) -> list[object]:
-            release_dns.wait(timeout=1)
-            return []
+            def communicate(self, timeout: float) -> tuple[bytes, bytes]:
+                time.sleep(timeout)
+                raise worker.subprocess.TimeoutExpired("resolver", timeout)
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+            def wait(self, timeout: float) -> int:
+                del timeout
+                assert self.returncode is not None
+                return self.returncode
+
+        processes: list[BlockingProcess] = []
+
+        def blocking_resolution(*_args: object) -> BlockingProcess:
+            process = BlockingProcess()
+            processes.append(process)
+            return process
 
         client = worker.PipedreamClient(
             client_id=b"client-id-value",
@@ -646,9 +671,9 @@ class PipedreamClientTests(unittest.TestCase):
             oauth_app_id="oa_test",
             api_origin="https://broker.invalid",
         )
-        try:
-            with mock.patch.object(worker.socket, "getaddrinfo", blocking_resolution):
-                started = time.monotonic()
+        with mock.patch.object(worker, "_resolver_process", blocking_resolution):
+            started = time.monotonic()
+            for _attempt in range(worker.MAX_CONCURRENCY + 2):
                 with self.assertRaises(worker.WorkerError) as raised:
                     client._request_bytes(
                         "GET",
@@ -656,12 +681,37 @@ class PipedreamClientTests(unittest.TestCase):
                         maximum_bytes=1024,
                         deadline=time.monotonic() + 0.05,
                     )
-                elapsed = time.monotonic() - started
-        finally:
-            release_dns.set()
+            elapsed = time.monotonic() - started
 
         self.assertEqual(raised.exception.code, "operation_deadline_exceeded")
-        self.assertLess(elapsed, 0.5)
+        self.assertLess(elapsed, 1)
+        self.assertEqual(len(processes), worker.MAX_CONCURRENCY + 2)
+        self.assertTrue(all(process.terminated for process in processes))
+
+        class ReadyProcess(BlockingProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self.returncode = 0
+
+            def communicate(self, timeout: float) -> tuple[bytes, bytes]:
+                del timeout
+                return (
+                    b'[[2,1,6,"",["127.0.0.1",443]]]',
+                    b"",
+                )
+
+        recovered = ReadyProcess()
+        with mock.patch.object(
+            worker,
+            "_resolver_process",
+            return_value=recovered,
+        ):
+            addresses = worker._resolved_addresses(
+                "broker.invalid",
+                443,
+                deadline=time.monotonic() + 0.5,
+            )
+        self.assertEqual(addresses[0][-1], ("127.0.0.1", 443))
 
     def test_read_drive_content_rejects_unowned_account_and_invalid_ids_before_proxy(self) -> None:
         with broker_client() as (client, state):
