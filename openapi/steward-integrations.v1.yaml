@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Managed Integration Worker API
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
     Private finite-operation worker for managed provider connections. Broker and
     provider credentials remain inside the worker. This contract does not expose
@@ -86,7 +86,7 @@ paths:
       summary: Reconcile one user's Google Drive connection
       description: |
         Lists only the configured Google Drive custom OAuth client and excludes
-        credentials. Ready requires a healthy account with the metadata-read scope
+        credentials. Ready requires a healthy account with the read-only scope
         and no broader Google Drive scope.
       requestBody:
         required: true
@@ -150,6 +150,66 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "409":
           description: The account is absent, unhealthy, over-scoped, or not owned by this external user.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/google-drive/content:
+    post:
+      tags: [google-drive]
+      operationId: readGoogleDriveFileContent
+      summary: Read bounded selected text through the connected account
+      description: |
+        Verifies app-scoped account ownership and readiness, refetches metadata for
+        one through ten exact file IDs, and chooses only reviewed Drive download or
+        export targets. Google Docs are exported as plain text; UTF-8 plain-text and
+        Markdown blobs are downloaded directly. Every requested ID receives one
+        ordered outcome. No caller URL, query, MIME override, export format, folder,
+        provider credential, or silently truncated content is accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContentRequest"
+      responses:
+        "200":
+          description: Bounded normalized per-file content outcomes.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoogleDriveContent"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No account with this ID belongs to the external user.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The account is absent, unhealthy, over-scoped, or not ready for content reads.
           headers:
             Cache-Control:
               $ref: "#/components/headers/NoStore"
@@ -291,6 +351,25 @@ components:
           $ref: "#/components/schemas/AccountID"
         external_user_id:
           $ref: "#/components/schemas/ExternalUserID"
+    FileID:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{1,256}$'
+    ContentRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, external_user_id, file_ids]
+      properties:
+        account_id:
+          $ref: "#/components/schemas/AccountID"
+        external_user_id:
+          $ref: "#/components/schemas/ExternalUserID"
+        file_ids:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/FileID"
     Health:
       type: object
       additionalProperties: false
@@ -370,7 +449,7 @@ components:
             maxLength: 4096
         required_scope:
           type: string
-          enum: [https://www.googleapis.com/auth/drive.metadata.readonly]
+          enum: [https://www.googleapis.com/auth/drive.readonly]
         healthy:
           type: boolean
     FileMetadata:
@@ -418,6 +497,96 @@ components:
           maximum: 50
         has_more:
           type: boolean
+    GoogleDriveContentSuccess:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - file_id
+        - name
+        - media_type
+        - modified_at
+        - view_url
+        - content
+        - content_bytes
+        - content_sha256
+      properties:
+        status:
+          type: string
+          enum: [succeeded]
+        file_id:
+          $ref: "#/components/schemas/FileID"
+        name:
+          type: string
+          maxLength: 4096
+        media_type:
+          type: string
+          enum: [application/vnd.google-apps.document, text/plain, text/markdown]
+        modified_at:
+          type: string
+          nullable: true
+          maxLength: 4096
+        view_url:
+          type: string
+          format: uri
+          maxLength: 4096
+        content:
+          type: string
+          maxLength: 65536
+        content_bytes:
+          type: integer
+          minimum: 0
+          maximum: 65536
+        content_sha256:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    GoogleDriveContentFailure:
+      type: object
+      additionalProperties: false
+      required: [status, file_id]
+      properties:
+        status:
+          type: string
+          enum: [not_found, unsupported, not_downloadable, too_large, invalid_text]
+        file_id:
+          $ref: "#/components/schemas/FileID"
+        name:
+          type: string
+          maxLength: 4096
+        media_type:
+          type: string
+          maxLength: 4096
+        modified_at:
+          type: string
+          nullable: true
+          maxLength: 4096
+        view_url:
+          type: string
+          format: uri
+          maxLength: 4096
+    GoogleDriveContent:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, results, result_count]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.google-drive-content.v1]
+        integration:
+          type: string
+          enum: [google-drive]
+        results:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/GoogleDriveContentSuccess"
+              - $ref: "#/components/schemas/GoogleDriveContentFailure"
+        result_count:
+          type: integer
+          minimum: 1
+          maximum: 10
     Revocation:
       type: object
       additionalProperties: false
