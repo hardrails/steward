@@ -5,7 +5,8 @@ provider credentials outside an agent, model context, application control plane,
 log, and artifact. It exposes only reviewed operations; it is not an API proxy,
 MCP server, or dynamic action catalog.
 
-The first profile supports Google Drive through Pipedream Connect:
+The worker currently supports Google Drive and Gmail through Pipedream Connect.
+The Google Drive profile can:
 
 - create a ten-minute, one-use Google Drive Connect Link;
 - reconcile a connected account without retrieving credentials;
@@ -16,11 +17,31 @@ The first profile supports Google Drive through Pipedream Connect:
   every requested ID; and
 - verify ownership before revoking one account.
 
+The Gmail profile can:
+
+- create the same bounded, one-use connection link for a configured Gmail OAuth app;
+- require exactly `https://www.googleapis.com/auth/gmail.readonly`, rejecting broader
+  Gmail scopes;
+- read at most 20 messages carrying the `INBOX` label from the last 30 days, within
+  one shared 30-second deadline;
+- return only bounded `From`, `To`, `Subject`, and `Date` headers plus the first
+  UTF-8 `text/plain` MIME body, falling back explicitly to Gmail's snippet; and
+- verify app-scoped ownership before every read or revocation.
+
+The Gmail caller cannot supply a URL, search query, label, message ID, MIME format,
+attachment request, provider header, or write action. Email is untrusted input;
+consumers must treat the normalized result as evidence, never instructions.
+
 The Pipedream OAuth access token is minted with the exact scopes needed for each
 operation and is never cached. The Google OAuth client configured in Pipedream must
 request `https://www.googleapis.com/auth/drive.readonly`; the worker will
 not mark an account ready without that reported scope. Configure that OAuth app ID
 with `STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID`.
+
+The Gmail OAuth app is optional and configured with
+`STEWARD_GMAIL_OAUTH_APP_ID`. `gmail.readonly` is also a restricted Google scope;
+public production enablement requires Google's current verification and any
+required restricted-scope security assessment.
 
 The content operation refetches metadata and `capabilities.canDownload` for each
 exact caller-selected ID. It exports native Google Docs as `text/plain`, downloads
@@ -50,6 +71,7 @@ The non-secret deployment configuration is:
 STEWARD_PIPEDREAM_PROJECT_ID=proj_...
 STEWARD_PIPEDREAM_ENVIRONMENT=development
 STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID=oa_...
+STEWARD_GMAIL_OAUTH_APP_ID=oa_...
 ```
 
 Run it read-only as UID/GID `65532:65532`, drop all capabilities, apply

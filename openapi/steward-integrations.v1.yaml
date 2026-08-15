@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Managed Integration Worker API
-  version: "1.1.0"
+  version: "1.2.0"
   description: |
     Private finite-operation worker for managed provider connections. Broker and
     provider credentials remain inside the worker. This contract does not expose
@@ -20,6 +20,7 @@ security:
 tags:
   - name: health
   - name: google-drive
+  - name: gmail
 paths:
   /healthz:
     get:
@@ -267,6 +268,158 @@ paths:
           $ref: "#/components/responses/UpstreamRejected"
         "503":
           $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/gmail/connect-link:
+    post:
+      tags: [gmail]
+      operationId: createGmailConnectLink
+      summary: Create one short-lived Gmail connection link
+      description: Returns a non-cacheable bearer URL scoped to the opaque external user, Gmail, and the configured custom OAuth client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Short-lived Gmail connection link.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/gmail/reconcile:
+    post:
+      tags: [gmail]
+      operationId: reconcileGmailConnection
+      summary: Reconcile one user's Gmail connection
+      description: Ready requires a healthy account with exactly the Gmail read-only scope and no broader Gmail scope.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Normalized connection state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AbsentConnection"
+                  - $ref: "#/components/schemas/PresentConnection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/gmail/recent-messages:
+    post:
+      tags: [gmail]
+      operationId: readRecentGmailMessages
+      summary: Read a bounded recent inbox window
+      description: |
+        Reads at most 20 messages carrying the INBOX label from the last 30 days
+        through one verified account. The worker returns bounded headers and the
+        first UTF-8 plain-text MIME body, with the provider snippet as a fallback.
+        It accepts no caller query, label, URL, format, attachment, or write action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: Bounded normalized recent inbox messages.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GmailRecentMessages"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No account with this ID belongs to the external user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The Gmail account is unhealthy, over-scoped, or not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/gmail/revoke:
+    post:
+      tags: [gmail]
+      operationId: revokeGmailConnection
+      summary: Revoke one verified Gmail account
+      description: Verifies external-user ownership before deleting the account at the managed-auth broker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: The broker accepted account revocation.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Revocation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No account with this ID belongs to the external user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
 components:
   securitySchemes:
     bearerAuth:
@@ -392,7 +545,7 @@ components:
           enum: [steward.managed-connect-link.v1]
         integration:
           type: string
-          enum: [google-drive]
+          enum: [google-drive, gmail]
         connect_url:
           type: string
           format: uri
@@ -410,7 +563,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive]
+          enum: [google-drive, gmail]
         status:
           type: string
           enum: [not_connected]
@@ -432,7 +585,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive]
+          enum: [google-drive, gmail]
         status:
           type: string
           enum: [ready, needs_attention]
@@ -450,7 +603,9 @@ components:
             maxLength: 4096
         required_scope:
           type: string
-          enum: [https://www.googleapis.com/auth/drive.readonly]
+          enum:
+            - https://www.googleapis.com/auth/drive.readonly
+            - https://www.googleapis.com/auth/gmail.readonly
         healthy:
           type: boolean
     FileMetadata:
@@ -589,6 +744,110 @@ components:
           type: integer
           minimum: 1
           maximum: 10
+    GmailMessageSuccess:
+      type: object
+      additionalProperties: false
+      required:
+        - message_id
+        - thread_id
+        - status
+        - received_at_epoch_ms
+        - labels
+        - from
+        - to
+        - subject
+        - sent_at
+        - content
+        - content_source
+        - content_bytes
+        - content_sha256
+      properties:
+        message_id:
+          $ref: "#/components/schemas/FileID"
+        thread_id:
+          $ref: "#/components/schemas/FileID"
+        status:
+          type: string
+          enum: [succeeded]
+        received_at_epoch_ms:
+          type: string
+          pattern: '^[0-9]{1,20}$'
+        labels:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            maxLength: 256
+        from:
+          type: string
+          maxLength: 4096
+        to:
+          type: string
+          maxLength: 4096
+        subject:
+          type: string
+          maxLength: 4096
+        sent_at:
+          type: string
+          maxLength: 4096
+        content:
+          type: string
+          maxLength: 32768
+        content_source:
+          type: string
+          enum: [text/plain, snippet]
+        content_bytes:
+          type: integer
+          minimum: 0
+          maximum: 32768
+          description: Successful messages contain at most 245760 normalized content bytes in aggregate.
+        content_sha256:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    GmailMessageFailure:
+      type: object
+      additionalProperties: false
+      required: [message_id, status]
+      properties:
+        message_id:
+          $ref: "#/components/schemas/FileID"
+        status:
+          type: string
+          enum: [not_found, too_large]
+    GmailRecentMessages:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - integration
+        - window_days
+        - results
+        - result_count
+        - has_more
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.gmail-recent-messages.v1]
+        integration:
+          type: string
+          enum: [gmail]
+        window_days:
+          type: integer
+          enum: [30]
+        results:
+          type: array
+          maxItems: 20
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/GmailMessageSuccess"
+              - $ref: "#/components/schemas/GmailMessageFailure"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 20
+        has_more:
+          type: boolean
     Revocation:
       type: object
       additionalProperties: false
@@ -599,7 +858,7 @@ components:
           enum: [steward.managed-connection-revocation.v1]
         integration:
           type: string
-          enum: [google-drive]
+          enum: [google-drive, gmail]
         account_id:
           $ref: "#/components/schemas/AccountID"
         revoked:

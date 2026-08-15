@@ -38,6 +38,8 @@ MAX_ACCOUNT_RESULTS = 1000
 PIPEDREAM_API_ORIGIN = "https://api.pipedream.com"
 GOOGLE_DRIVE_APP = "google_drive"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GMAIL_APP = "gmail"
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
 GOOGLE_DRIVE_CONTENT_FIELDS = (
     "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
@@ -57,6 +59,25 @@ MAX_CONTENT_FILES = 10
 MAX_FILE_CONTENT_BYTES = 64 << 10
 MAX_TOTAL_CONTENT_BYTES = 240 << 10
 MAX_CONTENT_RESPONSE = 512 << 10
+MAX_GMAIL_MESSAGES = 20
+MAX_GMAIL_MESSAGE_BYTES = 32 << 10
+MAX_GMAIL_TOTAL_BYTES = 240 << 10
+MAX_GMAIL_PARTS = 100
+MAX_GMAIL_PART_DEPTH = 12
+GMAIL_MESSAGE_FIELDS = (
+    "id,threadId,labelIds,snippet,internalDate,"
+    "payload(headers,mimeType,body(data,size),parts)"
+)
+GMAIL_LIST_TARGET = (
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages?"
+    + urllib.parse.urlencode(
+        {
+            "labelIds": "INBOX",
+            "maxResults": str(MAX_GMAIL_MESSAGES),
+            "q": "newer_than:30d",
+        }
+    )
+)
 GOOGLE_DRIVE_TARGET = (
     "https://www.googleapis.com/drive/v3/files?"
     + urllib.parse.urlencode(
@@ -72,6 +93,19 @@ ACCOUNT_RE = re.compile(r"^apn_[A-Za-z0-9]+$")
 PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+
+INTEGRATION_PROFILES = {
+    "google-drive": {
+        "app": GOOGLE_DRIVE_APP,
+        "default_name": "Google Drive",
+        "required_scope": GOOGLE_DRIVE_SCOPE,
+    },
+    "gmail": {
+        "app": GMAIL_APP,
+        "default_name": "Gmail",
+        "required_scope": GMAIL_SCOPE,
+    },
+}
 
 
 class WorkerError(Exception):
@@ -318,6 +352,7 @@ class PipedreamClient:
         project_id: str,
         environment: str,
         oauth_app_id: str,
+        gmail_oauth_app_id: str = "",
         api_origin: str = PIPEDREAM_API_ORIGIN,
     ) -> None:
         if not PROJECT_RE.fullmatch(project_id):
@@ -326,6 +361,8 @@ class PipedreamClient:
             raise RuntimeError("Pipedream environment is invalid")
         if not OAUTH_APP_RE.fullmatch(oauth_app_id):
             raise RuntimeError("Google Drive OAuth app ID is invalid")
+        if gmail_oauth_app_id and not OAUTH_APP_RE.fullmatch(gmail_oauth_app_id):
+            raise RuntimeError("Gmail OAuth app ID is invalid")
         parsed = urllib.parse.urlsplit(api_origin)
         allow_http = os.environ.get("STEWARD_ALLOW_INSECURE_UPSTREAM", "NO") == "YES"
         if (
@@ -343,7 +380,27 @@ class PipedreamClient:
         self.project_id = project_id
         self.environment = environment
         self.oauth_app_id = oauth_app_id
+        self.oauth_app_ids = {
+            "google-drive": oauth_app_id,
+            "gmail": gmail_oauth_app_id,
+        }
         self.origin = parsed
+
+    def _profile(self, integration: str) -> tuple[str, str, str, str]:
+        value = INTEGRATION_PROFILES.get(integration)
+        oauth_app_id = self.oauth_app_ids.get(integration, "")
+        if value is None or not oauth_app_id:
+            raise WorkerError(
+                503,
+                "integration_not_configured",
+                "managed integration is not configured",
+            )
+        return (
+            str(value["app"]),
+            str(value["default_name"]),
+            str(value["required_scope"]),
+            oauth_app_id,
+        )
 
     def _request(
         self,
@@ -531,7 +588,8 @@ class PipedreamClient:
             raise WorkerError(502, "invalid_broker_response", "managed-auth broker token response is invalid")
         return token
 
-    def connect_link(self, user: str) -> dict[str, object]:
+    def connect_link(self, user: str, integration: str = "google-drive") -> dict[str, object]:
+        app, _default_name, _required_scope, oauth_app_id = self._profile(integration)
         token = self.access_token("connect:tokens:create")
         result = self._request(
             "POST",
@@ -569,16 +627,22 @@ class PipedreamClient:
         query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         if any(key in {"app", "oauthAppId"} for key, _value in query):
             raise WorkerError(502, "invalid_broker_response", "managed-auth broker returned an ambiguous link")
-        query.extend((("app", GOOGLE_DRIVE_APP), ("oauthAppId", self.oauth_app_id)))
+        query.extend((("app", app), ("oauthAppId", oauth_app_id)))
         link = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), ""))
         return {
             "schema_version": "steward.managed-connect-link.v1",
-            "integration": "google-drive",
+            "integration": integration,
             "connect_url": link,
             "expires_at": expires_at,
         }
 
-    def _accounts(self, user: str, scope: str) -> tuple[str, list[object]]:
+    def _accounts(
+        self,
+        user: str,
+        scope: str,
+        integration: str = "google-drive",
+    ) -> tuple[str, list[object]]:
+        app, _default_name, _required_scope, oauth_app_id = self._profile(integration)
         token = self.access_token(scope)
         accounts: list[object] = []
         after: str | None = None
@@ -586,11 +650,11 @@ class PipedreamClient:
         expected_total: int | None = None
         while len(accounts) < MAX_ACCOUNT_RESULTS:
             parameters = {
-                "app": GOOGLE_DRIVE_APP,
+                "app": app,
                 "external_user_id": user,
                 "include_credentials": "false",
                 "limit": str(ACCOUNT_PAGE_SIZE),
-                "oauth_app_id": self.oauth_app_id,
+                "oauth_app_id": oauth_app_id,
             }
             if after is not None:
                 parameters["after"] = after
@@ -637,19 +701,25 @@ class PipedreamClient:
         raise WorkerError(502, "broker_result_limit", "managed-auth broker account set exceeds supported bound")
 
     @staticmethod
-    def _safe_account(value: object, user: str) -> dict[str, object] | None:
+    def _safe_account(
+        value: object,
+        user: str,
+        *,
+        expected_app: str = GOOGLE_DRIVE_APP,
+        default_name: str = "Google Drive",
+    ) -> dict[str, object] | None:
         if not isinstance(value, dict):
             return None
         identifier = value.get("id")
         external_id = value.get("external_id")
-        app = value.get("app")
+        provider_app = value.get("app")
         scopes = value.get("authorized_scopes")
         if (
             not isinstance(identifier, str)
             or not ACCOUNT_RE.fullmatch(identifier)
             or external_id != user
-            or not isinstance(app, dict)
-            or app.get("name_slug") != GOOGLE_DRIVE_APP
+            or not isinstance(provider_app, dict)
+            or provider_app.get("name_slug") != expected_app
             or not isinstance(scopes, list)
             or any(not isinstance(scope, str) for scope in scopes)
         ):
@@ -657,45 +727,74 @@ class PipedreamClient:
         healthy = value.get("healthy") is True and value.get("dead") is not True and not value.get("error")
         return {
             "account_id": identifier,
-            "account_name": value.get("name") if isinstance(value.get("name"), str) else "Google Drive",
+            "account_name": value.get("name") if isinstance(value.get("name"), str) else default_name,
             "authorized_scopes": sorted(set(scopes)),
             "created_at": value.get("created_at") if isinstance(value.get("created_at"), str) else "",
             "healthy": healthy,
         }
 
-    def reconcile(self, user: str, scope: str = "connect:accounts:read") -> tuple[str, dict[str, object]]:
-        token, raw_accounts = self._accounts(user, scope)
-        accounts = [safe for item in raw_accounts if (safe := self._safe_account(item, user)) is not None]
+    def reconcile(
+        self,
+        user: str,
+        scope: str = "connect:accounts:read",
+        integration: str = "google-drive",
+    ) -> tuple[str, dict[str, object]]:
+        app, default_name, required_scope, _oauth_app_id = self._profile(integration)
+        token, raw_accounts = self._accounts(user, scope, integration)
+        accounts = [
+            safe
+            for item in raw_accounts
+            if (
+                safe := self._safe_account(
+                    item,
+                    user,
+                    expected_app=app,
+                    default_name=default_name,
+                )
+            )
+            is not None
+        ]
         accounts.sort(key=lambda item: (str(item["created_at"]), str(item["account_id"])), reverse=True)
-        selected = next((item for item in accounts if self._account_ready(item)), None)
+        selected = next(
+            (item for item in accounts if self._account_ready(item, required_scope)),
+            None,
+        )
         if selected is None:
             selected = next((item for item in accounts if item["healthy"]), accounts[0] if accounts else None)
         if selected is None:
             return token, {
                 "schema_version": "steward.managed-connection.v1",
-                "integration": "google-drive",
+                "integration": integration,
                 "status": "not_connected",
             }
         return token, {
             "schema_version": "steward.managed-connection.v1",
-            "integration": "google-drive",
-            "status": "ready" if self._account_ready(selected) else "needs_attention",
+            "integration": integration,
+            "status": (
+                "ready"
+                if self._account_ready(selected, required_scope)
+                else "needs_attention"
+            ),
             "account_id": selected["account_id"],
             "account_name": selected["account_name"],
             "authorized_scopes": selected["authorized_scopes"],
-            "required_scope": GOOGLE_DRIVE_SCOPE,
+            "required_scope": required_scope,
             "healthy": selected["healthy"],
         }
 
     @staticmethod
-    def _account_ready(account: Mapping[str, object]) -> bool:
+    def _account_ready(
+        account: Mapping[str, object],
+        required_scope: str = GOOGLE_DRIVE_SCOPE,
+    ) -> bool:
         scopes = account.get("authorized_scopes", [])
-        drive_scopes = {
+        provider_prefix = required_scope.rsplit(".", 1)[0]
+        provider_scopes = {
             scope
             for scope in scopes
-            if isinstance(scope, str) and scope.startswith("https://www.googleapis.com/auth/drive")
+            if isinstance(scope, str) and scope.startswith(provider_prefix)
         }
-        return account.get("healthy") is True and drive_scopes == {GOOGLE_DRIVE_SCOPE}
+        return account.get("healthy") is True and provider_scopes == {required_scope}
 
     def _owned_account(
         self,
@@ -703,8 +802,10 @@ class PipedreamClient:
         requested_account: str,
         scope: str,
         *,
+        integration: str = "google-drive",
         deadline: float | None = None,
     ) -> tuple[str, dict[str, object]]:
+        app, default_name, _required_scope, _oauth_app_id = self._profile(integration)
         token = self.access_token(scope, deadline=deadline)
         query = urllib.parse.urlencode({"include_credentials": "false"})
         value = self._request(
@@ -713,7 +814,12 @@ class PipedreamClient:
             token=token,
             deadline=deadline,
         )
-        account = self._safe_account(value, user)
+        account = self._safe_account(
+            value,
+            user,
+            expected_app=app,
+            default_name=default_name,
+        )
         if account is not None and account["account_id"] == requested_account:
             return token, account
         raise WorkerError(404, "connection_not_found", "managed connection was not found")
@@ -973,6 +1079,246 @@ class PipedreamClient:
             "content_sha256": "sha256:" + hashlib.sha256(normalized).hexdigest(),
         }
 
+    def read_recent_gmail(self, user: str, requested_account: str) -> dict[str, object]:
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="gmail",
+            deadline=deadline,
+        )
+        if not self._account_ready(connection, GMAIL_SCOPE):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Gmail connection is not ready for this app",
+            )
+        listed = self._proxy_json(
+            token,
+            user=user,
+            account=requested_account,
+            target=GMAIL_LIST_TARGET,
+            deadline=deadline,
+        )
+        if not isinstance(listed, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Gmail returned an invalid message list",
+            )
+        raw_messages = listed.get("messages", [])
+        if not isinstance(raw_messages, list) or len(raw_messages) > MAX_GMAIL_MESSAGES:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Gmail exceeded the recent-message result bound",
+            )
+        message_ids: list[str] = []
+        for item in raw_messages:
+            if (
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("id"), str)
+                or FILE_ID_RE.fullmatch(str(item["id"])) is None
+                or item["id"] in message_ids
+            ):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Gmail returned invalid message identifiers",
+                )
+            message_ids.append(str(item["id"]))
+        results: list[dict[str, object]] = []
+        total_content_bytes = 0
+        for message_id in message_ids:
+            target = (
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+                + urllib.parse.quote(message_id, safe="")
+                + "?"
+                + urllib.parse.urlencode(
+                    {"fields": GMAIL_MESSAGE_FIELDS, "format": "full"}
+                )
+            )
+            try:
+                value = self._proxy_json(
+                    token,
+                    user=user,
+                    account=requested_account,
+                    target=target,
+                    deadline=deadline,
+                )
+            except WorkerError as error:
+                if error.upstream_status == 404:
+                    results.append({"message_id": message_id, "status": "not_found"})
+                    continue
+                if error.code == "broker_response_too_large":
+                    results.append({"message_id": message_id, "status": "too_large"})
+                    continue
+                raise
+            result = self._gmail_message(value, message_id)
+            content_bytes = result.get("content_bytes", 0)
+            if isinstance(content_bytes, int) and not isinstance(content_bytes, bool):
+                total_content_bytes += content_bytes
+            if total_content_bytes > MAX_GMAIL_TOTAL_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Gmail content exceeded the aggregate operation bound",
+                )
+            results.append(result)
+        return {
+            "schema_version": "steward.gmail-recent-messages.v1",
+            "integration": "gmail",
+            "window_days": 30,
+            "results": results,
+            "result_count": len(results),
+            "has_more": bool(listed.get("nextPageToken")),
+        }
+
+    def _gmail_message(self, value: object, expected_id: str) -> dict[str, object]:
+        if not isinstance(value, Mapping) or value.get("id") != expected_id:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Gmail returned invalid message content",
+            )
+        thread_id = value.get("threadId")
+        internal_date = value.get("internalDate")
+        labels = value.get("labelIds", [])
+        snippet = value.get("snippet", "")
+        payload = value.get("payload")
+        if (
+            not isinstance(thread_id, str)
+            or FILE_ID_RE.fullmatch(thread_id) is None
+            or not isinstance(internal_date, str)
+            or not internal_date.isdecimal()
+            or len(internal_date) > 20
+            or not isinstance(labels, list)
+            or len(labels) > 100
+            or any(not isinstance(label, str) or len(label.encode()) > 256 for label in labels)
+            or not isinstance(snippet, str)
+            or len(snippet.encode()) > 4096
+            or not isinstance(payload, Mapping)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Gmail returned invalid message content",
+            )
+        headers = self._gmail_headers(payload.get("headers"))
+        body = self._gmail_text_body(payload)
+        content_source = "text/plain"
+        if body is None:
+            body = self._safe_text(snippet, maximum_bytes=4096)
+            content_source = "snippet"
+        normalized = body.encode("utf-8")
+        return {
+            "message_id": expected_id,
+            "thread_id": thread_id,
+            "status": "succeeded",
+            "received_at_epoch_ms": internal_date,
+            "labels": sorted(set(labels)),
+            "from": headers.get("from", ""),
+            "to": headers.get("to", ""),
+            "subject": headers.get("subject", ""),
+            "sent_at": headers.get("date", ""),
+            "content": body,
+            "content_source": content_source,
+            "content_bytes": len(normalized),
+            "content_sha256": "sha256:" + hashlib.sha256(normalized).hexdigest(),
+        }
+
+    @staticmethod
+    def _gmail_headers(value: object) -> dict[str, str]:
+        if not isinstance(value, list) or len(value) > 200:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Gmail returned invalid message headers",
+            )
+        selected: dict[str, str] = {}
+        allowed = {"date", "from", "subject", "to"}
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Gmail returned invalid message headers",
+                )
+            name = item.get("name")
+            header_value = item.get("value")
+            if not isinstance(name, str) or not isinstance(header_value, str):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Gmail returned invalid message headers",
+                )
+            normalized_name = name.lower()
+            if normalized_name in allowed and normalized_name not in selected:
+                selected[normalized_name] = PipedreamClient._safe_text(
+                    header_value,
+                    maximum_bytes=4096,
+                )
+        return selected
+
+    @staticmethod
+    def _safe_text(value: str, *, maximum_bytes: int) -> str:
+        normalized = unicodedata.normalize("NFC", value).replace("\r\n", "\n").replace("\r", "\n")
+        encoded = normalized.encode("utf-8")
+        if (
+            len(encoded) > maximum_bytes
+            or any(ord(character) < 0x20 and character not in "\t\n" for character in normalized)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Gmail returned invalid message text",
+            )
+        return normalized
+
+    @staticmethod
+    def _gmail_text_body(payload: Mapping[str, object]) -> str | None:
+        stack: list[tuple[Mapping[str, object], int]] = [(payload, 0)]
+        inspected = 0
+        while stack:
+            part, depth = stack.pop()
+            inspected += 1
+            if inspected > MAX_GMAIL_PARTS or depth > MAX_GMAIL_PART_DEPTH:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Gmail message structure exceeded its bound",
+                )
+            mime_type = part.get("mimeType", "")
+            body = part.get("body", {})
+            parts = part.get("parts", [])
+            if (
+                not isinstance(mime_type, str)
+                or not isinstance(body, Mapping)
+                or not isinstance(parts, list)
+                or any(not isinstance(child, Mapping) for child in parts)
+            ):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Gmail returned an invalid message structure",
+                )
+            if mime_type.lower() == "text/plain" and isinstance(body.get("data"), str):
+                encoded = str(body["data"])
+                if len(encoded) > ((MAX_GMAIL_MESSAGE_BYTES + 2) * 4 // 3) + 4:
+                    return None
+                try:
+                    raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+                    text = raw.decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    return None
+                return PipedreamClient._safe_text(
+                    text,
+                    maximum_bytes=MAX_GMAIL_MESSAGE_BYTES,
+                )
+            stack.extend((child, depth + 1) for child in reversed(parts))
+        return None
+
     def _proxy_json(
         self,
         token: str,
@@ -1009,9 +1355,17 @@ class PipedreamClient:
         query = urllib.parse.urlencode({"account_id": account, "external_user_id": user})
         return f"/v1/connect/{self.project_id}/proxy/{encoded_target}?{query}"
 
-    def revoke(self, user: str, requested_account: str) -> dict[str, object]:
+    def revoke(
+        self,
+        user: str,
+        requested_account: str,
+        integration: str = "google-drive",
+    ) -> dict[str, object]:
         token, _connection = self._owned_account(
-            user, requested_account, "connect:accounts:read connect:accounts:write"
+            user,
+            requested_account,
+            "connect:accounts:read connect:accounts:write",
+            integration=integration,
         )
         self._request(
             "DELETE",
@@ -1020,7 +1374,7 @@ class PipedreamClient:
         )
         return {
             "schema_version": "steward.managed-connection-revocation.v1",
-            "integration": "google-drive",
+            "integration": integration,
             "account_id": requested_account,
             "revoked": True,
         }
@@ -1085,9 +1439,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.path == "/v1/connections/google-drive/connect-link":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 result = self.worker.client.connect_link(external_user(body["external_user_id"]))
+            elif self.path == "/v1/connections/gmail/connect-link":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.connect_link(
+                    external_user(body["external_user_id"]),
+                    "gmail",
+                )
             elif self.path == "/v1/connections/google-drive/reconcile":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 _token, result = self.worker.client.reconcile(external_user(body["external_user_id"]))
+            elif self.path == "/v1/connections/gmail/reconcile":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                _token, result = self.worker.client.reconcile(
+                    external_user(body["external_user_id"]),
+                    integration="gmail",
+                )
             elif self.path == "/v1/connections/google-drive/files":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.list_drive_metadata(
@@ -1103,10 +1469,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     account_id(body["account_id"]),
                     file_ids(body["file_ids"]),
                 )
+            elif self.path == "/v1/connections/gmail/recent-messages":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id"}),
+                )
+                result = self.worker.client.read_recent_gmail(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                )
             elif self.path == "/v1/connections/google-drive/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.revoke(
                     external_user(body["external_user_id"]), account_id(body["account_id"])
+                )
+            elif self.path == "/v1/connections/gmail/revoke":
+                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                result = self.worker.client.revoke(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    "gmail",
                 )
             else:
                 raise WorkerError(404, "not_found", "route not found")
@@ -1115,7 +1497,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result,
                 maximum_bytes=(
                     MAX_CONTENT_RESPONSE
-                    if self.path == "/v1/connections/google-drive/content"
+                    if self.path
+                    in {
+                        "/v1/connections/google-drive/content",
+                        "/v1/connections/gmail/recent-messages",
+                    }
                     else MAX_RESPONSE
                 ),
             )
@@ -1227,6 +1613,7 @@ def main() -> int:
         project_id=os.environ.get("STEWARD_PIPEDREAM_PROJECT_ID", ""),
         environment=os.environ.get("STEWARD_PIPEDREAM_ENVIRONMENT", ""),
         oauth_app_id=os.environ.get("STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID", ""),
+        gmail_oauth_app_id=os.environ.get("STEWARD_GMAIL_OAUTH_APP_ID", ""),
         api_origin=os.environ.get("STEWARD_PIPEDREAM_API_ORIGIN", PIPEDREAM_API_ORIGIN),
     )
     server = IntegrationServer(("0.0.0.0", 8080), worker_token, client)

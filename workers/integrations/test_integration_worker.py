@@ -37,6 +37,9 @@ class BrokerState:
         self.file_details: dict[str, object] = {}
         self.file_contents: dict[str, bytes] = {}
         self.next_page_token: str | None = None
+        self.gmail_messages: list[object] = []
+        self.gmail_message_details: dict[str, object] = {}
+        self.gmail_next_page_token: str | None = None
         self.connect_link_url = "https://pipedream.com/_static/connect.html?token=one-use-secret&connectLink=true"
 
 
@@ -134,6 +137,17 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
             encoded_target += "=" * (-len(encoded_target) % 4)
             target = urllib.parse.urlsplit(base64.urlsafe_b64decode(encoded_target).decode())
             target_parts = target.path.split("/")
+            if target.hostname == "gmail.googleapis.com":
+                if target.path == "/gmail/v1/users/me/messages":
+                    value: dict[str, object] = {"messages": self.state.gmail_messages}
+                    if self.state.gmail_next_page_token is not None:
+                        value["nextPageToken"] = self.state.gmail_next_page_token
+                    self._respond(200, value)
+                    return
+                message_id = target_parts[-1]
+                detail = self.state.gmail_message_details.get(message_id)
+                self._respond(200 if detail is not None else 404, detail or {"error": "not found"})
+                return
             if len(target_parts) >= 6 and target_parts[-1] == "export":
                 file_id = target_parts[-2]
                 content = self.state.file_contents.get(file_id)
@@ -192,6 +206,7 @@ def broker_client() -> Iterator[tuple[Any, BrokerState]]:
             project_id="proj_test",
             environment="development",
             oauth_app_id="oa_test",
+            gmail_oauth_app_id="oa_gmailtest",
             api_origin=f"http://127.0.0.1:{server.server_port}",
         )
         yield client, server.state
@@ -222,6 +237,49 @@ def connected_account(*, scopes: list[str] | None = None, identifier: str = "apn
     }
 
 
+def connected_gmail_account(
+    *,
+    scopes: list[str] | None = None,
+    identifier: str = "apn_owned123",
+) -> dict[str, object]:
+    value = connected_account(scopes=scopes or [worker.GMAIL_SCOPE], identifier=identifier)
+    value["name"] = "Operations Inbox"
+    value["app"] = {"name_slug": "gmail"}
+    return value
+
+
+def gmail_message(
+    message_id: str,
+    *,
+    body: str = "Please prepare the renewal summary by Friday.",
+) -> dict[str, object]:
+    encoded = base64.urlsafe_b64encode(body.encode()).decode().rstrip("=")
+    return {
+        "id": message_id,
+        "threadId": "thread_" + message_id,
+        "labelIds": ["INBOX", "UNREAD"],
+        "snippet": "Please prepare the renewal summary…",
+        "internalDate": "1786723200000",
+        "payload": {
+            "mimeType": "multipart/alternative",
+            "headers": [
+                {"name": "From", "value": "Customer <customer@example.com>"},
+                {"name": "To", "value": "ops@example.com"},
+                {"name": "Subject", "value": "Renewal next steps"},
+                {"name": "Date", "value": "Fri, 14 Aug 2026 12:00:00 -0700"},
+            ],
+            "body": {"size": 0},
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "headers": [],
+                    "body": {"data": encoded, "size": len(body.encode())},
+                }
+            ],
+        },
+    }
+
+
 class PipedreamClientTests(unittest.TestCase):
     def test_connect_link_uses_exact_scopes_and_returns_only_one_use_url(self) -> None:
         with broker_client() as (client, state):
@@ -244,6 +302,39 @@ class PipedreamClientTests(unittest.TestCase):
                 "scope": "connect:accounts:read connect:accounts:write",
             },
         )
+
+    def test_gmail_connect_and_reconcile_are_profile_scoped(self) -> None:
+        with broker_client() as (client, state):
+            link = client.connect_link("ryu_abcdefghijklmnop", "gmail")
+            state.accounts = [connected_gmail_account()]
+            _token, connection = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="gmail",
+            )
+
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(link["connect_url"])).query
+        )
+        self.assertEqual(link["integration"], "gmail")
+        self.assertEqual(query["app"], ["gmail"])
+        self.assertEqual(query["oauthAppId"], ["oa_gmailtest"])
+        self.assertEqual(connection["status"], "ready")
+        self.assertEqual(connection["required_scope"], worker.GMAIL_SCOPE)
+        account_request = next(
+            request for request in state.requests if "/accounts?" in request["path"]
+        )
+        account_query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(account_request["path"]).query
+        )
+        self.assertEqual(account_query["app"], ["gmail"])
+        self.assertEqual(account_query["oauth_app_id"], ["oa_gmailtest"])
+
+    def test_unconfigured_gmail_fails_without_contacting_broker(self) -> None:
+        with broker_client() as (client, state):
+            client.oauth_app_ids["gmail"] = ""
+            with self.assertRaisesRegex(worker.WorkerError, "not configured"):
+                client.connect_link("ryu_abcdefghijklmnop", "gmail")
+        self.assertEqual(state.requests, [])
 
     def test_reconcile_normalizes_account_and_never_returns_credentials(self) -> None:
         with broker_client() as (client, state):
@@ -726,6 +817,82 @@ class PipedreamClientTests(unittest.TestCase):
                 )
         self.assertFalse(any("/proxy/" in request["path"] for request in state.requests))
 
+    def test_read_recent_gmail_freezes_window_and_normalizes_bounded_text(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_gmail_account()]
+            state.gmail_messages = [{"id": "msg_1", "threadId": "thread_msg_1"}]
+            state.gmail_message_details["msg_1"] = gmail_message("msg_1")
+            result = client.read_recent_gmail(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+            )
+
+        self.assertEqual(result["schema_version"], "steward.gmail-recent-messages.v1")
+        self.assertEqual(result["window_days"], 30)
+        message = result["results"][0]
+        self.assertEqual(message["subject"], "Renewal next steps")
+        self.assertEqual(message["content_source"], "text/plain")
+        self.assertEqual(
+            message["content"],
+            "Please prepare the renewal summary by Friday.",
+        )
+        proxy_targets = []
+        for request in state.requests:
+            if "/proxy/" not in request["path"]:
+                continue
+            encoded = urllib.parse.urlsplit(request["path"]).path.rsplit("/", 1)[-1]
+            encoded += "=" * (-len(encoded) % 4)
+            proxy_targets.append(base64.urlsafe_b64decode(encoded).decode())
+        self.assertEqual(proxy_targets[0], worker.GMAIL_LIST_TARGET)
+        detail = urllib.parse.urlsplit(proxy_targets[1])
+        self.assertEqual(detail.hostname, "gmail.googleapis.com")
+        self.assertEqual(detail.path, "/gmail/v1/users/me/messages/msg_1")
+        self.assertEqual(
+            urllib.parse.parse_qs(detail.query),
+            {"fields": [worker.GMAIL_MESSAGE_FIELDS], "format": ["full"]},
+        )
+
+    def test_read_recent_gmail_uses_snippet_fallback_and_rejects_broader_scope(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_gmail_account()]
+            state.gmail_messages = [{"id": "msg_1"}]
+            detail = gmail_message("msg_1")
+            detail["payload"]["parts"] = []
+            state.gmail_message_details["msg_1"] = detail
+            result = client.read_recent_gmail(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+            )
+            self.assertEqual(result["results"][0]["content_source"], "snippet")
+
+            state.accounts = [
+                connected_gmail_account(
+                    scopes=[worker.GMAIL_SCOPE, "https://www.googleapis.com/auth/gmail.modify"]
+                )
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "not ready"):
+                client.read_recent_gmail(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+    def test_read_recent_gmail_rejects_duplicate_or_excess_messages_before_fetch(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_gmail_account()]
+            state.gmail_messages = [{"id": "msg_1"}, {"id": "msg_1"}]
+            with self.assertRaisesRegex(worker.WorkerError, "identifiers"):
+                client.read_recent_gmail(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+        detail_requests = [
+            request
+            for request in state.requests
+            if "/proxy/" in request["path"]
+            and "messages%2Fmsg" in request["path"]
+        ]
+        self.assertEqual(detail_requests, [])
+
     def test_revoke_verifies_ownership_then_uses_write_scope(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
@@ -742,11 +909,25 @@ class PipedreamClientTests(unittest.TestCase):
 
 
 class StubClient:
-    def connect_link(self, user: str) -> dict[str, object]:
-        return {"schema_version": "test", "user": user}
+    def connect_link(
+        self,
+        user: str,
+        integration: str = "google-drive",
+    ) -> dict[str, object]:
+        return {"schema_version": "test", "user": user, "integration": integration}
 
-    def reconcile(self, user: str) -> tuple[str, dict[str, object]]:
-        return "not-returned", {"schema_version": "test", "user": user}
+    def reconcile(
+        self,
+        user: str,
+        scope: str = "connect:accounts:read",
+        integration: str = "google-drive",
+    ) -> tuple[str, dict[str, object]]:
+        del scope
+        return "not-returned", {
+            "schema_version": "test",
+            "user": user,
+            "integration": integration,
+        }
 
     def list_drive_metadata(self, user: str, account: str) -> dict[str, object]:
         return {"schema_version": "test", "user": user, "account": account}
@@ -761,8 +942,27 @@ class StubClient:
             "file_ids": list(file_ids),
         }
 
-    def revoke(self, user: str, account: str) -> dict[str, object]:
-        return {"schema_version": "test", "user": user, "account": account, "revoked": True}
+    def read_recent_gmail(self, user: str, account: str) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "integration": "gmail",
+        }
+
+    def revoke(
+        self,
+        user: str,
+        account: str,
+        integration: str = "google-drive",
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "integration": integration,
+            "revoked": True,
+        }
 
 
 @contextlib.contextmanager
@@ -1003,6 +1203,31 @@ class HTTPContractTests(unittest.TestCase):
                 b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","file_ids":["doc-1","doc-1"]}',
             )
             self.assertEqual((status, body["error"]["code"]), (400, "invalid_file_ids"))
+
+    def test_gmail_routes_dispatch_only_exact_finite_operations(self) -> None:
+        with integration_server() as port:
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/gmail/connect-link",
+                b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["integration"], "gmail")
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/gmail/recent-messages",
+                b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["integration"], "gmail")
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/gmail/recent-messages",
+                b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","q":"from:ceo"}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
 
 
 class SecretFileTests(unittest.TestCase):
