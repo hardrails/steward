@@ -40,6 +40,7 @@ GOOGLE_DRIVE_APP = "google_drive"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 GMAIL_APP = "gmail"
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_FULL_ACCESS_SCOPE = "https://mail.google.com/"
 GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
 GOOGLE_DRIVE_CONTENT_FIELDS = (
     "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
@@ -66,7 +67,7 @@ MAX_GMAIL_PARTS = 100
 MAX_GMAIL_PART_DEPTH = 12
 GMAIL_MESSAGE_FIELDS = (
     "id,threadId,labelIds,snippet,internalDate,"
-    "payload(headers,mimeType,body(data,size),parts)"
+    "payload(filename,headers,mimeType,body(data,size),parts)"
 )
 GMAIL_LIST_TARGET = (
     "https://gmail.googleapis.com/gmail/v1/users/me/messages?"
@@ -359,10 +360,12 @@ class PipedreamClient:
             raise RuntimeError("Pipedream project ID is invalid")
         if environment not in {"development", "production"}:
             raise RuntimeError("Pipedream environment is invalid")
-        if not OAUTH_APP_RE.fullmatch(oauth_app_id):
+        if oauth_app_id and not OAUTH_APP_RE.fullmatch(oauth_app_id):
             raise RuntimeError("Google Drive OAuth app ID is invalid")
         if gmail_oauth_app_id and not OAUTH_APP_RE.fullmatch(gmail_oauth_app_id):
             raise RuntimeError("Gmail OAuth app ID is invalid")
+        if not oauth_app_id and not gmail_oauth_app_id:
+            raise RuntimeError("at least one managed OAuth app ID is required")
         parsed = urllib.parse.urlsplit(api_origin)
         allow_http = os.environ.get("STEWARD_ALLOW_INSECURE_UPSTREAM", "NO") == "YES"
         if (
@@ -788,12 +791,23 @@ class PipedreamClient:
         required_scope: str = GOOGLE_DRIVE_SCOPE,
     ) -> bool:
         scopes = account.get("authorized_scopes", [])
-        provider_prefix = required_scope.rsplit(".", 1)[0]
-        provider_scopes = {
-            scope
-            for scope in scopes
-            if isinstance(scope, str) and scope.startswith(provider_prefix)
-        }
+        if required_scope == GMAIL_SCOPE:
+            provider_scopes = {
+                scope
+                for scope in scopes
+                if isinstance(scope, str)
+                and (
+                    scope == GMAIL_FULL_ACCESS_SCOPE
+                    or scope.startswith("https://www.googleapis.com/auth/gmail.")
+                )
+            }
+        else:
+            provider_prefix = required_scope.rsplit(".", 1)[0]
+            provider_scopes = {
+                scope
+                for scope in scopes
+                if isinstance(scope, str) and scope.startswith(provider_prefix)
+            }
         return account.get("healthy") is True and provider_scopes == {required_scope}
 
     def _owned_account(
@@ -1216,6 +1230,12 @@ class PipedreamClient:
                 "invalid_provider_response",
                 "Gmail returned invalid message content",
             )
+        if "INBOX" not in labels:
+            raise WorkerError(
+                502,
+                "message_left_inbox",
+                "Gmail message left the recent-inbox boundary before it was read",
+            )
         headers = self._gmail_headers(payload.get("headers"))
         body = self._gmail_text_body(payload)
         content_source = "text/plain"
@@ -1301,10 +1321,17 @@ class PipedreamClient:
                     "Gmail message structure exceeded its bound",
                 )
             mime_type = part.get("mimeType", "")
+            filename = part.get("filename", "")
+            headers = part.get("headers", [])
             body = part.get("body", {})
             parts = part.get("parts", [])
             if (
                 not isinstance(mime_type, str)
+                or not isinstance(filename, str)
+                or len(filename.encode()) > 1024
+                or not isinstance(headers, list)
+                or len(headers) > 200
+                or any(not isinstance(header, Mapping) for header in headers)
                 or not isinstance(body, Mapping)
                 or not isinstance(parts, list)
                 or any(not isinstance(child, Mapping) for child in parts)
@@ -1314,7 +1341,24 @@ class PipedreamClient:
                     "invalid_provider_response",
                     "Gmail returned an invalid message structure",
                 )
-            if mime_type.lower() == "text/plain" and isinstance(body.get("data"), str):
+            content_disposition = ""
+            for header in headers:
+                name = header.get("name")
+                value = header.get("value")
+                if not isinstance(name, str) or not isinstance(value, str):
+                    raise WorkerError(
+                        502,
+                        "invalid_provider_response",
+                        "Gmail returned an invalid message structure",
+                    )
+                if name.lower() == "content-disposition":
+                    content_disposition = value.strip().lower()
+            is_attachment = bool(filename) or content_disposition.startswith("attachment")
+            if (
+                not is_attachment
+                and mime_type.lower() == "text/plain"
+                and isinstance(body.get("data"), str)
+            ):
                 encoded = str(body["data"])
                 if len(encoded) > ((MAX_GMAIL_MESSAGE_BYTES + 2) * 4 // 3) + 4:
                     return None

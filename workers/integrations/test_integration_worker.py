@@ -281,6 +281,29 @@ def gmail_message(
 
 
 class PipedreamClientTests(unittest.TestCase):
+    def test_each_managed_integration_can_be_configured_independently(self) -> None:
+        gmail_only = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="",
+            gmail_oauth_app_id="oa_gmailtest",
+            api_origin="https://broker.invalid",
+        )
+        self.assertEqual(gmail_only.oauth_app_ids["google-drive"], "")
+        self.assertEqual(gmail_only.oauth_app_ids["gmail"], "oa_gmailtest")
+        with self.assertRaisesRegex(RuntimeError, "at least one"):
+            worker.PipedreamClient(
+                client_id=b"client-id-value",
+                client_secret=b"client-secret-value",
+                project_id="proj_test",
+                environment="development",
+                oauth_app_id="",
+                gmail_oauth_app_id="",
+                api_origin="https://broker.invalid",
+            )
+
     def test_connect_link_uses_exact_scopes_and_returns_only_one_use_url(self) -> None:
         with broker_client() as (client, state):
             result = client.connect_link("ryu_abcdefghijklmnop")
@@ -871,6 +894,55 @@ class PipedreamClientTests(unittest.TestCase):
                 )
             ]
             with self.assertRaisesRegex(worker.WorkerError, "not ready"):
+                client.read_recent_gmail(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+            state.accounts = [
+                connected_gmail_account(
+                    scopes=[worker.GMAIL_SCOPE, worker.GMAIL_FULL_ACCESS_SCOPE]
+                )
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "not ready"):
+                client.read_recent_gmail(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+    def test_read_recent_gmail_ignores_text_attachments(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_gmail_account()]
+            state.gmail_messages = [{"id": "msg_1"}]
+            detail = gmail_message("msg_1", body="inline body")
+            attachment_text = base64.urlsafe_b64encode(b"private attachment").decode()
+            detail["payload"]["parts"].insert(
+                0,
+                {
+                    "filename": "private.txt",
+                    "mimeType": "text/plain",
+                    "headers": [
+                        {"name": "Content-Disposition", "value": "attachment"}
+                    ],
+                    "body": {"data": attachment_text, "size": 18},
+                },
+            )
+            state.gmail_message_details["msg_1"] = detail
+            result = client.read_recent_gmail(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+            )
+
+        self.assertEqual(result["results"][0]["content"], "inline body")
+
+    def test_read_recent_gmail_revalidates_inbox_after_listing(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_gmail_account()]
+            state.gmail_messages = [{"id": "msg_1"}]
+            detail = gmail_message("msg_1")
+            detail["labelIds"] = ["UNREAD"]
+            state.gmail_message_details["msg_1"] = detail
+            with self.assertRaisesRegex(worker.WorkerError, "left the recent-inbox"):
                 client.read_recent_gmail(
                     "ryu_abcdefghijklmnop",
                     "apn_owned123",
