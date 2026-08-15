@@ -935,6 +935,39 @@ class PipedreamClientTests(unittest.TestCase):
 
         self.assertEqual(result["results"][0]["content"], "inline body")
 
+    def test_read_recent_gmail_ignores_text_nested_below_attachment_container(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_gmail_account()]
+            state.gmail_messages = [{"id": "msg_1"}]
+            detail = gmail_message("msg_1", body="inline body")
+            attachment_text = base64.urlsafe_b64encode(b"private attachment").decode()
+            detail["payload"]["parts"].insert(
+                0,
+                {
+                    "filename": "archive.mime",
+                    "mimeType": "multipart/mixed",
+                    "headers": [
+                        {"name": "Content-Disposition", "value": "attachment"}
+                    ],
+                    "body": {},
+                    "parts": [
+                        {
+                            "filename": "",
+                            "mimeType": "text/plain",
+                            "headers": [],
+                            "body": {"data": attachment_text, "size": 18},
+                        }
+                    ],
+                },
+            )
+            state.gmail_message_details["msg_1"] = detail
+            result = client.read_recent_gmail(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+            )
+
+        self.assertEqual(result["results"][0]["content"], "inline body")
+
     def test_read_recent_gmail_revalidates_inbox_after_listing(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_gmail_account()]

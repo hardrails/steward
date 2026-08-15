@@ -1371,7 +1371,8 @@ class PipedreamClient:
                     text,
                     maximum_bytes=MAX_GMAIL_MESSAGE_BYTES,
                 )
-            stack.extend((child, depth + 1) for child in reversed(parts))
+            if not is_attachment:
+                stack.extend((child, depth + 1) for child in reversed(parts))
         return None
 
     def _proxy_json(
