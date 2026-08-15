@@ -538,7 +538,7 @@ components:
           type: integer
           minimum: 0
           maximum: 65536
-          description: The response contains at most 327680 normalized content bytes in aggregate.
+          description: The response contains at most 245760 normalized content bytes in aggregate and is bounded to 524288 encoded bytes.
         content_sha256:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'

@@ -11,7 +11,7 @@ The first profile supports Google Drive through Pipedream Connect:
 - reconcile a connected account without retrieving credentials;
 - list at most 50 file metadata records through one frozen Drive API request;
 - read one through ten selected Google Docs, plain-text files, or Markdown files
-  through frozen metadata and content requests, with 64 KiB per-file, 320 KiB
+  through frozen metadata and content requests, with 64 KiB per-file, 240 KiB
   aggregate text, one shared 30-second batch deadline, and an explicit outcome for
   every requested ID; and
 - verify ownership before revoking one account.

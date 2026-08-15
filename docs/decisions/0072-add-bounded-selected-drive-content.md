@@ -25,11 +25,11 @@ account handle, and one through ten unique canonical file IDs. Steward refetches
 metadata, checks download authority, selects the Google endpoint and format, and
 returns request-ordered bounded normalized outcomes. V1 supports native Google Docs
 as plain text plus UTF-8 `text/plain` and `text/markdown` blobs. Each file is capped
-at 64 KiB and aggregate text at 320 KiB; oversize content is rejected, not truncated.
+at 64 KiB and aggregate text at 240 KiB; oversize content is rejected, not truncated.
 Token lookup, ownership verification, metadata reads, and content reads share one
 30-second batch deadline, so selecting more files cannot multiply the upstream
 timeout. The aggregate content and field-specific provider-metadata bounds keep
-worst-case JSON escaping within the worker's 1 MiB response ceiling.
+worst-case JSON escaping within the operation's 512 KiB response ceiling.
 
 The configured custom OAuth client changes from metadata-only access to exactly
 `drive.readonly`. Existing grants therefore become not-ready until explicit

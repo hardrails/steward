@@ -55,7 +55,8 @@ GOOGLE_TEXT_EXPORT_MEDIA_TYPE = "text/plain"
 SUPPORTED_TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/markdown"})
 MAX_CONTENT_FILES = 10
 MAX_FILE_CONTENT_BYTES = 64 << 10
-MAX_TOTAL_CONTENT_BYTES = 320 << 10
+MAX_TOTAL_CONTENT_BYTES = 240 << 10
+MAX_CONTENT_RESPONSE = 512 << 10
 GOOGLE_DRIVE_TARGET = (
     "https://www.googleapis.com/drive/v3/files?"
     + urllib.parse.urlencode(
@@ -1036,16 +1037,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def worker(self) -> "IntegrationServer":
         return self.server  # type: ignore[return-value]
 
-    def _json(self, status: int, value: object) -> None:
+    def _json(self, status: int, value: object, *, maximum_bytes: int = MAX_RESPONSE) -> None:
         raw = json.dumps(
             value,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
-        if len(raw) > MAX_RESPONSE:
+        if len(raw) > maximum_bytes:
             status = 500
-            raw = b'{"error":{"code":"response_too_large","message":"worker response exceeded 1 MiB"}}'
+            raw = b'{"error":{"code":"response_too_large","message":"worker response exceeded its bound"}}'
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
@@ -1109,7 +1110,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 )
             else:
                 raise WorkerError(404, "not_found", "route not found")
-            self._json(200, result)
+            self._json(
+                200,
+                result,
+                maximum_bytes=(
+                    MAX_CONTENT_RESPONSE
+                    if self.path == "/v1/connections/google-drive/content"
+                    else MAX_RESPONSE
+                ),
+            )
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._json(400, {"error": {"code": "invalid_json", "message": "request is not valid JSON"}})
         except WorkerError as error:

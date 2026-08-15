@@ -509,7 +509,7 @@ class PipedreamClientTests(unittest.TestCase):
             sum(int(item["content_bytes"]) for item in result["results"]),
             worker.MAX_TOTAL_CONTENT_BYTES,
         )
-        self.assertLessEqual(len(serialized), worker.MAX_RESPONSE)
+        self.assertLessEqual(len(serialized), worker.MAX_CONTENT_RESPONSE)
 
     def test_read_drive_content_uses_one_deadline_for_the_whole_batch(self) -> None:
         class DeadlineClient(worker.PipedreamClient):
