@@ -31,6 +31,7 @@ class BrokerState:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
         self.accounts: list[object] = []
+        self.account_pages: list[list[object]] | None = None
         self.files: list[object] = []
         self.next_page_token: str | None = None
         self.connect_link_url = "https://pipedream.com/_static/connect.html?token=one-use-secret&connectLink=true"
@@ -92,7 +93,18 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._record(None)
         if self.path.startswith("/v1/connect/proj_test/accounts?"):
-            self._respond(200, {"data": self.state.accounts, "page_info": {"count": len(self.state.accounts)}})
+            pages = self.state.account_pages or [self.state.accounts]
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            after = query.get("after", [None])[0]
+            page_index = 0 if after is None else int(str(after).removeprefix("cursor-")) + 1
+            page = pages[page_index]
+            page_info: dict[str, object] = {
+                "count": len(page),
+                "total_count": sum(len(item) for item in pages),
+            }
+            if page_index + 1 < len(pages):
+                page_info["end_cursor"] = f"cursor-{page_index}"
+            self._respond(200, {"data": page, "page_info": page_info})
             return
         if self.path.startswith("/v1/connect/proj_test/accounts/"):
             account = next(
@@ -244,6 +256,24 @@ class PipedreamClientTests(unittest.TestCase):
             _token, result = client.reconcile("ryu_abcdefghijklmnop")
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["account_id"], "apn_owned123")
+
+    def test_reconcile_follows_all_account_pages(self) -> None:
+        with broker_client() as (client, state):
+            broader_accounts = [
+                connected_account(
+                    identifier=f"apn_broader{index}",
+                    scopes=[worker.GOOGLE_DRIVE_SCOPE, "https://www.googleapis.com/auth/drive"],
+                )
+                for index in range(100)
+            ]
+            state.account_pages = [broader_accounts, [connected_account()]]
+            _token, result = client.reconcile("ryu_abcdefghijklmnop")
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["account_id"], "apn_owned123")
+        account_requests = [request for request in state.requests if "/accounts?" in request["path"]]
+        self.assertEqual(len(account_requests), 2)
+        second_query = urllib.parse.parse_qs(urllib.parse.urlsplit(account_requests[1]["path"]).query)
+        self.assertEqual(second_query["after"], ["cursor-0"])
 
     def test_list_metadata_freezes_target_and_bounds_output(self) -> None:
         with broker_client() as (client, state):

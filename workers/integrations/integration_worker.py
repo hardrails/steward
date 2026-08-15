@@ -28,6 +28,8 @@ CONNECT_TOKEN_SECONDS = 600
 MAX_CONCURRENCY = 8
 MAX_HEALTH_CONCURRENCY = 2
 CLIENT_READ_TIMEOUT_SECONDS = 5
+ACCOUNT_PAGE_SIZE = 100
+MAX_ACCOUNT_RESULTS = 1000
 PIPEDREAM_API_ORIGIN = "https://api.pipedream.com"
 GOOGLE_DRIVE_APP = "google_drive"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
@@ -271,23 +273,61 @@ class PipedreamClient:
 
     def _accounts(self, user: str, scope: str) -> tuple[str, list[object]]:
         token = self.access_token(scope)
-        query = urllib.parse.urlencode(
-            {
+        accounts: list[object] = []
+        after: str | None = None
+        seen_cursors: set[str] = set()
+        expected_total: int | None = None
+        while len(accounts) < MAX_ACCOUNT_RESULTS:
+            parameters = {
                 "app": GOOGLE_DRIVE_APP,
                 "external_user_id": user,
                 "include_credentials": "false",
-                "limit": "100",
+                "limit": str(ACCOUNT_PAGE_SIZE),
                 "oauth_app_id": self.oauth_app_id,
             }
-        )
-        result = self._request(
-            "GET",
-            f"/v1/connect/{self.project_id}/accounts?{query}",
-            token=token,
-        )
-        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
-            raise WorkerError(502, "invalid_broker_response", "managed-auth broker account response is invalid")
-        return token, result["data"]
+            if after is not None:
+                parameters["after"] = after
+            query = urllib.parse.urlencode(parameters)
+            result = self._request(
+                "GET",
+                f"/v1/connect/{self.project_id}/accounts?{query}",
+                token=token,
+            )
+            data = result.get("data") if isinstance(result, dict) else None
+            page_info = result.get("page_info") if isinstance(result, dict) else None
+            if not isinstance(data, list) or not isinstance(page_info, dict):
+                raise WorkerError(502, "invalid_broker_response", "managed-auth broker account response is invalid")
+            count = page_info.get("count")
+            total = page_info.get("total_count")
+            if (
+                not isinstance(count, int)
+                or isinstance(count, bool)
+                or count != len(data)
+                or not isinstance(total, int)
+                or isinstance(total, bool)
+                or total < len(accounts) + len(data)
+            ):
+                raise WorkerError(502, "invalid_broker_response", "managed-auth broker pagination is invalid")
+            if total > MAX_ACCOUNT_RESULTS:
+                raise WorkerError(502, "broker_result_limit", "managed-auth broker account set exceeds supported bound")
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                raise WorkerError(502, "invalid_broker_response", "managed-auth broker pagination changed during traversal")
+            accounts.extend(data)
+            if len(accounts) == total:
+                return token, accounts
+            cursor = page_info.get("end_cursor")
+            if (
+                not isinstance(cursor, str)
+                or not 1 <= len(cursor) <= 1024
+                or any(ord(char) < 0x21 or ord(char) > 0x7E for char in cursor)
+                or cursor in seen_cursors
+            ):
+                raise WorkerError(502, "invalid_broker_response", "managed-auth broker pagination cursor is invalid")
+            seen_cursors.add(cursor)
+            after = cursor
+        raise WorkerError(502, "broker_result_limit", "managed-auth broker account set exceeds supported bound")
 
     @staticmethod
     def _safe_account(value: object, user: str) -> dict[str, object] | None:
