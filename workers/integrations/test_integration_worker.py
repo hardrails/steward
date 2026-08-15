@@ -614,8 +614,8 @@ class PipedreamClientTests(unittest.TestCase):
                 released.set()
 
         with broker_client() as (client, _state), mock.patch.object(
-            worker.http.client,
-            "HTTPConnection",
+            worker,
+            "_ResolvedHTTPConnection",
             BlockingConnection,
         ):
             started = time.monotonic()
@@ -627,6 +627,38 @@ class PipedreamClientTests(unittest.TestCase):
                     deadline=time.monotonic() + 0.05,
                 )
             elapsed = time.monotonic() - started
+
+        self.assertEqual(raised.exception.code, "operation_deadline_exceeded")
+        self.assertLess(elapsed, 0.5)
+
+    def test_upstream_deadline_is_enforced_before_dns_returns(self) -> None:
+        release_dns = threading.Event()
+
+        def blocking_resolution(*_args: object, **_kwargs: object) -> list[object]:
+            release_dns.wait(timeout=1)
+            return []
+
+        client = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="oa_test",
+            api_origin="https://broker.invalid",
+        )
+        try:
+            with mock.patch.object(worker.socket, "getaddrinfo", blocking_resolution):
+                started = time.monotonic()
+                with self.assertRaises(worker.WorkerError) as raised:
+                    client._request_bytes(
+                        "GET",
+                        "/dns-stall",
+                        maximum_bytes=1024,
+                        deadline=time.monotonic() + 0.05,
+                    )
+                elapsed = time.monotonic() - started
+        finally:
+            release_dns.set()
 
         self.assertEqual(raised.exception.code, "operation_deadline_exceeded")
         self.assertLess(elapsed, 0.5)

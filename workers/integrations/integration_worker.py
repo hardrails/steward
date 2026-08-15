@@ -11,6 +11,7 @@ import http.server
 import json
 import os
 import pathlib
+import queue
 import re
 import socket
 import socketserver
@@ -70,6 +71,7 @@ ACCOUNT_RE = re.compile(r"^apn_[A-Za-z0-9]+$")
 PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+_DNS_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 
 class WorkerError(Exception):
@@ -157,6 +159,109 @@ def file_ids(value: object) -> tuple[str, ...]:
             "file IDs must be one through ten unique canonical identifiers",
         )
     return tuple(value)
+
+
+def _deadline_error() -> WorkerError:
+    return WorkerError(
+        503,
+        "operation_deadline_exceeded",
+        "managed integration operation exceeded its deadline",
+    )
+
+
+def _resolved_addresses(
+    host: str,
+    port: int,
+    *,
+    deadline: float | None,
+) -> tuple[tuple[int, int, int, str, tuple[object, ...]], ...]:
+    """Resolve a configured upstream without letting DNS escape a deadline."""
+
+    if deadline is None:
+        return tuple(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _DNS_SLOTS.acquire(timeout=remaining):
+        raise _deadline_error()
+    result: queue.Queue[object] = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            result.put(tuple(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
+        except BaseException as error:
+            result.put(error)
+        finally:
+            _DNS_SLOTS.release()
+
+    threading.Thread(target=resolve, daemon=True, name="managed-upstream-dns").start()
+    try:
+        resolved = result.get(timeout=max(0.0, deadline - time.monotonic()))
+    except queue.Empty as error:
+        raise _deadline_error() from error
+    if time.monotonic() >= deadline:
+        raise _deadline_error()
+    if isinstance(resolved, BaseException):
+        raise WorkerError(
+            503,
+            "broker_unavailable",
+            "managed-auth broker is unavailable",
+        ) from resolved
+    addresses = tuple(resolved)
+    if not addresses:
+        raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
+    return addresses
+
+
+def _open_resolved_socket(
+    connection: http.client.HTTPConnection,
+    addresses: tuple[tuple[int, int, int, str, tuple[object, ...]], ...],
+    *,
+    deadline: float | None,
+) -> None:
+    last_error: OSError | None = None
+    for family, socket_type, protocol, _canonical_name, address in addresses:
+        candidate = socket.socket(family, socket_type, protocol)
+        connection.sock = candidate
+        try:
+            timeout = connection.timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _deadline_error()
+                timeout = min(timeout, remaining) if timeout is not None else remaining
+            candidate.settimeout(timeout)
+            candidate.connect(address)
+            return
+        except WorkerError:
+            candidate.close()
+            connection.sock = None
+            raise
+        except OSError as error:
+            last_error = error
+            candidate.close()
+            connection.sock = None
+    raise last_error or OSError("managed upstream has no usable address")
+
+
+class _ResolvedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args: object, addresses: tuple, deadline: float | None, **kwargs: object) -> None:
+        self._resolved_addresses = addresses
+        self._absolute_deadline = deadline
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        _open_resolved_socket(self, self._resolved_addresses, deadline=self._absolute_deadline)
+
+
+class _ResolvedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: object, addresses: tuple, deadline: float | None, **kwargs: object) -> None:
+        self._resolved_addresses = addresses
+        self._absolute_deadline = deadline
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        _open_resolved_socket(self, self._resolved_addresses, deadline=self._absolute_deadline)
+        assert self.sock is not None
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 
 class PipedreamClient:
@@ -257,20 +362,23 @@ class PipedreamClient:
         if token is not None:
             headers["Authorization"] = "Bearer " + token
             headers["X-PD-Environment"] = self.environment
-        connection_type = http.client.HTTPSConnection if self.origin.scheme == "https" else http.client.HTTPConnection
+        headers["Host"] = self.origin.netloc
         timeout = UPSTREAM_TIMEOUT_SECONDS
         if deadline is not None:
             timeout = min(timeout, deadline - time.monotonic())
             if timeout <= 0:
-                raise WorkerError(
-                    503,
-                    "operation_deadline_exceeded",
-                    "managed integration operation exceeded its deadline",
-                )
+                raise _deadline_error()
+        port = self.origin.port or (443 if self.origin.scheme == "https" else 80)
+        addresses = _resolved_addresses(self.origin.hostname, port, deadline=deadline)
+        connection_type = (
+            _ResolvedHTTPSConnection if self.origin.scheme == "https" else _ResolvedHTTPConnection
+        )
         connection = connection_type(
             self.origin.hostname,
             self.origin.port,
             timeout=timeout,
+            addresses=addresses,
+            deadline=deadline,
             **({"context": ssl.create_default_context()} if self.origin.scheme == "https" else {}),
         )
         expired = threading.Event()
@@ -294,11 +402,7 @@ class PipedreamClient:
             if expired.is_set() or (
                 deadline is not None and time.monotonic() >= deadline
             ):
-                raise WorkerError(
-                    503,
-                    "operation_deadline_exceeded",
-                    "managed integration operation exceeded its deadline",
-                )
+                raise _deadline_error()
 
         try:
             connection.request(method, path, body=body, headers=headers)
