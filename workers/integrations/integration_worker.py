@@ -273,10 +273,55 @@ class PipedreamClient:
             timeout=timeout,
             **({"context": ssl.create_default_context()} if self.origin.scheme == "https" else {}),
         )
+        expired = threading.Event()
+        deadline_timer: threading.Timer | None = None
+        if deadline is not None:
+            def expire_connection() -> None:
+                expired.set()
+                active_socket = connection.sock
+                if active_socket is not None:
+                    try:
+                        active_socket.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                connection.close()
+
+            deadline_timer = threading.Timer(timeout, expire_connection)
+            deadline_timer.daemon = True
+            deadline_timer.start()
+
+        def require_live_deadline() -> None:
+            if expired.is_set() or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                raise WorkerError(
+                    503,
+                    "operation_deadline_exceeded",
+                    "managed integration operation exceeded its deadline",
+                )
+
         try:
             connection.request(method, path, body=body, headers=headers)
+            require_live_deadline()
             response = connection.getresponse()
-            raw = response.read(maximum_bytes + 1)
+            require_live_deadline()
+            chunks: list[bytes] = []
+            received = 0
+            while received <= maximum_bytes:
+                require_live_deadline()
+                active_socket = connection.sock
+                if active_socket is not None and deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        require_live_deadline()
+                    active_socket.settimeout(min(UPSTREAM_TIMEOUT_SECONDS, remaining))
+                chunk = response.read1(min(64 << 10, maximum_bytes + 1 - received))
+                require_live_deadline()
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                received += len(chunk)
+            raw = b"".join(chunks)
             if len(raw) > maximum_bytes:
                 raise WorkerError(
                     502,
@@ -302,8 +347,16 @@ class PipedreamClient:
         except WorkerError:
             raise
         except (OSError, TimeoutError, http.client.HTTPException) as error:
+            if expired.is_set():
+                raise WorkerError(
+                    503,
+                    "operation_deadline_exceeded",
+                    "managed integration operation exceeded its deadline",
+                ) from error
             raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable") from error
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
             connection.close()
 
     def access_token(self, scope: str, *, deadline: float | None = None) -> str:

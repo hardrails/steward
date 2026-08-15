@@ -575,6 +575,62 @@ class PipedreamClientTests(unittest.TestCase):
             [100.0 + worker.CONTENT_BATCH_TIMEOUT_SECONDS] * 5,
         )
 
+    def test_upstream_watchdog_enforces_absolute_deadline_during_slow_body(self) -> None:
+        released = threading.Event()
+
+        class BlockingSocket:
+            def settimeout(self, _timeout: float) -> None:
+                return
+
+            def shutdown(self, _how: int) -> None:
+                released.set()
+
+        class Headers:
+            def get(self, _key: str, default: str = "") -> str:
+                return default
+
+            def get_content_type(self) -> str:
+                return "application/json"
+
+        class BlockingResponse:
+            status = 200
+            headers = Headers()
+
+            def read1(self, _maximum: int) -> bytes:
+                released.wait(timeout=1)
+                return b""
+
+        class BlockingConnection:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                self.sock = BlockingSocket()
+
+            def request(self, *_args: object, **_kwargs: object) -> None:
+                return
+
+            def getresponse(self) -> BlockingResponse:
+                return BlockingResponse()
+
+            def close(self) -> None:
+                released.set()
+
+        with broker_client() as (client, _state), mock.patch.object(
+            worker.http.client,
+            "HTTPConnection",
+            BlockingConnection,
+        ):
+            started = time.monotonic()
+            with self.assertRaises(worker.WorkerError) as raised:
+                client._request_bytes(
+                    "GET",
+                    "/slow",
+                    maximum_bytes=1024,
+                    deadline=time.monotonic() + 0.05,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(raised.exception.code, "operation_deadline_exceeded")
+        self.assertLess(elapsed, 0.5)
+
     def test_read_drive_content_rejects_unowned_account_and_invalid_ids_before_proxy(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
