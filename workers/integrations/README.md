@@ -9,14 +9,31 @@ The first profile supports Google Drive through Pipedream Connect:
 
 - create a ten-minute, one-use Google Drive Connect Link;
 - reconcile a connected account without retrieving credentials;
-- list at most 50 file metadata records through one frozen Drive API request; and
+- list at most 50 file metadata records through one frozen Drive API request;
+- read one through ten selected Google Docs, plain-text files, or Markdown files
+  through frozen metadata and content requests, with 64 KiB per-file, 240 KiB
+  aggregate text, one shared 30-second batch deadline, and an explicit outcome for
+  every requested ID; and
 - verify ownership before revoking one account.
 
 The Pipedream OAuth access token is minted with the exact scopes needed for each
 operation and is never cached. The Google OAuth client configured in Pipedream must
-request `https://www.googleapis.com/auth/drive.metadata.readonly`; the worker will
+request `https://www.googleapis.com/auth/drive.readonly`; the worker will
 not mark an account ready without that reported scope. Configure that OAuth app ID
 with `STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID`.
+
+The content operation refetches metadata and `capabilities.canDownload` for each
+exact caller-selected ID. It exports native Google Docs as `text/plain`, downloads
+only `text/plain` and `text/markdown` blobs, validates UTF-8, normalizes line endings,
+rejects control characters, and hashes normalized bytes. Unsupported, unavailable,
+locked, oversized, or invalid-text files return safe item outcomes; content is never
+silently truncated. The caller cannot supply a URL, MIME type, export format, query,
+folder, provider header, or abuse acknowledgement.
+
+`drive.readonly` is a restricted Google scope. A public production deployment must
+complete Google's current OAuth verification and, when required, restricted-scope
+security assessment before enabling this profile. Deterministic worker tests do not
+replace that approval or a real consent/read/revoke exercise.
 
 All three credentials are owner-only files, owned by runtime UID `65532`, with no
 group or world permission:

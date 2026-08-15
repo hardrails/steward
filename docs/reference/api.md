@@ -25,14 +25,17 @@ is a defect, not an extension clients should use.
 
 ## Managed integration worker API
 
-The optional private worker exposes one health route and four reviewed Google
+The optional private worker exposes one health route and five reviewed Google
 Drive connection operations. It holds managed-auth broker credentials, returns a
 short-lived Connect Link for immediate browser navigation, reconciles and revokes
-opaque account handles, and lists bounded file metadata through one frozen
-provider request. It never returns broker access tokens, provider credentials,
-file content, or a general proxy/action/MCP surface. See the
+opaque account handles, lists bounded file metadata, and reads one through ten exact
+selected Google Docs or UTF-8 text/Markdown files through frozen provider requests.
+Content results are bounded, hashed, request-ordered, and explicit about unsupported
+or unavailable files. It never returns broker access tokens, provider credentials,
+or a general proxy/action/MCP surface. See the
 [worker README](https://github.com/hardrails/steward/tree/main/workers/integrations)
 and [managed-auth decision]({{ '/decisions/0071-use-replaceable-managed-auth-broker/' |
+relative_url }}) and [selected-content decision]({{ '/decisions/0072-add-bounded-selected-drive-content/' |
 relative_url }}).
 
 ## Portable agent service API

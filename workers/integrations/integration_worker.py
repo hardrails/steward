@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import http.client
 import http.server
@@ -15,8 +16,11 @@ import socket
 import socketserver
 import ssl
 import stat
+import subprocess
 import sys
 import threading
+import time
+import unicodedata
 import urllib.parse
 from collections.abc import Mapping
 
@@ -24,6 +28,7 @@ MAX_REQUEST = 16 << 10
 MAX_UPSTREAM = 2 << 20
 MAX_RESPONSE = 1 << 20
 UPSTREAM_TIMEOUT_SECONDS = 30
+CONTENT_BATCH_TIMEOUT_SECONDS = 30
 CONNECT_TOKEN_SECONDS = 600
 MAX_CONCURRENCY = 8
 MAX_HEALTH_CONCURRENCY = 2
@@ -32,8 +37,26 @@ ACCOUNT_PAGE_SIZE = 100
 MAX_ACCOUNT_RESULTS = 1000
 PIPEDREAM_API_ORIGIN = "https://api.pipedream.com"
 GOOGLE_DRIVE_APP = "google_drive"
-GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
+GOOGLE_DRIVE_CONTENT_FIELDS = (
+    "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
+)
+GOOGLE_DRIVE_CONTENT_FIELD_BYTES = {
+    "id": 256,
+    "name": 1024,
+    "mimeType": 256,
+    "modifiedTime": 64,
+    "size": 32,
+    "webViewLink": 4096,
+}
+GOOGLE_DOCUMENT_MEDIA_TYPE = "application/vnd.google-apps.document"
+GOOGLE_TEXT_EXPORT_MEDIA_TYPE = "text/plain"
+SUPPORTED_TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/markdown"})
+MAX_CONTENT_FILES = 10
+MAX_FILE_CONTENT_BYTES = 64 << 10
+MAX_TOTAL_CONTENT_BYTES = 240 << 10
+MAX_CONTENT_RESPONSE = 512 << 10
 GOOGLE_DRIVE_TARGET = (
     "https://www.googleapis.com/drive/v3/files?"
     + urllib.parse.urlencode(
@@ -48,14 +71,23 @@ EXTERNAL_USER_RE = re.compile(r"^ryu_[A-Za-z0-9_-]{16,120}$")
 ACCOUNT_RE = re.compile(r"^apn_[A-Za-z0-9]+$")
 PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
+FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 
 
 class WorkerError(Exception):
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        *,
+        upstream_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.upstream_status = upstream_status
 
 
 def read_secret(path_text: str, label: str) -> bytes:
@@ -114,6 +146,169 @@ def account_id(value: object) -> str:
     return value
 
 
+def file_ids(value: object) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= MAX_CONTENT_FILES
+        or any(not isinstance(item, str) or FILE_ID_RE.fullmatch(item) is None for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise WorkerError(
+            400,
+            "invalid_file_ids",
+            "file IDs must be one through ten unique canonical identifiers",
+        )
+    return tuple(value)
+
+
+def _deadline_error() -> WorkerError:
+    return WorkerError(
+        503,
+        "operation_deadline_exceeded",
+        "managed integration operation exceeded its deadline",
+    )
+
+
+def _resolver_process(host: str, port: int) -> subprocess.Popen[bytes]:
+    script = (
+        "import json,socket,sys;"
+        "json.dump(socket.getaddrinfo(sys.argv[1],int(sys.argv[2]),"
+        "type=socket.SOCK_STREAM),sys.stdout,separators=(',',':'))"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-I", "-c", script, host, str(port)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _validated_resolved_addresses(value: object) -> tuple[tuple[int, int, int, str, tuple], ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 64:
+        raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
+    result: list[tuple[int, int, int, str, tuple]] = []
+    for item in value:
+        if (
+            not isinstance(item, list)
+            or len(item) != 5
+            or not all(isinstance(item[index], int) for index in range(3))
+            or not isinstance(item[3], str)
+            or not isinstance(item[4], list)
+            or len(item[4]) not in {2, 4}
+            or not isinstance(item[4][0], str)
+            or not isinstance(item[4][1], int)
+        ):
+            raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
+        family, socket_type, protocol = item[:3]
+        if family not in {socket.AF_INET, socket.AF_INET6} or socket_type != socket.SOCK_STREAM:
+            raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable")
+        try:
+            socket.inet_pton(family, item[4][0])
+        except OSError:
+            raise WorkerError(
+                503, "broker_unavailable", "managed-auth broker is unavailable"
+            ) from None
+        result.append((family, socket_type, protocol, item[3], tuple(item[4])))
+    return tuple(result)
+
+
+def _resolved_addresses(
+    host: str,
+    port: int,
+    *,
+    deadline: float | None,
+) -> tuple[tuple[int, int, int, str, tuple[object, ...]], ...]:
+    """Resolve a configured upstream without letting DNS escape a deadline."""
+
+    if deadline is None:
+        return tuple(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _deadline_error()
+    process = _resolver_process(host, port)
+    try:
+        raw, _stderr = process.communicate(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+    except subprocess.TimeoutExpired as error:
+        raise _deadline_error() from error
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+    if time.monotonic() >= deadline:
+        raise _deadline_error()
+    if process.returncode != 0 or len(raw) > 64 << 10:
+        raise WorkerError(
+            503,
+            "broker_unavailable",
+            "managed-auth broker is unavailable",
+        )
+    try:
+        return _validated_resolved_addresses(json.loads(raw))
+    except (UnicodeError, json.JSONDecodeError):
+        raise WorkerError(
+            503, "broker_unavailable", "managed-auth broker is unavailable"
+        ) from None
+
+
+def _open_resolved_socket(
+    connection: http.client.HTTPConnection,
+    addresses: tuple[tuple[int, int, int, str, tuple[object, ...]], ...],
+    *,
+    deadline: float | None,
+) -> None:
+    last_error: OSError | None = None
+    for family, socket_type, protocol, _canonical_name, address in addresses:
+        candidate = socket.socket(family, socket_type, protocol)
+        connection.sock = candidate
+        try:
+            timeout = connection.timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _deadline_error()
+                timeout = min(timeout, remaining) if timeout is not None else remaining
+            candidate.settimeout(timeout)
+            candidate.connect(address)
+            return
+        except WorkerError:
+            candidate.close()
+            connection.sock = None
+            raise
+        except OSError as error:
+            last_error = error
+            candidate.close()
+            connection.sock = None
+    raise last_error or OSError("managed upstream has no usable address")
+
+
+class _ResolvedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args: object, addresses: tuple, deadline: float | None, **kwargs: object) -> None:
+        self._resolved_addresses = addresses
+        self._absolute_deadline = deadline
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        _open_resolved_socket(self, self._resolved_addresses, deadline=self._absolute_deadline)
+
+
+class _ResolvedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: object, addresses: tuple, deadline: float | None, **kwargs: object) -> None:
+        self._resolved_addresses = addresses
+        self._absolute_deadline = deadline
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        _open_resolved_socket(self, self._resolved_addresses, deadline=self._absolute_deadline)
+        assert self.sock is not None
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
 class PipedreamClient:
     def __init__(
         self,
@@ -157,10 +352,52 @@ class PipedreamClient:
         *,
         payload: object | None = None,
         token: str | None = None,
+        deadline: float | None = None,
     ) -> object:
-        body = None if payload is None else json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        raw, media_type = self._request_bytes(
+            method,
+            path,
+            payload=payload,
+            token=token,
+            maximum_bytes=MAX_UPSTREAM,
+            deadline=deadline,
+        )
+        if not raw:
+            return {}
+        if media_type != "application/json":
+            raise WorkerError(
+                502,
+                "invalid_broker_response",
+                "managed-auth broker returned a non-JSON response",
+            )
+        try:
+            return json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise WorkerError(
+                502,
+                "invalid_broker_response",
+                "managed-auth broker returned invalid JSON",
+            ) from error
+
+    def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: object | None = None,
+        token: str | None = None,
+        maximum_bytes: int,
+        deadline: float | None = None,
+    ) -> tuple[bytes, str]:
+        if not 1 <= maximum_bytes <= MAX_UPSTREAM:
+            raise ValueError("managed-auth response bound is invalid")
+        body = (
+            None
+            if payload is None
+            else json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        )
         headers = {
-            "Accept": "application/json",
+            "Accept": "*/*",
             "Accept-Encoding": "identity",
             "User-Agent": "steward-integration-worker/1",
         }
@@ -170,39 +407,108 @@ class PipedreamClient:
         if token is not None:
             headers["Authorization"] = "Bearer " + token
             headers["X-PD-Environment"] = self.environment
-        connection_type = http.client.HTTPSConnection if self.origin.scheme == "https" else http.client.HTTPConnection
+        headers["Host"] = self.origin.netloc
+        timeout = UPSTREAM_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+            if timeout <= 0:
+                raise _deadline_error()
+        port = self.origin.port or (443 if self.origin.scheme == "https" else 80)
+        addresses = _resolved_addresses(self.origin.hostname, port, deadline=deadline)
+        connection_type = (
+            _ResolvedHTTPSConnection if self.origin.scheme == "https" else _ResolvedHTTPConnection
+        )
         connection = connection_type(
             self.origin.hostname,
             self.origin.port,
-            timeout=UPSTREAM_TIMEOUT_SECONDS,
+            timeout=timeout,
+            addresses=addresses,
+            deadline=deadline,
             **({"context": ssl.create_default_context()} if self.origin.scheme == "https" else {}),
         )
+        expired = threading.Event()
+        deadline_timer: threading.Timer | None = None
+        if deadline is not None:
+            def expire_connection() -> None:
+                expired.set()
+                active_socket = connection.sock
+                if active_socket is not None:
+                    try:
+                        active_socket.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                connection.close()
+
+            deadline_timer = threading.Timer(timeout, expire_connection)
+            deadline_timer.daemon = True
+            deadline_timer.start()
+
+        def require_live_deadline() -> None:
+            if expired.is_set() or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                raise _deadline_error()
+
         try:
             connection.request(method, path, body=body, headers=headers)
+            require_live_deadline()
             response = connection.getresponse()
-            raw = response.read(MAX_UPSTREAM + 1)
-            if len(raw) > MAX_UPSTREAM:
-                raise WorkerError(502, "broker_response_too_large", "managed-auth broker response exceeded 2 MiB")
+            require_live_deadline()
+            chunks: list[bytes] = []
+            received = 0
+            while received <= maximum_bytes:
+                require_live_deadline()
+                active_socket = connection.sock
+                if active_socket is not None and deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        require_live_deadline()
+                    active_socket.settimeout(min(UPSTREAM_TIMEOUT_SECONDS, remaining))
+                chunk = response.read1(min(64 << 10, maximum_bytes + 1 - received))
+                require_live_deadline()
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                received += len(chunk)
+            raw = b"".join(chunks)
+            if len(raw) > maximum_bytes:
+                raise WorkerError(
+                    502,
+                    "broker_response_too_large",
+                    "managed-auth broker response exceeded the operation bound",
+                )
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise WorkerError(
+                    502,
+                    "invalid_broker_response",
+                    "managed-auth broker returned encoded content",
+                )
             if response.status < 200 or response.status >= 300:
                 code = "broker_rate_limited" if response.status == 429 else "broker_rejected"
                 status = 503 if response.status == 429 or response.status >= 500 else 502
-                raise WorkerError(status, code, f"managed-auth broker returned HTTP {response.status}")
-            if not raw:
-                return {}
-            if response.headers.get_content_type() != "application/json":
-                raise WorkerError(502, "invalid_broker_response", "managed-auth broker returned a non-JSON response")
-            try:
-                return json.loads(raw)
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise WorkerError(502, "invalid_broker_response", "managed-auth broker returned invalid JSON") from error
+                raise WorkerError(
+                    status,
+                    code,
+                    f"managed-auth broker returned HTTP {response.status}",
+                    upstream_status=response.status,
+                )
+            return raw, response.headers.get_content_type().lower()
         except WorkerError:
             raise
         except (OSError, TimeoutError, http.client.HTTPException) as error:
+            if expired.is_set():
+                raise WorkerError(
+                    503,
+                    "operation_deadline_exceeded",
+                    "managed integration operation exceeded its deadline",
+                ) from error
             raise WorkerError(503, "broker_unavailable", "managed-auth broker is unavailable") from error
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
             connection.close()
 
-    def access_token(self, scope: str) -> str:
+    def access_token(self, scope: str, *, deadline: float | None = None) -> str:
         result = self._request(
             "POST",
             "/v1/oauth/token",
@@ -212,6 +518,7 @@ class PipedreamClient:
                 "grant_type": "client_credentials",
                 "scope": scope,
             },
+            deadline=deadline,
         )
         if not isinstance(result, dict):
             raise WorkerError(502, "invalid_broker_response", "managed-auth broker token response is invalid")
@@ -390,13 +697,21 @@ class PipedreamClient:
         }
         return account.get("healthy") is True and drive_scopes == {GOOGLE_DRIVE_SCOPE}
 
-    def _owned_account(self, user: str, requested_account: str, scope: str) -> tuple[str, dict[str, object]]:
-        token = self.access_token(scope)
+    def _owned_account(
+        self,
+        user: str,
+        requested_account: str,
+        scope: str,
+        *,
+        deadline: float | None = None,
+    ) -> tuple[str, dict[str, object]]:
+        token = self.access_token(scope, deadline=deadline)
         query = urllib.parse.urlencode({"include_credentials": "false"})
         value = self._request(
             "GET",
             f"/v1/connect/{self.project_id}/accounts/{urllib.parse.quote(requested_account, safe='')}?{query}",
             token=token,
+            deadline=deadline,
         )
         account = self._safe_account(value, user)
         if account is not None and account["account_id"] == requested_account:
@@ -446,6 +761,254 @@ class PipedreamClient:
             "has_more": bool(next_token),
         }
 
+    def read_drive_content(
+        self,
+        user: str,
+        requested_account: str,
+        requested_file_ids: tuple[str, ...],
+    ) -> dict[str, object]:
+        selected_ids = file_ids(list(requested_file_ids))
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            deadline=deadline,
+        )
+        if not self._account_ready(connection):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Google Drive connection is not ready for this app",
+            )
+        results: list[dict[str, object]] = []
+        total_content_bytes = 0
+        for selected_id in selected_ids:
+            metadata = self._drive_file_metadata(
+                token,
+                user=user,
+                account=requested_account,
+                selected_id=selected_id,
+                deadline=deadline,
+            )
+            if metadata is None:
+                results.append({"file_id": selected_id, "status": "not_found"})
+                continue
+            result = self._drive_file_content(
+                token,
+                user=user,
+                account=requested_account,
+                metadata=metadata,
+                deadline=deadline,
+            )
+            content_bytes = result.get("content_bytes", 0)
+            if isinstance(content_bytes, int) and not isinstance(content_bytes, bool):
+                total_content_bytes += content_bytes
+            if total_content_bytes > MAX_TOTAL_CONTENT_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Google Drive content exceeded the aggregate operation bound",
+                )
+            results.append(result)
+        return {
+            "schema_version": "steward.google-drive-content.v1",
+            "integration": "google-drive",
+            "results": results,
+            "result_count": len(results),
+        }
+
+    def _drive_file_metadata(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        selected_id: str,
+        deadline: float,
+    ) -> dict[str, object] | None:
+        target = (
+            "https://www.googleapis.com/drive/v3/files/"
+            + urllib.parse.quote(selected_id, safe="")
+            + "?"
+            + urllib.parse.urlencode(
+                {
+                    "fields": GOOGLE_DRIVE_CONTENT_FIELDS,
+                    "supportsAllDrives": "true",
+                }
+            )
+        )
+        try:
+            value = self._proxy_json(
+                token,
+                user=user,
+                account=account,
+                target=target,
+                deadline=deadline,
+            )
+        except WorkerError as error:
+            if error.upstream_status == 404:
+                return None
+            raise
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Drive returned invalid file metadata",
+            )
+        required = ("id", "name", "mimeType", "webViewLink")
+        normalized: dict[str, object] = {}
+        for field in (*required, "modifiedTime", "size"):
+            item = value.get(field)
+            if item is None:
+                continue
+            if (
+                not isinstance(item, str)
+                or len(item.encode()) > GOOGLE_DRIVE_CONTENT_FIELD_BYTES[field]
+            ):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Google Drive returned invalid file metadata",
+                )
+            normalized[field] = item
+        capabilities = value.get("capabilities")
+        if (
+            any(field not in normalized for field in required)
+            or normalized["id"] != selected_id
+            or not isinstance(capabilities, Mapping)
+            or not isinstance(capabilities.get("canDownload"), bool)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Drive returned invalid file metadata",
+            )
+        view_url = urllib.parse.urlsplit(str(normalized["webViewLink"]))
+        if (
+            view_url.scheme != "https"
+            or view_url.hostname != "drive.google.com"
+            or view_url.username
+            or view_url.password
+            or view_url.fragment
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Google Drive returned an unsafe file link",
+            )
+        normalized["canDownload"] = capabilities["canDownload"]
+        return normalized
+
+    def _drive_file_content(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        metadata: Mapping[str, object],
+        deadline: float,
+    ) -> dict[str, object]:
+        common = {
+            "file_id": metadata["id"],
+            "name": metadata["name"],
+            "media_type": metadata["mimeType"],
+            "modified_at": metadata.get("modifiedTime"),
+            "view_url": metadata["webViewLink"],
+        }
+        if metadata["canDownload"] is not True:
+            return {**common, "status": "not_downloadable"}
+        provider_media_type = str(metadata["mimeType"])
+        selected_id = str(metadata["id"])
+        if provider_media_type == GOOGLE_DOCUMENT_MEDIA_TYPE:
+            target = (
+                "https://www.googleapis.com/drive/v3/files/"
+                + urllib.parse.quote(selected_id, safe="")
+                + "/export?"
+                + urllib.parse.urlencode({"mimeType": GOOGLE_TEXT_EXPORT_MEDIA_TYPE})
+            )
+            expected_response_types = {GOOGLE_TEXT_EXPORT_MEDIA_TYPE}
+        elif provider_media_type in SUPPORTED_TEXT_MEDIA_TYPES:
+            target = (
+                "https://www.googleapis.com/drive/v3/files/"
+                + urllib.parse.quote(selected_id, safe="")
+                + "?"
+                + urllib.parse.urlencode({"alt": "media", "supportsAllDrives": "true"})
+            )
+            expected_response_types = {provider_media_type, "text/plain"}
+        else:
+            return {**common, "status": "unsupported"}
+        try:
+            raw, response_media_type = self._proxy_bytes(
+                token,
+                user=user,
+                account=account,
+                target=target,
+                maximum_bytes=MAX_FILE_CONTENT_BYTES,
+                deadline=deadline,
+            )
+        except WorkerError as error:
+            if error.code == "broker_response_too_large":
+                return {**common, "status": "too_large"}
+            if error.upstream_status == 404:
+                return {"file_id": selected_id, "status": "not_found"}
+            raise
+        if response_media_type not in expected_response_types:
+            return {**common, "status": "invalid_text"}
+        try:
+            text = unicodedata.normalize("NFC", raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return {**common, "status": "invalid_text"}
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if any(ord(character) < 0x20 and character not in "\t\n" for character in text):
+            return {**common, "status": "invalid_text"}
+        normalized = text.encode("utf-8")
+        if len(normalized) > MAX_FILE_CONTENT_BYTES:
+            return {**common, "status": "too_large"}
+        return {
+            **common,
+            "status": "succeeded",
+            "content": text,
+            "content_bytes": len(normalized),
+            "content_sha256": "sha256:" + hashlib.sha256(normalized).hexdigest(),
+        }
+
+    def _proxy_json(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        target: str,
+        deadline: float | None = None,
+    ) -> object:
+        path = self._proxy_path(user=user, account=account, target=target)
+        return self._request("GET", path, token=token, deadline=deadline)
+
+    def _proxy_bytes(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        target: str,
+        maximum_bytes: int,
+        deadline: float | None = None,
+    ) -> tuple[bytes, str]:
+        path = self._proxy_path(user=user, account=account, target=target)
+        return self._request_bytes(
+            "GET",
+            path,
+            token=token,
+            maximum_bytes=maximum_bytes,
+            deadline=deadline,
+        )
+
+    def _proxy_path(self, *, user: str, account: str, target: str) -> str:
+        encoded_target = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+        query = urllib.parse.urlencode({"account_id": account, "external_user_id": user})
+        return f"/v1/connect/{self.project_id}/proxy/{encoded_target}?{query}"
+
     def revoke(self, user: str, requested_account: str) -> dict[str, object]:
         token, _connection = self._owned_account(
             user, requested_account, "connect:accounts:read connect:accounts:write"
@@ -474,11 +1037,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def worker(self) -> "IntegrationServer":
         return self.server  # type: ignore[return-value]
 
-    def _json(self, status: int, value: object) -> None:
-        raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
-        if len(raw) > MAX_RESPONSE:
+    def _json(self, status: int, value: object, *, maximum_bytes: int = MAX_RESPONSE) -> None:
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        if len(raw) > maximum_bytes:
             status = 500
-            raw = b'{"error":{"code":"response_too_large","message":"worker response exceeded 1 MiB"}}'
+            raw = b'{"error":{"code":"response_too_large","message":"worker response exceeded its bound"}}'
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
@@ -525,6 +1093,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result = self.worker.client.list_drive_metadata(
                     external_user(body["external_user_id"]), account_id(body["account_id"])
                 )
+            elif self.path == "/v1/connections/google-drive/content":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id", "file_ids"}),
+                )
+                result = self.worker.client.read_drive_content(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    file_ids(body["file_ids"]),
+                )
             elif self.path == "/v1/connections/google-drive/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.revoke(
@@ -532,7 +1110,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 )
             else:
                 raise WorkerError(404, "not_found", "route not found")
-            self._json(200, result)
+            self._json(
+                200,
+                result,
+                maximum_bytes=(
+                    MAX_CONTENT_RESPONSE
+                    if self.path == "/v1/connections/google-drive/content"
+                    else MAX_RESPONSE
+                ),
+            )
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._json(400, {"error": {"code": "invalid_json", "message": "request is not valid JSON"}})
         except WorkerError as error:
