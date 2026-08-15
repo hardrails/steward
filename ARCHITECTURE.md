@@ -157,7 +157,10 @@ operation set. They hold worker and broker credentials in owner-only mounts,
 normalize bounded results, and expose neither raw credentials nor a general proxy,
 MCP server, or changing vendor action catalog. Product control planes may retain
 only opaque account handles. The first worker uses Pipedream Connect for managed
-Google Drive authorization and freezes runtime access to file metadata listing.
+Google Drive authorization and freezes runtime access to metadata listing and
+bounded selected-text reads. Provider content is untrusted output: the worker
+normalizes and hashes it but does not interpret it, select follow-on operations, or
+expose a provider URL surface.
 
 These workers reuse a commercial credential lifecycle but remain replaceable.
 Steward owns their authority, request, response, network, and evidence contracts;

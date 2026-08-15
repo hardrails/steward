@@ -261,7 +261,7 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(query["oauth_app_id"], ["oa_test"])
         self.assertEqual(query["include_credentials"], ["false"])
 
-    def test_reconcile_fails_closed_when_metadata_scope_is_absent(self) -> None:
+    def test_reconcile_fails_closed_when_readonly_scope_is_absent(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account(scopes=["https://www.googleapis.com/auth/drive"])]
             _token, result = client.reconcile("ryu_abcdefghijklmnop")

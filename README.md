@@ -458,7 +458,7 @@ Linux node: steward-executor -> Docker + gVisor agent -> steward-relay
 - `steward-mcp` is the bounded local MCP adapter.
 - optional managed integration workers keep broker and provider credentials out of
   workloads while exposing only reviewed operations such as bounded Google Drive
-  metadata listing;
+  metadata listing and selected text reads;
 - `steward` remains the compatibility supervisor for the generic public uplink.
   New Steward Control deployments use Executor's signed command protocol.
 
