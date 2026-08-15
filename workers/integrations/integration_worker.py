@@ -1108,11 +1108,22 @@ class PipedreamClient:
                 "Gmail returned an invalid message list",
             )
         raw_messages = listed.get("messages", [])
+        next_page_token = listed.get("nextPageToken")
         if not isinstance(raw_messages, list) or len(raw_messages) > MAX_GMAIL_MESSAGES:
             raise WorkerError(
                 502,
                 "invalid_provider_response",
                 "Gmail exceeded the recent-message result bound",
+            )
+        if next_page_token is not None and (
+            not isinstance(next_page_token, str)
+            or not 1 <= len(next_page_token) <= 4096
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in next_page_token)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Gmail returned an invalid page token",
             )
         message_ids: list[str] = []
         for item in raw_messages:
@@ -1172,7 +1183,7 @@ class PipedreamClient:
             "window_days": 30,
             "results": results,
             "result_count": len(results),
-            "has_more": bool(listed.get("nextPageToken")),
+            "has_more": next_page_token is not None,
         }
 
     def _gmail_message(self, value: object, expected_id: str) -> dict[str, object]:

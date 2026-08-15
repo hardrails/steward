@@ -893,6 +893,17 @@ class PipedreamClientTests(unittest.TestCase):
         ]
         self.assertEqual(detail_requests, [])
 
+    def test_read_recent_gmail_rejects_invalid_page_token(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_gmail_account()]
+            state.gmail_messages = []
+            state.gmail_next_page_token = "bad\nsecret"
+            with self.assertRaisesRegex(worker.WorkerError, "page token"):
+                client.read_recent_gmail(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
     def test_revoke_verifies_ownership_then_uses_write_scope(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
