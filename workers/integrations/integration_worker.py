@@ -107,6 +107,15 @@ INTEGRATION_PROFILES = {
         "required_scope": GMAIL_SCOPE,
     },
 }
+REVIEWED_IDENTITY_SCOPES = frozenset(
+    {
+        "email",
+        "openid",
+        "profile",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    }
+)
 
 
 class WorkerError(Exception):
@@ -791,24 +800,12 @@ class PipedreamClient:
         required_scope: str = GOOGLE_DRIVE_SCOPE,
     ) -> bool:
         scopes = account.get("authorized_scopes", [])
-        if required_scope == GMAIL_SCOPE:
-            provider_scopes = {
-                scope
-                for scope in scopes
-                if isinstance(scope, str)
-                and (
-                    scope == GMAIL_FULL_ACCESS_SCOPE
-                    or scope.startswith("https://www.googleapis.com/auth/gmail.")
-                )
-            }
-        else:
-            provider_prefix = required_scope.rsplit(".", 1)[0]
-            provider_scopes = {
-                scope
-                for scope in scopes
-                if isinstance(scope, str) and scope.startswith(provider_prefix)
-            }
-        return account.get("healthy") is True and provider_scopes == {required_scope}
+        authorized = {scope for scope in scopes if isinstance(scope, str)}
+        return (
+            account.get("healthy") is True
+            and required_scope in authorized
+            and authorized <= {required_scope, *REVIEWED_IDENTITY_SCOPES}
+        )
 
     def _owned_account(
         self,

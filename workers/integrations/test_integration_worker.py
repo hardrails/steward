@@ -393,6 +393,35 @@ class PipedreamClientTests(unittest.TestCase):
             _token, result = client.reconcile("ryu_abcdefghijklmnop")
         self.assertEqual(result["status"], "needs_attention")
 
+    def test_reconcile_allows_only_reviewed_identity_scopes_beside_the_operation(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [
+                connected_gmail_account(scopes=[worker.GMAIL_SCOPE, "openid", "email"])
+            ]
+            _token, result = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="gmail",
+            )
+            self.assertEqual(result["status"], "ready")
+
+            for extra_scope in (
+                worker.GOOGLE_DRIVE_SCOPE,
+                "https://www.googleapis.com/auth/calendar.readonly",
+                "https://www.googleapis.com/auth/cloud-platform",
+                "vendor.example/arbitrary",
+            ):
+                with self.subTest(extra_scope=extra_scope):
+                    state.accounts = [
+                        connected_gmail_account(
+                            scopes=[worker.GMAIL_SCOPE, extra_scope]
+                        )
+                    ]
+                    _token, result = client.reconcile(
+                        "ryu_abcdefghijklmnop",
+                        integration="gmail",
+                    )
+                    self.assertEqual(result["status"], "needs_attention")
+
     def test_reconcile_prefers_ready_account_over_newer_over_scoped_account(self) -> None:
         with broker_client() as (client, state):
             ready = connected_account()
