@@ -1060,8 +1060,8 @@ class PipedreamClient:
     ) -> dict[str, object]:
         """Read the trusted caller's selected channel after provider revalidation.
 
-        End-user choice is authenticated and persisted by Railyard, the sole
-        service caller. This credential-boundary worker independently verifies
+        End-user choice is authenticated and persisted by the trusted service
+        caller. This credential-boundary worker independently verifies
         account ownership, exact scopes, and current public-channel membership;
         it does not claim to authenticate an interactive human.
         """

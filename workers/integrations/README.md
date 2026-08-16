@@ -73,8 +73,8 @@ multi-channel and paginated reads separate future capabilities.
 This worker is a credential and provider-authority boundary, not an end-user identity
 provider. Its bearer-authenticated caller is responsible for authenticating and
 persisting the human owner's channel choice, just as it is for Google Drive file IDs.
-Railyard is that sole caller in the product deployment. Steward verifies the caller's
-opaque external-user/account binding, exact scopes, channel syntax, current public
+Steward verifies the caller's opaque external-user/account binding, exact scopes,
+channel syntax, current public
 visibility through one exact `conversations.info` check, and finite operation bounds
 before every Slack history request. This exact check does not depend on the bounded
 100-channel discovery page. Deployments
