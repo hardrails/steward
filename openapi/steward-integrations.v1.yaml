@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Managed Integration Worker API
-  version: "1.4.0"
+  version: "1.5.0"
   description: |
     Private finite-operation worker for managed provider connections. Broker and
     provider credentials remain inside the worker. This contract does not expose
@@ -22,6 +22,7 @@ tags:
   - name: google-drive
   - name: gmail
   - name: google-calendar
+  - name: hubspot
   - name: slack
 paths:
   /healthz:
@@ -574,6 +575,158 @@ paths:
           $ref: "#/components/responses/UpstreamRejected"
         "503":
           $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/hubspot/connect-link:
+    post:
+      tags: [hubspot]
+      operationId: createHubSpotConnectLink
+      summary: Create one short-lived HubSpot connection link
+      description: Returns a non-cacheable bearer URL scoped to one opaque external user, HubSpot, and the configured custom OAuth client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Short-lived HubSpot connection link.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/hubspot/reconcile:
+    post:
+      tags: [hubspot]
+      operationId: reconcileHubSpotConnection
+      summary: Reconcile one user's HubSpot connection
+      description: Ready requires a healthy account with exactly `crm.objects.deals.read` and no broader scope.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Normalized connection state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AbsentConnection"
+                  - $ref: "#/components/schemas/PresentConnection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/hubspot/recent-deals:
+    post:
+      tags: [hubspot]
+      operationId: readRecentHubSpotDeals
+      summary: Read a bounded recently modified deal window
+      description: |
+        Reads at most 100 non-archived deals ordered by latest modification and
+        joins current pipeline and stage labels. The caller cannot supply a
+        filter, property, sort, association, pipeline, page token, provider URL,
+        provider header, or write action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: Bounded normalized recent deals.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubSpotRecentDeals"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No account with this ID belongs to the external user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The HubSpot account is unhealthy, over-scoped, or not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/hubspot/revoke:
+    post:
+      tags: [hubspot]
+      operationId: revokeHubSpotConnection
+      summary: Revoke one verified HubSpot account
+      description: Verifies external-user ownership before deleting the account at the managed-auth broker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: The broker accepted account revocation.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Revocation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No account with this ID belongs to the external user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
   /v1/connections/slack/connect-link:
     post:
       tags: [slack]
@@ -860,7 +1013,7 @@ components:
           enum: [steward.managed-connect-link.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, slack]
+          enum: [google-drive, gmail, google-calendar, hubspot, slack]
         connect_url:
           type: string
           format: uri
@@ -878,7 +1031,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar]
+          enum: [google-drive, gmail, google-calendar, hubspot]
         status:
           type: string
           enum: [not_connected]
@@ -900,7 +1053,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar]
+          enum: [google-drive, gmail, google-calendar, hubspot]
         status:
           type: string
           enum: [ready, needs_attention]
@@ -922,6 +1075,7 @@ components:
             - https://www.googleapis.com/auth/drive.readonly
             - https://www.googleapis.com/auth/gmail.readonly
             - https://www.googleapis.com/auth/calendar.events.readonly
+            - crm.objects.deals.read
         healthy:
           type: boolean
     AbsentSlackConnection:
@@ -1384,6 +1538,88 @@ components:
           maximum: 50
         has_more:
           type: boolean
+    HubSpotDeal:
+      type: object
+      additionalProperties: false
+      required:
+        - deal_id
+        - name
+        - amount
+        - closed
+        - close_date
+        - created_at
+        - updated_at
+        - pipeline_id
+        - pipeline_name
+        - stage_id
+        - stage_name
+      properties:
+        deal_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        name:
+          type: string
+          maxLength: 8192
+        amount:
+          type: string
+          maxLength: 8192
+        closed:
+          type: boolean
+          nullable: true
+        close_date:
+          type: string
+          maxLength: 8192
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        pipeline_id:
+          type: string
+          maxLength: 8192
+        pipeline_name:
+          type: string
+          maxLength: 8192
+        stage_id:
+          type: string
+          maxLength: 8192
+        stage_name:
+          type: string
+          maxLength: 8192
+    HubSpotRecentDeals:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - integration
+        - deals
+        - result_count
+        - total_available
+        - has_more
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.hubspot-recent-deals.v1]
+        integration:
+          type: string
+          enum: [hubspot]
+        deals:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/HubSpotDeal"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 100
+        total_available:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        has_more:
+          type: boolean
     SlackChannel:
       type: object
       additionalProperties: false
@@ -1491,7 +1727,7 @@ components:
           enum: [steward.managed-connection-revocation.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, slack]
+          enum: [google-drive, gmail, google-calendar, hubspot, slack]
         account_id:
           $ref: "#/components/schemas/AccountID"
         revoked:
