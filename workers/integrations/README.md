@@ -58,9 +58,10 @@ The Slack profile can:
 - require exactly `channels:read` and `channels:history`, rejecting identity,
   private-channel, direct-message, directory, search, file, reaction, and write
   scopes;
-- list at most 100 non-archived public channels for explicit owner selection; and
-- make one request for at most 15 recent messages from one canonical selected public
-  channel.
+- list at most 100 non-archived public channels for selection by the authenticated
+  service caller; and
+- make one request for at most 15 recent messages from that caller-selected public
+  channel after independently rechecking current public membership.
 
 The Slack caller cannot supply a URL, query, page token, time range, message count,
 private channel, direct message, thread, provider header, or write action. The worker
@@ -68,6 +69,15 @@ does not retrieve a member directory. Channel metadata and message text are untr
 input; consumers must treat the normalized result as evidence, never instructions.
 Slack's current commercially distributed non-Marketplace history limit makes
 multi-channel and paginated reads separate future capabilities.
+
+This worker is a credential and provider-authority boundary, not an end-user identity
+provider. Its bearer-authenticated caller is responsible for authenticating and
+persisting the human owner's channel choice, just as it is for Google Drive file IDs.
+Railyard is that sole caller in the product deployment. Steward verifies the caller's
+opaque external-user/account binding, exact scopes, channel syntax, current public
+visibility, and finite operation bounds before every Slack history request. Deployments
+must keep the operation listener private; the worker token is service authority, not an
+owner session token.
 
 The Pipedream OAuth access token is minted with the exact scopes needed for each
 operation and is never cached. The Google OAuth client configured in Pipedream must

@@ -1058,6 +1058,13 @@ class PipedreamClient:
         requested_account: str,
         requested_channel: str,
     ) -> dict[str, object]:
+        """Read the trusted caller's selected channel after provider revalidation.
+
+        End-user choice is authenticated and persisted by Railyard, the sole
+        service caller. This credential-boundary worker independently verifies
+        account ownership, exact scopes, and current public-channel membership;
+        it does not claim to authenticate an interactive human.
+        """
         channel = slack_channel_id(requested_channel)
         deadline = time.monotonic() + SLACK_OPERATION_TIMEOUT_SECONDS
         token, connection = self._owned_account(

@@ -593,7 +593,7 @@ class PipedreamClientTests(unittest.TestCase):
                     )
                     self.assertEqual(result["status"], "needs_attention")
 
-    def test_list_slack_channels_freezes_public_choice_and_bounds_projection(self) -> None:
+    def test_list_slack_channels_freezes_caller_choice_and_bounds_projection(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_slack_account()]
             state.slack_channels = [slack_channel()]
