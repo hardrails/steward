@@ -5,8 +5,8 @@ provider credentials outside an agent, model context, application control plane,
 log, and artifact. It exposes only reviewed operations; it is not an API proxy,
 MCP server, or dynamic action catalog.
 
-The worker currently supports Google Drive, Gmail, Google Calendar, HubSpot, and Slack
-through Pipedream Connect.
+The worker currently supports Google Drive, Gmail, Google Calendar, Outlook Mail,
+Outlook Calendar, HubSpot, and Slack through Pipedream Connect.
 The Google Drive profile can:
 
 - create a ten-minute, one-use Google Drive Connect Link;
@@ -50,6 +50,35 @@ The Calendar caller cannot supply a calendar ID, query, time range, page token,
 attendee limit, URL, provider header, or write action. Event titles, descriptions,
 locations, and participants are untrusted input; consumers must treat them as
 evidence, never instructions.
+
+The Outlook Mail profile can:
+
+- create the same bounded, one-use connection link for a configured Pipedream
+  `microsoft_outlook` custom OAuth app;
+- require `Mail.Read` plus only Microsoft's reviewed identity/refresh scopes,
+  rejecting `Mail.Send`, `Mail.ReadWrite`, and every unrelated permission;
+- read at most 20 inbox message previews received in the last 30 days within one
+  shared 30-second deadline; and
+- return only bounded sender, recipients, subject, received time, read state,
+  importance, and `bodyPreview` fields.
+
+The Outlook Mail caller cannot supply a folder, query, date range, page token,
+message ID, URL, provider header, attachment request, or write action. Message
+previews are untrusted evidence, never instructions.
+
+The Outlook Calendar profile can:
+
+- create the same bounded, one-use connection link for a separate configured
+  Pipedream `microsoft_outlook_calendar` custom OAuth app;
+- require `Calendars.ReadBasic` plus only Microsoft's reviewed identity/refresh
+  scopes, rejecting `Calendars.ReadWrite` and every unrelated permission;
+- read at most 50 primary-calendar events for the next 14 days within one shared
+  30-second deadline; and
+- return only bounded basic event fields, organizer, and at most 20 attendees.
+
+The Outlook Calendar caller cannot supply a calendar ID, query, time range, page
+token, URL, provider header, event body request, RSVP, or write action. Event data
+is untrusted evidence, never instructions.
 
 The HubSpot profile can:
 
@@ -112,6 +141,14 @@ The Google Calendar OAuth app is optional and configured with
 `STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID`. The least-privilege events read-only scope
 still requires Google's current OAuth verification before public production use.
 
+The two Microsoft OAuth apps are optional and configured independently with
+`STEWARD_MICROSOFT_OUTLOOK_OAUTH_APP_ID` and
+`STEWARD_MICROSOFT_OUTLOOK_CALENDAR_OAUTH_APP_ID`. They must be Pipedream custom
+OAuth clients with only the permissions described above; Pipedream's default
+Microsoft clients request broader write/send permissions and are not compatible
+with this boundary. Production enablement requires real consent, exact-scope
+reconcile, bounded read, and revocation exercises for each profile.
+
 The Slack OAuth app is optional and configured with
 `STEWARD_SLACK_OAUTH_APP_ID`. It must use Pipedream's `slack` user-account profile
 with exactly the two reviewed read scopes. Production enablement requires a real
@@ -154,6 +191,8 @@ STEWARD_PIPEDREAM_ENVIRONMENT=development
 STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID=oa_...
 STEWARD_GMAIL_OAUTH_APP_ID=oa_...
 STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID=oa_...
+STEWARD_MICROSOFT_OUTLOOK_OAUTH_APP_ID=oa_...
+STEWARD_MICROSOFT_OUTLOOK_CALENDAR_OAUTH_APP_ID=oa_...
 STEWARD_HUBSPOT_OAUTH_APP_ID=oa_...
 STEWARD_SLACK_OAUTH_APP_ID=oa_...
 ```

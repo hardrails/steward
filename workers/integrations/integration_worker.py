@@ -44,6 +44,10 @@ GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_FULL_ACCESS_SCOPE = "https://mail.google.com/"
 GOOGLE_CALENDAR_APP = "google_calendar"
 GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
+MICROSOFT_OUTLOOK_APP = "microsoft_outlook"
+MICROSOFT_OUTLOOK_SCOPE = "Mail.Read"
+MICROSOFT_OUTLOOK_CALENDAR_APP = "microsoft_outlook_calendar"
+MICROSOFT_OUTLOOK_CALENDAR_SCOPE = "Calendars.ReadBasic"
 SLACK_APP = "slack"
 SLACK_SCOPES = ("channels:history", "channels:read")
 HUBSPOT_APP = "hubspot"
@@ -77,6 +81,16 @@ MAX_CALENDAR_EVENTS = 50
 MAX_CALENDAR_ATTENDEES = 20
 MAX_CALENDAR_EVENT_BYTES = 32 << 10
 MAX_CALENDAR_TOTAL_BYTES = 240 << 10
+MICROSOFT_OUTLOOK_WINDOW_DAYS = 30
+MAX_MICROSOFT_OUTLOOK_MESSAGES = 20
+MAX_MICROSOFT_OUTLOOK_RECIPIENTS = 20
+MAX_MICROSOFT_OUTLOOK_MESSAGE_BYTES = 32 << 10
+MAX_MICROSOFT_OUTLOOK_TOTAL_BYTES = 240 << 10
+MICROSOFT_OUTLOOK_CALENDAR_WINDOW_DAYS = 14
+MAX_MICROSOFT_OUTLOOK_EVENTS = 50
+MAX_MICROSOFT_OUTLOOK_ATTENDEES = 20
+MAX_MICROSOFT_OUTLOOK_EVENT_BYTES = 32 << 10
+MAX_MICROSOFT_OUTLOOK_CALENDAR_TOTAL_BYTES = 240 << 10
 MAX_SLACK_CHANNELS = 100
 MAX_SLACK_MESSAGES = 15
 MAX_SLACK_CHANNEL_TEXT_BYTES = 2 << 10
@@ -140,6 +154,7 @@ PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 CALENDAR_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,1024}$")
+MICROSOFT_GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9_+=/-]{1,1024}$")
 SLACK_CHANNEL_ID_RE = re.compile(r"^C[A-Z0-9]{1,255}$")
 SLACK_MESSAGE_TS_RE = re.compile(r"^[0-9]{1,20}\.[0-9]{1,12}$")
 SLACK_AUTHOR_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,255}$")
@@ -162,6 +177,16 @@ INTEGRATION_PROFILES = {
         "default_name": "Google Calendar",
         "required_scopes": (GOOGLE_CALENDAR_SCOPE,),
     },
+    "microsoft-outlook-mail": {
+        "app": MICROSOFT_OUTLOOK_APP,
+        "default_name": "Outlook Mail",
+        "required_scopes": (MICROSOFT_OUTLOOK_SCOPE,),
+    },
+    "microsoft-outlook-calendar": {
+        "app": MICROSOFT_OUTLOOK_CALENDAR_APP,
+        "default_name": "Outlook Calendar",
+        "required_scopes": (MICROSOFT_OUTLOOK_CALENDAR_SCOPE,),
+    },
     "slack": {
         "app": SLACK_APP,
         "default_name": "Slack",
@@ -181,6 +206,9 @@ REVIEWED_IDENTITY_SCOPES = frozenset(
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/userinfo.profile",
     }
+)
+MICROSOFT_IDENTITY_SCOPES = frozenset(
+    {"User.Read", "email", "offline_access", "openid", "profile"}
 )
 
 
@@ -440,6 +468,8 @@ class PipedreamClient:
         oauth_app_id: str,
         gmail_oauth_app_id: str = "",
         google_calendar_oauth_app_id: str = "",
+        microsoft_outlook_oauth_app_id: str = "",
+        microsoft_outlook_calendar_oauth_app_id: str = "",
         slack_oauth_app_id: str = "",
         hubspot_oauth_app_id: str = "",
         api_origin: str = PIPEDREAM_API_ORIGIN,
@@ -456,6 +486,14 @@ class PipedreamClient:
             google_calendar_oauth_app_id
         ):
             raise RuntimeError("Google Calendar OAuth app ID is invalid")
+        if microsoft_outlook_oauth_app_id and not OAUTH_APP_RE.fullmatch(
+            microsoft_outlook_oauth_app_id
+        ):
+            raise RuntimeError("Outlook Mail OAuth app ID is invalid")
+        if microsoft_outlook_calendar_oauth_app_id and not OAUTH_APP_RE.fullmatch(
+            microsoft_outlook_calendar_oauth_app_id
+        ):
+            raise RuntimeError("Outlook Calendar OAuth app ID is invalid")
         if slack_oauth_app_id and not OAUTH_APP_RE.fullmatch(slack_oauth_app_id):
             raise RuntimeError("Slack OAuth app ID is invalid")
         if hubspot_oauth_app_id and not OAUTH_APP_RE.fullmatch(hubspot_oauth_app_id):
@@ -464,6 +502,8 @@ class PipedreamClient:
             not oauth_app_id
             and not gmail_oauth_app_id
             and not google_calendar_oauth_app_id
+            and not microsoft_outlook_oauth_app_id
+            and not microsoft_outlook_calendar_oauth_app_id
             and not slack_oauth_app_id
             and not hubspot_oauth_app_id
         ):
@@ -489,6 +529,8 @@ class PipedreamClient:
             "google-drive": oauth_app_id,
             "gmail": gmail_oauth_app_id,
             "google-calendar": google_calendar_oauth_app_id,
+            "microsoft-outlook-mail": microsoft_outlook_oauth_app_id,
+            "microsoft-outlook-calendar": microsoft_outlook_calendar_oauth_app_id,
             "slack": slack_oauth_app_id,
             "hubspot": hubspot_oauth_app_id,
         }
@@ -509,6 +551,14 @@ class PipedreamClient:
             tuple(str(scope) for scope in value["required_scopes"]),
             oauth_app_id,
         )
+
+    @staticmethod
+    def _allowed_extra_scopes(integration: str) -> frozenset[str]:
+        if integration in {"hubspot", "slack"}:
+            return frozenset()
+        if integration.startswith("microsoft-outlook-"):
+            return MICROSOFT_IDENTITY_SCOPES
+        return REVIEWED_IDENTITY_SCOPES
 
     def _request(
         self,
@@ -870,7 +920,7 @@ class PipedreamClient:
                 if self._account_ready(
                     item,
                     required_scopes,
-                    allow_identity_scopes=integration not in {"hubspot", "slack"},
+                    allowed_extra_scopes=self._allowed_extra_scopes(integration),
                 )
             ),
             None,
@@ -899,7 +949,7 @@ class PipedreamClient:
                 if self._account_ready(
                     selected,
                     required_scopes,
-                    allow_identity_scopes=integration not in {"hubspot", "slack"},
+                    allowed_extra_scopes=self._allowed_extra_scopes(integration),
                 )
                 else "needs_attention"
             ),
@@ -919,13 +969,12 @@ class PipedreamClient:
         account: Mapping[str, object],
         required_scopes: tuple[str, ...] = (GOOGLE_DRIVE_SCOPE,),
         *,
-        allow_identity_scopes: bool = True,
+        allowed_extra_scopes: frozenset[str] = REVIEWED_IDENTITY_SCOPES,
     ) -> bool:
         scopes = account.get("authorized_scopes", [])
         authorized = {scope for scope in scopes if isinstance(scope, str)}
         allowed = set(required_scopes)
-        if allow_identity_scopes:
-            allowed.update(REVIEWED_IDENTITY_SCOPES)
+        allowed.update(allowed_extra_scopes)
         return (
             account.get("healthy") is True
             and set(required_scopes) <= authorized
@@ -1019,7 +1068,7 @@ class PipedreamClient:
         if not self._account_ready(
             connection,
             SLACK_SCOPES,
-            allow_identity_scopes=False,
+            allowed_extra_scopes=frozenset(),
         ):
             raise WorkerError(
                 409,
@@ -1112,7 +1161,7 @@ class PipedreamClient:
         if not self._account_ready(
             connection,
             SLACK_SCOPES,
-            allow_identity_scopes=False,
+            allowed_extra_scopes=frozenset(),
         ):
             raise WorkerError(
                 409,
@@ -1241,7 +1290,7 @@ class PipedreamClient:
         if not self._account_ready(
             connection,
             (HUBSPOT_SCOPE,),
-            allow_identity_scopes=False,
+            allowed_extra_scopes=frozenset(),
         ):
             raise WorkerError(
                 409,
@@ -1784,9 +1833,525 @@ class PipedreamClient:
             "has_more": page_token is not None,
         }
 
+    def read_recent_microsoft_outlook_messages(
+        self,
+        user: str,
+        requested_account: str,
+        *,
+        now: datetime.datetime | None = None,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="microsoft-outlook-mail",
+            deadline=deadline,
+        )
+        if not self._account_ready(
+            connection,
+            (MICROSOFT_OUTLOOK_SCOPE,),
+            allowed_extra_scopes=MICROSOFT_IDENTITY_SCOPES,
+        ):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Outlook Mail connection is not ready for this app",
+            )
+        window_end = now or datetime.datetime.now(datetime.UTC)
+        if window_end.tzinfo is None or window_end.utcoffset() is None:
+            raise ValueError("Outlook Mail clock must be timezone-aware")
+        window_end = window_end.astimezone(datetime.UTC).replace(microsecond=0)
+        window_start = window_end - datetime.timedelta(days=MICROSOFT_OUTLOOK_WINDOW_DAYS)
+        parameters = {
+            "$filter": f"receivedDateTime ge {self._rfc3339(window_start)}",
+            "$orderby": "receivedDateTime desc",
+            "$select": (
+                "id,conversationId,subject,from,toRecipients,receivedDateTime,"
+                "isRead,importance,bodyPreview"
+            ),
+            "$top": str(MAX_MICROSOFT_OUTLOOK_MESSAGES),
+        }
+        target = (
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?"
+            + urllib.parse.urlencode(parameters)
+        )
+        value = self._proxy_json(
+            token,
+            user=user,
+            account=requested_account,
+            target=target,
+            deadline=deadline,
+        )
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Mail returned an invalid message list",
+            )
+        raw_messages = value.get("value", [])
+        next_link = value.get("@odata.nextLink")
+        if not isinstance(raw_messages, list) or len(raw_messages) > MAX_MICROSOFT_OUTLOOK_MESSAGES:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Mail exceeded the recent-message result bound",
+            )
+        self._validate_microsoft_next_link(next_link, provider="Outlook Mail")
+        results: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        total_bytes = 0
+        for raw_message in raw_messages:
+            message = self._microsoft_outlook_message(raw_message)
+            message_id = str(message["message_id"])
+            if message_id in seen_ids:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Outlook Mail returned duplicate message identifiers",
+                )
+            seen_ids.add(message_id)
+            message_bytes = len(
+                json.dumps(message, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+            )
+            if message_bytes > MAX_MICROSOFT_OUTLOOK_MESSAGE_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Outlook Mail message content exceeded its bound",
+                )
+            total_bytes += message_bytes
+            if total_bytes > MAX_MICROSOFT_OUTLOOK_TOTAL_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Outlook Mail content exceeded the aggregate operation bound",
+                )
+            results.append(message)
+        return {
+            "schema_version": "steward.microsoft-outlook-recent-messages.v1",
+            "integration": "microsoft-outlook-mail",
+            "folder": "inbox",
+            "window_days": MICROSOFT_OUTLOOK_WINDOW_DAYS,
+            "window_start": self._rfc3339(window_start),
+            "window_end": self._rfc3339(window_end),
+            "results": results,
+            "result_count": len(results),
+            "has_more": next_link is not None,
+        }
+
+    def read_upcoming_microsoft_outlook_events(
+        self,
+        user: str,
+        requested_account: str,
+        *,
+        now: datetime.datetime | None = None,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="microsoft-outlook-calendar",
+            deadline=deadline,
+        )
+        if not self._account_ready(
+            connection,
+            (MICROSOFT_OUTLOOK_CALENDAR_SCOPE,),
+            allowed_extra_scopes=MICROSOFT_IDENTITY_SCOPES,
+        ):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Outlook Calendar connection is not ready for this app",
+            )
+        window_start = now or datetime.datetime.now(datetime.UTC)
+        if window_start.tzinfo is None or window_start.utcoffset() is None:
+            raise ValueError("Outlook Calendar clock must be timezone-aware")
+        window_start = window_start.astimezone(datetime.UTC).replace(microsecond=0)
+        window_end = window_start + datetime.timedelta(
+            days=MICROSOFT_OUTLOOK_CALENDAR_WINDOW_DAYS
+        )
+        parameters = {
+            "$orderby": "start/dateTime",
+            "$select": (
+                "id,subject,start,end,location,organizer,attendees,isAllDay,"
+                "isCancelled,showAs,sensitivity,type"
+            ),
+            "$top": str(MAX_MICROSOFT_OUTLOOK_EVENTS),
+            "endDateTime": self._rfc3339(window_end),
+            "startDateTime": self._rfc3339(window_start),
+        }
+        target = (
+            "https://graph.microsoft.com/v1.0/me/calendarView?"
+            + urllib.parse.urlencode(parameters)
+        )
+        value = self._proxy_json(
+            token,
+            user=user,
+            account=requested_account,
+            target=target,
+            deadline=deadline,
+        )
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned an invalid event list",
+            )
+        raw_events = value.get("value", [])
+        next_link = value.get("@odata.nextLink")
+        if not isinstance(raw_events, list) or len(raw_events) > MAX_MICROSOFT_OUTLOOK_EVENTS:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar exceeded the upcoming-event result bound",
+            )
+        self._validate_microsoft_next_link(next_link, provider="Outlook Calendar")
+        results: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        total_bytes = 0
+        for raw_event in raw_events:
+            event = self._microsoft_outlook_event(raw_event)
+            event_id = str(event["event_id"])
+            if event_id in seen_ids:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Outlook Calendar returned duplicate event identifiers",
+                )
+            seen_ids.add(event_id)
+            event_bytes = len(
+                json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+            )
+            if event_bytes > MAX_MICROSOFT_OUTLOOK_EVENT_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Outlook Calendar event content exceeded its bound",
+                )
+            total_bytes += event_bytes
+            if total_bytes > MAX_MICROSOFT_OUTLOOK_CALENDAR_TOTAL_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Outlook Calendar content exceeded the aggregate operation bound",
+                )
+            results.append(event)
+        return {
+            "schema_version": "steward.microsoft-outlook-upcoming-events.v1",
+            "integration": "microsoft-outlook-calendar",
+            "calendar": "primary",
+            "window_start": self._rfc3339(window_start),
+            "window_end": self._rfc3339(window_end),
+            "results": results,
+            "result_count": len(results),
+            "has_more": next_link is not None,
+        }
+
     @staticmethod
     def _rfc3339(value: datetime.datetime) -> str:
         return value.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _validate_microsoft_next_link(value: object, *, provider: str) -> None:
+        if value is None:
+            return
+        if (
+            not isinstance(value, str)
+            or not 1 <= len(value) <= 16384
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned an invalid continuation link",
+            )
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "graph.microsoft.com"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned an unsafe continuation link",
+            )
+
+    @classmethod
+    def _microsoft_outlook_message(cls, value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Mail returned invalid message content",
+            )
+        message_id = value.get("id")
+        conversation_id = value.get("conversationId")
+        received_at = value.get("receivedDateTime")
+        is_read = value.get("isRead")
+        importance = value.get("importance")
+        recipients = value.get("toRecipients", [])
+        if (
+            not isinstance(message_id, str)
+            or MICROSOFT_GRAPH_ID_RE.fullmatch(message_id) is None
+            or not isinstance(conversation_id, str)
+            or MICROSOFT_GRAPH_ID_RE.fullmatch(conversation_id) is None
+            or not isinstance(is_read, bool)
+            or importance not in {"low", "normal", "high"}
+            or not isinstance(recipients, list)
+            or len(recipients) > MAX_MICROSOFT_OUTLOOK_RECIPIENTS
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Mail returned invalid message content",
+            )
+        content = cls._safe_text(
+            cls._microsoft_optional_text(value.get("bodyPreview"), provider="Outlook Mail"),
+            maximum_bytes=16 << 10,
+            provider="Outlook Mail",
+        )
+        content_bytes = content.encode("utf-8")
+        sender = value.get("from")
+        normalized_sender = (
+            {"display_name": "", "email": ""}
+            if sender is None
+            else cls._microsoft_person(sender, provider="Outlook Mail")
+        )
+        return {
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "status": "succeeded",
+            "received_at": cls._microsoft_datetime(received_at, provider="Outlook Mail"),
+            "from": normalized_sender,
+            "to": [
+                cls._microsoft_person(item, provider="Outlook Mail") for item in recipients
+            ],
+            "subject": cls._safe_text(
+                cls._microsoft_optional_text(value.get("subject"), provider="Outlook Mail"),
+                maximum_bytes=4096,
+                provider="Outlook Mail",
+            ),
+            "is_read": is_read,
+            "importance": importance,
+            "content": content,
+            "content_source": "body_preview",
+            "content_bytes": len(content_bytes),
+            "content_sha256": "sha256:" + hashlib.sha256(content_bytes).hexdigest(),
+        }
+
+    @classmethod
+    def _microsoft_outlook_event(cls, value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned invalid event content",
+            )
+        event_id = value.get("id")
+        is_all_day = value.get("isAllDay")
+        is_cancelled = value.get("isCancelled")
+        show_as = value.get("showAs")
+        sensitivity = value.get("sensitivity")
+        event_type = value.get("type")
+        attendees = value.get("attendees", [])
+        if (
+            not isinstance(event_id, str)
+            or MICROSOFT_GRAPH_ID_RE.fullmatch(event_id) is None
+            or not isinstance(is_all_day, bool)
+            or not isinstance(is_cancelled, bool)
+            or show_as not in {"free", "tentative", "busy", "oof", "workingElsewhere", "unknown"}
+            or sensitivity not in {"normal", "personal", "private", "confidential"}
+            or event_type not in {"singleInstance", "occurrence", "exception", "seriesMaster"}
+            or not isinstance(attendees, list)
+            or len(attendees) > MAX_MICROSOFT_OUTLOOK_ATTENDEES
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned invalid event content",
+            )
+        location = value.get("location")
+        if location is None:
+            location = {}
+        if not isinstance(location, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned invalid location data",
+            )
+        organizer = value.get("organizer")
+        return {
+            "event_id": event_id,
+            "subject": cls._safe_text(
+                cls._microsoft_optional_text(value.get("subject"), provider="Outlook Calendar"),
+                maximum_bytes=4096,
+                provider="Outlook Calendar",
+            ),
+            "start": cls._microsoft_calendar_when(value.get("start")),
+            "end": cls._microsoft_calendar_when(value.get("end")),
+            "location": cls._safe_text(
+                cls._microsoft_optional_text(
+                    location.get("displayName"), provider="Outlook Calendar"
+                ),
+                maximum_bytes=4096,
+                provider="Outlook Calendar",
+            ),
+            "organizer": (
+                None
+                if organizer is None
+                else cls._microsoft_person(organizer, provider="Outlook Calendar")
+            ),
+            "attendees": [cls._microsoft_attendee(item) for item in attendees],
+            "is_all_day": is_all_day,
+            "is_cancelled": is_cancelled,
+            "show_as": show_as,
+            "sensitivity": sensitivity,
+            "event_type": event_type,
+        }
+
+    @staticmethod
+    def _microsoft_optional_text(value: object, *, provider: str) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned invalid text",
+            )
+        return value
+
+    @classmethod
+    def _microsoft_datetime(cls, value: object, *, provider: str) -> str:
+        if not isinstance(value, str) or not 1 <= len(value) <= 64:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned an invalid timestamp",
+            )
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned an invalid timestamp",
+            ) from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned a timezone-free timestamp",
+            )
+        return cls._rfc3339(parsed)
+
+    @classmethod
+    def _microsoft_person(cls, value: object, *, provider: str) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned invalid participant data",
+            )
+        address = value.get("emailAddress")
+        if not isinstance(address, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned invalid participant data",
+            )
+        name = address.get("name", "")
+        email = address.get("address", "")
+        if not isinstance(name, str) or not isinstance(email, str):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"{provider} returned invalid participant data",
+            )
+        return {
+            "display_name": cls._safe_text(name, maximum_bytes=1024, provider=provider),
+            "email": cls._safe_text(email, maximum_bytes=1024, provider=provider),
+        }
+
+    @classmethod
+    def _microsoft_attendee(cls, value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned invalid attendee data",
+            )
+        attendee_type = value.get("type")
+        status = value.get("status", {})
+        if attendee_type not in {"required", "optional", "resource"} or not isinstance(status, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned invalid attendee data",
+            )
+        response = status.get("response")
+        if response not in {
+            "none",
+            "organizer",
+            "tentativelyAccepted",
+            "accepted",
+            "declined",
+            "notResponded",
+        }:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned invalid attendee data",
+            )
+        return {
+            **cls._microsoft_person(value, provider="Outlook Calendar"),
+            "type": attendee_type,
+            "response": response,
+        }
+
+    @classmethod
+    def _microsoft_calendar_when(cls, value: object) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned an invalid event time",
+            )
+        date_time = value.get("dateTime")
+        time_zone = value.get("timeZone")
+        if not isinstance(date_time, str) or not isinstance(time_zone, str):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned an invalid event time",
+            )
+        if not 1 <= len(date_time) <= 64:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned an invalid event time",
+            )
+        try:
+            datetime.datetime.fromisoformat(date_time.replace("Z", "+00:00"))
+        except ValueError:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned an invalid event time",
+            ) from None
+        return {
+            "date_time": cls._safe_text(
+                date_time, maximum_bytes=64, provider="Outlook Calendar"
+            ),
+            "time_zone": cls._safe_text(
+                time_zone, maximum_bytes=256, provider="Outlook Calendar"
+            ),
+        }
 
     @classmethod
     def _calendar_event(cls, value: object) -> dict[str, object]:
@@ -2724,6 +3289,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     "google-calendar",
                 )
+            elif self.path == "/v1/connections/microsoft-outlook-mail/connect-link":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.connect_link(
+                    external_user(body["external_user_id"]),
+                    "microsoft-outlook-mail",
+                )
+            elif self.path == "/v1/connections/microsoft-outlook-calendar/connect-link":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.connect_link(
+                    external_user(body["external_user_id"]),
+                    "microsoft-outlook-calendar",
+                )
             elif self.path == "/v1/connections/slack/connect-link":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 result = self.worker.client.connect_link(
@@ -2750,6 +3327,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _token, result = self.worker.client.reconcile(
                     external_user(body["external_user_id"]),
                     integration="google-calendar",
+                )
+            elif self.path == "/v1/connections/microsoft-outlook-mail/reconcile":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                _token, result = self.worker.client.reconcile(
+                    external_user(body["external_user_id"]),
+                    integration="microsoft-outlook-mail",
+                )
+            elif self.path == "/v1/connections/microsoft-outlook-calendar/reconcile":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                _token, result = self.worker.client.reconcile(
+                    external_user(body["external_user_id"]),
+                    integration="microsoft-outlook-calendar",
                 )
             elif self.path == "/v1/connections/slack/reconcile":
                 body = exact_object(value, frozenset({"external_user_id"}))
@@ -2796,6 +3385,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     frozenset({"account_id", "external_user_id"}),
                 )
                 result = self.worker.client.read_upcoming_calendar(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                )
+            elif self.path == "/v1/connections/microsoft-outlook-mail/recent-messages":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id"}),
+                )
+                result = self.worker.client.read_recent_microsoft_outlook_messages(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                )
+            elif self.path == "/v1/connections/microsoft-outlook-calendar/upcoming-events":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id"}),
+                )
+                result = self.worker.client.read_upcoming_microsoft_outlook_events(
                     external_user(body["external_user_id"]),
                     account_id(body["account_id"]),
                 )
@@ -2846,6 +3453,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     account_id(body["account_id"]),
                     "google-calendar",
                 )
+            elif self.path == "/v1/connections/microsoft-outlook-mail/revoke":
+                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                result = self.worker.client.revoke(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    "microsoft-outlook-mail",
+                )
+            elif self.path == "/v1/connections/microsoft-outlook-calendar/revoke":
+                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                result = self.worker.client.revoke(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    "microsoft-outlook-calendar",
+                )
             elif self.path == "/v1/connections/slack/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.revoke(
@@ -2872,6 +3493,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "/v1/connections/google-drive/content",
                         "/v1/connections/gmail/recent-messages",
                         "/v1/connections/google-calendar/upcoming-events",
+                        "/v1/connections/microsoft-outlook-mail/recent-messages",
+                        "/v1/connections/microsoft-outlook-calendar/upcoming-events",
                         "/v1/connections/slack/recent-messages",
                         "/v1/connections/hubspot/recent-deals",
                     }
@@ -2989,6 +3612,12 @@ def main() -> int:
         gmail_oauth_app_id=os.environ.get("STEWARD_GMAIL_OAUTH_APP_ID", ""),
         google_calendar_oauth_app_id=os.environ.get(
             "STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID", ""
+        ),
+        microsoft_outlook_oauth_app_id=os.environ.get(
+            "STEWARD_MICROSOFT_OUTLOOK_OAUTH_APP_ID", ""
+        ),
+        microsoft_outlook_calendar_oauth_app_id=os.environ.get(
+            "STEWARD_MICROSOFT_OUTLOOK_CALENDAR_OAUTH_APP_ID", ""
         ),
         slack_oauth_app_id=os.environ.get("STEWARD_SLACK_OAUTH_APP_ID", ""),
         hubspot_oauth_app_id=os.environ.get("STEWARD_HUBSPOT_OAUTH_APP_ID", ""),
