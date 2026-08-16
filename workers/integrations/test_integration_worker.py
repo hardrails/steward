@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import datetime
+import hashlib
 import http.client
 import http.server
 import importlib.util
@@ -44,6 +45,14 @@ class BrokerState:
         self.calendar_events: list[object] = []
         self.calendar_next_page_token: str | None = None
         self.calendar_time_zone = "America/Los_Angeles"
+        self.slack_channels: list[object] = []
+        self.slack_channel_info: object | None = None
+        self.slack_channel_cursor = ""
+        self.slack_messages: list[object] = []
+        self.slack_message_cursor = ""
+        self.slack_has_more = False
+        self.slack_list_error: str | None = None
+        self.slack_history_error: str | None = None
         self.connect_link_url = "https://pipedream.com/_static/connect.html?token=one-use-secret&connectLink=true"
 
 
@@ -164,6 +173,44 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                     calendar_value["nextPageToken"] = self.state.calendar_next_page_token
                 self._respond(200, calendar_value)
                 return
+            if target.hostname == "slack.com" and target.path == "/api/conversations.list":
+                if self.state.slack_list_error is not None:
+                    self._respond(200, {"ok": False, "error": self.state.slack_list_error})
+                    return
+                self._respond(
+                    200,
+                    {
+                        "ok": True,
+                        "channels": self.state.slack_channels,
+                        "response_metadata": {
+                            "next_cursor": self.state.slack_channel_cursor,
+                        },
+                    },
+                )
+                return
+            if target.hostname == "slack.com" and target.path == "/api/conversations.history":
+                if self.state.slack_history_error is not None:
+                    self._respond(200, {"ok": False, "error": self.state.slack_history_error})
+                    return
+                self._respond(
+                    200,
+                    {
+                        "ok": True,
+                        "messages": self.state.slack_messages,
+                        "has_more": self.state.slack_has_more,
+                        "response_metadata": {
+                            "next_cursor": self.state.slack_message_cursor,
+                        },
+                    },
+                )
+                return
+            if target.hostname == "slack.com" and target.path == "/api/conversations.info":
+                channel = self.state.slack_channel_info
+                if channel is None:
+                    self._respond(200, {"ok": False, "error": "channel_not_found"})
+                else:
+                    self._respond(200, {"ok": True, "channel": channel})
+                return
             if len(target_parts) >= 6 and target_parts[-1] == "export":
                 file_id = target_parts[-2]
                 content = self.state.file_contents.get(file_id)
@@ -224,6 +271,7 @@ def broker_client() -> Iterator[tuple[Any, BrokerState]]:
             oauth_app_id="oa_test",
             gmail_oauth_app_id="oa_gmailtest",
             google_calendar_oauth_app_id="oa_calendartest",
+            slack_oauth_app_id="oa_slacktest",
             api_origin=f"http://127.0.0.1:{server.server_port}",
         )
         yield client, server.state
@@ -277,6 +325,42 @@ def connected_calendar_account(
     value["name"] = "Operations Calendar"
     value["app"] = {"name_slug": "google_calendar"}
     return value
+
+
+def connected_slack_account(
+    *,
+    scopes: list[str] | None = None,
+    identifier: str = "apn_owned123",
+) -> dict[str, object]:
+    value = connected_account(
+        scopes=scopes or list(worker.SLACK_SCOPES),
+        identifier=identifier,
+    )
+    value["name"] = "Operations Slack"
+    value["app"] = {"name_slug": "slack"}
+    return value
+
+
+def slack_channel(channel_id: str = "C123TEAM") -> dict[str, object]:
+    return {
+        "id": channel_id,
+        "name": "sales-operations",
+        "is_archived": False,
+        "is_private": False,
+        "topic": {"value": "Sales blockers and decisions"},
+        "purpose": {"value": "Coordinate the revenue team"},
+        "num_members": 37,
+    }
+
+
+def slack_message(timestamp: str = "1786723200.000100") -> dict[str, object]:
+    return {
+        "type": "message",
+        "ts": timestamp,
+        "user": "U123TEAM",
+        "text": "The renewal is blocked on security review.",
+        "reactions": [{"name": "eyes", "count": 3}],
+    }
 
 
 def calendar_event(event_id: str = "event_1") -> dict[str, object]:
@@ -385,6 +469,17 @@ class PipedreamClientTests(unittest.TestCase):
             "oa_calendartest",
         )
 
+        slack_only = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="",
+            slack_oauth_app_id="oa_slacktest",
+            api_origin="https://broker.invalid",
+        )
+        self.assertEqual(slack_only.oauth_app_ids["slack"], "oa_slacktest")
+
     def test_connect_link_uses_exact_scopes_and_returns_only_one_use_url(self) -> None:
         with broker_client() as (client, state):
             result = client.connect_link("ryu_abcdefghijklmnop")
@@ -471,6 +566,234 @@ class PipedreamClientTests(unittest.TestCase):
                         integration="google-calendar",
                     )
                     self.assertEqual(result["status"], "needs_attention")
+
+    def test_slack_connect_and_reconcile_require_exact_multi_scope_profile(self) -> None:
+        with broker_client() as (client, state):
+            link = client.connect_link("ryu_abcdefghijklmnop", "slack")
+            state.accounts = [connected_slack_account()]
+            _token, connection = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="slack",
+            )
+
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(link["connect_url"])).query
+        )
+        self.assertEqual(query["app"], ["slack"])
+        self.assertEqual(query["oauthAppId"], ["oa_slacktest"])
+        self.assertEqual(connection["schema_version"], "steward.managed-connection.v2")
+        self.assertEqual(connection["status"], "ready")
+        self.assertEqual(connection["required_scopes"], list(worker.SLACK_SCOPES))
+        self.assertNotIn("required_scope", connection)
+
+        with broker_client() as (client, state):
+            for scopes in (
+                ["channels:history"],
+                ["channels:read"],
+                [*worker.SLACK_SCOPES, "chat:write"],
+                [*worker.SLACK_SCOPES, "openid"],
+            ):
+                with self.subTest(scopes=scopes):
+                    state.accounts = [connected_slack_account(scopes=scopes)]
+                    _token, result = client.reconcile(
+                        "ryu_abcdefghijklmnop",
+                        integration="slack",
+                    )
+                    self.assertEqual(result["status"], "needs_attention")
+
+    def test_list_slack_channels_freezes_caller_choice_and_bounds_projection(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_slack_account()]
+            state.slack_channels = [slack_channel()]
+            state.slack_channel_info = slack_channel()
+            state.slack_channel_cursor = "next-page"
+            result = client.list_slack_channels(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+            )
+
+        self.assertEqual(result["schema_version"], "steward.slack-channels.v1")
+        self.assertEqual(result["result_count"], 1)
+        self.assertTrue(result["has_more"])
+        self.assertEqual(
+            result["channels"],
+            [
+                {
+                    "channel_id": "C123TEAM",
+                    "name": "sales-operations",
+                    "topic": "Sales blockers and decisions",
+                    "purpose": "Coordinate the revenue team",
+                }
+            ],
+        )
+        proxy_request = state.requests[-1]
+        parsed = urllib.parse.urlsplit(proxy_request["path"])
+        encoded_target = parsed.path.rsplit("/", 1)[-1]
+        encoded_target += "=" * (-len(encoded_target) % 4)
+        target = urllib.parse.urlsplit(
+            base64.urlsafe_b64decode(encoded_target).decode()
+        )
+        self.assertEqual(target.hostname, "slack.com")
+        self.assertEqual(target.path, "/api/conversations.list")
+        self.assertEqual(
+            urllib.parse.parse_qs(target.query),
+            {
+                "exclude_archived": ["true"],
+                "limit": ["100"],
+                "types": ["public_channel"],
+            },
+        )
+
+    def test_read_slack_messages_rechecks_public_channel_then_reads_fifteen_items(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_slack_account()]
+            state.slack_channels = [slack_channel()]
+            state.slack_channel_info = slack_channel()
+            ignored = slack_message("1786723199.000100")
+            ignored["subtype"] = "channel_join"
+            thread_reply = slack_message("1786723198.000100")
+            thread_reply["thread_ts"] = "1786723100.000100"
+            broadcast = slack_message("1786723197.000100")
+            broadcast["subtype"] = "thread_broadcast"
+            state.slack_messages = [slack_message(), ignored, thread_reply, broadcast]
+            state.slack_has_more = True
+            result = client.read_recent_slack_messages(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                "C123TEAM",
+            )
+
+        self.assertEqual(
+            result["schema_version"],
+            "steward.slack-recent-messages.v1",
+        )
+        self.assertEqual(result["channel_id"], "C123TEAM")
+        self.assertEqual(result["result_count"], 1)
+        self.assertTrue(result["has_more"])
+        message = result["messages"][0]
+        self.assertEqual(message["author_id"], "U123TEAM")
+        self.assertEqual(message["author_kind"], "member")
+        self.assertEqual(
+            message["content_sha256"],
+            "sha256:" + hashlib.sha256(message["text"].encode()).hexdigest(),
+        )
+        proxy_request = state.requests[-1]
+        parsed = urllib.parse.urlsplit(proxy_request["path"])
+        encoded_target = parsed.path.rsplit("/", 1)[-1]
+        encoded_target += "=" * (-len(encoded_target) % 4)
+        target = urllib.parse.urlsplit(
+            base64.urlsafe_b64decode(encoded_target).decode()
+        )
+        self.assertEqual(target.path, "/api/conversations.history")
+        self.assertEqual(
+            urllib.parse.parse_qs(target.query),
+            {
+                "channel": ["C123TEAM"],
+                "include_all_metadata": ["false"],
+                "limit": ["15"],
+            },
+        )
+
+    def test_read_slack_messages_rejects_channel_that_is_no_longer_public(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_slack_account()]
+            state.slack_channel_info = None
+            with self.assertRaisesRegex(worker.WorkerError, "choose the channel again") as caught:
+                client.read_recent_slack_messages(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                    "C123TEAM",
+                )
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertFalse(any("conversations.history" in str(item) for item in state.requests))
+
+    def test_read_slack_messages_checks_selected_channel_without_first_page_dependency(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_slack_account()]
+            state.slack_channels = [slack_channel("COTHERTEAM")]
+            state.slack_channel_cursor = "later-pages"
+            state.slack_channel_info = slack_channel()
+            result = client.read_recent_slack_messages(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                "C123TEAM",
+            )
+
+        self.assertEqual(result["channel_id"], "C123TEAM")
+        self.assertEqual(result["result_count"], 0)
+
+    def test_slack_access_change_and_invalid_channel_fail_without_leaking_provider_detail(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_slack_account()]
+            state.slack_channels = [slack_channel()]
+            state.slack_channel_info = slack_channel()
+            state.slack_history_error = "channel_not_found"
+            with self.assertRaisesRegex(worker.WorkerError, "choose the channel again") as caught:
+                client.read_recent_slack_messages(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                    "C123TEAM",
+                )
+            self.assertEqual(caught.exception.status, 409)
+
+            before = len(state.requests)
+            with self.assertRaisesRegex(worker.WorkerError, "identifier is invalid"):
+                client.read_recent_slack_messages(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                    "../private",
+                )
+            self.assertEqual(len(state.requests), before)
+
+    def test_slack_read_uses_one_deadline_for_all_broker_calls(self) -> None:
+        class DeadlineClient(worker.PipedreamClient):
+            def __init__(self) -> None:
+                self.deadlines: list[float] = []
+
+            def _owned_account(
+                self,
+                user: str,
+                requested_account: str,
+                scope: str,
+                *,
+                integration: str = "google-drive",
+                deadline: float | None = None,
+            ) -> tuple[str, dict[str, object]]:
+                del user, requested_account, scope, integration
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                return "token", {
+                    "healthy": True,
+                    "authorized_scopes": list(worker.SLACK_SCOPES),
+                }
+
+            def _proxy_json(
+                self,
+                token: str,
+                *,
+                user: str,
+                account: str,
+                target: str,
+                deadline: float | None = None,
+            ) -> object:
+                del token, user, account
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                if "conversations.info" in target:
+                    return {"ok": True, "channel": slack_channel()}
+                return {"ok": True, "messages": []}
+
+        client = DeadlineClient()
+        with mock.patch.object(worker.time, "monotonic", return_value=100.0):
+            client.read_recent_slack_messages(
+                "ryu_abcdefghijklmnop", "apn_owned123", "C123TEAM"
+            )
+
+        self.assertEqual(
+            client.deadlines,
+            [100.0 + worker.SLACK_OPERATION_TIMEOUT_SECONDS] * 3,
+        )
 
     def test_unconfigured_gmail_fails_without_contacting_broker(self) -> None:
         with broker_client() as (client, state):
@@ -1347,6 +1670,28 @@ class StubClient:
             "integration": "google-calendar",
         }
 
+    def list_slack_channels(self, user: str, account: str) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "integration": "slack",
+        }
+
+    def read_recent_slack_messages(
+        self,
+        user: str,
+        account: str,
+        channel: str,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "channel": channel,
+            "integration": "slack",
+        }
+
     def revoke(
         self,
         user: str,
@@ -1655,6 +2000,42 @@ class HTTPContractTests(unittest.TestCase):
                 port,
                 "/v1/connections/google-calendar/upcoming-events",
                 b'{"account_id":"apn_owned123","calendar_id":"other","external_user_id":"ryu_abcdefghijklmnop"}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+
+    def test_slack_routes_dispatch_only_exact_finite_operations(self) -> None:
+        with integration_server() as port:
+            for path, payload in (
+                (
+                    "/v1/connections/slack/connect-link",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/slack/reconcile",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/slack/channels",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/slack/recent-messages",
+                    b'{"account_id":"apn_owned123","channel_id":"C123TEAM","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/slack/revoke",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+            ):
+                with self.subTest(path=path):
+                    status, body, _headers = call_worker(port, path, payload)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["integration"], "slack")
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/slack/recent-messages",
+                b'{"account_id":"apn_owned123","channel_id":"C123TEAM","external_user_id":"ryu_abcdefghijklmnop","limit":100}',
             )
             self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
 

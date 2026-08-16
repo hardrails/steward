@@ -44,6 +44,8 @@ GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_FULL_ACCESS_SCOPE = "https://mail.google.com/"
 GOOGLE_CALENDAR_APP = "google_calendar"
 GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
+SLACK_APP = "slack"
+SLACK_SCOPES = ("channels:history", "channels:read")
 GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
 GOOGLE_DRIVE_CONTENT_FIELDS = (
     "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
@@ -73,6 +75,12 @@ MAX_CALENDAR_EVENTS = 50
 MAX_CALENDAR_ATTENDEES = 20
 MAX_CALENDAR_EVENT_BYTES = 32 << 10
 MAX_CALENDAR_TOTAL_BYTES = 240 << 10
+MAX_SLACK_CHANNELS = 100
+MAX_SLACK_MESSAGES = 15
+MAX_SLACK_CHANNEL_TEXT_BYTES = 2 << 10
+MAX_SLACK_MESSAGE_BYTES = 32 << 10
+MAX_SLACK_TOTAL_BYTES = 240 << 10
+SLACK_OPERATION_TIMEOUT_SECONDS = 30
 GMAIL_MESSAGE_FIELDS = (
     "id,threadId,labelIds,snippet,internalDate,"
     "payload(filename,headers,mimeType,body(data,size),parts)"
@@ -109,22 +117,30 @@ PROJECT_RE = re.compile(r"^proj_[A-Za-z0-9]+$")
 OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 CALENDAR_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,1024}$")
+SLACK_CHANNEL_ID_RE = re.compile(r"^C[A-Z0-9]{1,255}$")
+SLACK_MESSAGE_TS_RE = re.compile(r"^[0-9]{1,20}\.[0-9]{1,12}$")
+SLACK_AUTHOR_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,255}$")
 
 INTEGRATION_PROFILES = {
     "google-drive": {
         "app": GOOGLE_DRIVE_APP,
         "default_name": "Google Drive",
-        "required_scope": GOOGLE_DRIVE_SCOPE,
+        "required_scopes": (GOOGLE_DRIVE_SCOPE,),
     },
     "gmail": {
         "app": GMAIL_APP,
         "default_name": "Gmail",
-        "required_scope": GMAIL_SCOPE,
+        "required_scopes": (GMAIL_SCOPE,),
     },
     "google-calendar": {
         "app": GOOGLE_CALENDAR_APP,
         "default_name": "Google Calendar",
-        "required_scope": GOOGLE_CALENDAR_SCOPE,
+        "required_scopes": (GOOGLE_CALENDAR_SCOPE,),
+    },
+    "slack": {
+        "app": SLACK_APP,
+        "default_name": "Slack",
+        "required_scopes": SLACK_SCOPES,
     },
 }
 REVIEWED_IDENTITY_SCOPES = frozenset(
@@ -223,6 +239,16 @@ def file_ids(value: object) -> tuple[str, ...]:
             "file IDs must be one through ten unique canonical identifiers",
         )
     return tuple(value)
+
+
+def slack_channel_id(value: object) -> str:
+    if not isinstance(value, str) or SLACK_CHANNEL_ID_RE.fullmatch(value) is None:
+        raise WorkerError(
+            400,
+            "invalid_channel",
+            "Slack channel identifier is invalid",
+        )
+    return value
 
 
 def _deadline_error() -> WorkerError:
@@ -384,6 +410,7 @@ class PipedreamClient:
         oauth_app_id: str,
         gmail_oauth_app_id: str = "",
         google_calendar_oauth_app_id: str = "",
+        slack_oauth_app_id: str = "",
         api_origin: str = PIPEDREAM_API_ORIGIN,
     ) -> None:
         if not PROJECT_RE.fullmatch(project_id):
@@ -398,10 +425,13 @@ class PipedreamClient:
             google_calendar_oauth_app_id
         ):
             raise RuntimeError("Google Calendar OAuth app ID is invalid")
+        if slack_oauth_app_id and not OAUTH_APP_RE.fullmatch(slack_oauth_app_id):
+            raise RuntimeError("Slack OAuth app ID is invalid")
         if (
             not oauth_app_id
             and not gmail_oauth_app_id
             and not google_calendar_oauth_app_id
+            and not slack_oauth_app_id
         ):
             raise RuntimeError("at least one managed OAuth app ID is required")
         parsed = urllib.parse.urlsplit(api_origin)
@@ -425,10 +455,11 @@ class PipedreamClient:
             "google-drive": oauth_app_id,
             "gmail": gmail_oauth_app_id,
             "google-calendar": google_calendar_oauth_app_id,
+            "slack": slack_oauth_app_id,
         }
         self.origin = parsed
 
-    def _profile(self, integration: str) -> tuple[str, str, str, str]:
+    def _profile(self, integration: str) -> tuple[str, str, tuple[str, ...], str]:
         value = INTEGRATION_PROFILES.get(integration)
         oauth_app_id = self.oauth_app_ids.get(integration, "")
         if value is None or not oauth_app_id:
@@ -440,7 +471,7 @@ class PipedreamClient:
         return (
             str(value["app"]),
             str(value["default_name"]),
-            str(value["required_scope"]),
+            tuple(str(scope) for scope in value["required_scopes"]),
             oauth_app_id,
         )
 
@@ -631,7 +662,7 @@ class PipedreamClient:
         return token
 
     def connect_link(self, user: str, integration: str = "google-drive") -> dict[str, object]:
-        app, _default_name, _required_scope, oauth_app_id = self._profile(integration)
+        app, _default_name, _required_scopes, oauth_app_id = self._profile(integration)
         token = self.access_token("connect:tokens:create")
         result = self._request(
             "POST",
@@ -684,7 +715,7 @@ class PipedreamClient:
         scope: str,
         integration: str = "google-drive",
     ) -> tuple[str, list[object]]:
-        app, _default_name, _required_scope, oauth_app_id = self._profile(integration)
+        app, _default_name, _required_scopes, oauth_app_id = self._profile(integration)
         token = self.access_token(scope)
         accounts: list[object] = []
         after: str | None = None
@@ -781,7 +812,7 @@ class PipedreamClient:
         scope: str = "connect:accounts:read",
         integration: str = "google-drive",
     ) -> tuple[str, dict[str, object]]:
-        app, default_name, required_scope, _oauth_app_id = self._profile(integration)
+        app, default_name, required_scopes, _oauth_app_id = self._profile(integration)
         token, raw_accounts = self._accounts(user, scope, integration)
         accounts = [
             safe
@@ -798,43 +829,72 @@ class PipedreamClient:
         ]
         accounts.sort(key=lambda item: (str(item["created_at"]), str(item["account_id"])), reverse=True)
         selected = next(
-            (item for item in accounts if self._account_ready(item, required_scope)),
+            (
+                item
+                for item in accounts
+                if self._account_ready(
+                    item,
+                    required_scopes,
+                    allow_identity_scopes=integration != "slack",
+                )
+            ),
             None,
         )
         if selected is None:
             selected = next((item for item in accounts if item["healthy"]), accounts[0] if accounts else None)
         if selected is None:
             return token, {
-                "schema_version": "steward.managed-connection.v1",
+                "schema_version": (
+                    "steward.managed-connection.v2"
+                    if len(required_scopes) > 1
+                    else "steward.managed-connection.v1"
+                ),
                 "integration": integration,
                 "status": "not_connected",
             }
-        return token, {
-            "schema_version": "steward.managed-connection.v1",
+        result: dict[str, object] = {
+            "schema_version": (
+                "steward.managed-connection.v2"
+                if len(required_scopes) > 1
+                else "steward.managed-connection.v1"
+            ),
             "integration": integration,
             "status": (
                 "ready"
-                if self._account_ready(selected, required_scope)
+                if self._account_ready(
+                    selected,
+                    required_scopes,
+                    allow_identity_scopes=integration != "slack",
+                )
                 else "needs_attention"
             ),
             "account_id": selected["account_id"],
             "account_name": selected["account_name"],
             "authorized_scopes": selected["authorized_scopes"],
-            "required_scope": required_scope,
             "healthy": selected["healthy"],
         }
+        if len(required_scopes) == 1:
+            result["required_scope"] = required_scopes[0]
+        else:
+            result["required_scopes"] = list(required_scopes)
+        return token, result
 
     @staticmethod
     def _account_ready(
         account: Mapping[str, object],
-        required_scope: str = GOOGLE_DRIVE_SCOPE,
+        required_scopes: tuple[str, ...] = (GOOGLE_DRIVE_SCOPE,),
+        *,
+        allow_identity_scopes: bool = True,
     ) -> bool:
         scopes = account.get("authorized_scopes", [])
         authorized = {scope for scope in scopes if isinstance(scope, str)}
+        allowed = set(required_scopes)
+        if allow_identity_scopes:
+            allowed.update(REVIEWED_IDENTITY_SCOPES)
         return (
             account.get("healthy") is True
-            and required_scope in authorized
-            and authorized <= {required_scope, *REVIEWED_IDENTITY_SCOPES}
+            and set(required_scopes) <= authorized
+            and authorized <= allowed
         )
 
     def _owned_account(
@@ -846,7 +906,7 @@ class PipedreamClient:
         integration: str = "google-drive",
         deadline: float | None = None,
     ) -> tuple[str, dict[str, object]]:
-        app, default_name, _required_scope, _oauth_app_id = self._profile(integration)
+        app, default_name, _required_scopes, _oauth_app_id = self._profile(integration)
         token = self.access_token(scope, deadline=deadline)
         query = urllib.parse.urlencode({"include_credentials": "false"})
         value = self._request(
@@ -906,6 +966,220 @@ class PipedreamClient:
             "files": files,
             "result_count": len(files),
             "has_more": bool(next_token),
+        }
+
+    def list_slack_channels(
+        self,
+        user: str,
+        requested_account: str,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + SLACK_OPERATION_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="slack",
+            deadline=deadline,
+        )
+        if not self._account_ready(
+            connection,
+            SLACK_SCOPES,
+            allow_identity_scopes=False,
+        ):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Slack connection is not ready for this app",
+            )
+        target = "https://slack.com/api/conversations.list?" + urllib.parse.urlencode(
+            {
+                "exclude_archived": "true",
+                "limit": str(MAX_SLACK_CHANNELS),
+                "types": "public_channel",
+            }
+        )
+        value = self._slack_result(
+            self._proxy_json(
+                token,
+                user=user,
+                account=requested_account,
+                target=target,
+                deadline=deadline,
+            ),
+            operation="channel list",
+        )
+        raw_channels = value.get("channels")
+        response_metadata = value.get("response_metadata", {})
+        if (
+            not isinstance(raw_channels, list)
+            or len(raw_channels) > MAX_SLACK_CHANNELS
+            or not isinstance(response_metadata, Mapping)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned an invalid channel list",
+            )
+        channels: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        for item in raw_channels:
+            channel = self._slack_channel(item)
+            channel_id = channel["channel_id"]
+            if channel_id in seen_ids:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Slack returned duplicate channel identifiers",
+                )
+            seen_ids.add(channel_id)
+            channels.append(channel)
+        cursor = response_metadata.get("next_cursor", "")
+        if (
+            not isinstance(cursor, str)
+            or len(cursor.encode()) > 4096
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in cursor)
+        ) and cursor != "":
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned an invalid channel cursor",
+            )
+        return {
+            "schema_version": "steward.slack-channels.v1",
+            "integration": "slack",
+            "channels": channels,
+            "result_count": len(channels),
+            "has_more": bool(cursor),
+        }
+
+    def read_recent_slack_messages(
+        self,
+        user: str,
+        requested_account: str,
+        requested_channel: str,
+    ) -> dict[str, object]:
+        """Read the trusted caller's selected channel after provider revalidation.
+
+        End-user choice is authenticated and persisted by the trusted service
+        caller. This credential-boundary worker independently verifies
+        account ownership, exact scopes, and current public-channel membership;
+        it does not claim to authenticate an interactive human.
+        """
+        channel = slack_channel_id(requested_channel)
+        deadline = time.monotonic() + SLACK_OPERATION_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="slack",
+            deadline=deadline,
+        )
+        if not self._account_ready(
+            connection,
+            SLACK_SCOPES,
+            allow_identity_scopes=False,
+        ):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Slack connection is not ready for this app",
+            )
+        channel_target = "https://slack.com/api/conversations.info?" + urllib.parse.urlencode(
+            {
+                "channel": channel,
+                "include_locale": "false",
+                "include_num_members": "false",
+            }
+        )
+        channel_value = self._slack_result(
+            self._proxy_json(
+                token,
+                user=user,
+                account=requested_account,
+                target=channel_target,
+                deadline=deadline,
+            ),
+            operation="channel check",
+        )
+        verified_channel = self._slack_channel(channel_value.get("channel"))
+        if verified_channel["channel_id"] != channel:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned invalid channel metadata",
+            )
+        target = "https://slack.com/api/conversations.history?" + urllib.parse.urlencode(
+            {
+                "channel": channel,
+                "include_all_metadata": "false",
+                "limit": str(MAX_SLACK_MESSAGES),
+            }
+        )
+        value = self._slack_result(
+            self._proxy_json(
+                token,
+                user=user,
+                account=requested_account,
+                target=target,
+                deadline=deadline,
+            ),
+            operation="channel history",
+        )
+        raw_messages = value.get("messages")
+        response_metadata = value.get("response_metadata", {})
+        provider_has_more = value.get("has_more", False)
+        if (
+            not isinstance(raw_messages, list)
+            or len(raw_messages) > MAX_SLACK_MESSAGES
+            or not isinstance(response_metadata, Mapping)
+            or not isinstance(provider_has_more, bool)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned an invalid channel history",
+            )
+        messages: list[dict[str, object]] = []
+        seen_timestamps: set[str] = set()
+        total_bytes = 0
+        for item in raw_messages:
+            message = self._slack_message(item)
+            if message is None:
+                continue
+            timestamp = str(message["timestamp"])
+            if timestamp in seen_timestamps:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Slack returned duplicate message identifiers",
+                )
+            seen_timestamps.add(timestamp)
+            total_bytes += int(message["content_bytes"])
+            if total_bytes > MAX_SLACK_TOTAL_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Slack content exceeded the aggregate operation bound",
+                )
+            messages.append(message)
+        cursor = response_metadata.get("next_cursor", "")
+        if (
+            not isinstance(cursor, str)
+            or len(cursor.encode()) > 4096
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in cursor)
+        ) and cursor != "":
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned an invalid history cursor",
+            )
+        return {
+            "schema_version": "steward.slack-recent-messages.v1",
+            "integration": "slack",
+            "channel_id": channel,
+            "messages": messages,
+            "result_count": len(messages),
+            "has_more": provider_has_more or bool(cursor),
         }
 
     def read_drive_content(
@@ -1129,7 +1403,7 @@ class PipedreamClient:
             integration="gmail",
             deadline=deadline,
         )
-        if not self._account_ready(connection, GMAIL_SCOPE):
+        if not self._account_ready(connection, (GMAIL_SCOPE,)):
             raise WorkerError(
                 409,
                 "connection_not_ready",
@@ -1242,7 +1516,7 @@ class PipedreamClient:
             integration="google-calendar",
             deadline=deadline,
         )
-        if not self._account_ready(connection, GOOGLE_CALENDAR_SCOPE):
+        if not self._account_ready(connection, (GOOGLE_CALENDAR_SCOPE,)):
             raise WorkerError(
                 409,
                 "connection_not_ready",
@@ -1573,6 +1847,149 @@ class PipedreamClient:
             result["optional"] = optional
         return result
 
+    @staticmethod
+    def _slack_result(value: object, *, operation: str) -> Mapping[str, object]:
+        if not isinstance(value, Mapping) or not isinstance(value.get("ok"), bool):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                f"Slack returned an invalid {operation}",
+            )
+        if value["ok"] is True:
+            return value
+        error = value.get("error")
+        if error in {"channel_not_found", "not_in_channel", "team_access_not_granted"}:
+            raise WorkerError(
+                409,
+                "provider_access_changed",
+                "Slack channel access changed; choose the channel again",
+            )
+        if error in {"account_inactive", "invalid_auth", "not_authed", "token_expired", "token_revoked"}:
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Slack connection needs attention",
+            )
+        if error == "ratelimited":
+            raise WorkerError(
+                503,
+                "provider_rate_limited",
+                "Slack is temporarily rate limited",
+            )
+        raise WorkerError(
+            502,
+            "provider_rejected",
+            f"Slack rejected the {operation}",
+        )
+
+    @classmethod
+    def _slack_channel(cls, value: object) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned invalid channel metadata",
+            )
+        channel_id = value.get("id")
+        name = value.get("name")
+        is_archived = value.get("is_archived")
+        is_private = value.get("is_private")
+        topic = value.get("topic", {})
+        purpose = value.get("purpose", {})
+        if (
+            not isinstance(channel_id, str)
+            or SLACK_CHANNEL_ID_RE.fullmatch(channel_id) is None
+            or not isinstance(name, str)
+            or not name
+            or is_archived is not False
+            or is_private is not False
+            or not isinstance(topic, Mapping)
+            or not isinstance(purpose, Mapping)
+            or not isinstance(topic.get("value", ""), str)
+            or not isinstance(purpose.get("value", ""), str)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned invalid channel metadata",
+            )
+        return {
+            "channel_id": channel_id,
+            "name": cls._safe_text(
+                name,
+                maximum_bytes=256,
+                provider="Slack",
+            ),
+            "topic": cls._safe_text(
+                str(topic.get("value", "")),
+                maximum_bytes=MAX_SLACK_CHANNEL_TEXT_BYTES,
+                provider="Slack",
+            ),
+            "purpose": cls._safe_text(
+                str(purpose.get("value", "")),
+                maximum_bytes=MAX_SLACK_CHANNEL_TEXT_BYTES,
+                provider="Slack",
+            ),
+        }
+
+    @classmethod
+    def _slack_message(cls, value: object) -> dict[str, object] | None:
+        if not isinstance(value, Mapping) or value.get("type") != "message":
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned invalid message content",
+            )
+        subtype = value.get("subtype")
+        if subtype not in {None, "bot_message"}:
+            return None
+        timestamp = value.get("ts")
+        text = value.get("text")
+        user = value.get("user")
+        bot_id = value.get("bot_id")
+        thread_timestamp = value.get("thread_ts", "")
+        if (
+            not isinstance(timestamp, str)
+            or SLACK_MESSAGE_TS_RE.fullmatch(timestamp) is None
+            or not isinstance(text, str)
+            or (user is not None and not isinstance(user, str))
+            or (bot_id is not None and not isinstance(bot_id, str))
+            or not isinstance(thread_timestamp, str)
+            or (
+                thread_timestamp
+                and SLACK_MESSAGE_TS_RE.fullmatch(thread_timestamp) is None
+            )
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned invalid message content",
+            )
+        if thread_timestamp and thread_timestamp != timestamp:
+            return None
+        author = user or bot_id or ""
+        if author and SLACK_AUTHOR_ID_RE.fullmatch(author) is None:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned invalid message identity",
+            )
+        normalized = cls._safe_text(
+            text,
+            maximum_bytes=MAX_SLACK_MESSAGE_BYTES,
+            provider="Slack",
+        )
+        encoded = normalized.encode("utf-8")
+        return {
+            "timestamp": timestamp,
+            "author_id": author,
+            "author_kind": "member" if user else ("app" if bot_id else "unknown"),
+            "text": normalized,
+            "thread_root": thread_timestamp in {"", timestamp},
+            "content_bytes": len(encoded),
+            "content_sha256": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        }
+
     def _gmail_message(self, value: object, expected_id: str) -> dict[str, object]:
         if not isinstance(value, Mapping) or value.get("id") != expected_id:
             raise WorkerError(
@@ -1885,6 +2302,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     "google-calendar",
                 )
+            elif self.path == "/v1/connections/slack/connect-link":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.connect_link(
+                    external_user(body["external_user_id"]),
+                    "slack",
+                )
             elif self.path == "/v1/connections/google-drive/reconcile":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 _token, result = self.worker.client.reconcile(external_user(body["external_user_id"]))
@@ -1899,6 +2322,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _token, result = self.worker.client.reconcile(
                     external_user(body["external_user_id"]),
                     integration="google-calendar",
+                )
+            elif self.path == "/v1/connections/slack/reconcile":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                _token, result = self.worker.client.reconcile(
+                    external_user(body["external_user_id"]),
+                    integration="slack",
                 )
             elif self.path == "/v1/connections/google-drive/files":
                 body = exact_object(
@@ -1936,6 +2365,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     account_id(body["account_id"]),
                 )
+            elif self.path == "/v1/connections/slack/channels":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id"}),
+                )
+                result = self.worker.client.list_slack_channels(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                )
+            elif self.path == "/v1/connections/slack/recent-messages":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "channel_id", "external_user_id"}),
+                )
+                result = self.worker.client.read_recent_slack_messages(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    slack_channel_id(body["channel_id"]),
+                )
             elif self.path == "/v1/connections/google-drive/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.revoke(
@@ -1955,6 +2403,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     account_id(body["account_id"]),
                     "google-calendar",
                 )
+            elif self.path == "/v1/connections/slack/revoke":
+                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                result = self.worker.client.revoke(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    "slack",
+                )
             else:
                 raise WorkerError(404, "not_found", "route not found")
             self._json(
@@ -1967,6 +2422,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "/v1/connections/google-drive/content",
                         "/v1/connections/gmail/recent-messages",
                         "/v1/connections/google-calendar/upcoming-events",
+                        "/v1/connections/slack/recent-messages",
                     }
                     else MAX_RESPONSE
                 ),
@@ -2083,6 +2539,7 @@ def main() -> int:
         google_calendar_oauth_app_id=os.environ.get(
             "STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID", ""
         ),
+        slack_oauth_app_id=os.environ.get("STEWARD_SLACK_OAUTH_APP_ID", ""),
         api_origin=os.environ.get("STEWARD_PIPEDREAM_API_ORIGIN", PIPEDREAM_API_ORIGIN),
     )
     server = IntegrationServer(("0.0.0.0", 8080), worker_token, client)

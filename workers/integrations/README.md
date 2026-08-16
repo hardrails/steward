@@ -5,8 +5,8 @@ provider credentials outside an agent, model context, application control plane,
 log, and artifact. It exposes only reviewed operations; it is not an API proxy,
 MCP server, or dynamic action catalog.
 
-The worker currently supports Google Drive, Gmail, and Google Calendar through
-Pipedream Connect.
+The worker currently supports Google Drive, Gmail, Google Calendar, and Slack
+through Pipedream Connect.
 The Google Drive profile can:
 
 - create a ten-minute, one-use Google Drive Connect Link;
@@ -51,6 +51,36 @@ attendee limit, URL, provider header, or write action. Event titles, description
 locations, and participants are untrusted input; consumers must treat them as
 evidence, never instructions.
 
+The Slack profile can:
+
+- create the same bounded, one-use connection link for a configured Slack user OAuth
+  app;
+- require exactly `channels:read` and `channels:history`, rejecting identity,
+  private-channel, direct-message, directory, search, file, reaction, and write
+  scopes;
+- list at most 100 non-archived public channels for selection by the authenticated
+  service caller; and
+- make one request for at most 15 recent messages from that caller-selected public
+  channel after independently rechecking current public membership.
+
+The Slack caller cannot supply a URL, query, page token, time range, message count,
+private channel, direct message, thread, provider header, or write action. The worker
+does not retrieve a member directory. Channel metadata and message text are untrusted
+input; consumers must treat the normalized result as evidence, never instructions.
+Slack's current commercially distributed non-Marketplace history limit makes
+multi-channel and paginated reads separate future capabilities.
+
+This worker is a credential and provider-authority boundary, not an end-user identity
+provider. Its bearer-authenticated caller is responsible for authenticating and
+persisting the human owner's channel choice, just as it is for Google Drive file IDs.
+Steward verifies the caller's opaque external-user/account binding, exact scopes,
+channel syntax, current public
+visibility through one exact `conversations.info` check, and finite operation bounds
+before every Slack history request. This exact check does not depend on the bounded
+100-channel discovery page. Deployments
+must keep the operation listener private; the worker token is service authority, not an
+owner session token.
+
 The Pipedream OAuth access token is minted with the exact scopes needed for each
 operation and is never cached. The Google OAuth client configured in Pipedream must
 request `https://www.googleapis.com/auth/drive.readonly`; the worker will
@@ -65,6 +95,12 @@ required restricted-scope security assessment.
 The Google Calendar OAuth app is optional and configured with
 `STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID`. The least-privilege events read-only scope
 still requires Google's current OAuth verification before public production use.
+
+The Slack OAuth app is optional and configured with
+`STEWARD_SLACK_OAUTH_APP_ID`. It must use Pipedream's `slack` user-account profile
+with exactly the two reviewed read scopes. Production enablement requires a real
+consent, exact-scope reconcile, public-channel list, selected-channel read, and
+revocation exercise; deterministic worker tests do not establish provider approval.
 
 The content operation refetches metadata and `capabilities.canDownload` for each
 exact caller-selected ID. It exports native Google Docs as `text/plain`, downloads
@@ -96,6 +132,7 @@ STEWARD_PIPEDREAM_ENVIRONMENT=development
 STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID=oa_...
 STEWARD_GMAIL_OAUTH_APP_ID=oa_...
 STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID=oa_...
+STEWARD_SLACK_OAUTH_APP_ID=oa_...
 ```
 
 Run it read-only as UID/GID `65532:65532`, drop all capabilities, apply
