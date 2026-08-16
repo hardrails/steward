@@ -101,6 +101,7 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                 "environment": self.headers.get("X-PD-Environment", ""),
                 "method": self.command,
                 "path": self.path,
+                "proxy_prefer": self.headers.get("X-PD-Proxy-Prefer", ""),
             }
         )
 
@@ -601,8 +602,8 @@ def microsoft_outlook_event(event_id: str = "AAMk_event_1=") -> dict[str, object
     return {
         "id": event_id,
         "subject": "Customer renewal review",
-        "start": {"dateTime": "2026-08-18T09:00:00", "timeZone": "Pacific Standard Time"},
-        "end": {"dateTime": "2026-08-18T10:00:00", "timeZone": "Pacific Standard Time"},
+        "start": {"dateTime": "2026-08-18T16:00:00", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-08-18T17:00:00", "timeZone": "UTC"},
         "location": {"displayName": "Conference room 1"},
         "organizer": {
             "emailAddress": {"name": "Operations", "address": "ops@example.com"}
@@ -2173,7 +2174,7 @@ class PipedreamClientTests(unittest.TestCase):
 
         self.assertEqual(
             result["schema_version"],
-            "steward.microsoft-outlook-upcoming-events.v1",
+            "steward.microsoft-outlook-upcoming-events.v2",
         )
         self.assertEqual(result["window_start"], "2026-08-15T16:00:00Z")
         self.assertEqual(result["window_end"], "2026-08-29T16:00:00Z")
@@ -2181,6 +2182,7 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(event["subject"], "Customer renewal review")
         self.assertEqual(event["location"], "Conference room 1")
         self.assertEqual(event["attendees"][0]["response"], "accepted")
+        self.assertEqual(event["start"], {"date_time": "2026-08-18T16:00:00", "time_zone": "UTC"})
 
         proxy_request = next(
             request for request in state.requests if "/proxy/" in request["path"]
@@ -2194,6 +2196,7 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(query["$top"], ["50"])
         self.assertEqual(query["startDateTime"], ["2026-08-15T16:00:00Z"])
         self.assertEqual(query["endDateTime"], ["2026-08-29T16:00:00Z"])
+        self.assertEqual(proxy_request["proxy_prefer"], 'outlook.timezone="UTC"')
 
     def test_read_upcoming_microsoft_outlook_calendar_accepts_absent_location(self) -> None:
         with broker_client() as (client, state):
@@ -2219,6 +2222,19 @@ class PipedreamClientTests(unittest.TestCase):
                     "ryu_abcdefghijklmnop", "apn_owned123"
                 )
             self.assertFalse(any("/proxy/" in item["path"] for item in state.requests))
+
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_outlook_calendar_account()]
+            local_time = microsoft_outlook_event()
+            local_time["start"] = {
+                "dateTime": "2026-08-18T09:00:00",
+                "timeZone": "Pacific Standard Time",
+            }
+            state.microsoft_outlook_events = [local_time]
+            with self.assertRaisesRegex(worker.WorkerError, "non-UTC"):
+                client.read_upcoming_microsoft_outlook_events(
+                    "ryu_abcdefghijklmnop", "apn_owned123"
+                )
 
         with broker_client() as (client, state):
             state.accounts = [connected_microsoft_outlook_calendar_account()]

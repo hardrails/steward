@@ -1982,7 +1982,7 @@ components:
       properties:
         schema_version:
           type: string
-          enum: [steward.microsoft-outlook-upcoming-events.v1]
+          enum: [steward.microsoft-outlook-upcoming-events.v2]
         integration:
           type: string
           enum: [microsoft-outlook-calendar]
