@@ -53,6 +53,10 @@ class BrokerState:
         self.slack_has_more = False
         self.slack_list_error: str | None = None
         self.slack_history_error: str | None = None
+        self.hubspot_deals: list[object] = []
+        self.hubspot_total = 0
+        self.hubspot_after: str | None = None
+        self.hubspot_pipelines: list[object] = []
         self.connect_link_url = "https://pipedream.com/_static/connect.html?token=one-use-secret&connectLink=true"
 
 
@@ -114,6 +118,28 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                 },
             )
             return
+        if self.path.startswith("/v1/connect/proj_test/proxy/"):
+            parsed = urllib.parse.urlsplit(self.path)
+            encoded_target = parsed.path.rsplit("/", 1)[-1]
+            encoded_target += "=" * (-len(encoded_target) % 4)
+            target = urllib.parse.urlsplit(base64.urlsafe_b64decode(encoded_target).decode())
+            if (
+                target.hostname == "api.hubapi.com"
+                and target.path == "/crm/objects/2026-03/deals/search"
+            ):
+                value: dict[str, object] = {
+                    "results": self.state.hubspot_deals,
+                    "total": self.state.hubspot_total,
+                }
+                if self.state.hubspot_after is not None:
+                    value["paging"] = {
+                        "next": {
+                            "after": self.state.hubspot_after,
+                            "link": "https://api.hubapi.com/next",
+                        }
+                    }
+                self._respond(200, value)
+                return
         self._respond(404, {"error": "not found"})
 
     def do_GET(self) -> None:
@@ -211,6 +237,12 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     self._respond(200, {"ok": True, "channel": channel})
                 return
+            if (
+                target.hostname == "api.hubapi.com"
+                and target.path == "/crm/pipelines/2026-03/deals"
+            ):
+                self._respond(200, {"results": self.state.hubspot_pipelines})
+                return
             if len(target_parts) >= 6 and target_parts[-1] == "export":
                 file_id = target_parts[-2]
                 content = self.state.file_contents.get(file_id)
@@ -272,6 +304,7 @@ def broker_client() -> Iterator[tuple[Any, BrokerState]]:
             gmail_oauth_app_id="oa_gmailtest",
             google_calendar_oauth_app_id="oa_calendartest",
             slack_oauth_app_id="oa_slacktest",
+            hubspot_oauth_app_id="oa_hubspottest",
             api_origin=f"http://127.0.0.1:{server.server_port}",
         )
         yield client, server.state
@@ -339,6 +372,59 @@ def connected_slack_account(
     value["name"] = "Operations Slack"
     value["app"] = {"name_slug": "slack"}
     return value
+
+
+def connected_hubspot_account(
+    *,
+    scopes: list[str] | None = None,
+    identifier: str = "apn_owned123",
+) -> dict[str, object]:
+    value = connected_account(
+        scopes=scopes or [worker.HUBSPOT_SCOPE],
+        identifier=identifier,
+    )
+    value["name"] = "Revenue HubSpot"
+    value["app"] = {"name_slug": "hubspot"}
+    return value
+
+
+def hubspot_pipeline() -> dict[str, object]:
+    return {
+        "id": "default",
+        "label": "Sales Pipeline",
+        "archived": False,
+        "stages": [
+            {
+                "id": "qualifiedtobuy",
+                "label": "Qualified to buy",
+                "archived": False,
+            },
+            {
+                "id": "closedwon",
+                "label": "Closed won",
+                "archived": False,
+            },
+        ],
+    }
+
+
+def hubspot_deal(deal_id: str = "123456") -> dict[str, object]:
+    return {
+        "id": deal_id,
+        "archived": False,
+        "createdAt": "2026-08-01T12:00:00Z",
+        "updatedAt": "2026-08-15T17:30:00Z",
+        "properties": {
+            "amount": "125000.00",
+            "closedate": "2026-09-30T00:00:00Z",
+            "createdate": "2026-08-01T12:00:00Z",
+            "dealname": "Acme expansion",
+            "dealstage": "qualifiedtobuy",
+            "hs_is_closed": "false",
+            "hs_lastmodifieddate": "2026-08-15T17:30:00Z",
+            "pipeline": "default",
+        },
+    }
 
 
 def slack_channel(channel_id: str = "C123TEAM") -> dict[str, object]:
@@ -479,6 +565,17 @@ class PipedreamClientTests(unittest.TestCase):
             api_origin="https://broker.invalid",
         )
         self.assertEqual(slack_only.oauth_app_ids["slack"], "oa_slacktest")
+
+        hubspot_only = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="",
+            hubspot_oauth_app_id="oa_hubspottest",
+            api_origin="https://broker.invalid",
+        )
+        self.assertEqual(hubspot_only.oauth_app_ids["hubspot"], "oa_hubspottest")
 
     def test_connect_link_uses_exact_scopes_and_returns_only_one_use_url(self) -> None:
         with broker_client() as (client, state):
@@ -793,6 +890,209 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(
             client.deadlines,
             [100.0 + worker.SLACK_OPERATION_TIMEOUT_SECONDS] * 3,
+        )
+
+    def test_hubspot_connect_reconcile_and_deal_read_are_exact_and_bounded(self) -> None:
+        with broker_client() as (client, state):
+            link = client.connect_link("ryu_abcdefghijklmnop", "hubspot")
+            state.accounts = [connected_hubspot_account()]
+            _token, connection = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="hubspot",
+            )
+            state.hubspot_pipelines = [hubspot_pipeline()]
+            state.hubspot_deals = [hubspot_deal()]
+            state.hubspot_total = 137
+            state.hubspot_after = "123457"
+            result = client.read_recent_hubspot_deals(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+            )
+
+        link_query = urllib.parse.parse_qs(urllib.parse.urlsplit(str(link["connect_url"])).query)
+        self.assertEqual(link_query["app"], ["hubspot"])
+        self.assertEqual(link_query["oauthAppId"], ["oa_hubspottest"])
+        self.assertEqual(connection["status"], "ready")
+        self.assertEqual(connection["required_scope"], worker.HUBSPOT_SCOPE)
+        self.assertEqual(result["schema_version"], "steward.hubspot-recent-deals.v1")
+        self.assertEqual(result["integration"], "hubspot")
+        self.assertEqual(result["result_count"], 1)
+        self.assertEqual(result["total_available"], 137)
+        self.assertTrue(result["has_more"])
+        self.assertEqual(
+            result["deals"],
+            [
+                {
+                    "deal_id": "123456",
+                    "name": "Acme expansion",
+                    "amount": "125000.00",
+                    "closed": False,
+                    "close_date": "2026-09-30T00:00:00Z",
+                    "created_at": "2026-08-01T12:00:00Z",
+                    "updated_at": "2026-08-15T17:30:00Z",
+                    "pipeline_id": "default",
+                    "pipeline_name": "Sales Pipeline",
+                    "stage_id": "qualifiedtobuy",
+                    "stage_name": "Qualified to buy",
+                }
+            ],
+        )
+        proxy_requests = [request for request in state.requests if "/proxy/" in request["path"]]
+        self.assertEqual([request["method"] for request in proxy_requests], ["GET", "POST"])
+        self.assertEqual(
+            proxy_requests[-1]["body"],
+            {
+                "filterGroups": [],
+                "limit": worker.MAX_HUBSPOT_DEALS,
+                "properties": list(worker.HUBSPOT_DEAL_PROPERTIES),
+                "sorts": ["-hs_lastmodifieddate"],
+            },
+        )
+        self.assertNotIn("provider-access-secret", json.dumps(result))
+
+    def test_hubspot_read_rejects_extra_scope_before_provider_egress(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [
+                connected_hubspot_account(
+                    scopes=[worker.HUBSPOT_SCOPE, "crm.objects.deals.write"]
+                )
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "not ready"):
+                client.read_recent_hubspot_deals(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+        self.assertFalse(any("/proxy/" in request["path"] for request in state.requests))
+
+    def test_hubspot_read_rejects_duplicate_and_unbounded_provider_content(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_hubspot_account()]
+            state.hubspot_pipelines = [hubspot_pipeline()]
+            state.hubspot_deals = [hubspot_deal(), hubspot_deal()]
+            state.hubspot_total = 2
+            with self.assertRaisesRegex(worker.WorkerError, "duplicate"):
+                client.read_recent_hubspot_deals(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+            oversized = hubspot_deal("123457")
+            properties = oversized["properties"]
+            assert isinstance(properties, dict)
+            properties["dealname"] = "x" * (worker.MAX_HUBSPOT_DEAL_TEXT_BYTES + 1)
+            state.hubspot_deals = [oversized]
+            state.hubspot_total = 1
+            with self.assertRaisesRegex(worker.WorkerError, "invalid text"):
+                client.read_recent_hubspot_deals(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+    def test_hubspot_read_rejects_invalid_pagination_and_timestamps(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_hubspot_account()]
+            state.hubspot_pipelines = [hubspot_pipeline()]
+            state.hubspot_deals = [hubspot_deal()]
+            state.hubspot_total = 1
+            state.hubspot_after = "bad\nsecret"
+            with self.assertRaisesRegex(worker.WorkerError, "pagination"):
+                client.read_recent_hubspot_deals(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+            invalid_timestamp = hubspot_deal()
+            invalid_timestamp["createdAt"] = 1723723200000
+            state.hubspot_deals = [invalid_timestamp]
+            state.hubspot_after = None
+            with self.assertRaisesRegex(worker.WorkerError, "timestamps"):
+                client.read_recent_hubspot_deals(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+    def test_hubspot_read_rejects_aggregate_pipeline_content(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_hubspot_account()]
+            state.hubspot_pipelines = [
+                {
+                    "id": f"pipeline_{index}",
+                    "label": "x" * worker.MAX_HUBSPOT_DEAL_TEXT_BYTES,
+                    "archived": False,
+                    "stages": [],
+                }
+                for index in range(
+                    worker.MAX_HUBSPOT_TOTAL_BYTES
+                    // worker.MAX_HUBSPOT_DEAL_TEXT_BYTES
+                    + 1
+                )
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "pipeline content"):
+                client.read_recent_hubspot_deals(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                )
+
+    def test_hubspot_read_uses_one_deadline_for_all_broker_calls(self) -> None:
+        class DeadlineClient(worker.PipedreamClient):
+            def __init__(self) -> None:
+                self.deadlines: list[float] = []
+
+            def _owned_account(
+                self,
+                user: str,
+                requested_account: str,
+                scope: str,
+                *,
+                integration: str = "google-drive",
+                deadline: float | None = None,
+            ) -> tuple[str, dict[str, object]]:
+                del user, requested_account, scope, integration
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                return "token", {
+                    "healthy": True,
+                    "authorized_scopes": [worker.HUBSPOT_SCOPE],
+                }
+
+            def _proxy_json(
+                self,
+                token: str,
+                *,
+                user: str,
+                account: str,
+                target: str,
+                deadline: float | None = None,
+            ) -> object:
+                del token, user, account, target
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                return {"results": [hubspot_pipeline()]}
+
+            def _proxy_json_post(
+                self,
+                token: str,
+                *,
+                user: str,
+                account: str,
+                target: str,
+                payload: object,
+                deadline: float | None = None,
+            ) -> object:
+                del token, user, account, target, payload
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                return {"results": [], "total": 0}
+
+        client = DeadlineClient()
+        with mock.patch.object(worker.time, "monotonic", return_value=100.0):
+            client.read_recent_hubspot_deals(
+                "ryu_abcdefghijklmnop", "apn_owned123"
+            )
+
+        self.assertEqual(
+            client.deadlines,
+            [100.0 + worker.HUBSPOT_OPERATION_TIMEOUT_SECONDS] * 3,
         )
 
     def test_unconfigured_gmail_fails_without_contacting_broker(self) -> None:
@@ -1692,6 +1992,14 @@ class StubClient:
             "integration": "slack",
         }
 
+    def read_recent_hubspot_deals(self, user: str, account: str) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "integration": "hubspot",
+        }
+
     def revoke(
         self,
         user: str,
@@ -2036,6 +2344,38 @@ class HTTPContractTests(unittest.TestCase):
                 port,
                 "/v1/connections/slack/recent-messages",
                 b'{"account_id":"apn_owned123","channel_id":"C123TEAM","external_user_id":"ryu_abcdefghijklmnop","limit":100}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+
+    def test_hubspot_routes_dispatch_only_exact_finite_operations(self) -> None:
+        with integration_server() as port:
+            for path, payload in (
+                (
+                    "/v1/connections/hubspot/connect-link",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/hubspot/reconcile",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/hubspot/recent-deals",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/hubspot/revoke",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+            ):
+                with self.subTest(path=path):
+                    status, body, _headers = call_worker(port, path, payload)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["integration"], "hubspot")
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/hubspot/recent-deals",
+                b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","limit":1000}',
             )
             self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
 

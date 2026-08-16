@@ -5,7 +5,7 @@ provider credentials outside an agent, model context, application control plane,
 log, and artifact. It exposes only reviewed operations; it is not an API proxy,
 MCP server, or dynamic action catalog.
 
-The worker currently supports Google Drive, Gmail, Google Calendar, and Slack
+The worker currently supports Google Drive, Gmail, Google Calendar, HubSpot, and Slack
 through Pipedream Connect.
 The Google Drive profile can:
 
@@ -49,6 +49,22 @@ The Google Calendar profile can:
 The Calendar caller cannot supply a calendar ID, query, time range, page token,
 attendee limit, URL, provider header, or write action. Event titles, descriptions,
 locations, and participants are untrusted input; consumers must treat them as
+evidence, never instructions.
+
+The HubSpot profile can:
+
+- create the same bounded, one-use connection link for a configured HubSpot OAuth
+  app;
+- require exactly `crm.objects.deals.read`, rejecting identity and broader CRM
+  scopes;
+- read at most 100 non-archived deals ordered by latest modification within one
+  shared 30-second deadline; and
+- return only a fixed deal projection with current pipeline and stage labels.
+
+The HubSpot caller cannot supply a search filter, property, sort, association,
+pipeline, stage, page token, URL, provider header, or write action. It cannot read
+contacts, companies, owners, custom fields, or additional result pages. Deal and
+pipeline content is untrusted input; consumers must treat the normalized result as
 evidence, never instructions.
 
 The Slack profile can:
@@ -102,6 +118,12 @@ with exactly the two reviewed read scopes. Production enablement requires a real
 consent, exact-scope reconcile, public-channel list, selected-channel read, and
 revocation exercise; deterministic worker tests do not establish provider approval.
 
+The HubSpot OAuth app is optional and configured with
+`STEWARD_HUBSPOT_OAUTH_APP_ID`. It must use Pipedream's `hubspot` profile with only
+`crm.objects.deals.read`. Production enablement requires a real consent,
+exact-scope reconcile, bounded deal read, and revocation exercise; deterministic
+worker tests do not establish provider approval.
+
 The content operation refetches metadata and `capabilities.canDownload` for each
 exact caller-selected ID. It exports native Google Docs as `text/plain`, downloads
 only `text/plain` and `text/markdown` blobs, validates UTF-8, normalizes line endings,
@@ -132,6 +154,7 @@ STEWARD_PIPEDREAM_ENVIRONMENT=development
 STEWARD_GOOGLE_DRIVE_OAUTH_APP_ID=oa_...
 STEWARD_GMAIL_OAUTH_APP_ID=oa_...
 STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID=oa_...
+STEWARD_HUBSPOT_OAUTH_APP_ID=oa_...
 STEWARD_SLACK_OAUTH_APP_ID=oa_...
 ```
 

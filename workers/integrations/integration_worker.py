@@ -46,6 +46,8 @@ GOOGLE_CALENDAR_APP = "google_calendar"
 GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
 SLACK_APP = "slack"
 SLACK_SCOPES = ("channels:history", "channels:read")
+HUBSPOT_APP = "hubspot"
+HUBSPOT_SCOPE = "crm.objects.deals.read"
 GOOGLE_DRIVE_FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
 GOOGLE_DRIVE_CONTENT_FIELDS = (
     "id,name,mimeType,modifiedTime,size,webViewLink,capabilities(canDownload)"
@@ -81,6 +83,27 @@ MAX_SLACK_CHANNEL_TEXT_BYTES = 2 << 10
 MAX_SLACK_MESSAGE_BYTES = 32 << 10
 MAX_SLACK_TOTAL_BYTES = 240 << 10
 SLACK_OPERATION_TIMEOUT_SECONDS = 30
+MAX_HUBSPOT_DEALS = 100
+MAX_HUBSPOT_PIPELINES = 100
+MAX_HUBSPOT_STAGES_PER_PIPELINE = 100
+MAX_HUBSPOT_DEAL_TEXT_BYTES = 8 << 10
+MAX_HUBSPOT_TOTAL_BYTES = 240 << 10
+MAX_HUBSPOT_TOTAL_AVAILABLE = (1 << 53) - 1
+HUBSPOT_OPERATION_TIMEOUT_SECONDS = 30
+HUBSPOT_DEAL_PROPERTIES = (
+    "amount",
+    "closedate",
+    "createdate",
+    "dealname",
+    "dealstage",
+    "hs_is_closed",
+    "hs_lastmodifieddate",
+    "pipeline",
+)
+HUBSPOT_DEALS_SEARCH_TARGET = (
+    "https://api.hubapi.com/crm/objects/2026-03/deals/search"
+)
+HUBSPOT_PIPELINES_TARGET = "https://api.hubapi.com/crm/pipelines/2026-03/deals"
 GMAIL_MESSAGE_FIELDS = (
     "id,threadId,labelIds,snippet,internalDate,"
     "payload(filename,headers,mimeType,body(data,size),parts)"
@@ -120,6 +143,8 @@ CALENDAR_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,1024}$")
 SLACK_CHANNEL_ID_RE = re.compile(r"^C[A-Z0-9]{1,255}$")
 SLACK_MESSAGE_TS_RE = re.compile(r"^[0-9]{1,20}\.[0-9]{1,12}$")
 SLACK_AUTHOR_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,255}$")
+HUBSPOT_ID_RE = re.compile(r"^[0-9]{1,32}$")
+HUBSPOT_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 INTEGRATION_PROFILES = {
     "google-drive": {
@@ -141,6 +166,11 @@ INTEGRATION_PROFILES = {
         "app": SLACK_APP,
         "default_name": "Slack",
         "required_scopes": SLACK_SCOPES,
+    },
+    "hubspot": {
+        "app": HUBSPOT_APP,
+        "default_name": "HubSpot",
+        "required_scopes": (HUBSPOT_SCOPE,),
     },
 }
 REVIEWED_IDENTITY_SCOPES = frozenset(
@@ -411,6 +441,7 @@ class PipedreamClient:
         gmail_oauth_app_id: str = "",
         google_calendar_oauth_app_id: str = "",
         slack_oauth_app_id: str = "",
+        hubspot_oauth_app_id: str = "",
         api_origin: str = PIPEDREAM_API_ORIGIN,
     ) -> None:
         if not PROJECT_RE.fullmatch(project_id):
@@ -427,11 +458,14 @@ class PipedreamClient:
             raise RuntimeError("Google Calendar OAuth app ID is invalid")
         if slack_oauth_app_id and not OAUTH_APP_RE.fullmatch(slack_oauth_app_id):
             raise RuntimeError("Slack OAuth app ID is invalid")
+        if hubspot_oauth_app_id and not OAUTH_APP_RE.fullmatch(hubspot_oauth_app_id):
+            raise RuntimeError("HubSpot OAuth app ID is invalid")
         if (
             not oauth_app_id
             and not gmail_oauth_app_id
             and not google_calendar_oauth_app_id
             and not slack_oauth_app_id
+            and not hubspot_oauth_app_id
         ):
             raise RuntimeError("at least one managed OAuth app ID is required")
         parsed = urllib.parse.urlsplit(api_origin)
@@ -456,6 +490,7 @@ class PipedreamClient:
             "gmail": gmail_oauth_app_id,
             "google-calendar": google_calendar_oauth_app_id,
             "slack": slack_oauth_app_id,
+            "hubspot": hubspot_oauth_app_id,
         }
         self.origin = parsed
 
@@ -835,7 +870,7 @@ class PipedreamClient:
                 if self._account_ready(
                     item,
                     required_scopes,
-                    allow_identity_scopes=integration != "slack",
+                    allow_identity_scopes=integration not in {"hubspot", "slack"},
                 )
             ),
             None,
@@ -864,7 +899,7 @@ class PipedreamClient:
                 if self._account_ready(
                     selected,
                     required_scopes,
-                    allow_identity_scopes=integration != "slack",
+                    allow_identity_scopes=integration not in {"hubspot", "slack"},
                 )
                 else "needs_attention"
             ),
@@ -1180,6 +1215,123 @@ class PipedreamClient:
             "messages": messages,
             "result_count": len(messages),
             "has_more": provider_has_more or bool(cursor),
+        }
+
+    def read_recent_hubspot_deals(
+        self,
+        user: str,
+        requested_account: str,
+    ) -> dict[str, object]:
+        """Read one fixed, bounded CRM pipeline projection.
+
+        The caller cannot choose a query, property, sort, pipeline, stage, page,
+        association, or API target. Pipeline labels are joined inside this
+        credential boundary so downstream consumers never need another HubSpot
+        permission merely to understand the selected deal and stage IDs.
+        """
+
+        deadline = time.monotonic() + HUBSPOT_OPERATION_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="hubspot",
+            deadline=deadline,
+        )
+        if not self._account_ready(
+            connection,
+            (HUBSPOT_SCOPE,),
+            allow_identity_scopes=False,
+        ):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "HubSpot connection is not ready for this app",
+            )
+        pipelines_value = self._proxy_json(
+            token,
+            user=user,
+            account=requested_account,
+            target=HUBSPOT_PIPELINES_TARGET,
+            deadline=deadline,
+        )
+        pipeline_names, stage_names = self._hubspot_pipeline_labels(pipelines_value)
+        deals_value = self._proxy_json_post(
+            token,
+            user=user,
+            account=requested_account,
+            target=HUBSPOT_DEALS_SEARCH_TARGET,
+            payload={
+                "filterGroups": [],
+                "limit": MAX_HUBSPOT_DEALS,
+                "properties": list(HUBSPOT_DEAL_PROPERTIES),
+                "sorts": ["-hs_lastmodifieddate"],
+            },
+            deadline=deadline,
+        )
+        if not isinstance(deals_value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned an invalid deal result",
+            )
+        raw_deals = deals_value.get("results")
+        total_available = deals_value.get("total")
+        paging = deals_value.get("paging")
+        if (
+            not isinstance(raw_deals, list)
+            or len(raw_deals) > MAX_HUBSPOT_DEALS
+            or not isinstance(total_available, int)
+            or isinstance(total_available, bool)
+            or total_available < len(raw_deals)
+            or total_available > MAX_HUBSPOT_TOTAL_AVAILABLE
+            or (paging is not None and not isinstance(paging, Mapping))
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned an invalid deal result",
+            )
+        deals: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        total_bytes = 0
+        for item in raw_deals:
+            deal = self._hubspot_deal(
+                item,
+                pipeline_names=pipeline_names,
+                stage_names=stage_names,
+            )
+            deal_id = str(deal["deal_id"])
+            if deal_id in seen_ids:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "HubSpot returned duplicate deal identifiers",
+                )
+            seen_ids.add(deal_id)
+            total_bytes += len(
+                json.dumps(
+                    deal,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
+            )
+            if total_bytes > MAX_HUBSPOT_TOTAL_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "HubSpot deal content exceeded the aggregate operation bound",
+                )
+            deals.append(deal)
+        has_more = self._hubspot_has_more(paging)
+        return {
+            "schema_version": "steward.hubspot-recent-deals.v1",
+            "integration": "hubspot",
+            "deals": deals,
+            "result_count": len(deals),
+            "total_available": total_available,
+            "has_more": has_more,
         }
 
     def read_drive_content(
@@ -1847,6 +1999,257 @@ class PipedreamClient:
             result["optional"] = optional
         return result
 
+    @classmethod
+    def _hubspot_pipeline_labels(
+        cls,
+        value: object,
+    ) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned an invalid pipeline result",
+            )
+        raw_pipelines = value.get("results")
+        if not isinstance(raw_pipelines, list) or len(raw_pipelines) > MAX_HUBSPOT_PIPELINES:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot exceeded the pipeline result bound",
+            )
+        pipeline_names: dict[str, str] = {}
+        stage_names: dict[tuple[str, str], str] = {}
+        total_bytes = 0
+        for raw_pipeline in raw_pipelines:
+            if not isinstance(raw_pipeline, Mapping):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "HubSpot returned invalid pipeline content",
+                )
+            pipeline_id = raw_pipeline.get("id")
+            label = raw_pipeline.get("label")
+            archived = raw_pipeline.get("archived", False)
+            raw_stages = raw_pipeline.get("stages")
+            if (
+                not isinstance(pipeline_id, str)
+                or HUBSPOT_OPAQUE_ID_RE.fullmatch(pipeline_id) is None
+                or not isinstance(label, str)
+                or not isinstance(archived, bool)
+                or not isinstance(raw_stages, list)
+                or len(raw_stages) > MAX_HUBSPOT_STAGES_PER_PIPELINE
+                or pipeline_id in pipeline_names
+            ):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "HubSpot returned invalid pipeline content",
+                )
+            if archived:
+                continue
+            pipeline_label = cls._safe_text(
+                label,
+                maximum_bytes=MAX_HUBSPOT_DEAL_TEXT_BYTES,
+                provider="HubSpot",
+            )
+            pipeline_names[pipeline_id] = pipeline_label
+            total_bytes += len(pipeline_label.encode())
+            if total_bytes > MAX_HUBSPOT_TOTAL_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "HubSpot pipeline content exceeded the aggregate operation bound",
+                )
+            for raw_stage in raw_stages:
+                if not isinstance(raw_stage, Mapping):
+                    raise WorkerError(
+                        502,
+                        "invalid_provider_response",
+                        "HubSpot returned invalid pipeline stage content",
+                    )
+                stage_id = raw_stage.get("id")
+                stage_label = raw_stage.get("label")
+                stage_archived = raw_stage.get("archived", False)
+                if (
+                    not isinstance(stage_id, str)
+                    or HUBSPOT_OPAQUE_ID_RE.fullmatch(stage_id) is None
+                    or not isinstance(stage_label, str)
+                    or not isinstance(stage_archived, bool)
+                ):
+                    raise WorkerError(
+                        502,
+                        "invalid_provider_response",
+                        "HubSpot returned invalid pipeline stage content",
+                    )
+                stage_key = (pipeline_id, stage_id)
+                if stage_key in stage_names:
+                    raise WorkerError(
+                        502,
+                        "invalid_provider_response",
+                        "HubSpot returned invalid pipeline stage content",
+                    )
+                if stage_archived:
+                    continue
+                normalized_stage = cls._safe_text(
+                    stage_label,
+                    maximum_bytes=MAX_HUBSPOT_DEAL_TEXT_BYTES,
+                    provider="HubSpot",
+                )
+                stage_names[stage_key] = normalized_stage
+                total_bytes += len(normalized_stage.encode())
+                if total_bytes > MAX_HUBSPOT_TOTAL_BYTES:
+                    raise WorkerError(
+                        502,
+                        "provider_result_limit",
+                        "HubSpot pipeline content exceeded the aggregate operation bound",
+                    )
+        return pipeline_names, stage_names
+
+    @classmethod
+    def _hubspot_deal(
+        cls,
+        value: object,
+        *,
+        pipeline_names: Mapping[str, str],
+        stage_names: Mapping[tuple[str, str], str],
+    ) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal content",
+            )
+        deal_id = value.get("id")
+        archived = value.get("archived")
+        properties = value.get("properties")
+        if (
+            not isinstance(deal_id, str)
+            or HUBSPOT_ID_RE.fullmatch(deal_id) is None
+            or archived is not False
+            or not isinstance(properties, Mapping)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal content",
+            )
+        selected: dict[str, str] = {}
+        for name in HUBSPOT_DEAL_PROPERTIES:
+            raw = properties.get(name)
+            if raw is None:
+                selected[name] = ""
+            elif isinstance(raw, str):
+                selected[name] = cls._safe_text(
+                    raw,
+                    maximum_bytes=MAX_HUBSPOT_DEAL_TEXT_BYTES,
+                    provider="HubSpot",
+                )
+            else:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "HubSpot returned invalid deal properties",
+                )
+        pipeline_id = selected["pipeline"]
+        stage_id = selected["dealstage"]
+        if (
+            pipeline_id
+            and HUBSPOT_OPAQUE_ID_RE.fullmatch(pipeline_id) is None
+        ) or (stage_id and HUBSPOT_OPAQUE_ID_RE.fullmatch(stage_id) is None):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal properties",
+            )
+        closed_value = selected["hs_is_closed"]
+        if closed_value not in {"", "false", "true"}:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal properties",
+            )
+        for field in ("closedate", "createdate", "hs_lastmodifieddate"):
+            cls._hubspot_timestamp(selected[field])
+        created_at = value.get("createdAt")
+        updated_at = value.get("updatedAt")
+        if not isinstance(created_at, str) or not isinstance(updated_at, str):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal timestamps",
+            )
+        normalized_created_at = cls._hubspot_timestamp(created_at)
+        normalized_updated_at = cls._hubspot_timestamp(updated_at)
+        if not normalized_created_at or not normalized_updated_at:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal timestamps",
+            )
+        return {
+            "deal_id": deal_id,
+            "name": selected["dealname"],
+            "amount": selected["amount"],
+            "closed": None if not closed_value else closed_value == "true",
+            "close_date": selected["closedate"],
+            "created_at": normalized_created_at,
+            "updated_at": normalized_updated_at,
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_names.get(pipeline_id, ""),
+            "stage_id": stage_id,
+            "stage_name": stage_names.get((pipeline_id, stage_id), ""),
+        }
+
+    @staticmethod
+    def _hubspot_timestamp(value: str) -> str:
+        if not value:
+            return ""
+        if len(value.encode()) > 64:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned an invalid timestamp",
+            )
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned an invalid timestamp",
+            ) from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned an invalid timestamp",
+            )
+        return value
+
+    @staticmethod
+    def _hubspot_has_more(value: object) -> bool:
+        if value is None:
+            return False
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal pagination",
+            )
+        next_page = value.get("next")
+        after = next_page.get("after") if isinstance(next_page, Mapping) else None
+        if (
+            not isinstance(after, str)
+            or not 1 <= len(after.encode()) <= 256
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in after)
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "HubSpot returned invalid deal pagination",
+            )
+        return True
+
     @staticmethod
     def _slack_result(value: object, *, operation: str) -> Mapping[str, object]:
         if not isinstance(value, Mapping) or not isinstance(value.get("ok"), bool):
@@ -2182,6 +2585,25 @@ class PipedreamClient:
         path = self._proxy_path(user=user, account=account, target=target)
         return self._request("GET", path, token=token, deadline=deadline)
 
+    def _proxy_json_post(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        target: str,
+        payload: object,
+        deadline: float | None = None,
+    ) -> object:
+        path = self._proxy_path(user=user, account=account, target=target)
+        return self._request(
+            "POST",
+            path,
+            payload=payload,
+            token=token,
+            deadline=deadline,
+        )
+
     def _proxy_bytes(
         self,
         token: str,
@@ -2308,6 +2730,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     "slack",
                 )
+            elif self.path == "/v1/connections/hubspot/connect-link":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.connect_link(
+                    external_user(body["external_user_id"]),
+                    "hubspot",
+                )
             elif self.path == "/v1/connections/google-drive/reconcile":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 _token, result = self.worker.client.reconcile(external_user(body["external_user_id"]))
@@ -2328,6 +2756,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _token, result = self.worker.client.reconcile(
                     external_user(body["external_user_id"]),
                     integration="slack",
+                )
+            elif self.path == "/v1/connections/hubspot/reconcile":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                _token, result = self.worker.client.reconcile(
+                    external_user(body["external_user_id"]),
+                    integration="hubspot",
                 )
             elif self.path == "/v1/connections/google-drive/files":
                 body = exact_object(
@@ -2384,6 +2818,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     account_id(body["account_id"]),
                     slack_channel_id(body["channel_id"]),
                 )
+            elif self.path == "/v1/connections/hubspot/recent-deals":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id"}),
+                )
+                result = self.worker.client.read_recent_hubspot_deals(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                )
             elif self.path == "/v1/connections/google-drive/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.revoke(
@@ -2410,6 +2853,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     account_id(body["account_id"]),
                     "slack",
                 )
+            elif self.path == "/v1/connections/hubspot/revoke":
+                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                result = self.worker.client.revoke(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    "hubspot",
+                )
             else:
                 raise WorkerError(404, "not_found", "route not found")
             self._json(
@@ -2423,6 +2873,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "/v1/connections/gmail/recent-messages",
                         "/v1/connections/google-calendar/upcoming-events",
                         "/v1/connections/slack/recent-messages",
+                        "/v1/connections/hubspot/recent-deals",
                     }
                     else MAX_RESPONSE
                 ),
@@ -2540,6 +2991,7 @@ def main() -> int:
             "STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID", ""
         ),
         slack_oauth_app_id=os.environ.get("STEWARD_SLACK_OAUTH_APP_ID", ""),
+        hubspot_oauth_app_id=os.environ.get("STEWARD_HUBSPOT_OAUTH_APP_ID", ""),
         api_origin=os.environ.get("STEWARD_PIPEDREAM_API_ORIGIN", PIPEDREAM_API_ORIGIN),
     )
     server = IntegrationServer(("0.0.0.0", 8080), worker_token, client)
