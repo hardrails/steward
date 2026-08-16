@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Managed Integration Worker API
-  version: "1.3.0"
+  version: "1.4.0"
   description: |
     Private finite-operation worker for managed provider connections. Broker and
     provider credentials remain inside the worker. This contract does not expose
@@ -22,6 +22,7 @@ tags:
   - name: google-drive
   - name: gmail
   - name: google-calendar
+  - name: slack
 paths:
   /healthz:
     get:
@@ -573,6 +574,153 @@ paths:
           $ref: "#/components/responses/UpstreamRejected"
         "503":
           $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/slack/connect-link:
+    post:
+      tags: [slack]
+      operationId: createSlackConnectLink
+      summary: Create one short-lived Slack connection link
+      description: Returns a non-cacheable bearer URL scoped to one opaque external user, Slack, and the configured custom OAuth client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Short-lived Slack connection link.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/slack/reconcile:
+    post:
+      tags: [slack]
+      operationId: reconcileSlackConnection
+      summary: Reconcile one user's Slack connection
+      description: Ready requires a healthy Slack user account with exactly `channels:read` and `channels:history` and no broader scopes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Normalized multi-scope connection state.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AbsentSlackConnection"
+                  - $ref: "#/components/schemas/PresentSlackConnection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/slack/channels:
+    post:
+      tags: [slack]
+      operationId: listSlackPublicChannels
+      summary: List bounded public Slack channels for owner selection
+      description: Lists at most 100 non-archived public channels. It cannot list private channels, direct messages, members, files, or message content.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: Bounded normalized public channels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SlackChannels"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UpstreamRejected"
+        "409":
+          $ref: "#/components/responses/UpstreamRejected"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/slack/recent-messages:
+    post:
+      tags: [slack]
+      operationId: readRecentSlackChannelMessages
+      summary: Read one bounded public Slack channel window
+      description: Reads at most 15 recent messages from one canonical owner-selected public channel. It cannot read private channels, direct messages, threads, files, reactions, history pages, or any other channel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SlackMessageRequest"
+      responses:
+        "200":
+          description: Bounded normalized recent messages.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SlackRecentMessages"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UpstreamRejected"
+        "409":
+          $ref: "#/components/responses/UpstreamRejected"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/slack/revoke:
+    post:
+      tags: [slack]
+      operationId: revokeSlackConnection
+      summary: Revoke one verified Slack account
+      description: Verifies external-user ownership before deleting the account at the managed-auth broker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: The broker accepted account revocation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Revocation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UpstreamRejected"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
 components:
   securitySchemes:
     bearerAuth:
@@ -658,6 +806,20 @@ components:
           $ref: "#/components/schemas/AccountID"
         external_user_id:
           $ref: "#/components/schemas/ExternalUserID"
+    SlackChannelID:
+      type: string
+      pattern: '^C[A-Z0-9]{1,255}$'
+    SlackMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, channel_id, external_user_id]
+      properties:
+        account_id:
+          $ref: "#/components/schemas/AccountID"
+        channel_id:
+          $ref: "#/components/schemas/SlackChannelID"
+        external_user_id:
+          $ref: "#/components/schemas/ExternalUserID"
     FileID:
       type: string
       pattern: '^[A-Za-z0-9_-]{1,256}$'
@@ -698,7 +860,7 @@ components:
           enum: [steward.managed-connect-link.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar]
+          enum: [google-drive, gmail, google-calendar, slack]
         connect_url:
           type: string
           format: uri
@@ -760,6 +922,64 @@ components:
             - https://www.googleapis.com/auth/drive.readonly
             - https://www.googleapis.com/auth/gmail.readonly
             - https://www.googleapis.com/auth/calendar.events.readonly
+        healthy:
+          type: boolean
+    AbsentSlackConnection:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, status]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.managed-connection.v2]
+        integration:
+          type: string
+          enum: [slack]
+        status:
+          type: string
+          enum: [not_connected]
+    PresentSlackConnection:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - integration
+        - status
+        - account_id
+        - account_name
+        - authorized_scopes
+        - required_scopes
+        - healthy
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.managed-connection.v2]
+        integration:
+          type: string
+          enum: [slack]
+        status:
+          type: string
+          enum: [ready, needs_attention]
+        account_id:
+          $ref: "#/components/schemas/AccountID"
+        account_name:
+          type: string
+          maxLength: 4096
+        authorized_scopes:
+          type: array
+          uniqueItems: true
+          maxItems: 256
+          items:
+            type: string
+            maxLength: 4096
+        required_scopes:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [channels:history, channels:read]
         healthy:
           type: boolean
     FileMetadata:
@@ -1164,6 +1384,103 @@ components:
           maximum: 50
         has_more:
           type: boolean
+    SlackChannel:
+      type: object
+      additionalProperties: false
+      required: [channel_id, name, topic, purpose]
+      properties:
+        channel_id:
+          $ref: "#/components/schemas/SlackChannelID"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        topic:
+          type: string
+          maxLength: 2048
+        purpose:
+          type: string
+          maxLength: 2048
+    SlackChannels:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, channels, result_count, has_more]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.slack-channels.v1]
+        integration:
+          type: string
+          enum: [slack]
+        channels:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SlackChannel"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 100
+        has_more:
+          type: boolean
+    SlackMessage:
+      type: object
+      additionalProperties: false
+      required:
+        - timestamp
+        - author_id
+        - author_kind
+        - text
+        - thread_root
+        - content_bytes
+        - content_sha256
+      properties:
+        timestamp:
+          type: string
+          pattern: '^[0-9]{1,20}\.[0-9]{1,12}$'
+        author_id:
+          type: string
+          maxLength: 256
+          pattern: '^$|^[A-Z][A-Z0-9]{1,255}$'
+        author_kind:
+          type: string
+          enum: [member, app, unknown]
+        text:
+          type: string
+          maxLength: 32768
+        thread_root:
+          type: boolean
+        content_bytes:
+          type: integer
+          minimum: 0
+          maximum: 32768
+        content_sha256:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    SlackRecentMessages:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, channel_id, messages, result_count, has_more]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.slack-recent-messages.v1]
+        integration:
+          type: string
+          enum: [slack]
+        channel_id:
+          $ref: "#/components/schemas/SlackChannelID"
+        messages:
+          type: array
+          maxItems: 15
+          items:
+            $ref: "#/components/schemas/SlackMessage"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 15
+        has_more:
+          type: boolean
     Revocation:
       type: object
       additionalProperties: false
@@ -1174,7 +1491,7 @@ components:
           enum: [steward.managed-connection-revocation.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar]
+          enum: [google-drive, gmail, google-calendar, slack]
         account_id:
           $ref: "#/components/schemas/AccountID"
         revoked:
