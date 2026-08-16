@@ -567,6 +567,7 @@ class PipedreamClient:
         *,
         payload: object | None = None,
         token: str | None = None,
+        proxy_headers: Mapping[str, str] | None = None,
         deadline: float | None = None,
     ) -> object:
         raw, media_type = self._request_bytes(
@@ -574,6 +575,7 @@ class PipedreamClient:
             path,
             payload=payload,
             token=token,
+            proxy_headers=proxy_headers,
             maximum_bytes=MAX_UPSTREAM,
             deadline=deadline,
         )
@@ -601,6 +603,7 @@ class PipedreamClient:
         *,
         payload: object | None = None,
         token: str | None = None,
+        proxy_headers: Mapping[str, str] | None = None,
         maximum_bytes: int,
         deadline: float | None = None,
     ) -> tuple[bytes, str]:
@@ -622,6 +625,17 @@ class PipedreamClient:
         if token is not None:
             headers["Authorization"] = "Bearer " + token
             headers["X-PD-Environment"] = self.environment
+        if proxy_headers is not None:
+            for name, value in proxy_headers.items():
+                if (
+                    re.fullmatch(r"X-PD-Proxy-[A-Za-z0-9-]{1,64}", name) is None
+                    or not isinstance(value, str)
+                    or not 1 <= len(value) <= 256
+                    or any(ord(character) < 0x20 or ord(character) > 0x7E for character in value)
+                    or name.casefold() in {header.casefold() for header in headers}
+                ):
+                    raise ValueError("managed-auth proxy header is invalid")
+                headers[name] = value
         headers["Host"] = self.origin.netloc
         timeout = UPSTREAM_TIMEOUT_SECONDS
         if deadline is not None:
@@ -1991,6 +2005,7 @@ class PipedreamClient:
             user=user,
             account=requested_account,
             target=target,
+            proxy_headers={"X-PD-Proxy-Prefer": 'outlook.timezone="UTC"'},
             deadline=deadline,
         )
         if not isinstance(value, Mapping):
@@ -2039,7 +2054,7 @@ class PipedreamClient:
                 )
             results.append(event)
         return {
-            "schema_version": "steward.microsoft-outlook-upcoming-events.v1",
+            "schema_version": "steward.microsoft-outlook-upcoming-events.v2",
             "integration": "microsoft-outlook-calendar",
             "calendar": "primary",
             "window_start": self._rfc3339(window_start),
@@ -2337,16 +2352,24 @@ class PipedreamClient:
                 "Outlook Calendar returned an invalid event time",
             )
         try:
-            datetime.datetime.fromisoformat(date_time.replace("Z", "+00:00"))
+            parsed = datetime.datetime.fromisoformat(date_time.replace("Z", "+00:00"))
         except ValueError:
             raise WorkerError(
                 502,
                 "invalid_provider_response",
                 "Outlook Calendar returned an invalid event time",
             ) from None
+        if time_zone != "UTC":
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Outlook Calendar returned a non-UTC event time",
+            )
+        if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+            parsed = parsed.astimezone(datetime.UTC).replace(tzinfo=None)
         return {
             "date_time": cls._safe_text(
-                date_time, maximum_bytes=64, provider="Outlook Calendar"
+                parsed.isoformat(), maximum_bytes=64, provider="Outlook Calendar"
             ),
             "time_zone": cls._safe_text(
                 time_zone, maximum_bytes=256, provider="Outlook Calendar"
@@ -3145,10 +3168,17 @@ class PipedreamClient:
         user: str,
         account: str,
         target: str,
+        proxy_headers: Mapping[str, str] | None = None,
         deadline: float | None = None,
     ) -> object:
         path = self._proxy_path(user=user, account=account, target=target)
-        return self._request("GET", path, token=token, deadline=deadline)
+        return self._request(
+            "GET",
+            path,
+            token=token,
+            proxy_headers=proxy_headers,
+            deadline=deadline,
+        )
 
     def _proxy_json_post(
         self,
