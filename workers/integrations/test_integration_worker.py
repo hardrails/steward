@@ -2195,6 +2195,18 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(query["startDateTime"], ["2026-08-15T16:00:00Z"])
         self.assertEqual(query["endDateTime"], ["2026-08-29T16:00:00Z"])
 
+    def test_read_upcoming_microsoft_outlook_calendar_accepts_absent_location(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_outlook_calendar_account()]
+            event = microsoft_outlook_event()
+            event["location"] = None
+            state.microsoft_outlook_events = [event]
+            result = client.read_upcoming_microsoft_outlook_events(
+                "ryu_abcdefghijklmnop", "apn_owned123"
+            )
+
+        self.assertEqual(result["results"][0]["location"], "")
+
     def test_microsoft_outlook_operations_reject_broader_scopes_and_unsafe_results(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [

@@ -2175,7 +2175,9 @@ class PipedreamClient:
                 "invalid_provider_response",
                 "Outlook Calendar returned invalid event content",
             )
-        location = value.get("location", {})
+        location = value.get("location")
+        if location is None:
+            location = {}
         if not isinstance(location, Mapping):
             raise WorkerError(
                 502,
