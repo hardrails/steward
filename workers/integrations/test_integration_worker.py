@@ -46,6 +46,7 @@ class BrokerState:
         self.calendar_next_page_token: str | None = None
         self.calendar_time_zone = "America/Los_Angeles"
         self.slack_channels: list[object] = []
+        self.slack_channel_info: object | None = None
         self.slack_channel_cursor = ""
         self.slack_messages: list[object] = []
         self.slack_message_cursor = ""
@@ -202,6 +203,13 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                         },
                     },
                 )
+                return
+            if target.hostname == "slack.com" and target.path == "/api/conversations.info":
+                channel = self.state.slack_channel_info
+                if channel is None:
+                    self._respond(200, {"ok": False, "error": "channel_not_found"})
+                else:
+                    self._respond(200, {"ok": True, "channel": channel})
                 return
             if len(target_parts) >= 6 and target_parts[-1] == "export":
                 file_id = target_parts[-2]
@@ -597,6 +605,7 @@ class PipedreamClientTests(unittest.TestCase):
         with broker_client() as (client, state):
             state.accounts = [connected_slack_account()]
             state.slack_channels = [slack_channel()]
+            state.slack_channel_info = slack_channel()
             state.slack_channel_cursor = "next-page"
             result = client.list_slack_channels(
                 "ryu_abcdefghijklmnop",
@@ -639,6 +648,7 @@ class PipedreamClientTests(unittest.TestCase):
         with broker_client() as (client, state):
             state.accounts = [connected_slack_account()]
             state.slack_channels = [slack_channel()]
+            state.slack_channel_info = slack_channel()
             ignored = slack_message("1786723199.000100")
             ignored["subtype"] = "channel_join"
             thread_reply = slack_message("1786723198.000100")
@@ -684,10 +694,10 @@ class PipedreamClientTests(unittest.TestCase):
             },
         )
 
-    def test_read_slack_messages_rejects_channel_outside_current_public_list(self) -> None:
+    def test_read_slack_messages_rejects_channel_that_is_no_longer_public(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_slack_account()]
-            state.slack_channels = [slack_channel("COTHERTEAM")]
+            state.slack_channel_info = None
             with self.assertRaisesRegex(worker.WorkerError, "choose the channel again") as caught:
                 client.read_recent_slack_messages(
                     "ryu_abcdefghijklmnop",
@@ -698,10 +708,26 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 409)
         self.assertFalse(any("conversations.history" in str(item) for item in state.requests))
 
+    def test_read_slack_messages_checks_selected_channel_without_first_page_dependency(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_slack_account()]
+            state.slack_channels = [slack_channel("COTHERTEAM")]
+            state.slack_channel_cursor = "later-pages"
+            state.slack_channel_info = slack_channel()
+            result = client.read_recent_slack_messages(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                "C123TEAM",
+            )
+
+        self.assertEqual(result["channel_id"], "C123TEAM")
+        self.assertEqual(result["result_count"], 0)
+
     def test_slack_access_change_and_invalid_channel_fail_without_leaking_provider_detail(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_slack_account()]
             state.slack_channels = [slack_channel()]
+            state.slack_channel_info = slack_channel()
             state.slack_history_error = "channel_not_found"
             with self.assertRaisesRegex(worker.WorkerError, "choose the channel again") as caught:
                 client.read_recent_slack_messages(
@@ -754,8 +780,8 @@ class PipedreamClientTests(unittest.TestCase):
                 del token, user, account
                 assert deadline is not None
                 self.deadlines.append(deadline)
-                if "conversations.list" in target:
-                    return {"ok": True, "channels": [slack_channel()]}
+                if "conversations.info" in target:
+                    return {"ok": True, "channel": slack_channel()}
                 return {"ok": True, "messages": []}
 
         client = DeadlineClient()

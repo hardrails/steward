@@ -75,7 +75,9 @@ provider. Its bearer-authenticated caller is responsible for authenticating and
 persisting the human owner's channel choice, just as it is for Google Drive file IDs.
 Railyard is that sole caller in the product deployment. Steward verifies the caller's
 opaque external-user/account binding, exact scopes, channel syntax, current public
-visibility, and finite operation bounds before every Slack history request. Deployments
+visibility through one exact `conversations.info` check, and finite operation bounds
+before every Slack history request. This exact check does not depend on the bounded
+100-channel discovery page. Deployments
 must keep the operation listener private; the worker token is service authority, not an
 owner session token.
 

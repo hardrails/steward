@@ -666,7 +666,7 @@ paths:
       tags: [slack]
       operationId: readRecentSlackChannelMessages
       summary: Read one bounded public Slack channel window
-      description: The authenticated service caller supplies its persisted end-user selection. Steward rechecks that exact channel against the current bounded public-channel list, then reads at most 15 recent messages. End-user authentication and selection persistence remain the caller's responsibility; this private worker verifies account ownership, exact scopes, public visibility, and finite provider authority. It cannot read private channels, direct messages, threads, files, reactions, history pages, or any other channel.
+      description: The authenticated service caller supplies its persisted end-user selection. Steward rechecks that exact channel with one `conversations.info` request, verifies it is currently public and non-archived without depending on the bounded discovery page, then reads at most 15 recent messages. End-user authentication and selection persistence remain the caller's responsibility; this private worker verifies account ownership, exact scopes, public visibility, and finite provider authority. It cannot read private channels, direct messages, threads, files, reactions, history pages, or any other channel.
       requestBody:
         required: true
         content:

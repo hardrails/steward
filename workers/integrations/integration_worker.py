@@ -1084,38 +1084,29 @@ class PipedreamClient:
                 "connection_not_ready",
                 "Slack connection is not ready for this app",
             )
-        channels_target = "https://slack.com/api/conversations.list?" + urllib.parse.urlencode(
+        channel_target = "https://slack.com/api/conversations.info?" + urllib.parse.urlencode(
             {
-                "exclude_archived": "true",
-                "limit": str(MAX_SLACK_CHANNELS),
-                "types": "public_channel",
+                "channel": channel,
+                "include_locale": "false",
+                "include_num_members": "false",
             }
         )
-        channels_value = self._slack_result(
+        channel_value = self._slack_result(
             self._proxy_json(
                 token,
                 user=user,
                 account=requested_account,
-                target=channels_target,
+                target=channel_target,
                 deadline=deadline,
             ),
-            operation="channel list",
+            operation="channel check",
         )
-        raw_channels = channels_value.get("channels")
-        if not isinstance(raw_channels, list) or len(raw_channels) > MAX_SLACK_CHANNELS:
+        verified_channel = self._slack_channel(channel_value.get("channel"))
+        if verified_channel["channel_id"] != channel:
             raise WorkerError(
                 502,
                 "invalid_provider_response",
-                "Slack returned an invalid channel list",
-            )
-        public_channel_ids = {
-            self._slack_channel(item)["channel_id"] for item in raw_channels
-        }
-        if channel not in public_channel_ids:
-            raise WorkerError(
-                409,
-                "channel_selection_stale",
-                "The selected Slack channel is no longer available; choose the channel again",
+                "Slack returned invalid channel metadata",
             )
         target = "https://slack.com/api/conversations.history?" + urllib.parse.urlencode(
             {
