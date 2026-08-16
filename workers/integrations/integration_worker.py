@@ -80,6 +80,7 @@ MAX_SLACK_MESSAGES = 15
 MAX_SLACK_CHANNEL_TEXT_BYTES = 2 << 10
 MAX_SLACK_MESSAGE_BYTES = 32 << 10
 MAX_SLACK_TOTAL_BYTES = 240 << 10
+SLACK_OPERATION_TIMEOUT_SECONDS = 30
 GMAIL_MESSAGE_FIELDS = (
     "id,threadId,labelIds,snippet,internalDate,"
     "payload(filename,headers,mimeType,body(data,size),parts)"
@@ -972,11 +973,13 @@ class PipedreamClient:
         user: str,
         requested_account: str,
     ) -> dict[str, object]:
+        deadline = time.monotonic() + SLACK_OPERATION_TIMEOUT_SECONDS
         token, connection = self._owned_account(
             user,
             requested_account,
             "connect:accounts:read connect:proxy",
             integration="slack",
+            deadline=deadline,
         )
         if not self._account_ready(
             connection,
@@ -1001,6 +1004,7 @@ class PipedreamClient:
                 user=user,
                 account=requested_account,
                 target=target,
+                deadline=deadline,
             ),
             operation="channel list",
         )
@@ -1055,11 +1059,13 @@ class PipedreamClient:
         requested_channel: str,
     ) -> dict[str, object]:
         channel = slack_channel_id(requested_channel)
+        deadline = time.monotonic() + SLACK_OPERATION_TIMEOUT_SECONDS
         token, connection = self._owned_account(
             user,
             requested_account,
             "connect:accounts:read connect:proxy",
             integration="slack",
+            deadline=deadline,
         )
         if not self._account_ready(
             connection,
@@ -1070,6 +1076,39 @@ class PipedreamClient:
                 409,
                 "connection_not_ready",
                 "Slack connection is not ready for this app",
+            )
+        channels_target = "https://slack.com/api/conversations.list?" + urllib.parse.urlencode(
+            {
+                "exclude_archived": "true",
+                "limit": str(MAX_SLACK_CHANNELS),
+                "types": "public_channel",
+            }
+        )
+        channels_value = self._slack_result(
+            self._proxy_json(
+                token,
+                user=user,
+                account=requested_account,
+                target=channels_target,
+                deadline=deadline,
+            ),
+            operation="channel list",
+        )
+        raw_channels = channels_value.get("channels")
+        if not isinstance(raw_channels, list) or len(raw_channels) > MAX_SLACK_CHANNELS:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Slack returned an invalid channel list",
+            )
+        public_channel_ids = {
+            self._slack_channel(item)["channel_id"] for item in raw_channels
+        }
+        if channel not in public_channel_ids:
+            raise WorkerError(
+                409,
+                "channel_selection_stale",
+                "The selected Slack channel is no longer available; choose the channel again",
             )
         target = "https://slack.com/api/conversations.history?" + urllib.parse.urlencode(
             {
@@ -1084,6 +1123,7 @@ class PipedreamClient:
                 user=user,
                 account=requested_account,
                 target=target,
+                deadline=deadline,
             ),
             operation="channel history",
         )
@@ -1903,7 +1943,7 @@ class PipedreamClient:
                 "Slack returned invalid message content",
             )
         subtype = value.get("subtype")
-        if subtype not in {None, "bot_message", "thread_broadcast"}:
+        if subtype not in {None, "bot_message"}:
             return None
         timestamp = value.get("ts")
         text = value.get("text")
@@ -1927,6 +1967,8 @@ class PipedreamClient:
                 "invalid_provider_response",
                 "Slack returned invalid message content",
             )
+        if thread_timestamp and thread_timestamp != timestamp:
+            return None
         author = user or bot_id or ""
         if author and SLACK_AUTHOR_ID_RE.fullmatch(author) is None:
             raise WorkerError(

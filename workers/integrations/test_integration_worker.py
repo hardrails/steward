@@ -50,7 +50,8 @@ class BrokerState:
         self.slack_messages: list[object] = []
         self.slack_message_cursor = ""
         self.slack_has_more = False
-        self.slack_error: str | None = None
+        self.slack_list_error: str | None = None
+        self.slack_history_error: str | None = None
         self.connect_link_url = "https://pipedream.com/_static/connect.html?token=one-use-secret&connectLink=true"
 
 
@@ -172,8 +173,8 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                 self._respond(200, calendar_value)
                 return
             if target.hostname == "slack.com" and target.path == "/api/conversations.list":
-                if self.state.slack_error is not None:
-                    self._respond(200, {"ok": False, "error": self.state.slack_error})
+                if self.state.slack_list_error is not None:
+                    self._respond(200, {"ok": False, "error": self.state.slack_list_error})
                     return
                 self._respond(
                     200,
@@ -187,8 +188,8 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                 )
                 return
             if target.hostname == "slack.com" and target.path == "/api/conversations.history":
-                if self.state.slack_error is not None:
-                    self._respond(200, {"ok": False, "error": self.state.slack_error})
+                if self.state.slack_history_error is not None:
+                    self._respond(200, {"ok": False, "error": self.state.slack_history_error})
                     return
                 self._respond(
                     200,
@@ -634,12 +635,17 @@ class PipedreamClientTests(unittest.TestCase):
             },
         )
 
-    def test_read_slack_messages_is_one_fifteen_item_public_channel_call(self) -> None:
+    def test_read_slack_messages_rechecks_public_channel_then_reads_fifteen_items(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_slack_account()]
+            state.slack_channels = [slack_channel()]
             ignored = slack_message("1786723199.000100")
             ignored["subtype"] = "channel_join"
-            state.slack_messages = [slack_message(), ignored]
+            thread_reply = slack_message("1786723198.000100")
+            thread_reply["thread_ts"] = "1786723100.000100"
+            broadcast = slack_message("1786723197.000100")
+            broadcast["subtype"] = "thread_broadcast"
+            state.slack_messages = [slack_message(), ignored, thread_reply, broadcast]
             state.slack_has_more = True
             result = client.read_recent_slack_messages(
                 "ryu_abcdefghijklmnop",
@@ -678,10 +684,25 @@ class PipedreamClientTests(unittest.TestCase):
             },
         )
 
+    def test_read_slack_messages_rejects_channel_outside_current_public_list(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_slack_account()]
+            state.slack_channels = [slack_channel("COTHERTEAM")]
+            with self.assertRaisesRegex(worker.WorkerError, "choose the channel again") as caught:
+                client.read_recent_slack_messages(
+                    "ryu_abcdefghijklmnop",
+                    "apn_owned123",
+                    "C123TEAM",
+                )
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertFalse(any("conversations.history" in str(item) for item in state.requests))
+
     def test_slack_access_change_and_invalid_channel_fail_without_leaking_provider_detail(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_slack_account()]
-            state.slack_error = "channel_not_found"
+            state.slack_channels = [slack_channel()]
+            state.slack_history_error = "channel_not_found"
             with self.assertRaisesRegex(worker.WorkerError, "choose the channel again") as caught:
                 client.read_recent_slack_messages(
                     "ryu_abcdefghijklmnop",
@@ -698,6 +719,55 @@ class PipedreamClientTests(unittest.TestCase):
                     "../private",
                 )
             self.assertEqual(len(state.requests), before)
+
+    def test_slack_read_uses_one_deadline_for_all_broker_calls(self) -> None:
+        class DeadlineClient(worker.PipedreamClient):
+            def __init__(self) -> None:
+                self.deadlines: list[float] = []
+
+            def _owned_account(
+                self,
+                user: str,
+                requested_account: str,
+                scope: str,
+                *,
+                integration: str = "google-drive",
+                deadline: float | None = None,
+            ) -> tuple[str, dict[str, object]]:
+                del user, requested_account, scope, integration
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                return "token", {
+                    "healthy": True,
+                    "authorized_scopes": list(worker.SLACK_SCOPES),
+                }
+
+            def _proxy_json(
+                self,
+                token: str,
+                *,
+                user: str,
+                account: str,
+                target: str,
+                deadline: float | None = None,
+            ) -> object:
+                del token, user, account
+                assert deadline is not None
+                self.deadlines.append(deadline)
+                if "conversations.list" in target:
+                    return {"ok": True, "channels": [slack_channel()]}
+                return {"ok": True, "messages": []}
+
+        client = DeadlineClient()
+        with mock.patch.object(worker.time, "monotonic", return_value=100.0):
+            client.read_recent_slack_messages(
+                "ryu_abcdefghijklmnop", "apn_owned123", "C123TEAM"
+            )
+
+        self.assertEqual(
+            client.deadlines,
+            [100.0 + worker.SLACK_OPERATION_TIMEOUT_SECONDS] * 3,
+        )
 
     def test_unconfigured_gmail_fails_without_contacting_broker(self) -> None:
         with broker_client() as (client, state):
