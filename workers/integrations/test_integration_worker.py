@@ -45,6 +45,10 @@ class BrokerState:
         self.calendar_events: list[object] = []
         self.calendar_next_page_token: str | None = None
         self.calendar_time_zone = "America/Los_Angeles"
+        self.microsoft_outlook_messages: list[object] = []
+        self.microsoft_outlook_message_next_link: str | None = None
+        self.microsoft_outlook_events: list[object] = []
+        self.microsoft_outlook_event_next_link: str | None = None
         self.slack_channels: list[object] = []
         self.slack_channel_info: object | None = None
         self.slack_channel_cursor = ""
@@ -199,6 +203,27 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                     calendar_value["nextPageToken"] = self.state.calendar_next_page_token
                 self._respond(200, calendar_value)
                 return
+            if target.hostname == "graph.microsoft.com":
+                if target.path == "/v1.0/me/mailFolders/inbox/messages":
+                    mail_value: dict[str, object] = {
+                        "value": self.state.microsoft_outlook_messages
+                    }
+                    if self.state.microsoft_outlook_message_next_link is not None:
+                        mail_value["@odata.nextLink"] = (
+                            self.state.microsoft_outlook_message_next_link
+                        )
+                    self._respond(200, mail_value)
+                    return
+                if target.path == "/v1.0/me/calendarView":
+                    event_value: dict[str, object] = {
+                        "value": self.state.microsoft_outlook_events
+                    }
+                    if self.state.microsoft_outlook_event_next_link is not None:
+                        event_value["@odata.nextLink"] = (
+                            self.state.microsoft_outlook_event_next_link
+                        )
+                    self._respond(200, event_value)
+                    return
             if target.hostname == "slack.com" and target.path == "/api/conversations.list":
                 if self.state.slack_list_error is not None:
                     self._respond(200, {"ok": False, "error": self.state.slack_list_error})
@@ -303,6 +328,8 @@ def broker_client() -> Iterator[tuple[Any, BrokerState]]:
             oauth_app_id="oa_test",
             gmail_oauth_app_id="oa_gmailtest",
             google_calendar_oauth_app_id="oa_calendartest",
+            microsoft_outlook_oauth_app_id="oa_outlooktest",
+            microsoft_outlook_calendar_oauth_app_id="oa_outlookcaltest",
             slack_oauth_app_id="oa_slacktest",
             hubspot_oauth_app_id="oa_hubspottest",
             api_origin=f"http://127.0.0.1:{server.server_port}",
@@ -357,6 +384,34 @@ def connected_calendar_account(
     )
     value["name"] = "Operations Calendar"
     value["app"] = {"name_slug": "google_calendar"}
+    return value
+
+
+def connected_microsoft_outlook_account(
+    *,
+    scopes: list[str] | None = None,
+    identifier: str = "apn_owned123",
+) -> dict[str, object]:
+    value = connected_account(
+        scopes=scopes or [worker.MICROSOFT_OUTLOOK_SCOPE],
+        identifier=identifier,
+    )
+    value["name"] = "Operations Outlook"
+    value["app"] = {"name_slug": "microsoft_outlook"}
+    return value
+
+
+def connected_microsoft_outlook_calendar_account(
+    *,
+    scopes: list[str] | None = None,
+    identifier: str = "apn_owned123",
+) -> dict[str, object]:
+    value = connected_account(
+        scopes=scopes or [worker.MICROSOFT_OUTLOOK_CALENDAR_SCOPE],
+        identifier=identifier,
+    )
+    value["name"] = "Operations Outlook Calendar"
+    value["app"] = {"name_slug": "microsoft_outlook_calendar"}
     return value
 
 
@@ -516,6 +571,60 @@ def gmail_message(
     }
 
 
+def microsoft_outlook_message(message_id: str = "AAMk_message_1=") -> dict[str, object]:
+    return {
+        "id": message_id,
+        "conversationId": "AAQk_conversation_1=",
+        "subject": "Renewal next steps",
+        "from": {
+            "emailAddress": {
+                "name": "Customer",
+                "address": "customer@example.com",
+            }
+        },
+        "toRecipients": [
+            {
+                "emailAddress": {
+                    "name": "Operations",
+                    "address": "ops@example.com",
+                }
+            }
+        ],
+        "receivedDateTime": "2026-08-14T19:00:00Z",
+        "isRead": False,
+        "importance": "high",
+        "bodyPreview": "Please prepare the renewal summary by Friday.",
+    }
+
+
+def microsoft_outlook_event(event_id: str = "AAMk_event_1=") -> dict[str, object]:
+    return {
+        "id": event_id,
+        "subject": "Customer renewal review",
+        "start": {"dateTime": "2026-08-18T09:00:00", "timeZone": "Pacific Standard Time"},
+        "end": {"dateTime": "2026-08-18T10:00:00", "timeZone": "Pacific Standard Time"},
+        "location": {"displayName": "Conference room 1"},
+        "organizer": {
+            "emailAddress": {"name": "Operations", "address": "ops@example.com"}
+        },
+        "attendees": [
+            {
+                "emailAddress": {
+                    "name": "Customer",
+                    "address": "customer@example.com",
+                },
+                "type": "required",
+                "status": {"response": "accepted"},
+            }
+        ],
+        "isAllDay": False,
+        "isCancelled": False,
+        "showAs": "busy",
+        "sensitivity": "normal",
+        "type": "singleInstance",
+    }
+
+
 class PipedreamClientTests(unittest.TestCase):
     def test_each_managed_integration_can_be_configured_independently(self) -> None:
         gmail_only = worker.PipedreamClient(
@@ -576,6 +685,34 @@ class PipedreamClientTests(unittest.TestCase):
             api_origin="https://broker.invalid",
         )
         self.assertEqual(hubspot_only.oauth_app_ids["hubspot"], "oa_hubspottest")
+
+        outlook_only = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="",
+            microsoft_outlook_oauth_app_id="oa_outlooktest",
+            api_origin="https://broker.invalid",
+        )
+        self.assertEqual(
+            outlook_only.oauth_app_ids["microsoft-outlook-mail"],
+            "oa_outlooktest",
+        )
+
+        outlook_calendar_only = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="",
+            microsoft_outlook_calendar_oauth_app_id="oa_outlookcaltest",
+            api_origin="https://broker.invalid",
+        )
+        self.assertEqual(
+            outlook_calendar_only.oauth_app_ids["microsoft-outlook-calendar"],
+            "oa_outlookcaltest",
+        )
 
     def test_connect_link_uses_exact_scopes_and_returns_only_one_use_url(self) -> None:
         with broker_client() as (client, state):
@@ -661,6 +798,80 @@ class PipedreamClientTests(unittest.TestCase):
                     _token, result = client.reconcile(
                         "ryu_abcdefghijklmnop",
                         integration="google-calendar",
+                    )
+                    self.assertEqual(result["status"], "needs_attention")
+
+    def test_microsoft_outlook_profiles_use_distinct_apps_and_exact_permissions(self) -> None:
+        with broker_client() as (client, state):
+            mail_link = client.connect_link(
+                "ryu_abcdefghijklmnop", "microsoft-outlook-mail"
+            )
+            state.accounts = [
+                connected_microsoft_outlook_account(
+                    scopes=[
+                        worker.MICROSOFT_OUTLOOK_SCOPE,
+                        "User.Read",
+                        "offline_access",
+                        "openid",
+                        "profile",
+                    ]
+                )
+            ]
+            _token, mail = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="microsoft-outlook-mail",
+            )
+
+            calendar_link = client.connect_link(
+                "ryu_abcdefghijklmnop", "microsoft-outlook-calendar"
+            )
+            state.accounts = [connected_microsoft_outlook_calendar_account()]
+            _token, calendar = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="microsoft-outlook-calendar",
+            )
+
+        mail_query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(mail_link["connect_url"])).query
+        )
+        calendar_query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(calendar_link["connect_url"])).query
+        )
+        self.assertEqual(mail_query["app"], ["microsoft_outlook"])
+        self.assertEqual(mail_query["oauthAppId"], ["oa_outlooktest"])
+        self.assertEqual(calendar_query["app"], ["microsoft_outlook_calendar"])
+        self.assertEqual(calendar_query["oauthAppId"], ["oa_outlookcaltest"])
+        self.assertEqual(mail["status"], "ready")
+        self.assertEqual(mail["required_scope"], worker.MICROSOFT_OUTLOOK_SCOPE)
+        self.assertEqual(calendar["status"], "ready")
+        self.assertEqual(
+            calendar["required_scope"], worker.MICROSOFT_OUTLOOK_CALENDAR_SCOPE
+        )
+
+        with broker_client() as (client, state):
+            for account, integration, broader_scope in (
+                (
+                    connected_microsoft_outlook_account(
+                        scopes=[worker.MICROSOFT_OUTLOOK_SCOPE, "Mail.Send"]
+                    ),
+                    "microsoft-outlook-mail",
+                    "Mail.Send",
+                ),
+                (
+                    connected_microsoft_outlook_calendar_account(
+                        scopes=[
+                            worker.MICROSOFT_OUTLOOK_CALENDAR_SCOPE,
+                            "Calendars.ReadWrite",
+                        ]
+                    ),
+                    "microsoft-outlook-calendar",
+                    "Calendars.ReadWrite",
+                ),
+            ):
+                with self.subTest(broader_scope=broader_scope):
+                    state.accounts = [account]
+                    _token, result = client.reconcile(
+                        "ryu_abcdefghijklmnop", integration=integration
                     )
                     self.assertEqual(result["status"], "needs_attention")
 
@@ -1905,6 +2116,115 @@ class PipedreamClientTests(unittest.TestCase):
                             "apn_owned123",
                         )
 
+    def test_read_recent_microsoft_outlook_mail_freezes_query_and_normalizes_preview(self) -> None:
+        now = datetime.datetime(2026, 8, 15, 16, 0, tzinfo=datetime.UTC)
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_outlook_account()]
+            state.microsoft_outlook_messages = [microsoft_outlook_message()]
+            state.microsoft_outlook_message_next_link = (
+                "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=next"
+            )
+            result = client.read_recent_microsoft_outlook_messages(
+                "ryu_abcdefghijklmnop", "apn_owned123", now=now
+            )
+
+        self.assertEqual(
+            result["schema_version"],
+            "steward.microsoft-outlook-recent-messages.v1",
+        )
+        self.assertEqual(result["window_start"], "2026-07-16T16:00:00Z")
+        self.assertEqual(result["window_end"], "2026-08-15T16:00:00Z")
+        self.assertTrue(result["has_more"])
+        message = result["results"][0]
+        self.assertEqual(message["subject"], "Renewal next steps")
+        self.assertEqual(message["content_source"], "body_preview")
+        self.assertEqual(message["from"]["email"], "customer@example.com")
+        self.assertEqual(message["to"][0]["email"], "ops@example.com")
+
+        proxy_request = next(
+            request for request in state.requests if "/proxy/" in request["path"]
+        )
+        encoded = urllib.parse.urlsplit(proxy_request["path"]).path.rsplit("/", 1)[-1]
+        encoded += "=" * (-len(encoded) % 4)
+        target = urllib.parse.urlsplit(base64.urlsafe_b64decode(encoded).decode())
+        self.assertEqual(target.hostname, "graph.microsoft.com")
+        self.assertEqual(target.path, "/v1.0/me/mailFolders/inbox/messages")
+        self.assertEqual(
+            urllib.parse.parse_qs(target.query),
+            {
+                "$filter": ["receivedDateTime ge 2026-07-16T16:00:00Z"],
+                "$orderby": ["receivedDateTime desc"],
+                "$select": [
+                    "id,conversationId,subject,from,toRecipients,receivedDateTime,"
+                    "isRead,importance,bodyPreview"
+                ],
+                "$top": ["20"],
+            },
+        )
+
+    def test_read_upcoming_microsoft_outlook_calendar_freezes_window_and_normalizes(self) -> None:
+        now = datetime.datetime(2026, 8, 15, 16, 0, tzinfo=datetime.UTC)
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_outlook_calendar_account()]
+            state.microsoft_outlook_events = [microsoft_outlook_event()]
+            result = client.read_upcoming_microsoft_outlook_events(
+                "ryu_abcdefghijklmnop", "apn_owned123", now=now
+            )
+
+        self.assertEqual(
+            result["schema_version"],
+            "steward.microsoft-outlook-upcoming-events.v1",
+        )
+        self.assertEqual(result["window_start"], "2026-08-15T16:00:00Z")
+        self.assertEqual(result["window_end"], "2026-08-29T16:00:00Z")
+        event = result["results"][0]
+        self.assertEqual(event["subject"], "Customer renewal review")
+        self.assertEqual(event["location"], "Conference room 1")
+        self.assertEqual(event["attendees"][0]["response"], "accepted")
+
+        proxy_request = next(
+            request for request in state.requests if "/proxy/" in request["path"]
+        )
+        encoded = urllib.parse.urlsplit(proxy_request["path"]).path.rsplit("/", 1)[-1]
+        encoded += "=" * (-len(encoded) % 4)
+        target = urllib.parse.urlsplit(base64.urlsafe_b64decode(encoded).decode())
+        query = urllib.parse.parse_qs(target.query)
+        self.assertEqual(target.hostname, "graph.microsoft.com")
+        self.assertEqual(target.path, "/v1.0/me/calendarView")
+        self.assertEqual(query["$top"], ["50"])
+        self.assertEqual(query["startDateTime"], ["2026-08-15T16:00:00Z"])
+        self.assertEqual(query["endDateTime"], ["2026-08-29T16:00:00Z"])
+
+    def test_microsoft_outlook_operations_reject_broader_scopes_and_unsafe_results(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [
+                connected_microsoft_outlook_account(
+                    scopes=[worker.MICROSOFT_OUTLOOK_SCOPE, "Mail.Send"]
+                )
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "not ready"):
+                client.read_recent_microsoft_outlook_messages(
+                    "ryu_abcdefghijklmnop", "apn_owned123"
+                )
+            self.assertFalse(any("/proxy/" in item["path"] for item in state.requests))
+
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_outlook_calendar_account()]
+            state.microsoft_outlook_events = [
+                microsoft_outlook_event(), microsoft_outlook_event()
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "duplicate"):
+                client.read_upcoming_microsoft_outlook_events(
+                    "ryu_abcdefghijklmnop", "apn_owned123"
+                )
+
+            state.microsoft_outlook_events = []
+            state.microsoft_outlook_event_next_link = "https://evil.example/next"
+            with self.assertRaisesRegex(worker.WorkerError, "unsafe continuation"):
+                client.read_upcoming_microsoft_outlook_events(
+                    "ryu_abcdefghijklmnop", "apn_owned123"
+                )
+
     def test_revoke_verifies_ownership_then_uses_write_scope(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_account()]
@@ -1968,6 +2288,26 @@ class StubClient:
             "user": user,
             "account": account,
             "integration": "google-calendar",
+        }
+
+    def read_recent_microsoft_outlook_messages(
+        self, user: str, account: str
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "integration": "microsoft-outlook-mail",
+        }
+
+    def read_upcoming_microsoft_outlook_events(
+        self, user: str, account: str
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "integration": "microsoft-outlook-calendar",
         }
 
     def list_slack_channels(self, user: str, account: str) -> dict[str, object]:
@@ -2308,6 +2648,37 @@ class HTTPContractTests(unittest.TestCase):
                 port,
                 "/v1/connections/google-calendar/upcoming-events",
                 b'{"account_id":"apn_owned123","calendar_id":"other","external_user_id":"ryu_abcdefghijklmnop"}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+
+    def test_microsoft_outlook_routes_dispatch_only_exact_finite_operations(self) -> None:
+        with integration_server() as port:
+            for integration, operation in (
+                ("microsoft-outlook-mail", "recent-messages"),
+                ("microsoft-outlook-calendar", "upcoming-events"),
+            ):
+                for suffix, payload in (
+                    ("connect-link", b'{"external_user_id":"ryu_abcdefghijklmnop"}'),
+                    ("reconcile", b'{"external_user_id":"ryu_abcdefghijklmnop"}'),
+                    (
+                        operation,
+                        b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                    ),
+                    (
+                        "revoke",
+                        b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                    ),
+                ):
+                    path = f"/v1/connections/{integration}/{suffix}"
+                    with self.subTest(path=path):
+                        status, body, _headers = call_worker(port, path, payload)
+                        self.assertEqual(status, 200)
+                        self.assertEqual(body["integration"], integration)
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/microsoft-outlook-mail/recent-messages",
+                b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","limit":100}',
             )
             self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
 

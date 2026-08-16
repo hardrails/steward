@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Managed Integration Worker API
-  version: "1.5.0"
+  version: "1.6.0"
   description: |
     Private finite-operation worker for managed provider connections. Broker and
     provider credentials remain inside the worker. This contract does not expose
@@ -22,6 +22,8 @@ tags:
   - name: google-drive
   - name: gmail
   - name: google-calendar
+  - name: microsoft-outlook-mail
+  - name: microsoft-outlook-calendar
   - name: hubspot
   - name: slack
 paths:
@@ -575,6 +577,238 @@ paths:
           $ref: "#/components/responses/UpstreamRejected"
         "503":
           $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-mail/connect-link:
+    post:
+      tags: [microsoft-outlook-mail]
+      operationId: createMicrosoftOutlookMailConnectLink
+      summary: Create one short-lived Outlook Mail connection link
+      description: Returns a non-cacheable bearer URL scoped to the opaque external user, Outlook Mail, and a custom least-privilege OAuth client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Short-lived Outlook Mail connection link.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-mail/reconcile:
+    post:
+      tags: [microsoft-outlook-mail]
+      operationId: reconcileMicrosoftOutlookMailConnection
+      summary: Reconcile one user's Outlook Mail connection
+      description: Ready requires Mail.Read and only reviewed Microsoft identity and refresh scopes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Normalized connection state.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AbsentConnection"
+                  - $ref: "#/components/schemas/PresentConnection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-mail/recent-messages:
+    post:
+      tags: [microsoft-outlook-mail]
+      operationId: readRecentMicrosoftOutlookMessages
+      summary: Read a bounded recent Outlook inbox window
+      description: Reads at most 20 inbox message previews from the last 30 days. The caller cannot supply a folder, query, date range, page token, message ID, attachment request, provider URL, provider header, or write action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: Bounded normalized recent Outlook inbox messages.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicrosoftOutlookRecentMessages"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UpstreamRejected"
+        "409":
+          $ref: "#/components/responses/UpstreamRejected"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-mail/revoke:
+    post:
+      tags: [microsoft-outlook-mail]
+      operationId: revokeMicrosoftOutlookMailConnection
+      summary: Revoke one verified Outlook Mail account
+      description: Verifies external-user ownership before deleting the account at the managed-auth broker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: The broker accepted account revocation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Revocation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UpstreamRejected"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-calendar/connect-link:
+    post:
+      tags: [microsoft-outlook-calendar]
+      operationId: createMicrosoftOutlookCalendarConnectLink
+      summary: Create one short-lived Outlook Calendar connection link
+      description: Returns a non-cacheable bearer URL scoped to the opaque external user, Outlook Calendar, and a custom least-privilege OAuth client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Short-lived Outlook Calendar connection link.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-calendar/reconcile:
+    post:
+      tags: [microsoft-outlook-calendar]
+      operationId: reconcileMicrosoftOutlookCalendarConnection
+      summary: Reconcile one user's Outlook Calendar connection
+      description: Ready requires Calendars.ReadBasic and only reviewed Microsoft identity and refresh scopes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Normalized connection state.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AbsentConnection"
+                  - $ref: "#/components/schemas/PresentConnection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-calendar/upcoming-events:
+    post:
+      tags: [microsoft-outlook-calendar]
+      operationId: readUpcomingMicrosoftOutlookEvents
+      summary: Read a bounded upcoming Outlook primary-calendar window
+      description: Reads at most 50 basic events from the next 14 days. The caller cannot supply a calendar ID, query, time range, page token, event body request, RSVP, provider URL, provider header, or write action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: Bounded normalized upcoming Outlook events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicrosoftOutlookUpcomingEvents"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UpstreamRejected"
+        "409":
+          $ref: "#/components/responses/UpstreamRejected"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-outlook-calendar/revoke:
+    post:
+      tags: [microsoft-outlook-calendar]
+      operationId: revokeMicrosoftOutlookCalendarConnection
+      summary: Revoke one verified Outlook Calendar account
+      description: Verifies external-user ownership before deleting the account at the managed-auth broker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: The broker accepted account revocation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Revocation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UpstreamRejected"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
   /v1/connections/hubspot/connect-link:
     post:
       tags: [hubspot]
@@ -1013,7 +1247,7 @@ components:
           enum: [steward.managed-connect-link.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, hubspot, slack]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
         connect_url:
           type: string
           format: uri
@@ -1031,7 +1265,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, hubspot]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot]
         status:
           type: string
           enum: [not_connected]
@@ -1053,7 +1287,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, hubspot]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot]
         status:
           type: string
           enum: [ready, needs_attention]
@@ -1075,6 +1309,8 @@ components:
             - https://www.googleapis.com/auth/drive.readonly
             - https://www.googleapis.com/auth/gmail.readonly
             - https://www.googleapis.com/auth/calendar.events.readonly
+            - Mail.Read
+            - Calendars.ReadBasic
             - crm.objects.deals.read
         healthy:
           type: boolean
@@ -1538,6 +1774,238 @@ components:
           maximum: 50
         has_more:
           type: boolean
+    MicrosoftGraphID:
+      type: string
+      pattern: '^[A-Za-z0-9_+=/-]{1,1024}$'
+    MicrosoftPerson:
+      type: object
+      additionalProperties: false
+      required: [display_name, email]
+      properties:
+        display_name:
+          type: string
+          maxLength: 1024
+        email:
+          type: string
+          maxLength: 1024
+    MicrosoftOutlookMessage:
+      type: object
+      additionalProperties: false
+      required:
+        - message_id
+        - conversation_id
+        - status
+        - received_at
+        - from
+        - to
+        - subject
+        - is_read
+        - importance
+        - content
+        - content_source
+        - content_bytes
+        - content_sha256
+      properties:
+        message_id:
+          $ref: "#/components/schemas/MicrosoftGraphID"
+        conversation_id:
+          $ref: "#/components/schemas/MicrosoftGraphID"
+        status:
+          type: string
+          enum: [succeeded]
+        received_at:
+          type: string
+          format: date-time
+        from:
+          $ref: "#/components/schemas/MicrosoftPerson"
+        to:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/MicrosoftPerson"
+        subject:
+          type: string
+          maxLength: 4096
+        is_read:
+          type: boolean
+        importance:
+          type: string
+          enum: [low, normal, high]
+        content:
+          type: string
+          maxLength: 16384
+        content_source:
+          type: string
+          enum: [body_preview]
+        content_bytes:
+          type: integer
+          minimum: 0
+          maximum: 16384
+          description: Message projections contain at most 245760 encoded bytes in aggregate.
+        content_sha256:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    MicrosoftOutlookRecentMessages:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - integration
+        - folder
+        - window_days
+        - window_start
+        - window_end
+        - results
+        - result_count
+        - has_more
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.microsoft-outlook-recent-messages.v1]
+        integration:
+          type: string
+          enum: [microsoft-outlook-mail]
+        folder:
+          type: string
+          enum: [inbox]
+        window_days:
+          type: integer
+          enum: [30]
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        results:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/MicrosoftOutlookMessage"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 20
+        has_more:
+          type: boolean
+    MicrosoftOutlookEventTime:
+      type: object
+      additionalProperties: false
+      required: [date_time, time_zone]
+      properties:
+        date_time:
+          type: string
+          maxLength: 64
+        time_zone:
+          type: string
+          maxLength: 256
+    MicrosoftOutlookAttendee:
+      type: object
+      additionalProperties: false
+      required: [display_name, email, type, response]
+      properties:
+        display_name:
+          type: string
+          maxLength: 1024
+        email:
+          type: string
+          maxLength: 1024
+        type:
+          type: string
+          enum: [required, optional, resource]
+        response:
+          type: string
+          enum: [none, organizer, tentativelyAccepted, accepted, declined, notResponded]
+    MicrosoftOutlookEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - event_id
+        - subject
+        - start
+        - end
+        - location
+        - organizer
+        - attendees
+        - is_all_day
+        - is_cancelled
+        - show_as
+        - sensitivity
+        - event_type
+      properties:
+        event_id:
+          $ref: "#/components/schemas/MicrosoftGraphID"
+        subject:
+          type: string
+          maxLength: 4096
+        start:
+          $ref: "#/components/schemas/MicrosoftOutlookEventTime"
+        end:
+          $ref: "#/components/schemas/MicrosoftOutlookEventTime"
+        location:
+          type: string
+          maxLength: 4096
+        organizer:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/MicrosoftPerson"
+        attendees:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/MicrosoftOutlookAttendee"
+        is_all_day:
+          type: boolean
+        is_cancelled:
+          type: boolean
+        show_as:
+          type: string
+          enum: [free, tentative, busy, oof, workingElsewhere, unknown]
+        sensitivity:
+          type: string
+          enum: [normal, personal, private, confidential]
+        event_type:
+          type: string
+          enum: [singleInstance, occurrence, exception, seriesMaster]
+    MicrosoftOutlookUpcomingEvents:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - integration
+        - calendar
+        - window_start
+        - window_end
+        - results
+        - result_count
+        - has_more
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.microsoft-outlook-upcoming-events.v1]
+        integration:
+          type: string
+          enum: [microsoft-outlook-calendar]
+        calendar:
+          type: string
+          enum: [primary]
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        results:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/MicrosoftOutlookEvent"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 50
+        has_more:
+          type: boolean
     HubSpotDeal:
       type: object
       additionalProperties: false
@@ -1727,7 +2195,7 @@ components:
           enum: [steward.managed-connection-revocation.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, hubspot, slack]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
         account_id:
           $ref: "#/components/schemas/AccountID"
         revoked:
