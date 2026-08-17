@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Managed Integration Worker API
-  version: "1.6.0"
+  version: "1.7.0"
   description: |
     Private finite-operation worker for managed provider connections. Broker and
     provider credentials remain inside the worker. This contract does not expose
@@ -49,6 +49,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+  /v1/connections/{integration}/accounts:
+    post:
+      tags: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
+      operationId: listManagedIntegrationAccounts
+      summary: List bounded credential-free accounts for one released integration
+      description: |
+        Lists only accounts owned by the opaque external user and configured
+        custom OAuth client. The response includes bounded display names,
+        exact reported scopes, health, and readiness; it never includes provider
+        credentials. Availability in this list is not application authorization.
+      parameters:
+        - name: integration
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Bounded normalized account choices.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ManagedSingleScopeAccountList"
+                  - $ref: "#/components/schemas/ManagedMultiScopeAccountList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
   /v1/connections/google-drive/connect-link:
     post:
       tags: [google-drive]
@@ -1148,6 +1195,17 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: The requested finite integration route is not released.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     UpstreamRejected:
       description: The broker or provider rejected the frozen operation or returned an invalid bounded response.
       headers:
@@ -1255,6 +1313,86 @@ components:
         expires_at:
           type: string
           format: date-time
+    ManagedAccountChoice:
+      type: object
+      additionalProperties: false
+      required: [account_id, account_name, authorized_scopes, healthy, status]
+      properties:
+        account_id:
+          $ref: "#/components/schemas/AccountID"
+        account_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        authorized_scopes:
+          type: array
+          uniqueItems: true
+          maxItems: 256
+          items:
+            type: string
+            maxLength: 4096
+        healthy:
+          type: boolean
+        status:
+          type: string
+          enum: [ready, needs_attention]
+    ManagedSingleScopeAccountList:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, accounts, result_count, required_scope]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.managed-account-list.v1]
+        integration:
+          type: string
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot]
+        accounts:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ManagedAccountChoice"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 100
+        required_scope:
+          type: string
+          enum:
+            - https://www.googleapis.com/auth/drive.readonly
+            - https://www.googleapis.com/auth/gmail.readonly
+            - https://www.googleapis.com/auth/calendar.events.readonly
+            - Mail.Read
+            - Calendars.ReadBasic
+            - crm.objects.deals.read
+    ManagedMultiScopeAccountList:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, accounts, result_count, required_scopes]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.managed-account-list.v1]
+        integration:
+          type: string
+          enum: [slack]
+        accounts:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ManagedAccountChoice"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 100
+        required_scopes:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [channels:history, channels:read]
     AbsentConnection:
       type: object
       additionalProperties: false
@@ -1295,7 +1433,8 @@ components:
           $ref: "#/components/schemas/AccountID"
         account_name:
           type: string
-          maxLength: 4096
+          minLength: 1
+          maxLength: 256
         authorized_scopes:
           type: array
           uniqueItems: true
@@ -1354,7 +1493,8 @@ components:
           $ref: "#/components/schemas/AccountID"
         account_name:
           type: string
-          maxLength: 4096
+          minLength: 1
+          maxLength: 256
         authorized_scopes:
           type: array
           uniqueItems: true

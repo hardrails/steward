@@ -7,6 +7,12 @@ MCP server, or dynamic action catalog.
 
 The worker currently supports Google Drive, Gmail, Google Calendar, Outlook Mail,
 Outlook Calendar, HubSpot, and Slack through Pipedream Connect.
+For each released profile it can also list at most 100 accounts owned by one opaque
+external user and the configured custom OAuth client. That projection contains only
+the provider's bounded display name, exact reported scopes, health, readiness, and an
+opaque account ID needed for a later finite operation; credentials and broker metadata
+remain inside the worker. The caller must still grant one exact account to each app or
+work definition. Presence in the list is availability, never inherited authority.
 The Google Drive profile can:
 
 - create a ten-minute, one-use Google Drive Connect Link;
