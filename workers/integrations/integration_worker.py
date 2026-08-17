@@ -901,7 +901,8 @@ class PipedreamClient:
         if (
             not isinstance(account_name, str)
             or not account_name
-            or len(account_name.encode("utf-8")) > 256
+            or len(account_name) > 256
+            or len(account_name.encode("utf-8")) > 1_024
         ):
             account_name = default_name
         return {
@@ -975,7 +976,7 @@ class PipedreamClient:
                     else "needs_attention"
                 ),
             }
-            for item in accounts
+            for item in accounts[:100]
         ]
         result: dict[str, object] = {
             "accounts": projected,

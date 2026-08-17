@@ -806,6 +806,27 @@ class PipedreamClientTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.WorkerError, "duplicate accounts"):
                 client.list_connections("ryu_abcdefghijklmnop")
 
+    def test_account_list_retains_international_names_and_caps_newest_hundred(self) -> None:
+        international = connected_account(identifier="apn_international")
+        international["name"] = "東京" * 128
+        accounts = [international]
+        for index in range(105):
+            account = connected_account(identifier=f"apn_choice{index:03d}")
+            account["created_at"] = f"2026-08-15T12:{index // 60:02d}:{index % 60:02d}Z"
+            accounts.append(account)
+        with broker_client() as (client, state):
+            state.accounts = accounts
+            result = client.list_connections("ryu_abcdefghijklmnop")
+
+        self.assertEqual(result["result_count"], 100)
+        self.assertEqual(len(result["accounts"]), 100)
+        self.assertEqual(result["accounts"][0]["account_id"], "apn_choice104")
+
+        with broker_client() as (client, state):
+            state.accounts = [international]
+            result = client.list_connections("ryu_abcdefghijklmnop")
+        self.assertEqual(result["accounts"][0]["account_name"], "東京" * 128)
+
     def test_calendar_connect_and_reconcile_are_profile_scoped(self) -> None:
         with broker_client() as (client, state):
             link = client.connect_link("ryu_abcdefghijklmnop", "google-calendar")
