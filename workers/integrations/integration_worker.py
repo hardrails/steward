@@ -897,20 +897,28 @@ class PipedreamClient:
         ):
             return None
         healthy = value.get("healthy") is True and value.get("dead") is not True and not value.get("error")
+        account_name = value.get("name")
+        if (
+            not isinstance(account_name, str)
+            or not account_name
+            or len(account_name) > 256
+            or len(account_name.encode("utf-8")) > 1_024
+        ):
+            account_name = default_name
         return {
             "account_id": identifier,
-            "account_name": value.get("name") if isinstance(value.get("name"), str) else default_name,
+            "account_name": account_name,
             "authorized_scopes": sorted(set(scopes)),
             "created_at": value.get("created_at") if isinstance(value.get("created_at"), str) else "",
             "healthy": healthy,
         }
 
-    def reconcile(
+    def _normalized_accounts(
         self,
         user: str,
-        scope: str = "connect:accounts:read",
-        integration: str = "google-drive",
-    ) -> tuple[str, dict[str, object]]:
+        scope: str,
+        integration: str,
+    ) -> tuple[str, tuple[dict[str, object], ...], tuple[str, ...]]:
         app, default_name, required_scopes, _oauth_app_id = self._profile(integration)
         token, raw_accounts = self._accounts(user, scope, integration)
         accounts = [
@@ -926,7 +934,74 @@ class PipedreamClient:
             )
             is not None
         ]
-        accounts.sort(key=lambda item: (str(item["created_at"]), str(item["account_id"])), reverse=True)
+        identifiers = [str(item["account_id"]) for item in accounts]
+        if len(set(identifiers)) != len(identifiers):
+            raise WorkerError(
+                502,
+                "invalid_broker_response",
+                "managed-auth broker returned duplicate accounts",
+            )
+        accounts.sort(
+            key=lambda item: (str(item["created_at"]), str(item["account_id"])),
+            reverse=True,
+        )
+        return token, tuple(accounts), required_scopes
+
+    def list_connections(
+        self,
+        user: str,
+        integration: str = "google-drive",
+    ) -> dict[str, object]:
+        """Return bounded credential-free choices for one reviewed integration."""
+
+        _token, accounts, required_scopes = self._normalized_accounts(
+            user,
+            "connect:accounts:read",
+            integration,
+        )
+        allowed_extra_scopes = self._allowed_extra_scopes(integration)
+        projected = [
+            {
+                "account_id": item["account_id"],
+                "account_name": item["account_name"],
+                "authorized_scopes": item["authorized_scopes"],
+                "healthy": item["healthy"],
+                "status": (
+                    "ready"
+                    if self._account_ready(
+                        item,
+                        required_scopes,
+                        allowed_extra_scopes=allowed_extra_scopes,
+                    )
+                    else "needs_attention"
+                ),
+            }
+            for item in accounts[:100]
+        ]
+        result: dict[str, object] = {
+            "accounts": projected,
+            "integration": integration,
+            "result_count": len(projected),
+            "schema_version": "steward.managed-account-list.v1",
+        }
+        if len(required_scopes) == 1:
+            result["required_scope"] = required_scopes[0]
+        else:
+            result["required_scopes"] = list(required_scopes)
+        return result
+
+    def reconcile(
+        self,
+        user: str,
+        scope: str = "connect:accounts:read",
+        integration: str = "google-drive",
+    ) -> tuple[str, dict[str, object]]:
+        token, normalized, required_scopes = self._normalized_accounts(
+            user,
+            scope,
+            integration,
+        )
+        accounts = list(normalized)
         selected = next(
             (
                 item
@@ -3304,7 +3379,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         try:
             value = json.loads(raw)
-            if self.path == "/v1/connections/google-drive/connect-link":
+            account_list_prefix = "/v1/connections/"
+            account_list_suffix = "/accounts"
+            if (
+                self.path.startswith(account_list_prefix)
+                and self.path.endswith(account_list_suffix)
+                and self.path.count("/") == 4
+            ):
+                integration = self.path[
+                    len(account_list_prefix) : -len(account_list_suffix)
+                ]
+                if integration not in INTEGRATION_PROFILES:
+                    raise WorkerError(404, "not_found", "route not found")
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.list_connections(
+                    external_user(body["external_user_id"]),
+                    integration,
+                )
+            elif self.path == "/v1/connections/google-drive/connect-link":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 result = self.worker.client.connect_link(external_user(body["external_user_id"]))
             elif self.path == "/v1/connections/gmail/connect-link":

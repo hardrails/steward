@@ -763,6 +763,70 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(account_query["app"], ["gmail"])
         self.assertEqual(account_query["oauth_app_id"], ["oa_gmailtest"])
 
+    def test_account_list_is_bounded_sorted_and_credential_free(self) -> None:
+        older = connected_gmail_account(identifier="apn_older123")
+        older["name"] = "Older Inbox"
+        older["created_at"] = "2026-08-13T12:00:00Z"
+        over_scoped = connected_gmail_account(
+            scopes=[worker.GMAIL_SCOPE, worker.GOOGLE_DRIVE_SCOPE],
+            identifier="apn_newer123",
+        )
+        over_scoped["name"] = "Needs review"
+        over_scoped["created_at"] = "2026-08-15T12:00:00Z"
+        with broker_client() as (client, state):
+            state.accounts = [older, over_scoped]
+            result = client.list_connections("ryu_abcdefghijklmnop", "gmail")
+
+        self.assertEqual(result["schema_version"], "steward.managed-account-list.v1")
+        self.assertEqual(result["required_scope"], worker.GMAIL_SCOPE)
+        self.assertEqual(result["result_count"], 2)
+        self.assertEqual(
+            [item["account_id"] for item in result["accounts"]],
+            ["apn_newer123", "apn_older123"],
+        )
+        self.assertEqual(
+            [item["status"] for item in result["accounts"]],
+            ["needs_attention", "ready"],
+        )
+        encoded = json.dumps(result)
+        self.assertNotIn("credentials", encoded)
+        self.assertNotIn("created_at", encoded)
+        self.assertNotIn("provider-access-secret", encoded)
+
+    def test_account_list_rejects_duplicate_identity_and_bounds_display_name(self) -> None:
+        malformed_name = connected_account()
+        malformed_name["name"] = "x" * 257
+        with broker_client() as (client, state):
+            state.accounts = [malformed_name]
+            result = client.list_connections("ryu_abcdefghijklmnop")
+        self.assertEqual(result["accounts"][0]["account_name"], "Google Drive")
+
+        with broker_client() as (client, state):
+            state.accounts = [connected_account(), connected_account()]
+            with self.assertRaisesRegex(worker.WorkerError, "duplicate accounts"):
+                client.list_connections("ryu_abcdefghijklmnop")
+
+    def test_account_list_retains_international_names_and_caps_newest_hundred(self) -> None:
+        international = connected_account(identifier="apn_international")
+        international["name"] = "東京" * 128
+        accounts = [international]
+        for index in range(105):
+            account = connected_account(identifier=f"apn_choice{index:03d}")
+            account["created_at"] = f"2026-08-15T12:{index // 60:02d}:{index % 60:02d}Z"
+            accounts.append(account)
+        with broker_client() as (client, state):
+            state.accounts = accounts
+            result = client.list_connections("ryu_abcdefghijklmnop")
+
+        self.assertEqual(result["result_count"], 100)
+        self.assertEqual(len(result["accounts"]), 100)
+        self.assertEqual(result["accounts"][0]["account_id"], "apn_choice104")
+
+        with broker_client() as (client, state):
+            state.accounts = [international]
+            result = client.list_connections("ryu_abcdefghijklmnop")
+        self.assertEqual(result["accounts"][0]["account_name"], "東京" * 128)
+
     def test_calendar_connect_and_reconcile_are_profile_scoped(self) -> None:
         with broker_client() as (client, state):
             link = client.connect_link("ryu_abcdefghijklmnop", "google-calendar")
@@ -2289,6 +2353,19 @@ class StubClient:
             "integration": integration,
         }
 
+    def list_connections(
+        self,
+        user: str,
+        integration: str = "google-drive",
+    ) -> dict[str, object]:
+        return {
+            "accounts": [],
+            "integration": integration,
+            "result_count": 0,
+            "schema_version": "steward.managed-account-list.v1",
+            "user": user,
+        }
+
     def list_drive_metadata(self, user: str, account: str) -> dict[str, object]:
         return {"schema_version": "test", "user": user, "account": account}
 
@@ -2581,6 +2658,42 @@ class HTTPContractTests(unittest.TestCase):
                 port,
                 "/v1/connections/google-drive/connect-link",
                 b'{"external_user_id":"ryu_abcdefghijklmnop","surprise":true}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+
+    def test_account_list_routes_are_closed_to_released_integrations(self) -> None:
+        with integration_server() as port:
+            for integration in (
+                "google-drive",
+                "gmail",
+                "google-calendar",
+                "microsoft-outlook-mail",
+                "microsoft-outlook-calendar",
+                "slack",
+                "hubspot",
+            ):
+                with self.subTest(integration=integration):
+                    status, body, headers = call_worker(
+                        port,
+                        f"/v1/connections/{integration}/accounts",
+                        b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["integration"], integration)
+                    self.assertEqual(body["user"], "ryu_abcdefghijklmnop")
+                    self.assertEqual(headers["Cache-Control"], "no-store")
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/not-released/accounts",
+                b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+            )
+            self.assertEqual((status, body["error"]["code"]), (404, "not_found"))
+
+            status, body, _headers = call_worker(
+                port,
+                "/v1/connections/gmail/accounts",
+                b'{"external_user_id":"ryu_abcdefghijklmnop","include_credentials":true}',
             )
             self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
 
