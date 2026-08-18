@@ -140,7 +140,7 @@ provides a temporary loopback HTTP URL for the browser without injecting the
 saved operator token or requiring browser trust-store changes.
 
 Steward includes a qualified Hermes Agent adapter definition for upstream commit
-`3ef6bbd201263d354fd83ec55b3c306ded2eb72a` on `linux/amd64`; other platforms are
+`e624e9fde561e1add9388384012b295fde669ade` on `linux/amd64`; other platforms are
 not yet qualified. The source-built image runs non-root
 under gVisor, fixes inference through `http://steward-relay:8080/v1`, and exposes
 bounded negotiation, health, run submission, and run-status operations on port
