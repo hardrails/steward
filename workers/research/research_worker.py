@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hmac
 import html.parser
 import http.client
@@ -22,6 +23,7 @@ import sys
 import time
 import urllib.parse
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 
 MAX_REQUEST = 64 << 10
 MAX_UPSTREAM = 4 << 20
@@ -34,6 +36,16 @@ UPSTREAM_TIMEOUT = 45
 BRAVE_API_BASE = urllib.parse.urlsplit("https://api.search.brave.com")
 BRAVE_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 BRAVE_RETRY_DELAYS_SECONDS = (1.0, 2.0)
+EIA_API_BASE = urllib.parse.urlsplit("https://api.eia.gov")
+EIA_RETAIL_SALES_PATH = "/v2/electricity/retail-sales/data/"
+EIA_RESULT_SCHEMA = "steward.eia-commercial-electricity-price.v1"
+EIA_STATE_CODES = frozenset({
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA",
+    "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY",
+    "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX",
+    "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+})
 MAX_REDIRECTS = 5
 V2_MAX_CONCURRENCY = 4
 V2_SOURCE_SECONDS = 15
@@ -168,6 +180,7 @@ def upstream_json(
     subscription_token: bytes | None = None,
     retryable_statuses: frozenset[int] = frozenset(),
     retry_delays_seconds: tuple[float, ...] = (),
+    timeout_seconds: float = UPSTREAM_TIMEOUT,
 ) -> object:
     body = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
     headers = {"Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": "steward-research-worker/1"}
@@ -185,11 +198,13 @@ def upstream_json(
             type(delay) is not float or not 0.0 < delay <= 5.0
             for delay in retry_delays_seconds
         )
+        or type(timeout_seconds) not in {int, float}
+        or not 0 < timeout_seconds <= UPSTREAM_TIMEOUT
     ):
         raise RuntimeError("upstream retry policy is invalid")
     connection_type = http.client.HTTPSConnection if base.scheme == "https" else http.client.HTTPConnection
     for attempt in range(len(retry_delays_seconds) + 1):
-        connection = connection_type(base.hostname, base.port, timeout=UPSTREAM_TIMEOUT)
+        connection = connection_type(base.hostname, base.port, timeout=timeout_seconds)
         try:
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
@@ -798,6 +813,199 @@ def search_brave(query: str, limit: int, api_key: bytes) -> dict[str, object]:
     return {"schema_version": "steward.research-search-result.v1", "results": results}
 
 
+def eia_request_state(value: str) -> str | None:
+    """Recognize one credential-free, bounded EIA request profile."""
+
+    try:
+        url, parsed, _host, _port = public_url_shape(value)
+    except (UnicodeError, ValueError) as error:
+        raise WorkerError(400, "invalid_source_url", "source URL is invalid") from error
+    if parsed.hostname != EIA_API_BASE.hostname:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != EIA_API_BASE.netloc
+        or parsed.path != EIA_RETAIL_SALES_PATH
+        or parsed.fragment
+    ):
+        raise WorkerError(400, "invalid_source_url", "EIA source URL is not reviewed")
+    try:
+        query = urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError as error:
+        raise WorkerError(400, "invalid_source_url", "EIA source query is invalid") from error
+    if len(query) != 7:
+        raise WorkerError(400, "invalid_source_url", "EIA source query is not reviewed")
+    expected_without_state = [
+        ("frequency", "annual"),
+        ("data[]", "price"),
+        ("facets[sectorid][]", "COM"),
+        ("sort[0][column]", "period"),
+        ("sort[0][direction]", "desc"),
+        ("length", "5"),
+    ]
+    state_items = [item for item in query if item[0] == "facets[stateid][]"]
+    remaining = [item for item in query if item[0] != "facets[stateid][]"]
+    if len(state_items) != 1 or remaining != expected_without_state:
+        raise WorkerError(400, "invalid_source_url", "EIA source query is not reviewed")
+    state = state_items[0][1]
+    if state not in EIA_STATE_CODES or url != urllib.parse.urlunsplit(parsed):
+        raise WorkerError(400, "invalid_source_url", "EIA state is invalid")
+    return state
+
+
+def _eia_price_row(value: object, state: str) -> dict[str, str]:
+    fields = {
+        "period",
+        "price",
+        "price-units",
+        "sectorName",
+        "sectorid",
+        "stateDescription",
+        "stateid",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise WorkerError(502, "invalid_upstream_response", "EIA row shape is invalid")
+    if (
+        not isinstance(value["period"], str)
+        or re.fullmatch(r"[0-9]{4}", value["period"]) is None
+        or value["stateid"] != state
+        or value["sectorid"] != "COM"
+        or value["sectorName"] != "commercial"
+        or value["price-units"] != "cents per kilowatt-hour"
+        or not isinstance(value["stateDescription"], str)
+        or not bounded_utf8_text(value["stateDescription"], minimum=1, maximum=128)
+        or not isinstance(value["price"], str)
+        or len(value["price"]) > 32
+    ):
+        raise WorkerError(502, "invalid_upstream_response", "EIA row fields are invalid")
+    try:
+        price = Decimal(value["price"])
+    except InvalidOperation as error:
+        raise WorkerError(502, "invalid_upstream_response", "EIA price is invalid") from error
+    if not price.is_finite() or price < 0:
+        raise WorkerError(502, "invalid_upstream_response", "EIA price is invalid")
+    return {
+        "period": value["period"],
+        "price": value["price"],
+        "price_units": value["price-units"],
+        "state_name": value["stateDescription"],
+    }
+
+
+def eia_commercial_electricity_price(
+    requested_url: str,
+    api_key: bytes,
+    *,
+    deadline: float,
+) -> str:
+    """Fetch one frozen EIA series without reflecting the credential-bearing URL."""
+
+    state = eia_request_state(requested_url)
+    if state is None:
+        raise WorkerError(400, "invalid_source_url", "EIA source URL is not reviewed")
+    remaining = remaining_source_seconds(deadline)
+    query = urllib.parse.urlencode(
+        [
+            ("api_key", api_key.decode("ascii")),
+            ("frequency", "annual"),
+            ("data[]", "price"),
+            ("facets[stateid][]", state),
+            ("facets[sectorid][]", "COM"),
+            ("sort[0][column]", "period"),
+            ("sort[0][direction]", "desc"),
+            ("length", "5"),
+        ]
+    )
+    value = upstream_json(
+        EIA_API_BASE,
+        "GET",
+        request_path(EIA_API_BASE, EIA_RETAIL_SALES_PATH, query),
+        None,
+        timeout_seconds=min(float(V2_SOURCE_SECONDS), remaining),
+    )
+    if not isinstance(value, dict) or not isinstance(value.get("response"), dict):
+        raise WorkerError(502, "invalid_upstream_response", "EIA response is invalid")
+    response = value["response"]
+    if set(response) != {"data", "dateFormat", "description", "frequency", "total"}:
+        raise WorkerError(502, "invalid_upstream_response", "EIA response shape is invalid")
+    data = response["data"]
+    if (
+        response["dateFormat"] != "YYYY"
+        or response["frequency"] != "annual"
+        or not isinstance(response["description"], str)
+        or not bounded_utf8_text(response["description"], minimum=1, maximum=2048)
+        or not isinstance(response["total"], str)
+        or re.fullmatch(r"[0-9]{1,12}", response["total"]) is None
+        or not isinstance(data, list)
+        or not 1 <= len(data) <= 5
+    ):
+        raise WorkerError(502, "invalid_upstream_response", "EIA response fields are invalid")
+    rows = [_eia_price_row(item, state) for item in data]
+    periods = [item["period"] for item in rows]
+    if periods != sorted(periods, reverse=True) or len(periods) != len(set(periods)):
+        raise WorkerError(502, "invalid_upstream_response", "EIA periods are invalid")
+    return json.dumps(
+        {
+            "data": rows,
+            "frequency": "annual",
+            "schema_version": EIA_RESULT_SCHEMA,
+            "state_id": state,
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def extract_eia_outcome(
+    requested_url: str,
+    api_key: bytes | None,
+    *,
+    deadline: float,
+) -> dict[str, object]:
+    if api_key is None:
+        return failed_v2_outcome(requested_url, "source_unavailable")
+    try:
+        content = eia_commercial_electricity_price(
+            requested_url,
+            api_key,
+            deadline=deadline,
+        )
+    except WorkerError as error:
+        failure_code = {
+            "upstream_rejected": "source_rejected",
+            "invalid_upstream_response": "unsupported_source",
+        }.get(error.code, "source_unavailable")
+        return failed_v2_outcome(requested_url, failure_code)
+    normalized, truncated = normalized_v2_text(content)
+    if truncated:
+        raise RuntimeError("EIA normalized result exceeded its reviewed bound")
+    return {
+        "requested_url": requested_url,
+        "disposition": "extracted",
+        "resolved_url": requested_url,
+        "source_media_type": "application/json",
+        "title": "U.S. EIA commercial electricity prices",
+        "content": normalized,
+        "content_type": "text/plain",
+        "content_truncated": False,
+    }
+
+
+def bounded_utf8_text(value: str, *, minimum: int, maximum: int) -> bool:
+    """Reject malformed Unicode at the provider boundary without escaping isolation."""
+
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+    return minimum <= size <= maximum
+
+
 def extract(payload: dict[str, object]) -> dict[str, object]:
     if set(payload) != {"urls"} or not isinstance(payload.get("urls"), list) or not 1 <= len(payload["urls"]) <= 10:
         raise WorkerError(400, "invalid_request", "extract requires one to ten URLs")
@@ -821,8 +1029,18 @@ def validate_extract_v2_url(value: object) -> str:
     return url
 
 
-def extract_v2_outcome(requested_url: str, batch_deadline: float) -> dict[str, object]:
+def extract_v2_outcome(
+    requested_url: str,
+    batch_deadline: float,
+    eia_api_key: bytes | None = None,
+) -> dict[str, object]:
     source_deadline = min(batch_deadline, time.monotonic() + V2_SOURCE_SECONDS)
+    if eia_request_state(requested_url) is not None:
+        return extract_eia_outcome(
+            requested_url,
+            eia_api_key,
+            deadline=source_deadline,
+        )
     try:
         resolved_url, title, content, source_media_type = fetch_public_page(
             requested_url,
@@ -871,13 +1089,29 @@ def v2_source_child() -> int:
         if not raw or len(raw) > MAX_REQUEST:
             return 1
         payload = json.loads(raw)
-        if not isinstance(payload, dict) or set(payload) != {"url"}:
+        if not isinstance(payload, dict) or set(payload) not in (
+            {"url"},
+            {"url", "eia_api_key"},
+        ):
             return 1
         requested_url = validate_extract_v2_url(payload["url"])
+        api_key_text = payload.get("eia_api_key")
+        if api_key_text is None:
+            eia_api_key = None
+        elif isinstance(api_key_text, str):
+            try:
+                eia_api_key = base64.b64decode(api_key_text, validate=True)
+            except ValueError:
+                return 1
+            if not 16 <= len(eia_api_key) <= 4096:
+                return 1
+        else:
+            return 1
         try:
             result: object = extract_v2_outcome(
                 requested_url,
                 time.monotonic() + V2_SOURCE_SECONDS,
+                eia_api_key,
             )
         except WorkerError as error:
             if error.code != "invalid_source_url":
@@ -892,8 +1126,22 @@ def v2_source_child() -> int:
         return 1
 
 
-def start_v2_source_process(index: int, requested_url: str, batch_deadline: float) -> V2SourceProcess:
-    body = json.dumps({"url": requested_url}, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+def start_v2_source_process(
+    index: int,
+    requested_url: str,
+    batch_deadline: float,
+    *,
+    eia_api_key: bytes | None = None,
+) -> V2SourceProcess:
+    payload = {"url": requested_url}
+    if eia_request_state(requested_url) is not None and eia_api_key is not None:
+        payload["eia_api_key"] = base64.b64encode(eia_api_key).decode("ascii")
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
     process = subprocess.Popen(
         [sys.executable, "-I", os.path.abspath(__file__), V2_SOURCE_CHILD_MODE],
         stdin=subprocess.PIPE,
@@ -1016,6 +1264,8 @@ def decode_v2_source_result(source: V2SourceProcess) -> dict[str, object]:
 def run_v2_source_processes(
     urls: list[str],
     process_factory: Callable[[int, str, float], V2SourceProcess] | None = None,
+    *,
+    batch_deadline: float | None = None,
 ) -> list[dict[str, object]]:
     if process_factory is None:
         process_factory = start_v2_source_process
@@ -1024,7 +1274,8 @@ def run_v2_source_processes(
         float(V2_CLEANUP_RESERVE_SECONDS),
         V2_BATCH_SECONDS / 4,
     )
-    batch_deadline = time.monotonic() + V2_BATCH_SECONDS - cleanup_reserve
+    if batch_deadline is None:
+        batch_deadline = time.monotonic() + V2_BATCH_SECONDS - cleanup_reserve
     outcomes: list[dict[str, object] | None] = [None] * len(urls)
     running: list[V2SourceProcess] = []
     next_index = 0
@@ -1094,12 +1345,45 @@ def run_v2_source_processes(
     return [outcome for outcome in outcomes if outcome is not None]
 
 
-def extract_v2(payload: dict[str, object]) -> dict[str, object]:
+def extract_v2(
+    payload: dict[str, object],
+    eia_api_key: bytes | None = None,
+) -> dict[str, object]:
     if set(payload) != {"urls"} or not isinstance(payload.get("urls"), list) or not 1 <= len(payload["urls"]) <= 10:
         raise WorkerError(400, "invalid_request", "extract requires one to ten URLs")
     urls = [validate_extract_v2_url(value) for value in payload["urls"]]
-    outcomes = run_v2_source_processes(urls)
-    return {"schema_version": "steward.research-extract-result.v2", "outcomes": outcomes}
+    eia_states = [eia_request_state(url) for url in urls]
+    if sum(state is not None for state in eia_states) > 1:
+        raise WorkerError(400, "invalid_request", "extract accepts at most one EIA source")
+    cleanup_reserve = min(float(V2_CLEANUP_RESERVE_SECONDS), V2_BATCH_SECONDS / 4)
+    batch_deadline = time.monotonic() + V2_BATCH_SECONDS - cleanup_reserve
+    def process_factory(
+        index: int,
+        requested_url: str,
+        source_batch_deadline: float,
+    ) -> V2SourceProcess:
+        if eia_states[index] is None or eia_api_key is None:
+            return start_v2_source_process(
+                index,
+                requested_url,
+                source_batch_deadline,
+            )
+        return start_v2_source_process(
+            index,
+            requested_url,
+            source_batch_deadline,
+            eia_api_key=eia_api_key,
+        )
+
+    outcomes = run_v2_source_processes(
+        urls,
+        process_factory=process_factory,
+        batch_deadline=batch_deadline,
+    )
+    return {
+        "schema_version": "steward.research-extract-result.v2",
+        "outcomes": outcomes,
+    }
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1118,7 +1402,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif self.path == "/v1/extract":
                 result = extract(payload)
             elif self.path == "/v2/extract":
-                result = extract_v2(payload)
+                result = extract_v2(
+                    payload,
+                    getattr(self.server, "eia_api_key", None),
+                )
             else:
                 raise WorkerError(404, "route_not_found", "route is not available")
             self.write_json(200, result)
@@ -1182,6 +1469,11 @@ class Server(http.server.HTTPServer):
         self.brave_api_key = read_secret(
             os.environ.get("STEWARD_BRAVE_API_KEY_FILE", ""),
             "Brave Search API key",
+            required=False,
+        )
+        self.eia_api_key = read_secret(
+            os.environ.get("STEWARD_EIA_API_KEY_FILE", ""),
+            "EIA API key",
             required=False,
         )
 
