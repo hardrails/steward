@@ -6,6 +6,8 @@ network access. It adapts a SearXNG JSON API by default, and automatically uses
 the Brave Search API when an owner-only Brave key file is configured. Both
 paths normalize to the same fixed result contract before directly extracting
 bounded text from public HTTP(S) HTML, XHTML, plain-text, JSON, and PDF sources.
+It can also inject an owner-only U.S. EIA API key for one frozen, credential-free
+commercial electricity-price request profile.
 
 The worker is intentionally not a crawler or browser. Before each request and
 redirect, it resolves the hostname, rejects the destination if any returned
@@ -85,6 +87,16 @@ group when its authority expires, so blocking DNS, socket, parser, and descendan
 PDF work cannot wedge the single-threaded HTTP server. A source or pending URL
 whose deadline expires receives `source_unavailable`.
 
+The EIA profile is available only through `POST /v2/extract`. The request URL
+must be the exact HTTPS retail-sales route with annual frequency, commercial
+sector, price data, one U.S. state or District of Columbia, descending period,
+and a five-row limit. It must not contain `api_key`. The worker permits at most
+one EIA URL per extraction call, injects the mounted key only into the outbound
+request to `api.eia.gov`, validates the provider response, and returns a small
+`steward.eia-commercial-electricity-price.v1` JSON projection. The requested and
+resolved URLs remain credential-free. Any wider EIA route, facet, frequency,
+column, ordering, length, or caller-supplied key is rejected before egress.
+
 Source children receive a stripped environment and no inherited file
 descriptors, but they run under the same UID and container filesystem as the
 parent. They are a deadline and bounded-output failure boundary, not a separate
@@ -124,6 +136,12 @@ to the same public-destination validation as SearXNG results. If the configured
 provider rejects a request or returns no usable results, the fixed search
 contract reports the bounded error or empty list; it does not substitute
 uncited model output.
+
+To enable the EIA profile, mount a separate owner-only API-key file and set
+`STEWARD_EIA_API_KEY_FILE` to it. The key never enters the worker request,
+normalized response, log, child-process environment, or source artifact. If no
+key is configured, an otherwise valid EIA URL produces the closed
+`source_unavailable` outcome.
 
 Run the dependency-backed adversarial tests inside the built image:
 

@@ -54,6 +54,21 @@ def pdf_with_text(text: str) -> bytes:
     return bytes(document)
 
 
+def eia_price_url(state: str = "WV") -> str:
+    query = urllib.parse.urlencode(
+        [
+            ("frequency", "annual"),
+            ("data[]", "price"),
+            ("facets[stateid][]", state),
+            ("facets[sectorid][]", "COM"),
+            ("sort[0][column]", "period"),
+            ("sort[0][direction]", "desc"),
+            ("length", "5"),
+        ]
+    )
+    return f"https://api.eia.gov/v2/electricity/retail-sales/data/?{query}"
+
+
 class SearchTests(unittest.TestCase):
     def test_brave_search_normalizes_only_public_results(self) -> None:
         response = {
@@ -224,6 +239,124 @@ class SearchTests(unittest.TestCase):
             "/search?q=Colusa+site+diligence&format=json",
             None,
         )
+
+
+class EIATests(unittest.TestCase):
+    def response(self) -> dict[str, object]:
+        return {
+            "response": {
+                "data": [
+                    {
+                        "period": "2024",
+                        "price": "9.24",
+                        "price-units": "cents per kilowatthour",
+                        "sectorName": "commercial",
+                        "sectorid": "COM",
+                        "stateDescription": "West Virginia",
+                        "stateid": "WV",
+                    },
+                    {
+                        "period": "2023",
+                        "price": "8.91",
+                        "price-units": "cents per kilowatthour",
+                        "sectorName": "commercial",
+                        "sectorid": "COM",
+                        "stateDescription": "West Virginia",
+                        "stateid": "WV",
+                    },
+                ],
+                "dateFormat": "YYYY",
+                "description": "Electricity sales to ultimate customers",
+                "frequency": "annual",
+                "total": "24",
+            },
+            "warnings": [{"warning": "incomplete return", "description": "bounded"}],
+        }
+
+    def test_eia_profile_injects_key_and_never_reflects_it(self) -> None:
+        requested_url = eia_price_url()
+        api_key = b"eia-fixture-secret-key"
+        with mock.patch.object(worker, "upstream_json", return_value=self.response()) as upstream:
+            outcome = worker.extract_eia_outcome(
+                requested_url,
+                api_key,
+                deadline=time.monotonic() + 5,
+            )
+
+        self.assertEqual(outcome["disposition"], "extracted")
+        self.assertEqual(outcome["requested_url"], requested_url)
+        self.assertEqual(outcome["resolved_url"], requested_url)
+        self.assertEqual(outcome["source_media_type"], "application/json")
+        projected = json.loads(outcome["content"])
+        self.assertEqual(projected["schema_version"], worker.EIA_RESULT_SCHEMA)
+        self.assertEqual(projected["state_id"], "WV")
+        self.assertEqual(projected["data"][0]["period"], "2024")
+        self.assertNotIn(api_key.decode(), json.dumps(outcome))
+        called_path = upstream.call_args.args[2]
+        self.assertIn("api_key=eia-fixture-secret-key", called_path)
+        self.assertNotIn("api_key", requested_url)
+        self.assertGreater(upstream.call_args.kwargs["timeout_seconds"], 4)
+        self.assertLessEqual(upstream.call_args.kwargs["timeout_seconds"], 5)
+
+    def test_eia_profile_rejects_query_widening_and_multiple_calls(self) -> None:
+        invalid = (
+            eia_price_url().replace("length=5", "length=500"),
+            eia_price_url().replace("COM", "RES"),
+            eia_price_url().replace("frequency=annual", "frequency=monthly"),
+            eia_price_url("XX"),
+            eia_price_url() + "&api_key=attacker",
+        )
+        for url in invalid:
+            with self.subTest(url=url), self.assertRaises(worker.WorkerError) as raised:
+                worker.eia_request_state(url)
+            self.assertEqual(raised.exception.code, "invalid_source_url")
+
+        with self.assertRaises(worker.WorkerError) as raised:
+            worker.extract_v2({"urls": [eia_price_url("WV"), eia_price_url("CA")]})
+        self.assertEqual(raised.exception.code, "invalid_request")
+
+    def test_eia_profile_fails_as_a_source_when_key_or_response_is_unavailable(self) -> None:
+        requested_url = eia_price_url()
+        self.assertEqual(
+            worker.extract_v2({"urls": [requested_url]}),
+            {
+                "schema_version": "steward.research-extract-result.v2",
+                "outcomes": [
+                    {
+                        "requested_url": requested_url,
+                        "disposition": "failed",
+                        "failure_code": "source_unavailable",
+                    }
+                ],
+            },
+        )
+        with mock.patch.object(
+            worker,
+            "upstream_json",
+            side_effect=worker.WorkerError(
+                502,
+                "upstream_rejected",
+                "provider included secret details",
+            ),
+        ):
+            outcome = worker.extract_eia_outcome(
+                requested_url,
+                b"eia-fixture-secret-key",
+                deadline=time.monotonic() + 5,
+            )
+        self.assertEqual(outcome["failure_code"], "source_rejected")
+        self.assertNotIn("secret", json.dumps(outcome))
+
+    def test_eia_profile_rejects_provider_schema_drift(self) -> None:
+        response = self.response()
+        response["response"]["data"][0]["stateid"] = "CA"
+        with mock.patch.object(worker, "upstream_json", return_value=response):
+            outcome = worker.extract_eia_outcome(
+                eia_price_url(),
+                b"eia-fixture-secret-key",
+                deadline=time.monotonic() + 5,
+            )
+        self.assertEqual(outcome["failure_code"], "unsupported_source")
 
 
 class PDFExtractionTests(unittest.TestCase):
