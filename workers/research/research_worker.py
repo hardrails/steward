@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hmac
 import html.parser
 import http.client
@@ -876,7 +877,7 @@ def _eia_price_row(value: object, state: str) -> dict[str, str]:
         or value["sectorName"] != "commercial"
         or value["price-units"] != "cents per kilowatt-hour"
         or not isinstance(value["stateDescription"], str)
-        or not 1 <= len(value["stateDescription"].encode("utf-8")) <= 128
+        or not bounded_utf8_text(value["stateDescription"], minimum=1, maximum=128)
         or not isinstance(value["price"], str)
         or len(value["price"]) > 32
     ):
@@ -936,7 +937,7 @@ def eia_commercial_electricity_price(
         response["dateFormat"] != "YYYY"
         or response["frequency"] != "annual"
         or not isinstance(response["description"], str)
-        or not 1 <= len(response["description"].encode("utf-8")) <= 2048
+        or not bounded_utf8_text(response["description"], minimum=1, maximum=2048)
         or not isinstance(response["total"], str)
         or re.fullmatch(r"[0-9]{1,12}", response["total"]) is None
         or not isinstance(data, list)
@@ -995,6 +996,16 @@ def extract_eia_outcome(
     }
 
 
+def bounded_utf8_text(value: str, *, minimum: int, maximum: int) -> bool:
+    """Reject malformed Unicode at the provider boundary without escaping isolation."""
+
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+    return minimum <= size <= maximum
+
+
 def extract(payload: dict[str, object]) -> dict[str, object]:
     if set(payload) != {"urls"} or not isinstance(payload.get("urls"), list) or not 1 <= len(payload["urls"]) <= 10:
         raise WorkerError(400, "invalid_request", "extract requires one to ten URLs")
@@ -1018,8 +1029,18 @@ def validate_extract_v2_url(value: object) -> str:
     return url
 
 
-def extract_v2_outcome(requested_url: str, batch_deadline: float) -> dict[str, object]:
+def extract_v2_outcome(
+    requested_url: str,
+    batch_deadline: float,
+    eia_api_key: bytes | None = None,
+) -> dict[str, object]:
     source_deadline = min(batch_deadline, time.monotonic() + V2_SOURCE_SECONDS)
+    if eia_request_state(requested_url) is not None:
+        return extract_eia_outcome(
+            requested_url,
+            eia_api_key,
+            deadline=source_deadline,
+        )
     try:
         resolved_url, title, content, source_media_type = fetch_public_page(
             requested_url,
@@ -1068,13 +1089,29 @@ def v2_source_child() -> int:
         if not raw or len(raw) > MAX_REQUEST:
             return 1
         payload = json.loads(raw)
-        if not isinstance(payload, dict) or set(payload) != {"url"}:
+        if not isinstance(payload, dict) or set(payload) not in (
+            {"url"},
+            {"url", "eia_api_key"},
+        ):
             return 1
         requested_url = validate_extract_v2_url(payload["url"])
+        api_key_text = payload.get("eia_api_key")
+        if api_key_text is None:
+            eia_api_key = None
+        elif isinstance(api_key_text, str):
+            try:
+                eia_api_key = base64.b64decode(api_key_text, validate=True)
+            except ValueError:
+                return 1
+            if not 16 <= len(eia_api_key) <= 4096:
+                return 1
+        else:
+            return 1
         try:
             result: object = extract_v2_outcome(
                 requested_url,
                 time.monotonic() + V2_SOURCE_SECONDS,
+                eia_api_key,
             )
         except WorkerError as error:
             if error.code != "invalid_source_url":
@@ -1089,8 +1126,22 @@ def v2_source_child() -> int:
         return 1
 
 
-def start_v2_source_process(index: int, requested_url: str, batch_deadline: float) -> V2SourceProcess:
-    body = json.dumps({"url": requested_url}, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+def start_v2_source_process(
+    index: int,
+    requested_url: str,
+    batch_deadline: float,
+    *,
+    eia_api_key: bytes | None = None,
+) -> V2SourceProcess:
+    payload = {"url": requested_url}
+    if eia_request_state(requested_url) is not None and eia_api_key is not None:
+        payload["eia_api_key"] = base64.b64encode(eia_api_key).decode("ascii")
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
     process = subprocess.Popen(
         [sys.executable, "-I", os.path.abspath(__file__), V2_SOURCE_CHILD_MODE],
         stdin=subprocess.PIPE,
@@ -1306,27 +1357,32 @@ def extract_v2(
         raise WorkerError(400, "invalid_request", "extract accepts at most one EIA source")
     cleanup_reserve = min(float(V2_CLEANUP_RESERVE_SECONDS), V2_BATCH_SECONDS / 4)
     batch_deadline = time.monotonic() + V2_BATCH_SECONDS - cleanup_reserve
-    outcomes: list[dict[str, object] | None] = [None] * len(urls)
-    for index, state in enumerate(eia_states):
-        if state is not None:
-            outcomes[index] = extract_eia_outcome(
-                urls[index],
-                eia_api_key,
-                deadline=min(batch_deadline, time.monotonic() + V2_SOURCE_SECONDS),
+    def process_factory(
+        index: int,
+        requested_url: str,
+        source_batch_deadline: float,
+    ) -> V2SourceProcess:
+        if eia_states[index] is None or eia_api_key is None:
+            return start_v2_source_process(
+                index,
+                requested_url,
+                source_batch_deadline,
             )
-    public_indexes = [index for index, state in enumerate(eia_states) if state is None]
-    if public_indexes:
-        public_outcomes = run_v2_source_processes(
-            [urls[index] for index in public_indexes],
-            batch_deadline=batch_deadline,
+        return start_v2_source_process(
+            index,
+            requested_url,
+            source_batch_deadline,
+            eia_api_key=eia_api_key,
         )
-        for index, outcome in zip(public_indexes, public_outcomes, strict=True):
-            outcomes[index] = outcome
-    if any(outcome is None for outcome in outcomes):
-        raise RuntimeError("v2 extraction did not produce every outcome")
+
+    outcomes = run_v2_source_processes(
+        urls,
+        process_factory=process_factory,
+        batch_deadline=batch_deadline,
+    )
     return {
         "schema_version": "steward.research-extract-result.v2",
-        "outcomes": [outcome for outcome in outcomes if outcome is not None],
+        "outcomes": outcomes,
     }
 
 

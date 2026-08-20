@@ -358,6 +358,54 @@ class EIATests(unittest.TestCase):
             )
         self.assertEqual(outcome["failure_code"], "unsupported_source")
 
+    def test_eia_profile_rejects_malformed_provider_unicode_as_one_source(self) -> None:
+        for field_path in ("row", "description"):
+            response = self.response()
+            if field_path == "row":
+                response["response"]["data"][0]["stateDescription"] = "West\ud800Virginia"
+            else:
+                response["response"]["description"] = "Electricity\ud800sales"
+            with (
+                self.subTest(field=field_path),
+                mock.patch.object(worker, "upstream_json", return_value=response),
+            ):
+                outcome = worker.extract_eia_outcome(
+                    eia_price_url(),
+                    b"eia-fixture-secret-key",
+                    deadline=time.monotonic() + 5,
+                )
+            self.assertEqual(outcome["failure_code"], "unsupported_source")
+
+    def test_eia_network_work_is_delegated_to_deadline_managed_child(self) -> None:
+        requested_url = eia_price_url()
+        expected = worker.failed_v2_outcome(requested_url, "source_unavailable")
+        captured_factory = None
+        with mock.patch.object(
+            worker,
+            "run_v2_source_processes",
+            return_value=[expected],
+        ) as run:
+            result = worker.extract_v2(
+                {"urls": [requested_url]},
+                b"eia-fixture-secret-key",
+            )
+            captured_factory = run.call_args.kwargs["process_factory"]
+
+        process = mock.Mock(spec=worker.V2SourceProcess)
+        with mock.patch.object(
+            worker,
+            "start_v2_source_process",
+            return_value=process,
+        ) as start:
+            self.assertIs(captured_factory(0, requested_url, time.monotonic() + 5), process)
+        start.assert_called_once_with(
+            0,
+            requested_url,
+            mock.ANY,
+            eia_api_key=b"eia-fixture-secret-key",
+        )
+        self.assertEqual(result["outcomes"], [expected])
+
 
 class PDFExtractionTests(unittest.TestCase):
     @unittest.skipUnless(PYPDF_AVAILABLE, "pypdf is installed in the research worker image")
