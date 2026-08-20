@@ -249,7 +249,7 @@ class EIATests(unittest.TestCase):
                     {
                         "period": "2024",
                         "price": "9.24",
-                        "price-units": "cents per kilowatthour",
+                        "price-units": "cents per kilowatt-hour",
                         "sectorName": "commercial",
                         "sectorid": "COM",
                         "stateDescription": "West Virginia",
@@ -258,7 +258,7 @@ class EIATests(unittest.TestCase):
                     {
                         "period": "2023",
                         "price": "8.91",
-                        "price-units": "cents per kilowatthour",
+                        "price-units": "cents per kilowatt-hour",
                         "sectorName": "commercial",
                         "sectorid": "COM",
                         "stateDescription": "West Virginia",

@@ -874,7 +874,7 @@ def _eia_price_row(value: object, state: str) -> dict[str, str]:
         or value["stateid"] != state
         or value["sectorid"] != "COM"
         or value["sectorName"] != "commercial"
-        or value["price-units"] != "cents per kilowatthour"
+        or value["price-units"] != "cents per kilowatt-hour"
         or not isinstance(value["stateDescription"], str)
         or not 1 <= len(value["stateDescription"].encode("utf-8")) <= 128
         or not isinstance(value["price"], str)
