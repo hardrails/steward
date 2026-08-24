@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Managed Integration Worker API
-  version: "1.7.0"
+  version: "1.8.0"
   description: |
     Private finite-operation worker for managed provider connections. Broker and
     provider credentials remain inside the worker. This contract does not expose
@@ -24,6 +24,7 @@ tags:
   - name: google-calendar
   - name: microsoft-outlook-mail
   - name: microsoft-outlook-calendar
+  - name: microsoft-onedrive
   - name: hubspot
   - name: slack
 paths:
@@ -51,7 +52,7 @@ paths:
                 $ref: "#/components/schemas/Health"
   /v1/connections/{integration}/accounts:
     post:
-      tags: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
+      tags: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, microsoft-onedrive, hubspot, slack]
       operationId: listManagedIntegrationAccounts
       summary: List bounded credential-free accounts for one released integration
       description: |
@@ -65,7 +66,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
+            enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, microsoft-onedrive, hubspot, slack]
       requestBody:
         required: true
         content:
@@ -316,6 +317,193 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-onedrive/connect-link:
+    post:
+      tags: [microsoft-onedrive]
+      operationId: createMicrosoftOneDriveConnectLink
+      summary: Create one short-lived OneDrive connection link
+      description: Returns a non-cacheable bearer URL scoped to one opaque external user, Microsoft OneDrive, and the configured custom OAuth client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Short-lived Microsoft OneDrive connection link.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-onedrive/reconcile:
+    post:
+      tags: [microsoft-onedrive]
+      operationId: reconcileMicrosoftOneDriveConnection
+      summary: Reconcile one user's Microsoft OneDrive connection
+      description: Ready requires a healthy account with `Files.Read` plus only reviewed Microsoft identity and refresh scopes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRequest"
+      responses:
+        "200":
+          description: Normalized connection state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AbsentConnection"
+                  - $ref: "#/components/schemas/PresentConnection"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-onedrive/items:
+    post:
+      tags: [microsoft-onedrive]
+      operationId: listMicrosoftOneDriveItems
+      summary: List one bounded OneDrive folder page
+      description: |
+        Lists at most 50 recent children of root or one exact caller-selected folder
+        in the signed-in user's drive. Folder navigation returns metadata only. The
+        caller cannot supply a path, URL, query, page token, drive ID, or site ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicrosoftOneDriveItemsRequest"
+      responses:
+        "200":
+          description: Bounded normalized OneDrive item metadata.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicrosoftOneDriveItems"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The Microsoft OneDrive account is unhealthy, over-scoped, or not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-onedrive/content:
+    post:
+      tags: [microsoft-onedrive]
+      operationId: readMicrosoftOneDriveContent
+      summary: Read bounded selected OneDrive text
+      description: |
+        Refetches metadata for one through ten exact item IDs and downloads only
+        UTF-8 plain-text or Markdown files within one shared 30-second deadline,
+        64 KiB per file, and 240 KiB aggregate. Every selected item receives one
+        ordered outcome. Binary, Office, and PDF files are explicitly unsupported.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MicrosoftOneDriveContentRequest"
+      responses:
+        "200":
+          description: Bounded normalized per-file content outcomes.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MicrosoftOneDriveContent"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The Microsoft OneDrive account is unhealthy, over-scoped, or not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          $ref: "#/components/responses/UpstreamRejected"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+  /v1/connections/microsoft-onedrive/revoke:
+    post:
+      tags: [microsoft-onedrive]
+      operationId: revokeMicrosoftOneDriveConnection
+      summary: Revoke one verified Microsoft OneDrive account
+      description: Verifies external-user ownership before deleting the account at the managed-auth broker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRequest"
+      responses:
+        "200":
+          description: The broker accepted account revocation.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Revocation"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "502":
           $ref: "#/components/responses/UpstreamRejected"
         "503":
@@ -1284,6 +1472,38 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/FileID"
+    MicrosoftDriveItemID:
+      type: string
+      pattern: '^[A-Za-z0-9_+=!.:-]{1,1024}$'
+    MicrosoftOneDriveItemsRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, external_user_id, folder_id]
+      properties:
+        account_id:
+          $ref: "#/components/schemas/AccountID"
+        external_user_id:
+          $ref: "#/components/schemas/ExternalUserID"
+        folder_id:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/MicrosoftDriveItemID"
+    MicrosoftOneDriveContentRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, external_user_id, file_ids]
+      properties:
+        account_id:
+          $ref: "#/components/schemas/AccountID"
+        external_user_id:
+          $ref: "#/components/schemas/ExternalUserID"
+        file_ids:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/MicrosoftDriveItemID"
     Health:
       type: object
       additionalProperties: false
@@ -1305,7 +1525,7 @@ components:
           enum: [steward.managed-connect-link.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, microsoft-onedrive, hubspot, slack]
         connect_url:
           type: string
           format: uri
@@ -1346,7 +1566,7 @@ components:
           enum: [steward.managed-account-list.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, microsoft-onedrive, hubspot]
         accounts:
           type: array
           maxItems: 100
@@ -1364,6 +1584,7 @@ components:
             - https://www.googleapis.com/auth/calendar.events.readonly
             - Mail.Read
             - Calendars.ReadBasic
+            - Files.Read
             - crm.objects.deals.read
     ManagedMultiScopeAccountList:
       type: object
@@ -1403,7 +1624,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, microsoft-onedrive, hubspot]
         status:
           type: string
           enum: [not_connected]
@@ -1425,7 +1646,7 @@ components:
           enum: [steward.managed-connection.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, microsoft-onedrive, hubspot]
         status:
           type: string
           enum: [ready, needs_attention]
@@ -1450,6 +1671,7 @@ components:
             - https://www.googleapis.com/auth/calendar.events.readonly
             - Mail.Read
             - Calendars.ReadBasic
+            - Files.Read
             - crm.objects.deals.read
         healthy:
           type: boolean
@@ -1644,6 +1866,187 @@ components:
             oneOf:
               - $ref: "#/components/schemas/GoogleDriveContentSuccess"
               - $ref: "#/components/schemas/GoogleDriveContentFailure"
+        result_count:
+          type: integer
+          minimum: 1
+          maximum: 10
+    MicrosoftOneDriveFileItem:
+      type: object
+      additionalProperties: false
+      required: [item_id, kind, modified_at, name, media_type, supported]
+      properties:
+        item_id:
+          $ref: "#/components/schemas/MicrosoftDriveItemID"
+        kind:
+          type: string
+          enum: [file]
+        modified_at:
+          type: string
+          nullable: true
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        view_url:
+          type: string
+          format: uri
+          maxLength: 4096
+        size:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        media_type:
+          type: string
+          minLength: 1
+          maxLength: 256
+        supported:
+          type: boolean
+    MicrosoftOneDriveFolderItem:
+      type: object
+      additionalProperties: false
+      required: [item_id, kind, modified_at, name]
+      properties:
+        item_id:
+          $ref: "#/components/schemas/MicrosoftDriveItemID"
+        kind:
+          type: string
+          enum: [folder]
+        modified_at:
+          type: string
+          nullable: true
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        view_url:
+          type: string
+          format: uri
+          maxLength: 4096
+        size:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        child_count:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    MicrosoftOneDriveItems:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, folder_id, items, result_count, has_more]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.microsoft-onedrive-items.v1]
+        integration:
+          type: string
+          enum: [microsoft-onedrive]
+        folder_id:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/MicrosoftDriveItemID"
+        items:
+          type: array
+          maxItems: 50
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/MicrosoftOneDriveFileItem"
+              - $ref: "#/components/schemas/MicrosoftOneDriveFolderItem"
+        result_count:
+          type: integer
+          minimum: 0
+          maximum: 50
+        has_more:
+          type: boolean
+    MicrosoftOneDriveContentSuccess:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - file_id
+        - name
+        - media_type
+        - modified_at
+        - view_url
+        - content
+        - content_bytes
+        - content_sha256
+      properties:
+        status:
+          type: string
+          enum: [succeeded]
+        file_id:
+          $ref: "#/components/schemas/MicrosoftDriveItemID"
+        name:
+          type: string
+          maxLength: 1024
+        media_type:
+          type: string
+          enum: [text/plain, text/markdown]
+        modified_at:
+          type: string
+          nullable: true
+          maxLength: 64
+        view_url:
+          type: string
+          format: uri
+          maxLength: 4096
+        content:
+          type: string
+          maxLength: 65536
+        content_bytes:
+          type: integer
+          minimum: 0
+          maximum: 65536
+          description: The response contains at most 245760 normalized content bytes in aggregate and is bounded to 524288 encoded bytes.
+        content_sha256:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    MicrosoftOneDriveContentFailure:
+      type: object
+      additionalProperties: false
+      required: [status, file_id]
+      properties:
+        status:
+          type: string
+          enum: [not_found, unsupported, too_large, invalid_text]
+        file_id:
+          $ref: "#/components/schemas/MicrosoftDriveItemID"
+        name:
+          type: string
+          maxLength: 1024
+        media_type:
+          type: string
+          maxLength: 256
+        modified_at:
+          type: string
+          nullable: true
+          maxLength: 64
+        view_url:
+          type: string
+          format: uri
+          maxLength: 4096
+    MicrosoftOneDriveContent:
+      type: object
+      additionalProperties: false
+      required: [schema_version, integration, results, result_count]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.microsoft-onedrive-content.v1]
+        integration:
+          type: string
+          enum: [microsoft-onedrive]
+        results:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/MicrosoftOneDriveContentSuccess"
+              - $ref: "#/components/schemas/MicrosoftOneDriveContentFailure"
         result_count:
           type: integer
           minimum: 1
@@ -2335,7 +2738,7 @@ components:
           enum: [steward.managed-connection-revocation.v1]
         integration:
           type: string
-          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, hubspot, slack]
+          enum: [google-drive, gmail, google-calendar, microsoft-outlook-mail, microsoft-outlook-calendar, microsoft-onedrive, hubspot, slack]
         account_id:
           $ref: "#/components/schemas/AccountID"
         revoked:

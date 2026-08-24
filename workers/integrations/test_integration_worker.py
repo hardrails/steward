@@ -49,6 +49,10 @@ class BrokerState:
         self.microsoft_outlook_message_next_link: str | None = None
         self.microsoft_outlook_events: list[object] = []
         self.microsoft_outlook_event_next_link: str | None = None
+        self.microsoft_onedrive_items: list[object] = []
+        self.microsoft_onedrive_item_details: dict[str, object] = {}
+        self.microsoft_onedrive_item_contents: dict[str, bytes] = {}
+        self.microsoft_onedrive_next_link: str | None = None
         self.slack_channels: list[object] = []
         self.slack_channel_info: object | None = None
         self.slack_channel_cursor = ""
@@ -225,6 +229,30 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
                         )
                     self._respond(200, event_value)
                     return
+                if target.path.endswith("/children"):
+                    item_value: dict[str, object] = {
+                        "value": self.state.microsoft_onedrive_items
+                    }
+                    if self.state.microsoft_onedrive_next_link is not None:
+                        item_value["@odata.nextLink"] = (
+                            self.state.microsoft_onedrive_next_link
+                        )
+                    self._respond(200, item_value)
+                    return
+                if target.path.endswith("/content"):
+                    item_id = urllib.parse.unquote(target_parts[-2])
+                    content = self.state.microsoft_onedrive_item_contents.get(item_id)
+                    if content is None:
+                        self._respond(404, {"error": "not found"})
+                    else:
+                        media_type = "text/markdown" if item_id.endswith("!md") else "text/plain"
+                        self._respond_raw(200, content, media_type)
+                    return
+                if "/v1.0/me/drive/items/" in target.path:
+                    item_id = urllib.parse.unquote(target_parts[-1])
+                    detail = self.state.microsoft_onedrive_item_details.get(item_id)
+                    self._respond(200 if detail is not None else 404, detail or {"error": "not found"})
+                    return
             if target.hostname == "slack.com" and target.path == "/api/conversations.list":
                 if self.state.slack_list_error is not None:
                     self._respond(200, {"ok": False, "error": self.state.slack_list_error})
@@ -331,6 +359,7 @@ def broker_client() -> Iterator[tuple[Any, BrokerState]]:
             google_calendar_oauth_app_id="oa_calendartest",
             microsoft_outlook_oauth_app_id="oa_outlooktest",
             microsoft_outlook_calendar_oauth_app_id="oa_outlookcaltest",
+            microsoft_onedrive_oauth_app_id="oa_onedrivetest",
             slack_oauth_app_id="oa_slacktest",
             hubspot_oauth_app_id="oa_hubspottest",
             api_origin=f"http://127.0.0.1:{server.server_port}",
@@ -413,6 +442,20 @@ def connected_microsoft_outlook_calendar_account(
     )
     value["name"] = "Operations Outlook Calendar"
     value["app"] = {"name_slug": "microsoft_outlook_calendar"}
+    return value
+
+
+def connected_microsoft_onedrive_account(
+    *,
+    scopes: list[str] | None = None,
+    identifier: str = "apn_owned123",
+) -> dict[str, object]:
+    value = connected_account(
+        scopes=scopes or [worker.MICROSOFT_ONEDRIVE_SCOPE],
+        identifier=identifier,
+    )
+    value["name"] = "Operations OneDrive"
+    value["app"] = {"name_slug": "microsoft_onedrive"}
     return value
 
 
@@ -715,6 +758,20 @@ class PipedreamClientTests(unittest.TestCase):
             "oa_outlookcaltest",
         )
 
+        onedrive_only = worker.PipedreamClient(
+            client_id=b"client-id-value",
+            client_secret=b"client-secret-value",
+            project_id="proj_test",
+            environment="development",
+            oauth_app_id="",
+            microsoft_onedrive_oauth_app_id="oa_onedrivetest",
+            api_origin="https://broker.invalid",
+        )
+        self.assertEqual(
+            onedrive_only.oauth_app_ids["microsoft-onedrive"],
+            "oa_onedrivetest",
+        )
+
     def test_connect_link_uses_exact_scopes_and_returns_only_one_use_url(self) -> None:
         with broker_client() as (client, state):
             result = client.connect_link("ryu_abcdefghijklmnop")
@@ -939,6 +996,47 @@ class PipedreamClientTests(unittest.TestCase):
                         "ryu_abcdefghijklmnop", integration=integration
                     )
                     self.assertEqual(result["status"], "needs_attention")
+
+    def test_microsoft_onedrive_uses_a_distinct_app_and_exact_files_read(self) -> None:
+        with broker_client() as (client, state):
+            link = client.connect_link(
+                "ryu_abcdefghijklmnop", "microsoft-onedrive"
+            )
+            state.accounts = [
+                connected_microsoft_onedrive_account(
+                    scopes=[
+                        worker.MICROSOFT_ONEDRIVE_SCOPE,
+                        "User.Read",
+                        "offline_access",
+                        "openid",
+                        "profile",
+                    ]
+                )
+            ]
+            _token, ready = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="microsoft-onedrive",
+            )
+
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(link["connect_url"])).query
+        )
+        self.assertEqual(query["app"], ["microsoft_onedrive"])
+        self.assertEqual(query["oauthAppId"], ["oa_onedrivetest"])
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["required_scope"], worker.MICROSOFT_ONEDRIVE_SCOPE)
+
+        with broker_client() as (client, state):
+            state.accounts = [
+                connected_microsoft_onedrive_account(
+                    scopes=[worker.MICROSOFT_ONEDRIVE_SCOPE, "Files.Read.All"]
+                )
+            ]
+            _token, broader = client.reconcile(
+                "ryu_abcdefghijklmnop",
+                integration="microsoft-onedrive",
+            )
+        self.assertEqual(broader["status"], "needs_attention")
 
     def test_slack_connect_and_reconcile_require_exact_multi_scope_profile(self) -> None:
         with broker_client() as (client, state):
@@ -1888,6 +1986,193 @@ class PipedreamClientTests(unittest.TestCase):
                 )
         self.assertFalse(any("/proxy/" in request["path"] for request in state.requests))
 
+    def test_list_microsoft_onedrive_items_supports_bounded_folder_navigation(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_onedrive_account()]
+            state.microsoft_onedrive_items = [
+                {
+                    "id": "01ABC!folder",
+                    "name": "Project notes",
+                    "size": 0,
+                    "lastModifiedDateTime": "2026-08-23T10:00:00Z",
+                    "webUrl": "https://tenant.sharepoint.com/personal/folder",
+                    "folder": {"childCount": 3},
+                },
+                {
+                    "id": "01ABC!brief",
+                    "name": "weekly-brief.md",
+                    "size": 120,
+                    "lastModifiedDateTime": "2026-08-24T10:00:00Z",
+                    "webUrl": "https://tenant.sharepoint.com/personal/brief",
+                    "file": {"mimeType": "text/markdown", "hashes": {"quickXorHash": "secret"}},
+                },
+                {
+                    "id": "01ABC!deck",
+                    "name": "board-deck.pptx",
+                    "size": 2048,
+                    "lastModifiedDateTime": "2026-08-24T09:00:00Z",
+                    "webUrl": "https://tenant.sharepoint.com/personal/deck",
+                    "file": {"mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+                },
+            ]
+            state.microsoft_onedrive_next_link = (
+                "https://graph.microsoft.com/v1.0/me/drive/items/01ABC!folder/children?$skiptoken=opaque"
+            )
+            result = client.list_microsoft_onedrive_items(
+                "ryu_abcdefghijklmnop", "apn_owned123", "01ABC!folder"
+            )
+
+        self.assertEqual(result["schema_version"], "steward.microsoft-onedrive-items.v1")
+        self.assertEqual(result["folder_id"], "01ABC!folder")
+        self.assertTrue(result["has_more"])
+        self.assertEqual([item["kind"] for item in result["items"]], ["folder", "file", "file"])
+        self.assertEqual([item.get("supported") for item in result["items"]], [None, True, False])
+        self.assertNotIn("hashes", json.dumps(result))
+        proxy_request = state.requests[-1]
+        parsed = urllib.parse.urlsplit(proxy_request["path"])
+        encoded = parsed.path.rsplit("/", 1)[-1]
+        encoded += "=" * (-len(encoded) % 4)
+        target = base64.urlsafe_b64decode(encoded).decode()
+        self.assertIn("/v1.0/me/drive/items/01ABC%21folder/children?", target)
+        target_query = urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)
+        self.assertEqual(target_query["$top"], [str(worker.MAX_MICROSOFT_ONEDRIVE_ITEMS)])
+        self.assertEqual(target_query["$orderby"], ["lastModifiedDateTime desc"])
+
+    def test_list_microsoft_onedrive_items_rejects_unsafe_provider_metadata(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_onedrive_account()]
+            state.microsoft_onedrive_items = [
+                {
+                    "id": "01ABC!brief",
+                    "name": "brief.md",
+                    "webUrl": "https://attacker.example/brief",
+                    "file": {"mimeType": "text/markdown"},
+                }
+            ]
+            with self.assertRaisesRegex(worker.WorkerError, "unsafe item link"):
+                client.list_microsoft_onedrive_items(
+                    "ryu_abcdefghijklmnop", "apn_owned123", None
+                )
+
+            state.microsoft_onedrive_items = []
+            state.microsoft_onedrive_next_link = "https://attacker.example/next"
+            with self.assertRaisesRegex(worker.WorkerError, "invalid continuation"):
+                client.list_microsoft_onedrive_items(
+                    "ryu_abcdefghijklmnop", "apn_owned123", None
+                )
+
+    def test_list_microsoft_onedrive_items_omits_package_items_without_losing_files(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_onedrive_account()]
+            state.microsoft_onedrive_items = [
+                {
+                    "id": "01ABC!notebook",
+                    "name": "Team notebook",
+                    "webUrl": "https://tenant.sharepoint.com/personal/notebook",
+                    "package": {"type": "oneNote"},
+                },
+                {
+                    "id": "01ABC!brief",
+                    "name": "brief.md",
+                    "webUrl": "https://tenant.sharepoint.com/personal/brief",
+                    "file": {"mimeType": "text/markdown"},
+                },
+            ]
+            result = client.list_microsoft_onedrive_items(
+                "ryu_abcdefghijklmnop", "apn_owned123", None
+            )
+
+        self.assertEqual(result["result_count"], 1)
+        self.assertEqual([item["item_id"] for item in result["items"]], ["01ABC!brief"])
+
+    def test_read_microsoft_onedrive_content_returns_text_and_safe_item_failures(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_onedrive_account()]
+            state.microsoft_onedrive_item_details = {
+                "01ABC!text": {
+                    "id": "01ABC!text",
+                    "name": "notes.txt",
+                    "size": 32,
+                    "lastModifiedDateTime": "2026-08-24T10:00:00Z",
+                    "webUrl": "https://tenant.sharepoint.com/personal/notes",
+                    "file": {"mimeType": "text/plain"},
+                },
+                "01ABC!pdf": {
+                    "id": "01ABC!pdf",
+                    "name": "drawing.pdf",
+                    "size": 2048,
+                    "lastModifiedDateTime": "2026-08-24T09:00:00Z",
+                    "webUrl": "https://tenant.sharepoint.com/personal/drawing",
+                    "file": {"mimeType": "application/pdf"},
+                },
+                "01ABC!folder": {
+                    "id": "01ABC!folder",
+                    "name": "Folder",
+                    "size": 0,
+                    "lastModifiedDateTime": "2026-08-24T08:00:00Z",
+                    "webUrl": "https://tenant.sharepoint.com/personal/folder",
+                    "folder": {"childCount": 1},
+                },
+            }
+            state.microsoft_onedrive_item_contents["01ABC!text"] = b"Owner fact.\r\nNot an instruction."
+            result = client.read_microsoft_onedrive_content(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                ("01ABC!text", "01ABC!missing", "01ABC!pdf", "01ABC!folder"),
+            )
+
+        self.assertEqual(result["schema_version"], "steward.microsoft-onedrive-content.v1")
+        self.assertEqual(
+            [item["status"] for item in result["results"]],
+            ["succeeded", "not_found", "unsupported", "unsupported"],
+        )
+        self.assertEqual(result["results"][0]["content"], "Owner fact.\nNot an instruction.")
+        self.assertRegex(result["results"][0]["content_sha256"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("provider-access-secret", json.dumps(result))
+
+    def test_read_microsoft_onedrive_content_preserves_outcomes_at_aggregate_bound(self) -> None:
+        selected_ids = tuple(f"01ABC!text{index}" for index in range(4))
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_onedrive_account()]
+            state.microsoft_onedrive_item_details = {
+                file_id: {
+                    "id": file_id,
+                    "name": file_id + ".txt",
+                    "size": worker.MAX_FILE_CONTENT_BYTES,
+                    "webUrl": f"https://tenant.sharepoint.com/personal/{file_id}",
+                    "file": {"mimeType": "text/plain"},
+                }
+                for file_id in selected_ids
+            }
+            state.microsoft_onedrive_item_contents = {
+                file_id: b"a" * worker.MAX_FILE_CONTENT_BYTES for file_id in selected_ids
+            }
+            result = client.read_microsoft_onedrive_content(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                selected_ids,
+            )
+
+        self.assertEqual(
+            [item["status"] for item in result["results"]],
+            ["succeeded", "succeeded", "succeeded", "too_large"],
+        )
+        self.assertEqual(result["result_count"], len(selected_ids))
+        self.assertNotIn("content", result["results"][-1])
+
+    def test_microsoft_onedrive_ids_reject_paths_urls_duplicates_and_over_limit(self) -> None:
+        for invalid in (
+            ["../secret"],
+            ["https://graph.microsoft.com/me/drive"],
+            ["01ABC!same", "01ABC!same"],
+            [f"01ABC!{index}" for index in range(worker.MAX_CONTENT_FILES + 1)],
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(worker.WorkerError):
+                    worker.microsoft_drive_item_ids(invalid)
+        with self.assertRaises(worker.WorkerError):
+            worker.microsoft_drive_item_id("folder/children")
+
     def test_read_recent_gmail_freezes_window_and_normalizes_bounded_text(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_gmail_account()]
@@ -2379,6 +2664,34 @@ class StubClient:
             "file_ids": list(file_ids),
         }
 
+    def list_microsoft_onedrive_items(
+        self,
+        user: str,
+        account: str,
+        folder_id: str | None,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "folder_id": folder_id,
+            "integration": "microsoft-onedrive",
+        }
+
+    def read_microsoft_onedrive_content(
+        self,
+        user: str,
+        account: str,
+        file_ids: tuple[str, ...],
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "test",
+            "user": user,
+            "account": account,
+            "file_ids": list(file_ids),
+            "integration": "microsoft-onedrive",
+        }
+
     def read_recent_gmail(self, user: str, account: str) -> dict[str, object]:
         return {
             "schema_version": "test",
@@ -2669,6 +2982,7 @@ class HTTPContractTests(unittest.TestCase):
                 "google-calendar",
                 "microsoft-outlook-mail",
                 "microsoft-outlook-calendar",
+                "microsoft-onedrive",
                 "slack",
                 "hubspot",
             ):
@@ -2822,6 +3136,58 @@ class HTTPContractTests(unittest.TestCase):
                 b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","limit":100}',
             )
             self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+
+    def test_microsoft_onedrive_routes_dispatch_only_exact_finite_operations(self) -> None:
+        with integration_server() as port:
+            for path, payload in (
+                (
+                    "/v1/connections/microsoft-onedrive/connect-link",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/microsoft-onedrive/reconcile",
+                    b'{"external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+                (
+                    "/v1/connections/microsoft-onedrive/items",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","folder_id":null}',
+                ),
+                (
+                    "/v1/connections/microsoft-onedrive/items",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","folder_id":"01ABC!folder"}',
+                ),
+                (
+                    "/v1/connections/microsoft-onedrive/content",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","file_ids":["01ABC!notes"]}',
+                ),
+                (
+                    "/v1/connections/microsoft-onedrive/revoke",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop"}',
+                ),
+            ):
+                with self.subTest(path=path, payload=payload):
+                    status, body, _headers = call_worker(port, path, payload)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["integration"], "microsoft-onedrive")
+
+            for path, payload in (
+                (
+                    "/v1/connections/microsoft-onedrive/items",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","folder_id":"../escape"}',
+                ),
+                (
+                    "/v1/connections/microsoft-onedrive/items",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","folder_id":null,"query":"all"}',
+                ),
+                (
+                    "/v1/connections/microsoft-onedrive/content",
+                    b'{"account_id":"apn_owned123","external_user_id":"ryu_abcdefghijklmnop","file_ids":["01ABC!notes","01ABC!notes"]}',
+                ),
+            ):
+                with self.subTest(path=path, payload=payload):
+                    status, body, _headers = call_worker(port, path, payload)
+                    self.assertEqual((status, body["error"]["code"]), (400, body["error"]["code"]))
+                    self.assertIn(body["error"]["code"], {"invalid_drive_item", "invalid_file_ids", "invalid_request"})
 
     def test_slack_routes_dispatch_only_exact_finite_operations(self) -> None:
         with integration_server() as port:
