@@ -2061,6 +2061,30 @@ class PipedreamClientTests(unittest.TestCase):
                     "ryu_abcdefghijklmnop", "apn_owned123", None
                 )
 
+    def test_list_microsoft_onedrive_items_omits_package_items_without_losing_files(self) -> None:
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_onedrive_account()]
+            state.microsoft_onedrive_items = [
+                {
+                    "id": "01ABC!notebook",
+                    "name": "Team notebook",
+                    "webUrl": "https://tenant.sharepoint.com/personal/notebook",
+                    "package": {"type": "oneNote"},
+                },
+                {
+                    "id": "01ABC!brief",
+                    "name": "brief.md",
+                    "webUrl": "https://tenant.sharepoint.com/personal/brief",
+                    "file": {"mimeType": "text/markdown"},
+                },
+            ]
+            result = client.list_microsoft_onedrive_items(
+                "ryu_abcdefghijklmnop", "apn_owned123", None
+            )
+
+        self.assertEqual(result["result_count"], 1)
+        self.assertEqual([item["item_id"] for item in result["items"]], ["01ABC!brief"])
+
     def test_read_microsoft_onedrive_content_returns_text_and_safe_item_failures(self) -> None:
         with broker_client() as (client, state):
             state.accounts = [connected_microsoft_onedrive_account()]
@@ -2105,6 +2129,36 @@ class PipedreamClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["content"], "Owner fact.\nNot an instruction.")
         self.assertRegex(result["results"][0]["content_sha256"], r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn("provider-access-secret", json.dumps(result))
+
+    def test_read_microsoft_onedrive_content_preserves_outcomes_at_aggregate_bound(self) -> None:
+        selected_ids = tuple(f"01ABC!text{index}" for index in range(4))
+        with broker_client() as (client, state):
+            state.accounts = [connected_microsoft_onedrive_account()]
+            state.microsoft_onedrive_item_details = {
+                file_id: {
+                    "id": file_id,
+                    "name": file_id + ".txt",
+                    "size": worker.MAX_FILE_CONTENT_BYTES,
+                    "webUrl": f"https://tenant.sharepoint.com/personal/{file_id}",
+                    "file": {"mimeType": "text/plain"},
+                }
+                for file_id in selected_ids
+            }
+            state.microsoft_onedrive_item_contents = {
+                file_id: b"a" * worker.MAX_FILE_CONTENT_BYTES for file_id in selected_ids
+            }
+            result = client.read_microsoft_onedrive_content(
+                "ryu_abcdefghijklmnop",
+                "apn_owned123",
+                selected_ids,
+            )
+
+        self.assertEqual(
+            [item["status"] for item in result["results"]],
+            ["succeeded", "succeeded", "succeeded", "too_large"],
+        )
+        self.assertEqual(result["result_count"], len(selected_ids))
+        self.assertNotIn("content", result["results"][-1])
 
     def test_microsoft_onedrive_ids_reject_paths_urls_duplicates_and_over_limit(self) -> None:
         for invalid in (

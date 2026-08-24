@@ -70,7 +70,7 @@ GOOGLE_DOCUMENT_MEDIA_TYPE = "application/vnd.google-apps.document"
 GOOGLE_TEXT_EXPORT_MEDIA_TYPE = "text/plain"
 SUPPORTED_TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/markdown"})
 MICROSOFT_ONEDRIVE_ITEM_FIELDS = (
-    "id,name,size,lastModifiedDateTime,webUrl,file,folder"
+    "id,name,size,lastModifiedDateTime,webUrl,file,folder,package"
 )
 MAX_MICROSOFT_ONEDRIVE_ITEMS = 50
 MAX_CONTENT_FILES = 10
@@ -1282,6 +1282,8 @@ class PipedreamClient:
             modified_at = raw_item.get("lastModifiedDateTime")
             file_facet = raw_item.get("file")
             folder_facet = raw_item.get("folder")
+            if isinstance(raw_item.get("package"), Mapping):
+                continue
             if (
                 not isinstance(item_id, str)
                 or MICROSOFT_DRIVE_ITEM_ID_RE.fullmatch(item_id) is None
@@ -1977,13 +1979,15 @@ class PipedreamClient:
             )
             content_bytes = result.get("content_bytes", 0)
             if isinstance(content_bytes, int) and not isinstance(content_bytes, bool):
-                total_content_bytes += content_bytes
-            if total_content_bytes > MAX_TOTAL_CONTENT_BYTES:
-                raise WorkerError(
-                    502,
-                    "provider_result_limit",
-                    "Microsoft OneDrive content exceeded the aggregate operation bound",
-                )
+                if total_content_bytes + content_bytes > MAX_TOTAL_CONTENT_BYTES:
+                    result = {
+                        key: value
+                        for key, value in result.items()
+                        if key not in {"content", "content_bytes", "content_sha256"}
+                    }
+                    result["status"] = "too_large"
+                else:
+                    total_content_bytes += content_bytes
             results.append(result)
         return {
             "schema_version": "steward.microsoft-onedrive-content.v1",
