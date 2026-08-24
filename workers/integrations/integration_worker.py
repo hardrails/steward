@@ -48,6 +48,8 @@ MICROSOFT_OUTLOOK_APP = "microsoft_outlook"
 MICROSOFT_OUTLOOK_SCOPE = "Mail.Read"
 MICROSOFT_OUTLOOK_CALENDAR_APP = "microsoft_outlook_calendar"
 MICROSOFT_OUTLOOK_CALENDAR_SCOPE = "Calendars.ReadBasic"
+MICROSOFT_ONEDRIVE_APP = "microsoft_onedrive"
+MICROSOFT_ONEDRIVE_SCOPE = "Files.Read"
 SLACK_APP = "slack"
 SLACK_SCOPES = ("channels:history", "channels:read")
 HUBSPOT_APP = "hubspot"
@@ -67,6 +69,10 @@ GOOGLE_DRIVE_CONTENT_FIELD_BYTES = {
 GOOGLE_DOCUMENT_MEDIA_TYPE = "application/vnd.google-apps.document"
 GOOGLE_TEXT_EXPORT_MEDIA_TYPE = "text/plain"
 SUPPORTED_TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/markdown"})
+MICROSOFT_ONEDRIVE_ITEM_FIELDS = (
+    "id,name,size,lastModifiedDateTime,webUrl,file,folder"
+)
+MAX_MICROSOFT_ONEDRIVE_ITEMS = 50
 MAX_CONTENT_FILES = 10
 MAX_FILE_CONTENT_BYTES = 64 << 10
 MAX_TOTAL_CONTENT_BYTES = 240 << 10
@@ -155,6 +161,7 @@ OAUTH_APP_RE = re.compile(r"^oa_[A-Za-z0-9]+$")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 CALENDAR_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,1024}$")
 MICROSOFT_GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9_+=/-]{1,1024}$")
+MICROSOFT_DRIVE_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_+=!.:-]{1,1024}$")
 SLACK_CHANNEL_ID_RE = re.compile(r"^C[A-Z0-9]{1,255}$")
 SLACK_MESSAGE_TS_RE = re.compile(r"^[0-9]{1,20}\.[0-9]{1,12}$")
 SLACK_AUTHOR_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,255}$")
@@ -186,6 +193,11 @@ INTEGRATION_PROFILES = {
         "app": MICROSOFT_OUTLOOK_CALENDAR_APP,
         "default_name": "Outlook Calendar",
         "required_scopes": (MICROSOFT_OUTLOOK_CALENDAR_SCOPE,),
+    },
+    "microsoft-onedrive": {
+        "app": MICROSOFT_ONEDRIVE_APP,
+        "default_name": "Microsoft OneDrive",
+        "required_scopes": (MICROSOFT_ONEDRIVE_SCOPE,),
     },
     "slack": {
         "app": SLACK_APP,
@@ -289,6 +301,37 @@ def file_ids(value: object) -> tuple[str, ...]:
         not isinstance(value, list)
         or not 1 <= len(value) <= MAX_CONTENT_FILES
         or any(not isinstance(item, str) or FILE_ID_RE.fullmatch(item) is None for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise WorkerError(
+            400,
+            "invalid_file_ids",
+            "file IDs must be one through ten unique canonical identifiers",
+        )
+    return tuple(value)
+
+
+def microsoft_drive_item_id(value: object, *, optional: bool = False) -> str | None:
+    if optional and value is None:
+        return None
+    if not isinstance(value, str) or MICROSOFT_DRIVE_ITEM_ID_RE.fullmatch(value) is None:
+        raise WorkerError(
+            400,
+            "invalid_drive_item",
+            "OneDrive item identifier is invalid",
+        )
+    return value
+
+
+def microsoft_drive_item_ids(value: object) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= MAX_CONTENT_FILES
+        or any(
+            not isinstance(item, str)
+            or MICROSOFT_DRIVE_ITEM_ID_RE.fullmatch(item) is None
+            for item in value
+        )
         or len(set(value)) != len(value)
     ):
         raise WorkerError(
@@ -470,6 +513,7 @@ class PipedreamClient:
         google_calendar_oauth_app_id: str = "",
         microsoft_outlook_oauth_app_id: str = "",
         microsoft_outlook_calendar_oauth_app_id: str = "",
+        microsoft_onedrive_oauth_app_id: str = "",
         slack_oauth_app_id: str = "",
         hubspot_oauth_app_id: str = "",
         api_origin: str = PIPEDREAM_API_ORIGIN,
@@ -494,6 +538,10 @@ class PipedreamClient:
             microsoft_outlook_calendar_oauth_app_id
         ):
             raise RuntimeError("Outlook Calendar OAuth app ID is invalid")
+        if microsoft_onedrive_oauth_app_id and not OAUTH_APP_RE.fullmatch(
+            microsoft_onedrive_oauth_app_id
+        ):
+            raise RuntimeError("Microsoft OneDrive OAuth app ID is invalid")
         if slack_oauth_app_id and not OAUTH_APP_RE.fullmatch(slack_oauth_app_id):
             raise RuntimeError("Slack OAuth app ID is invalid")
         if hubspot_oauth_app_id and not OAUTH_APP_RE.fullmatch(hubspot_oauth_app_id):
@@ -504,6 +552,7 @@ class PipedreamClient:
             and not google_calendar_oauth_app_id
             and not microsoft_outlook_oauth_app_id
             and not microsoft_outlook_calendar_oauth_app_id
+            and not microsoft_onedrive_oauth_app_id
             and not slack_oauth_app_id
             and not hubspot_oauth_app_id
         ):
@@ -531,6 +580,7 @@ class PipedreamClient:
             "google-calendar": google_calendar_oauth_app_id,
             "microsoft-outlook-mail": microsoft_outlook_oauth_app_id,
             "microsoft-outlook-calendar": microsoft_outlook_calendar_oauth_app_id,
+            "microsoft-onedrive": microsoft_onedrive_oauth_app_id,
             "slack": slack_oauth_app_id,
             "hubspot": hubspot_oauth_app_id,
         }
@@ -556,7 +606,7 @@ class PipedreamClient:
     def _allowed_extra_scopes(integration: str) -> frozenset[str]:
         if integration in {"hubspot", "slack"}:
             return frozenset()
-        if integration.startswith("microsoft-outlook-"):
+        if integration.startswith("microsoft-"):
             return MICROSOFT_IDENTITY_SCOPES
         return REVIEWED_IDENTITY_SCOPES
 
@@ -1141,6 +1191,202 @@ class PipedreamClient:
             "has_more": bool(next_token),
         }
 
+    @staticmethod
+    def _safe_onedrive_view_url(value: object) -> str | None:
+        if not isinstance(value, str) or not 1 <= len(value.encode()) <= 4096:
+            return None
+        parsed = urllib.parse.urlsplit(value)
+        hostname = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or not (
+                hostname in {"1drv.ms", "onedrive.live.com"}
+                or hostname.endswith(".sharepoint.com")
+            )
+        ):
+            return None
+        return value
+
+    def list_microsoft_onedrive_items(
+        self,
+        user: str,
+        requested_account: str,
+        requested_folder_id: str | None,
+    ) -> dict[str, object]:
+        folder_id = microsoft_drive_item_id(requested_folder_id, optional=True)
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="microsoft-onedrive",
+            deadline=deadline,
+        )
+        if not self._account_ready(
+            connection,
+            (MICROSOFT_ONEDRIVE_SCOPE,),
+            allowed_extra_scopes=MICROSOFT_IDENTITY_SCOPES,
+        ):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Microsoft OneDrive connection is not ready for this app",
+            )
+        path = "/v1.0/me/drive/root/children"
+        if folder_id is not None:
+            path = (
+                "/v1.0/me/drive/items/"
+                + urllib.parse.quote(folder_id, safe="")
+                + "/children"
+            )
+        target = "https://graph.microsoft.com" + path + "?" + urllib.parse.urlencode(
+            {
+                "$orderby": "lastModifiedDateTime desc",
+                "$select": MICROSOFT_ONEDRIVE_ITEM_FIELDS,
+                "$top": str(MAX_MICROSOFT_ONEDRIVE_ITEMS),
+            }
+        )
+        result = self._proxy_json(
+            token,
+            user=user,
+            account=requested_account,
+            target=target,
+            deadline=deadline,
+        )
+        if not isinstance(result, Mapping) or not isinstance(result.get("value"), list):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Microsoft OneDrive returned an invalid item result",
+            )
+        raw_items = result["value"]
+        if len(raw_items) > MAX_MICROSOFT_ONEDRIVE_ITEMS:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Microsoft OneDrive exceeded the item result bound",
+            )
+        items: list[dict[str, object]] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Microsoft OneDrive returned invalid item metadata",
+                )
+            item_id = raw_item.get("id")
+            name = raw_item.get("name")
+            modified_at = raw_item.get("lastModifiedDateTime")
+            file_facet = raw_item.get("file")
+            folder_facet = raw_item.get("folder")
+            if (
+                not isinstance(item_id, str)
+                or MICROSOFT_DRIVE_ITEM_ID_RE.fullmatch(item_id) is None
+                or not isinstance(name, str)
+                or not 1 <= len(name.encode()) <= 1024
+                or (
+                    modified_at is not None
+                    and (
+                        not isinstance(modified_at, str)
+                        or not 1 <= len(modified_at.encode()) <= 64
+                    )
+                )
+                or (isinstance(file_facet, Mapping) == isinstance(folder_facet, Mapping))
+            ):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Microsoft OneDrive returned invalid item metadata",
+                )
+            item: dict[str, object] = {
+                "item_id": item_id,
+                "kind": "file" if isinstance(file_facet, Mapping) else "folder",
+                "modified_at": modified_at,
+                "name": name,
+            }
+            view_url = self._safe_onedrive_view_url(raw_item.get("webUrl"))
+            if raw_item.get("webUrl") is not None and view_url is None:
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Microsoft OneDrive returned an unsafe item link",
+                )
+            if view_url is not None:
+                item["view_url"] = view_url
+            size = raw_item.get("size")
+            if size is not None:
+                if (
+                    not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or not 0 <= size <= (1 << 53) - 1
+                ):
+                    raise WorkerError(
+                        502,
+                        "invalid_provider_response",
+                        "Microsoft OneDrive returned invalid item metadata",
+                    )
+                item["size"] = size
+            if isinstance(file_facet, Mapping):
+                media_type = file_facet.get("mimeType")
+                if (
+                    not isinstance(media_type, str)
+                    or not 1 <= len(media_type.encode()) <= 256
+                ):
+                    raise WorkerError(
+                        502,
+                        "invalid_provider_response",
+                        "Microsoft OneDrive returned invalid file metadata",
+                    )
+                item["media_type"] = media_type
+                item["supported"] = media_type in SUPPORTED_TEXT_MEDIA_TYPES
+            else:
+                child_count = folder_facet.get("childCount")
+                if (
+                    child_count is not None
+                    and (
+                        not isinstance(child_count, int)
+                        or isinstance(child_count, bool)
+                        or not 0 <= child_count <= (1 << 53) - 1
+                    )
+                ):
+                    raise WorkerError(
+                        502,
+                        "invalid_provider_response",
+                        "Microsoft OneDrive returned invalid folder metadata",
+                    )
+                if child_count is not None:
+                    item["child_count"] = child_count
+            items.append(item)
+        next_link = result.get("@odata.nextLink")
+        if next_link is not None:
+            parsed_next = urllib.parse.urlsplit(next_link) if isinstance(next_link, str) else None
+            if (
+                parsed_next is None
+                or not 1 <= len(next_link.encode()) <= 8192
+                or parsed_next.scheme != "https"
+                or parsed_next.hostname != "graph.microsoft.com"
+                or parsed_next.username
+                or parsed_next.password
+                or parsed_next.fragment
+                or not parsed_next.path.startswith("/v1.0/me/drive/")
+            ):
+                raise WorkerError(
+                    502,
+                    "invalid_provider_response",
+                    "Microsoft OneDrive returned an invalid continuation",
+                )
+        return {
+            "schema_version": "steward.microsoft-onedrive-items.v1",
+            "integration": "microsoft-onedrive",
+            "folder_id": folder_id,
+            "items": items,
+            "result_count": len(items),
+            "has_more": next_link is not None,
+        }
+
     def list_slack_channels(
         self,
         user: str,
@@ -1665,6 +1911,221 @@ class PipedreamClient:
                 return {"file_id": selected_id, "status": "not_found"}
             raise
         if response_media_type not in expected_response_types:
+            return {**common, "status": "invalid_text"}
+        try:
+            text = unicodedata.normalize("NFC", raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return {**common, "status": "invalid_text"}
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if any(ord(character) < 0x20 and character not in "\t\n" for character in text):
+            return {**common, "status": "invalid_text"}
+        normalized = text.encode("utf-8")
+        if len(normalized) > MAX_FILE_CONTENT_BYTES:
+            return {**common, "status": "too_large"}
+        return {
+            **common,
+            "status": "succeeded",
+            "content": text,
+            "content_bytes": len(normalized),
+            "content_sha256": "sha256:" + hashlib.sha256(normalized).hexdigest(),
+        }
+
+    def read_microsoft_onedrive_content(
+        self,
+        user: str,
+        requested_account: str,
+        requested_file_ids: tuple[str, ...],
+    ) -> dict[str, object]:
+        selected_ids = microsoft_drive_item_ids(list(requested_file_ids))
+        deadline = time.monotonic() + CONTENT_BATCH_TIMEOUT_SECONDS
+        token, connection = self._owned_account(
+            user,
+            requested_account,
+            "connect:accounts:read connect:proxy",
+            integration="microsoft-onedrive",
+            deadline=deadline,
+        )
+        if not self._account_ready(
+            connection,
+            (MICROSOFT_ONEDRIVE_SCOPE,),
+            allowed_extra_scopes=MICROSOFT_IDENTITY_SCOPES,
+        ):
+            raise WorkerError(
+                409,
+                "connection_not_ready",
+                "Microsoft OneDrive connection is not ready for this app",
+            )
+        results: list[dict[str, object]] = []
+        total_content_bytes = 0
+        for selected_id in selected_ids:
+            metadata = self._microsoft_onedrive_file_metadata(
+                token,
+                user=user,
+                account=requested_account,
+                selected_id=selected_id,
+                deadline=deadline,
+            )
+            if metadata is None:
+                results.append({"file_id": selected_id, "status": "not_found"})
+                continue
+            result = self._microsoft_onedrive_file_content(
+                token,
+                user=user,
+                account=requested_account,
+                metadata=metadata,
+                deadline=deadline,
+            )
+            content_bytes = result.get("content_bytes", 0)
+            if isinstance(content_bytes, int) and not isinstance(content_bytes, bool):
+                total_content_bytes += content_bytes
+            if total_content_bytes > MAX_TOTAL_CONTENT_BYTES:
+                raise WorkerError(
+                    502,
+                    "provider_result_limit",
+                    "Microsoft OneDrive content exceeded the aggregate operation bound",
+                )
+            results.append(result)
+        return {
+            "schema_version": "steward.microsoft-onedrive-content.v1",
+            "integration": "microsoft-onedrive",
+            "results": results,
+            "result_count": len(results),
+        }
+
+    def _microsoft_onedrive_file_metadata(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        selected_id: str,
+        deadline: float,
+    ) -> dict[str, object] | None:
+        target = (
+            "https://graph.microsoft.com/v1.0/me/drive/items/"
+            + urllib.parse.quote(selected_id, safe="")
+            + "?"
+            + urllib.parse.urlencode({"$select": MICROSOFT_ONEDRIVE_ITEM_FIELDS})
+        )
+        try:
+            value = self._proxy_json(
+                token,
+                user=user,
+                account=account,
+                target=target,
+                deadline=deadline,
+            )
+        except WorkerError as error:
+            if error.upstream_status == 404:
+                return None
+            raise
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Microsoft OneDrive returned invalid file metadata",
+            )
+        item_id = value.get("id")
+        name = value.get("name")
+        modified_at = value.get("lastModifiedDateTime")
+        size = value.get("size")
+        file_facet = value.get("file")
+        view_url = self._safe_onedrive_view_url(value.get("webUrl"))
+        if (
+            item_id != selected_id
+            or not isinstance(name, str)
+            or not 1 <= len(name.encode()) <= 1024
+            or (
+                modified_at is not None
+                and (
+                    not isinstance(modified_at, str)
+                    or not 1 <= len(modified_at.encode()) <= 64
+                )
+            )
+            or (
+                size is not None
+                and (
+                    not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or not 0 <= size <= (1 << 53) - 1
+                )
+            )
+            or view_url is None
+        ):
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Microsoft OneDrive returned invalid file metadata",
+            )
+        if not isinstance(file_facet, Mapping):
+            return {
+                "file_id": selected_id,
+                "name": name,
+                "modified_at": modified_at,
+                "view_url": view_url,
+            }
+        media_type = file_facet.get("mimeType")
+        if not isinstance(media_type, str) or not 1 <= len(media_type.encode()) <= 256:
+            raise WorkerError(
+                502,
+                "invalid_provider_response",
+                "Microsoft OneDrive returned invalid file metadata",
+            )
+        return {
+            "file_id": selected_id,
+            "name": name,
+            "media_type": media_type,
+            "modified_at": modified_at,
+            "size": size,
+            "view_url": view_url,
+        }
+
+    def _microsoft_onedrive_file_content(
+        self,
+        token: str,
+        *,
+        user: str,
+        account: str,
+        metadata: Mapping[str, object],
+        deadline: float,
+    ) -> dict[str, object]:
+        common = {
+            "file_id": metadata["file_id"],
+            "name": metadata["name"],
+            "modified_at": metadata.get("modified_at"),
+            "view_url": metadata["view_url"],
+        }
+        media_type = metadata.get("media_type")
+        if not isinstance(media_type, str):
+            return {**common, "status": "unsupported"}
+        common["media_type"] = media_type
+        if media_type not in SUPPORTED_TEXT_MEDIA_TYPES:
+            return {**common, "status": "unsupported"}
+        size = metadata.get("size")
+        if isinstance(size, int) and size > MAX_FILE_CONTENT_BYTES:
+            return {**common, "status": "too_large"}
+        selected_id = str(metadata["file_id"])
+        target = (
+            "https://graph.microsoft.com/v1.0/me/drive/items/"
+            + urllib.parse.quote(selected_id, safe="")
+            + "/content"
+        )
+        try:
+            raw, response_media_type = self._proxy_bytes(
+                token,
+                user=user,
+                account=account,
+                target=target,
+                maximum_bytes=MAX_FILE_CONTENT_BYTES,
+                deadline=deadline,
+            )
+        except WorkerError as error:
+            if error.code == "broker_response_too_large":
+                return {**common, "status": "too_large"}
+            if error.upstream_status == 404:
+                return {"file_id": selected_id, "status": "not_found"}
+            raise
+        if response_media_type not in {media_type, "text/plain"}:
             return {**common, "status": "invalid_text"}
         try:
             text = unicodedata.normalize("NFC", raw.decode("utf-8"))
@@ -3423,6 +3884,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     "microsoft-outlook-calendar",
                 )
+            elif self.path == "/v1/connections/microsoft-onedrive/connect-link":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                result = self.worker.client.connect_link(
+                    external_user(body["external_user_id"]),
+                    "microsoft-onedrive",
+                )
             elif self.path == "/v1/connections/slack/connect-link":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 result = self.worker.client.connect_link(
@@ -3462,6 +3929,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     integration="microsoft-outlook-calendar",
                 )
+            elif self.path == "/v1/connections/microsoft-onedrive/reconcile":
+                body = exact_object(value, frozenset({"external_user_id"}))
+                _token, result = self.worker.client.reconcile(
+                    external_user(body["external_user_id"]),
+                    integration="microsoft-onedrive",
+                )
             elif self.path == "/v1/connections/slack/reconcile":
                 body = exact_object(value, frozenset({"external_user_id"}))
                 _token, result = self.worker.client.reconcile(
@@ -3491,6 +3964,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     external_user(body["external_user_id"]),
                     account_id(body["account_id"]),
                     file_ids(body["file_ids"]),
+                )
+            elif self.path == "/v1/connections/microsoft-onedrive/items":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id", "folder_id"}),
+                )
+                result = self.worker.client.list_microsoft_onedrive_items(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    microsoft_drive_item_id(body["folder_id"], optional=True),
+                )
+            elif self.path == "/v1/connections/microsoft-onedrive/content":
+                body = exact_object(
+                    value,
+                    frozenset({"account_id", "external_user_id", "file_ids"}),
+                )
+                result = self.worker.client.read_microsoft_onedrive_content(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    microsoft_drive_item_ids(body["file_ids"]),
                 )
             elif self.path == "/v1/connections/gmail/recent-messages":
                 body = exact_object(
@@ -3589,6 +4082,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     account_id(body["account_id"]),
                     "microsoft-outlook-calendar",
                 )
+            elif self.path == "/v1/connections/microsoft-onedrive/revoke":
+                body = exact_object(value, frozenset({"account_id", "external_user_id"}))
+                result = self.worker.client.revoke(
+                    external_user(body["external_user_id"]),
+                    account_id(body["account_id"]),
+                    "microsoft-onedrive",
+                )
             elif self.path == "/v1/connections/slack/revoke":
                 body = exact_object(value, frozenset({"account_id", "external_user_id"}))
                 result = self.worker.client.revoke(
@@ -3613,6 +4113,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if self.path
                     in {
                         "/v1/connections/google-drive/content",
+                        "/v1/connections/microsoft-onedrive/content",
                         "/v1/connections/gmail/recent-messages",
                         "/v1/connections/google-calendar/upcoming-events",
                         "/v1/connections/microsoft-outlook-mail/recent-messages",
@@ -3740,6 +4241,9 @@ def main() -> int:
         ),
         microsoft_outlook_calendar_oauth_app_id=os.environ.get(
             "STEWARD_MICROSOFT_OUTLOOK_CALENDAR_OAUTH_APP_ID", ""
+        ),
+        microsoft_onedrive_oauth_app_id=os.environ.get(
+            "STEWARD_MICROSOFT_ONEDRIVE_OAUTH_APP_ID", ""
         ),
         slack_oauth_app_id=os.environ.get("STEWARD_SLACK_OAUTH_APP_ID", ""),
         hubspot_oauth_app_id=os.environ.get("STEWARD_HUBSPOT_OAUTH_APP_ID", ""),

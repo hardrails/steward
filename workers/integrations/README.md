@@ -6,7 +6,7 @@ log, and artifact. It exposes only reviewed operations; it is not an API proxy,
 MCP server, or dynamic action catalog.
 
 The worker currently supports Google Drive, Gmail, Google Calendar, Outlook Mail,
-Outlook Calendar, HubSpot, and Slack through Pipedream Connect.
+Outlook Calendar, Microsoft OneDrive, HubSpot, and Slack through Pipedream Connect.
 For each released profile it can also list at most 100 accounts owned by one opaque
 external user and the configured custom OAuth client. That projection contains only
 the provider's bounded display name, exact reported scopes, health, readiness, and an
@@ -86,6 +86,23 @@ The Outlook Calendar caller cannot supply a calendar ID, query, time range, page
 token, URL, provider header, event body request, RSVP, or write action. Event data
 is untrusted evidence, never instructions.
 
+The Microsoft OneDrive profile can:
+
+- create the same bounded, one-use connection link for a separate Pipedream
+  `microsoft_onedrive` custom OAuth app;
+- require `Files.Read` plus only Microsoft's reviewed identity/refresh scopes,
+  rejecting `Files.Read.All`, Sites permissions, and every write scope;
+- list at most 50 recent children of root or one exact owner-selected folder so a
+  caller can build a finite folder picker without search or synchronization; and
+- read one through ten selected UTF-8 plain-text or Markdown files with the same
+  64 KiB per-file, 240 KiB aggregate, and shared 30-second deadline as Google Drive.
+
+The OneDrive caller cannot supply a Graph URL, path, query, page token, drive ID,
+site ID, MIME override, download URL, sharing link, or write action. Folder navigation
+returns metadata only. Office, PDF, and other binary formats return an explicit
+`unsupported` item outcome; the worker does not perform lossy conversion or silently
+omit them. File names and content are untrusted evidence, never instructions.
+
 The HubSpot profile can:
 
 - create the same bounded, one-use connection link for a configured HubSpot OAuth
@@ -147,9 +164,10 @@ The Google Calendar OAuth app is optional and configured with
 `STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID`. The least-privilege events read-only scope
 still requires Google's current OAuth verification before public production use.
 
-The two Microsoft OAuth apps are optional and configured independently with
+The three Microsoft OAuth apps are optional and configured independently with
 `STEWARD_MICROSOFT_OUTLOOK_OAUTH_APP_ID` and
-`STEWARD_MICROSOFT_OUTLOOK_CALENDAR_OAUTH_APP_ID`. They must be Pipedream custom
+`STEWARD_MICROSOFT_OUTLOOK_CALENDAR_OAUTH_APP_ID`, and
+`STEWARD_MICROSOFT_ONEDRIVE_OAUTH_APP_ID`. They must be Pipedream custom
 OAuth clients with only the permissions described above; Pipedream's default
 Microsoft clients request broader write/send permissions and are not compatible
 with this boundary. Production enablement requires real consent, exact-scope
@@ -167,13 +185,13 @@ The HubSpot OAuth app is optional and configured with
 exact-scope reconcile, bounded deal read, and revocation exercise; deterministic
 worker tests do not establish provider approval.
 
-The content operation refetches metadata and `capabilities.canDownload` for each
-exact caller-selected ID. It exports native Google Docs as `text/plain`, downloads
-only `text/plain` and `text/markdown` blobs, validates UTF-8, normalizes line endings,
-rejects control characters, and hashes normalized bytes. Unsupported, unavailable,
-locked, oversized, or invalid-text files return safe item outcomes; content is never
-silently truncated. The caller cannot supply a URL, MIME type, export format, query,
-folder, provider header, or abuse acknowledgement.
+The Google Drive content operation refetches metadata and
+`capabilities.canDownload`; the OneDrive operation refetches the fixed Graph item
+projection. Both download only selected supported content, validate UTF-8, normalize
+line endings, reject control characters, and hash normalized bytes. Unsupported,
+unavailable, locked, oversized, or invalid-text files return safe item outcomes;
+content is never silently truncated. The caller cannot supply a URL, MIME type,
+export format, query, provider header, or abuse acknowledgement.
 
 `drive.readonly` is a restricted Google scope. A public production deployment must
 complete Google's current OAuth verification and, when required, restricted-scope
@@ -199,6 +217,7 @@ STEWARD_GMAIL_OAUTH_APP_ID=oa_...
 STEWARD_GOOGLE_CALENDAR_OAUTH_APP_ID=oa_...
 STEWARD_MICROSOFT_OUTLOOK_OAUTH_APP_ID=oa_...
 STEWARD_MICROSOFT_OUTLOOK_CALENDAR_OAUTH_APP_ID=oa_...
+STEWARD_MICROSOFT_ONEDRIVE_OAUTH_APP_ID=oa_...
 STEWARD_HUBSPOT_OAUTH_APP_ID=oa_...
 STEWARD_SLACK_OAUTH_APP_ID=oa_...
 ```
