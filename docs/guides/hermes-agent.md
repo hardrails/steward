@@ -7,7 +7,7 @@ section: Agent compatibility
 # Build and run the qualified Hermes Agent adapter
 
 Steward includes a qualified adapter definition for Hermes Agent commit
-[`3ef6bbd201263d354fd83ec55b3c306ded2eb72a`](https://github.com/NousResearch/hermes-agent/commit/3ef6bbd201263d354fd83ec55b3c306ded2eb72a).
+[`fcbd1076a93841fa88855acce810e342a5b78101`](https://github.com/NousResearch/hermes-agent/commit/fcbd1076a93841fa88855acce810e342a5b78101).
 The adapter builds Hermes from that exact source revision into a hardened image that
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
 upstream image.
