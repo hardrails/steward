@@ -588,6 +588,64 @@ class PDFExtractionTests(unittest.TestCase):
         self.assertEqual((url, title), ("https://source.example/report.pdf", ""))
         self.assertIn("Authoritative source", content)
 
+    def test_yaml_uses_existing_pinned_fetch_and_text_contract(self) -> None:
+        raw = b"openapi: 3.0.0\npaths: {}\n"
+
+        class Headers:
+            def get(self, name: str, default: str | None = None) -> str | None:
+                return "identity" if name == "Content-Encoding" else default
+
+            def get_content_type(self) -> str:
+                return "text/yaml"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class Response:
+            status = 200
+            headers = Headers()
+
+            def read(self, maximum: int) -> bytes:
+                self.maximum = maximum
+                return raw
+
+        class Connection:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = Response()
+        connection = Connection()
+        parsed = urllib.parse.urlsplit("https://source.example/openapi.yaml")
+        with (
+            mock.patch.object(
+                worker,
+                "public_destination",
+                return_value=(
+                    "https://source.example/openapi.yaml",
+                    parsed,
+                    ["93.184.216.34"],
+                ),
+            ),
+            mock.patch.object(
+                worker,
+                "request_public_page",
+                return_value=(response, connection),
+            ),
+        ):
+            url, title, content, media_type = worker.fetch_public_page(
+                "https://source.example/openapi.yaml",
+                include_source_media=True,
+            )
+
+        self.assertEqual(response.maximum, worker.MAX_UPSTREAM + 1)
+        self.assertTrue(connection.closed)
+        self.assertEqual(url, "https://source.example/openapi.yaml")
+        self.assertEqual(title, "")
+        self.assertEqual(content, raw.decode())
+        self.assertEqual(media_type, "text/yaml")
+
 
 class TotalBatchExtractionTests(unittest.TestCase):
     def fixture_process_factory(

@@ -75,8 +75,18 @@ V2_SOURCE_MEDIA_TYPES = frozenset({
     "text/html",
     "application/xhtml+xml",
     "text/plain",
+    "text/yaml",
+    "text/x-yaml",
     "application/pdf",
     "application/json",
+    "application/yaml",
+    "application/x-yaml",
+})
+YAML_MEDIA_TYPES = frozenset({
+    "text/yaml",
+    "text/x-yaml",
+    "application/yaml",
+    "application/x-yaml",
 })
 V2_PENDING_REAPS: list[subprocess.Popen[bytes]] = []
 
@@ -586,7 +596,8 @@ def request_public_page(
             connection.request("GET", path, headers={
                 "Accept": (
                     "text/html,application/xhtml+xml,application/json,"
-                    "application/*+json;q=0.95,application/pdf;q=0.9,text/plain;q=0.8"
+                    "application/*+json;q=0.95,application/yaml;q=0.9,"
+                    "text/yaml;q=0.9,application/pdf;q=0.85,text/plain;q=0.8"
                 ),
                 "Accept-Encoding": "identity",
                 "User-Agent": "steward-research-worker/1",
@@ -667,6 +678,7 @@ def fetch_public_page(
                 content_type
                 not in {"text/html", "application/xhtml+xml", "application/pdf", "text/plain"}
                 and not json_content
+                and content_type not in YAML_MEDIA_TYPES
             ):
                 raise WorkerError(502, "unsupported_source", "public source content type is not supported")
             constrain_connection_to_deadline(connection, deadline)
@@ -710,7 +722,7 @@ def fetch_public_page(
                     "application/json",
                     include_source_media=include_source_media,
                 )
-            if content_type == "text/plain":
+            if content_type == "text/plain" or content_type in YAML_MEDIA_TYPES:
                 return public_page_result(
                     url,
                     "",
