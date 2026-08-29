@@ -525,6 +525,27 @@ class PDFExtractionTests(unittest.TestCase):
                 _url, _parsed, host, _port = worker.public_url_shape(valid_url)
                 self.assertEqual(host, expected_host)
 
+    def test_public_fetch_negotiates_every_accepted_yaml_media_type(self) -> None:
+        parsed = urllib.parse.urlsplit("https://source.example/openapi")
+        connection = mock.Mock()
+        response = mock.Mock()
+        connection.getresponse.return_value = response
+        with mock.patch.object(
+            worker,
+            "PinnedHTTPSConnection",
+            return_value=connection,
+        ):
+            selected_response, selected_connection = worker.request_public_page(
+                parsed,
+                ["93.184.216.34"],
+            )
+
+        self.assertIs(selected_response, response)
+        self.assertIs(selected_connection, connection)
+        accept = connection.request.call_args.kwargs["headers"]["Accept"]
+        for media_type in worker.YAML_MEDIA_TYPES:
+            self.assertIn(media_type, accept)
+
     def test_extract_batch_remains_fail_fast_without_partial_results(self) -> None:
         failure = worker.WorkerError(502, "unsupported_source", "source failed")
         with mock.patch.object(
@@ -587,6 +608,64 @@ class PDFExtractionTests(unittest.TestCase):
         self.assertTrue(connection.closed)
         self.assertEqual((url, title), ("https://source.example/report.pdf", ""))
         self.assertIn("Authoritative source", content)
+
+    def test_yaml_uses_existing_pinned_fetch_and_text_contract(self) -> None:
+        raw = b"openapi: 3.0.0\npaths: {}\n"
+
+        class Headers:
+            def get(self, name: str, default: str | None = None) -> str | None:
+                return "identity" if name == "Content-Encoding" else default
+
+            def get_content_type(self) -> str:
+                return "text/yaml"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class Response:
+            status = 200
+            headers = Headers()
+
+            def read(self, maximum: int) -> bytes:
+                self.maximum = maximum
+                return raw
+
+        class Connection:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = Response()
+        connection = Connection()
+        parsed = urllib.parse.urlsplit("https://source.example/openapi.yaml")
+        with (
+            mock.patch.object(
+                worker,
+                "public_destination",
+                return_value=(
+                    "https://source.example/openapi.yaml",
+                    parsed,
+                    ["93.184.216.34"],
+                ),
+            ),
+            mock.patch.object(
+                worker,
+                "request_public_page",
+                return_value=(response, connection),
+            ),
+        ):
+            url, title, content, media_type = worker.fetch_public_page(
+                "https://source.example/openapi.yaml",
+                include_source_media=True,
+            )
+
+        self.assertEqual(response.maximum, worker.MAX_UPSTREAM + 1)
+        self.assertTrue(connection.closed)
+        self.assertEqual(url, "https://source.example/openapi.yaml")
+        self.assertEqual(title, "")
+        self.assertEqual(content, raw.decode())
+        self.assertEqual(media_type, "text/yaml")
 
 
 class TotalBatchExtractionTests(unittest.TestCase):

@@ -5,7 +5,7 @@ This optional container gives agents fixed `/v1/search`, `/v1/extract`, and
 network access. It adapts a SearXNG JSON API by default, and automatically uses
 the Brave Search API when an owner-only Brave key file is configured. Both
 paths normalize to the same fixed result contract before directly extracting
-bounded text from public HTTP(S) HTML, XHTML, plain-text, JSON, and PDF sources.
+bounded text from public HTTP(S) HTML, XHTML, plain-text, JSON, YAML, and PDF sources.
 It can also inject an owner-only U.S. EIA API key for one frozen, credential-free
 commercial electricity-price request profile.
 
@@ -61,8 +61,9 @@ URL, in request order, even when completion order differs:
 ```
 
 An extracted outcome has exactly the fields shown. `source_media_type` is the
-accepted upstream representation for HTML, plain text, and PDF: `text/html`,
-`application/xhtml+xml`, `text/plain`, or `application/pdf`. Every accepted JSON
+accepted upstream representation for HTML, plain text, YAML, and PDF: `text/html`,
+`application/xhtml+xml`, `text/plain`, `text/yaml`, `text/x-yaml`,
+`application/yaml`, `application/x-yaml`, or `application/pdf`. Every accepted JSON
 representation, including `application/*+json`, is reported canonically as
 `application/json`. JSON is parsed and serialized with stable key ordering before
 it leaves the worker. JSON is limited to 8,192 values and 64 levels, and strings
