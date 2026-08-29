@@ -597,7 +597,8 @@ def request_public_page(
                 "Accept": (
                     "text/html,application/xhtml+xml,application/json,"
                     "application/*+json;q=0.95,application/yaml;q=0.9,"
-                    "text/yaml;q=0.9,application/pdf;q=0.85,text/plain;q=0.8"
+                    "application/x-yaml;q=0.9,text/yaml;q=0.9,text/x-yaml;q=0.9,"
+                    "application/pdf;q=0.85,text/plain;q=0.8"
                 ),
                 "Accept-Encoding": "identity",
                 "User-Agent": "steward-research-worker/1",

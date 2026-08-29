@@ -525,6 +525,27 @@ class PDFExtractionTests(unittest.TestCase):
                 _url, _parsed, host, _port = worker.public_url_shape(valid_url)
                 self.assertEqual(host, expected_host)
 
+    def test_public_fetch_negotiates_every_accepted_yaml_media_type(self) -> None:
+        parsed = urllib.parse.urlsplit("https://source.example/openapi")
+        connection = mock.Mock()
+        response = mock.Mock()
+        connection.getresponse.return_value = response
+        with mock.patch.object(
+            worker,
+            "PinnedHTTPSConnection",
+            return_value=connection,
+        ):
+            selected_response, selected_connection = worker.request_public_page(
+                parsed,
+                ["93.184.216.34"],
+            )
+
+        self.assertIs(selected_response, response)
+        self.assertIs(selected_connection, connection)
+        accept = connection.request.call_args.kwargs["headers"]["Accept"]
+        for media_type in worker.YAML_MEDIA_TYPES:
+            self.assertIn(media_type, accept)
+
     def test_extract_batch_remains_fail_fast_without_partial_results(self) -> None:
         failure = worker.WorkerError(502, "unsupported_source", "source failed")
         with mock.patch.object(
