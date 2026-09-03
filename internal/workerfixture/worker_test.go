@@ -485,10 +485,10 @@ print(json.dumps({"url":url,"title":title,"content":content,"media":media,"v2":v
 		t.Fatal(err)
 	}
 	if result.URL != "https://api.example/data" || result.Title != "" ||
-		result.Content != "{\n  \"a\": {\n    \"value\": 1\n  },\n  \"z\": 2\n}" ||
+		result.Content != "{\"a\":{\"value\":1},\"z\":2}" ||
 		result.Media != "application/json" ||
 		result.V2.Disposition != "extracted" || result.V2.Media != "application/json" ||
-		result.V2.Content != "{\n  \"type\": \"Feature\"\n}" ||
+		result.V2.Content != "{\"type\":\"Feature\"}" ||
 		strings.Join(result.Failures, ",") != "unsupported_source,unsupported_source,unsupported_source" {
 		t.Fatalf("public JSON normalization=%s", raw)
 	}

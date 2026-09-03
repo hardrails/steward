@@ -249,7 +249,7 @@ def clean_text(value: object, maximum: int) -> str:
     return encoded[:maximum].decode("utf-8", "ignore")
 
 
-def normalized_json_text(decoded: str) -> str:
+def normalized_json_text(decoded: str, *, compact: bool = False) -> str:
     value = json.loads(decoded)
     pending: list[tuple[object, int]] = [(value, 0)]
     nodes = 0
@@ -266,7 +266,13 @@ def normalized_json_text(decoded: str) -> str:
             for key, child in item.items():
                 key.encode("utf-8")
                 pending.append((child, depth + 1))
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":") if compact else None,
+        indent=None if compact else 2,
+        sort_keys=True,
+    )
 
 
 def normalized_v2_text(value: str) -> tuple[str, bool]:
@@ -708,7 +714,10 @@ def fetch_public_page(
                 raise WorkerError(502, "unsupported_source", "public source character set is not supported") from error
             if json_content:
                 try:
-                    normalized = normalized_json_text(decoded)
+                    normalized = normalized_json_text(
+                        decoded,
+                        compact=include_source_media,
+                    )
                     content = clean_text(normalized, MAX_SOURCE_TEXT)
                 except (ValueError, RecursionError, UnicodeError) as error:
                     raise WorkerError(

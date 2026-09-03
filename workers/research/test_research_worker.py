@@ -667,6 +667,71 @@ class PDFExtractionTests(unittest.TestCase):
         self.assertEqual(content, raw.decode())
         self.assertEqual(media_type, "text/yaml")
 
+    def test_v2_compacts_json_before_applying_the_retained_source_limit(self) -> None:
+        value = {
+            "holidays": [
+                {"date": "2027-01-01", "name": "Holiday name"}
+                for _index in range(600)
+            ]
+        }
+        raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+        pretty = json.dumps(value, indent=2, sort_keys=True).encode()
+        self.assertLessEqual(len(raw), worker.MAX_V2_SOURCE_TEXT)
+        self.assertGreater(len(pretty), worker.MAX_V2_SOURCE_TEXT)
+
+        class Headers:
+            def get(self, name: str, default: str | None = None) -> str | None:
+                return "identity" if name == "Content-Encoding" else default
+
+            def get_content_type(self) -> str:
+                return "application/json"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class Response:
+            status = 200
+            headers = Headers()
+
+            def read(self, maximum: int) -> bytes:
+                self.maximum = maximum
+                return raw
+
+        class Connection:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = Response()
+        connection = Connection()
+        parsed = urllib.parse.urlsplit("https://source.example/holidays")
+        with (
+            mock.patch.object(
+                worker,
+                "public_destination",
+                return_value=(
+                    "https://source.example/holidays",
+                    parsed,
+                    ["93.184.216.34"],
+                ),
+            ),
+            mock.patch.object(
+                worker,
+                "request_public_page",
+                return_value=(response, connection),
+            ),
+        ):
+            _url, _title, content, media_type = worker.fetch_public_page(
+                "https://source.example/holidays",
+                include_source_media=True,
+            )
+
+        normalized, truncated = worker.normalized_v2_text(content)
+        self.assertEqual(json.loads(normalized), value)
+        self.assertEqual(media_type, "application/json")
+        self.assertFalse(truncated)
+
 
 class TotalBatchExtractionTests(unittest.TestCase):
     def fixture_process_factory(
