@@ -32,10 +32,27 @@ know only logical Steward connector names; provider credentials and upstream
 origins never enter Hermes state. The adapter does not change Hermes core source
 or seed workspace content into the image.
 
+The v2 service contract adds a bounded stop operation. Its HTTP boundary has local
+tests; the existing retained v1 qualification does not qualify these changed
+adapter bytes. A new disposable-host gVisor qualification, including stopping an
+active tool, is required before publishing this adapter as qualified.
+
 The port 8766 service is intended to sit behind a Steward authenticated service
 grant. It serves `GET /steward/v1/negotiation` itself and forwards only
 `GET /health`, `POST /v1/runs`, and `GET /v1/runs/run_<32 lowercase hex>` to the
-Hermes API on loopback. It replaces caller credentials with a fixed internal
+Hermes API on loopback. `POST /steward/v1/run-stop` accepts exactly the canonical
+49-byte JSON object `{"run_id":"run_<32 lowercase hex>"}` and forwards an empty
+object to that run's native `/stop` endpoint. The fixed operation path permits
+Gateway to require a signed exact-body operation without a wildcard path grant.
+It is not automatically authorized by an existing run-submission permit. The
+response may say `stopping`; this is not evidence that execution or an external
+effect has halted. Reconcile the same run's terminal status separately.
+Native `/approval`, `/events`, and `/stop` subroutes remain unavailable at the
+bridge. Existing bounded controller-event and signed-interaction channels are the
+intended substrate for progress and business questions; a Hermes workspace helper
+and controller integration still need implementation and acceptance. Upstream
+command-approval choices are not a business-question protocol.
+The bridge replaces caller credentials with a fixed internal
 Bearer token, never forwards cookies, requires a `Content-Length` on run
 submissions, limits request bodies to 64 KiB and responses to 1 MiB, and uses a
 30-second I/O timeout. The bridge is single-threaded with a bounded connection
