@@ -39,7 +39,7 @@ cd "$(dirname "$0")/.."
 /bin/bash -p scripts/check-release-inventory.sh
 /bin/bash -p scripts/check-docs-consistency.sh
 /bin/bash -p scripts/check-cli-docs-contract.sh
-go test -tags=qualification ./internal/adapterfixture -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' -count=1
+GOENV=off GOFLAGS= go test -tags=qualification ./internal/adapterfixture -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' -skip= -count=1
 
 # The published target matrix: pure-stdlib Go with CGO off, so every target is a
 # trivial cross-compile from any host.

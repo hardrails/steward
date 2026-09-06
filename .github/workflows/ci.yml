@@ -51,7 +51,7 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test
-        run: go test -race -tags=qualification ./...
+        run: GOENV=off GOFLAGS= go test -race -tags=qualification -skip= ./...
       - name: Install native RPM build tooling
         run: |
           sudo apt-get update
@@ -710,8 +710,8 @@ jobs:
             docs/reference/evidence/hermes-feasibility.json
           install -m 0644 "$evidence_root/hermes-integration.json" \
             docs/reference/evidence/hermes-integration.json
-          go test -tags=qualification ./internal/adapterfixture \
-            -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' \
+          GOENV=off GOFLAGS= go test -tags=qualification ./internal/adapterfixture \
+            -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' -skip= \
             -count=1
 
       - name: Report bounded Hermes build diagnostics
