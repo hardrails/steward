@@ -24,6 +24,21 @@ func TestHermesQualificationIsMandatoryForCIAndRelease(t *testing.T) {
 			t.Fatalf("CI is missing mandatory qualification command %q", required)
 		}
 	}
+	uploadStart := strings.Index(ci, "      - name: Upload metadata-only qualification evidence\n")
+	if uploadStart < 0 {
+		t.Fatal("qualification evidence upload missing")
+	}
+	upload := strings.SplitN(ci[uploadStart:], "\n      - name:", 2)[0]
+	for _, required := range []string{
+		"if: ${{ always() }}",
+		"path: ${{ runner.temp }}/steward-hermes-qualification/evidence/*.json",
+		"retention-days: 3",
+		"if-no-files-found: error",
+	} {
+		if !strings.Contains(upload, required) {
+			t.Fatalf("metadata-only failure evidence upload is missing %q", required)
+		}
+	}
 	release := string(readBounded(t, filepath.Join(root, "scripts", "release.sh"), 2<<20))
 	gate := strings.Index(release, "\nGOENV=off GOFLAGS= go test -tags=qualification ./internal/adapterfixture -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' -skip= -count=1\n")
 	build := strings.Index(release, "go build ")

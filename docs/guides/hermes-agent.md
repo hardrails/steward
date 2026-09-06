@@ -308,9 +308,13 @@ gh workflow run ci.yml \
   -f hermes_qualification=true
 ```
 
-Download the `hermes-qualification-<commit>` artifact from that exact run and
-commit its two files without editing or reserializing them. A pull-request or push
-CI run never starts this expensive job; it is manual and opt-in.
+After both harnesses and the exact-source verifier pass, download the
+`hermes-qualification-<commit>` artifact from that exact run and commit its two
+files without editing or reserializing them. The job also attempts to upload
+metadata from failed runs for diagnosis; partial or failed records do not qualify
+a release and must not replace the retained successful evidence. Artifacts retain
+only metadata JSON for three days, never runtime logs or credentials. A
+pull-request or push CI run never starts this expensive job; it is manual and opt-in.
 
 ## Inspect and import the exact output
 
