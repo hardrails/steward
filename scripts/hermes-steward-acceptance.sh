@@ -261,7 +261,7 @@ if attestation_path:
         or document["image"].get("runtime_image_id") not in {manifest_digest, config_digest}
         or document["image"].get("platform") != expected_platform
         or not isinstance(document.get("adapter"), dict)
-        or document["adapter"].get("contract") != "steward.hermes-agent.v1"
+        or document["adapter"].get("contract") != "steward.hermes-agent.v2"
         or not isinstance(document.get("source"), dict)
         or not isinstance(document.get("build_recipe"), dict)
     ):

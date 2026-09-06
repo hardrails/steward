@@ -28,10 +28,13 @@ RESEARCH_SKILL = pathlib.Path("/opt/steward/profiles/research")
 DEVELOPER_SKILL = pathlib.Path("/opt/steward/profiles/developer")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 RUN_PATH_RE = re.compile(r"^/v1/runs/run_[a-f0-9]{32}$")
+RUN_ID_RE = re.compile(r"run_[a-f0-9]{32}")
+RUN_STOP_PATH = "/steward/v1/run-stop"
 INTERNAL_API_HOST = "127.0.0.1"
 INTERNAL_API_PORT = 8642
 INTERNAL_API_TOKEN = "steward-feasibility"
 MAX_REQUEST_BODY = 64 << 10
+MAX_STOP_REQUEST_BODY = 49
 MAX_RESPONSE_BODY = 1 << 20
 SERVICE_TIMEOUT_SECONDS = 30
 STARTUP_TIMEOUT_SECONDS = 120
@@ -113,7 +116,7 @@ PROFILE_SKILLS = {
 NEGOTIATION = {
     "schema_version": "steward.adapter-negotiation.v1",
     "adapter": "hermes-agent",
-    "adapter_contract": "steward.hermes-agent.v1",
+    "adapter_contract": "steward.hermes-agent.v2",
     "upstream_revision": REVISION,
     "task_protocol": "hermes.runs.v1",
     "native_protocols": ["http"],
@@ -653,7 +656,8 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         self._send_error(404, "route_not_allowed")
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/v1/runs":
+        stopping = self.path == RUN_STOP_PATH
+        if self.path != "/v1/runs" and not stopping:
             self._send_error(404, "route_not_allowed")
             return
         if self.headers.get("Transfer-Encoding") is not None:
@@ -670,7 +674,8 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
             self._send_error(400, "invalid_content_length")
             return
         length = int(lengths[0])
-        if length > MAX_REQUEST_BODY:
+        maximum = MAX_STOP_REQUEST_BODY if stopping else MAX_REQUEST_BODY
+        if length > maximum:
             self._send_error(413, "request_body_too_large")
             return
         try:
@@ -681,9 +686,29 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         if len(body) != length:
             self._send_error(400, "incomplete_request_body")
             return
+        if stopping:
+            try:
+                value = json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                self._send_error(400, "invalid_stop_request")
+                return
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"run_id"}
+                or not isinstance(value["run_id"], str)
+                or RUN_ID_RE.fullmatch(value["run_id"]) is None
+                or body != json.dumps(value, separators=(",", ":")).encode("ascii")
+            ):
+                self._send_error(400, "invalid_stop_request")
+                return
+            # A fixed public operation lets Gateway bind the exact run ID in its
+            # signed request bytes without admitting a wildcard service path.
+            # Preserve upstream stopping; acknowledgement is not termination.
+            self._proxy("POST", b"{}", path=f"/v1/runs/{value['run_id']}/stop")
+            return
         self._proxy("POST", body)
 
-    def _proxy(self, method: str, body: bytes | None) -> None:
+    def _proxy(self, method: str, body: bytes | None, *, path: str | None = None) -> None:
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
@@ -699,7 +724,7 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         )
         deadline = time.monotonic() + SERVICE_TIMEOUT_SECONDS
         try:
-            connection.request(method, self.path, body=body, headers=headers)
+            connection.request(method, self.path if path is None else path, body=body, headers=headers)
             if connection.sock is not None:
                 connection.sock.settimeout(max(0.001, deadline - time.monotonic()))
             response = connection.getresponse()

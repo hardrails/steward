@@ -7,11 +7,19 @@ import hashlib
 import http.server
 import json
 import re
+import shlex
 from typing import Any
 
 MAX_BODY = 1 << 20
 NONCE = "steward-hermes-phase1"
 DIGEST = hashlib.sha256(NONCE.encode()).hexdigest()
+STOP_FIXTURE_COMMAND = "python3 -c " + shlex.quote(
+    "import json,os,pathlib,time; "
+    "pid=os.getpid(); "
+    "start=pathlib.Path('/proc/self/stat').read_text().split(') ',1)[1].split()[19]; "
+    "pathlib.Path('/tmp/steward-stop-active.json').write_text(json.dumps({'pid':pid,'start':start,'born':time.monotonic()})); "
+    "time.sleep(60)"
+)
 WORKSPACE_DIGEST_DOMAIN = b"steward.workspace-audit.manifest.v1\x00"
 MCP_RESULT_PREFIX = (
     '<untrusted_tool_result source="mcp__fixture_echo__echo">\n'
@@ -321,9 +329,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ],
             }
             finish = "tool_calls"
+        elif tool_message is not None and tool_message.get("tool_call_id") == "call_stop_fixture":
+            message = {"role": "assistant", "content": "stop-fixture-finished-without-interruption"}
+            finish = "stop"
         elif tool_message is not None:
             self._json(422, {"error": {"code": "unexpected_tool_result", "message": "unexpected tool result"}})
             return
+        elif "STEWARD_STOP_ACTIVE_TOOL" in last_text:
+            message = {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "call_stop_fixture", "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": STOP_FIXTURE_COMMAND, "timeout": 120, "background": False}, separators=(",", ":")),
+                    },
+                }],
+            }
+            finish = "tool_calls"
         elif "STEWARD_WORKSPACE_AUDIT" in last_text:
             message = {
                 "role": "assistant",

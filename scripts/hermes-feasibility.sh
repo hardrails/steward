@@ -78,7 +78,7 @@ required_checks=(
 	source.inputs image.build image.contract network.internal fixture.services
 	fixture.network
 	runtime.policy agent.readiness adapter.negotiation runtime.identity runtime.filesystem runtime.network
-	service.boundary fixture.workspace task.basic task.skill task.mcp
+	service.boundary fixture.workspace task.basic task.skill task.mcp task.stop
 	restart.readiness task.restart restart.state feasibility.complete
 )
 
@@ -638,7 +638,7 @@ authority_before=$(state_authority_digest) || stop_gate adapter.negotiation auth
 negotiation_two=$(agent_get /steward/v1/negotiation) || stop_gate adapter.negotiation negotiation_replay_failed
 authority_after=$(state_authority_digest) || stop_gate adapter.negotiation authority_state_unreadable
 [[ $negotiation_one == "$negotiation_two" && $authority_before == "$authority_after" ]] || stop_gate adapter.negotiation negotiation_mutated_authority_state
-python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert set(p)=={"adapter","adapter_contract","capabilities","native_protocols","schema_version","task_protocol","upstream_revision"}; assert p["schema_version"]=="steward.adapter-negotiation.v1" and p["adapter"]=="hermes-agent" and p["adapter_contract"]=="steward.hermes-agent.v1" and p["upstream_revision"]==sys.argv[1]; assert p["task_protocol"]=="hermes.runs.v1" and p["native_protocols"]==["http"]; assert p["capabilities"]==[{"fixture_id":"steward.workspace-audit","id":"skill"},{"fixture_id":"steward.connector-work","id":"skill"},{"fixture_id":"fixed-response","id":"task"}]' "$revision" <<<"$negotiation_one" || stop_gate adapter.negotiation invalid_negotiation_contract
+python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert set(p)=={"adapter","adapter_contract","capabilities","native_protocols","schema_version","task_protocol","upstream_revision"}; assert p["schema_version"]=="steward.adapter-negotiation.v1" and p["adapter"]=="hermes-agent" and p["adapter_contract"]=="steward.hermes-agent.v2" and p["upstream_revision"]==sys.argv[1]; assert p["task_protocol"]=="hermes.runs.v1" and p["native_protocols"]==["http"]; assert p["capabilities"]==[{"fixture_id":"steward.workspace-audit","id":"skill"},{"fixture_id":"steward.connector-work","id":"skill"},{"fixture_id":"fixed-response","id":"task"}]' "$revision" <<<"$negotiation_one" || stop_gate adapter.negotiation invalid_negotiation_contract
 record adapter.negotiation passed side_effect_free_exact_contract
 
 timeout 15 docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' || stop_gate service.boundary service_boundary_contract_failed
@@ -654,9 +654,16 @@ except urllib.error.HTTPError as exc:
 else:
     raise SystemExit("event stream escaped the service allowlist")
 
-for headers, expected in (({}, 411), ({"Content-Length": "65537"}, 413)):
+for path, headers, expected in (
+    ("/v1/runs", {}, 411),
+    ("/v1/runs", {"Content-Length": "65537"}, 413),
+    ("/steward/v1/run-stop", {}, 411),
+    ("/steward/v1/run-stop", {"Content-Length": "50"}, 413),
+    ("/v1/runs/run_00000000000000000000000000000000/stop", {}, 404),
+    ("/v1/runs/run_00000000000000000000000000000000/approval", {}, 404),
+):
     connection = http.client.HTTPConnection("127.0.0.1", 8766, timeout=10)
-    connection.putrequest("POST", "/v1/runs", skip_accept_encoding=True)
+    connection.putrequest("POST", path, skip_accept_encoding=True)
     connection.putheader("Authorization", "Bearer untrusted-outer-caller")
     for name, value in headers.items():
         connection.putheader(name, value)
@@ -733,6 +740,86 @@ PY
 run_native_task basic STEWARD_TASK_FIXTURE "steward-task:$expected_digest"
 run_native_task skill STEWARD_WORKSPACE_AUDIT "$workspace_manifest_digest"
 run_native_task mcp STEWARD_MCP_FIXTURE steward-hermes-phase1
+
+# Prove interruption against a real terminal tool, not a fabricated status reply.
+# The fixture marker records process identity inside this disposable container.
+docker exec "$agent" test ! -e /tmp/steward-stop-active.json || stop_gate task.stop stale_stop_fixture
+stop_response=$(agent_post /v1/runs '{"input":"STEWARD_STOP_ACTIVE_TOOL","session_id":"steward-stop-fixture"}') || stop_gate task.stop submit_failed
+stop_run=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("run_id",""))' <<<"$stop_response")
+[[ $stop_run =~ ^run_[a-f0-9]{32}$ ]] || stop_gate task.stop invalid_run_id
+tool_active=no
+for _ in $(seq 1 "$run_timeout"); do
+	if docker exec "$agent" test -s /tmp/steward-stop-active.json; then
+		tool_active=yes
+		break
+	fi
+	sleep 1
+done
+[[ $tool_active == yes ]] || stop_gate task.stop active_tool_not_observed
+timeout 10 docker exec -i "$agent" python3 -I - "$stop_run" <<'PY' || stop_gate task.stop interruption_not_proven
+import http.client
+import json
+import math
+import pathlib
+import sys
+import time
+
+# BEGIN STOP OBSERVATION ORACLE (also executed by the negative-control test)
+def observe_stop(run_id, marker, request, process_matches, clock, sleep):
+    assert set(marker) == {'pid', 'start', 'born'}
+    assert type(marker['pid']) is int and marker['pid'] > 0
+    assert type(marker['start']) is str and marker['start'].isdigit()
+    assert type(marker['born']) in (int, float) and math.isfinite(marker['born'])
+    started = clock()
+    assert 0 <= started - marker['born'] <= 3, 'fixture marker is not fresh'
+    # The foreground tool sleeps 60 seconds with an explicit 120-second timeout.
+    # Freshness plus this absolute deadline rules out natural/tool-timeout exit.
+    deadline = started + 5
+    assert process_matches(marker), 'fixture tool was not active before stop'
+    body = json.dumps({'run_id': run_id}, separators=(',', ':')).encode()
+    ack = request('POST', '/steward/v1/run-stop', body, deadline)
+    assert ack == {'run_id': run_id, 'status': 'stopping'}
+    while clock() < deadline:
+        result = request('GET', '/v1/runs/' + run_id, None, deadline)
+        assert result.get('run_id') == run_id
+        status = result.get('status')
+        assert status in ('queued', 'running', 'stopping', 'cancelled')
+        if status == 'cancelled' and not process_matches(marker):
+            assert clock() < deadline, 'interruption exceeded observation deadline'
+            return
+        sleep(min(0.1, max(0, deadline - clock())))
+    raise AssertionError('terminal cancellation and tool interruption not observed within five seconds')
+# END STOP OBSERVATION ORACLE
+
+def request(method, path, body, deadline):
+    remaining = deadline - time.monotonic()
+    assert remaining > 0, 'stop observation deadline expired'
+    connection = http.client.HTTPConnection('127.0.0.1', 8766, timeout=remaining)
+    try:
+        connection.request(method, path, body=body, headers={'Content-Type': 'application/json'})
+        response = connection.getresponse()
+        payload = response.read((1 << 20) + 1)
+        assert response.status == 200 and len(payload) <= 1 << 20
+        value = json.loads(payload)
+        assert isinstance(value, dict)
+        return value
+    finally:
+        connection.close()
+
+def process_matches(marker):
+    try:
+        observed = pathlib.Path(f"/proc/{marker['pid']}/stat").read_text().split(') ', 1)[1].split()[19]
+    except FileNotFoundError:
+        return False
+    return observed == marker['start']
+
+with pathlib.Path('/tmp/steward-stop-active.json').open('rb') as source:
+    body = source.read(257)
+assert len(body) <= 256
+marker = json.loads(body)
+observe_stop(sys.argv[1], marker, request, process_matches, time.monotonic, time.sleep)
+PY
+record task.stop passed active_tool_interrupted_and_terminal_observed
 persisted_authority_before_restart=$(state_authority_digest) || stop_gate restart.state authority_state_unreadable
 
 docker rm -f "$agent" >/dev/null

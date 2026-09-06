@@ -1,6 +1,6 @@
 {
   "schema_version": "steward.adapter-source.v1",
-  "adapter_contract": "steward.hermes-agent.v1",
+  "adapter_contract": "steward.hermes-agent.v2",
   "qualified_platforms": [
     "linux/amd64"
   ],
@@ -50,10 +50,16 @@
     "operations": [
       "GET /health",
       "POST /v1/runs",
-      "GET /v1/runs/{run_id}"
+      "GET /v1/runs/{run_id}",
+      "POST /steward/v1/run-stop"
     ],
     "run_id_pattern": "^run_[a-f0-9]{32}$",
     "events": false,
+    "stop": {
+      "request_body": "{\"run_id\":\"run_<32 lowercase hex>\"}",
+      "max_request_body_bytes": 49,
+      "acknowledgement_is_terminal": false
+    },
     "max_request_body_bytes": 65536,
     "max_response_body_bytes": 1048576,
     "timeout_seconds": 30

@@ -1045,7 +1045,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		"source.inputs", "image.build", "image.contract", "network.internal",
 		"fixture.services", "fixture.network", "runtime.policy", "agent.readiness",
 		"adapter.negotiation", "service.boundary", "runtime.identity", "runtime.filesystem",
-		"runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp",
+		"runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp", "task.stop",
 		"restart.readiness", "task.restart", "restart.state", "feasibility.complete",
 		"evidence.coverage",
 	}
@@ -1591,6 +1591,20 @@ try:
     tool_call = chunk["choices"][0]["delta"]["tool_calls"][0]
     assert tool_call["index"] == 0 and tool_call["function"]["name"] == "terminal"
 
+    _, wire = complete(user("STEWARD_STOP_ACTIVE_TOOL"), False)
+    stop_message = json.loads(wire)["choices"][0]["message"]
+    stop_call = stop_message["tool_calls"][0]
+    assert stop_call["id"] == "call_stop_fixture"
+    assert stop_call["function"]["name"] == "terminal"
+    stop_arguments = json.loads(stop_call["function"]["arguments"])
+    assert stop_arguments == {"command": module.STOP_FIXTURE_COMMAND, "timeout": 120, "background": False}
+    assert "time.sleep(60)" in module.STOP_FIXTURE_COMMAND
+    assert "/tmp/steward-stop-active.json" in module.STOP_FIXTURE_COMMAND
+    _, wire = complete(user("STEWARD_STOP_ACTIVE_TOOL") + [stop_message, {
+        "role": "tool", "tool_call_id": "call_stop_fixture", "content": "finished",
+    }], False)
+    assert json.loads(wire)["choices"][0]["message"]["content"] == "stop-fixture-finished-without-interruption"
+
     connector_input = "STEWARD_CONNECTOR_WORK task=fixture-task-1"
     try:
         complete(user(connector_input), False)
@@ -1934,7 +1948,7 @@ func TestHermesBuilderPublicationRecoversEveryDurableState(t *testing.T) {
 		digest := sha256.Sum256(content)
 		document := map[string]any{
 			"adapter": map[string]any{
-				"contract":       "steward.hermes-agent.v1",
+				"contract":       "steward.hermes-agent.v2",
 				"git_tree":       expectedTree,
 				"source":         "git-checkout",
 				"steward_commit": expectedCommit,
