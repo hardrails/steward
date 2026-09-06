@@ -6,20 +6,18 @@ from __future__ import annotations
 import hashlib
 import http.server
 import json
+import os
+import pathlib
 import re
-import shlex
+import sys
+import time
 from typing import Any
 
 MAX_BODY = 1 << 20
 NONCE = "steward-hermes-phase1"
 DIGEST = hashlib.sha256(NONCE.encode()).hexdigest()
-STOP_FIXTURE_COMMAND = "python3 -c " + shlex.quote(
-    "import json,os,pathlib,time; "
-    "pid=os.getpid(); "
-    "start=pathlib.Path('/proc/self/stat').read_text().split(') ',1)[1].split()[19]; "
-    "pathlib.Path('/tmp/steward-stop-active.json').write_text(json.dumps({'pid':pid,'start':start,'born':time.monotonic()})); "
-    "time.sleep(60)"
-)
+STOP_FIXTURE_COMMAND = "python3 /opt/steward/fixture_model.py --stop-fixture"
+STOP_FIXTURE_MARKER = "/tmp/steward-stop-active.json"
 WORKSPACE_DIGEST_DOMAIN = b"steward.workspace-audit.manifest.v1\x00"
 MCP_RESULT_PREFIX = (
     '<untrusted_tool_result source="mcp__fixture_echo__echo">\n'
@@ -459,5 +457,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return
 
 
+def run_stop_fixture() -> None:
+    """Run one fixed image-owned terminal fixture, never arbitrary inline code."""
+    start = pathlib.Path("/proc/self/stat").read_text().split(") ", 1)[1].split()[19]
+    marker = {"pid": os.getpid(), "start": start, "born": time.monotonic()}
+    descriptor = os.open(
+        STOP_FIXTURE_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+        json.dump(marker, target, separators=(",", ":"))
+    time.sleep(60)
+
+
 if __name__ == "__main__":
-    http.server.ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    if sys.argv[1:] == ["--stop-fixture"]:
+        run_stop_fixture()
+    elif sys.argv[1:]:
+        raise SystemExit("fixture_model accepts no arguments or exactly --stop-fixture")
+    else:
+        http.server.ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()

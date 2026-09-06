@@ -1598,8 +1598,9 @@ try:
     assert stop_call["function"]["name"] == "terminal"
     stop_arguments = json.loads(stop_call["function"]["arguments"])
     assert stop_arguments == {"command": module.STOP_FIXTURE_COMMAND, "timeout": 120, "background": False}
-    assert "time.sleep(60)" in module.STOP_FIXTURE_COMMAND
-    assert "/tmp/steward-stop-active.json" in module.STOP_FIXTURE_COMMAND
+    assert module.STOP_FIXTURE_COMMAND == "python3 /opt/steward/fixture_model.py --stop-fixture"
+    assert " -c " not in module.STOP_FIXTURE_COMMAND
+    assert module.STOP_FIXTURE_MARKER == "/tmp/steward-stop-active.json"
     _, wire = complete(user("STEWARD_STOP_ACTIVE_TOOL") + [stop_message, {
         "role": "tool", "tool_call_id": "call_stop_fixture", "content": "finished",
     }], False)

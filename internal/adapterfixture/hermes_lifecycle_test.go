@@ -74,6 +74,57 @@ for kwargs in (
 	}
 }
 
+func TestHermesImageOwnedStopFixture(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	program := `
+import importlib.util, json, pathlib, stat, sys, tempfile
+from unittest import mock
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('fixture_model', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with tempfile.TemporaryDirectory() as temporary:
+    marker = pathlib.Path(temporary) / 'active.json'
+    module.STOP_FIXTURE_MARKER = str(marker)
+    proc_stat = '42 (python3) ' + ' '.join(['S'] + ['0'] * 18 + ['12345'])
+    with mock.patch.object(module.pathlib.Path, 'read_text', return_value=proc_stat), mock.patch.object(module.os, 'getpid', return_value=42), mock.patch.object(module.time, 'monotonic', return_value=100.0), mock.patch.object(module.time, 'sleep') as sleep:
+        module.run_stop_fixture()
+        sleep.assert_called_once_with(60)
+        try:
+            module.run_stop_fixture()
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError('existing marker was overwritten')
+    assert json.loads(marker.read_text()) == {'pid': 42, 'start': '12345', 'born': 100.0}
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+    target = pathlib.Path(temporary) / 'do-not-overwrite'
+    target.write_text('preserved')
+    link = pathlib.Path(temporary) / 'marker-link'
+    link.symlink_to(target)
+    module.STOP_FIXTURE_MARKER = str(link)
+    with mock.patch.object(module.pathlib.Path, 'read_text', return_value=proc_stat), mock.patch.object(module.time, 'sleep') as sleep:
+        try:
+            module.run_stop_fixture()
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError('symlink marker accepted')
+        sleep.assert_not_called()
+    assert target.read_text() == 'preserved'
+`
+	command := exec.CommandContext(ctx, python, "-I", "-c", program,
+		filepath.Join(hermesAdapterRoot(t), "fixture_model.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("image-owned stop fixture failed: %v\n%s", err, output)
+	}
+}
+
 func TestHermesBridgeRunStopBoundary(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
