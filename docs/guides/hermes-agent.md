@@ -4,15 +4,17 @@ description: Build Steward's exact pinned Hermes Agent adapter, run a custom ski
 section: Agent compatibility
 ---
 
-# Build and run the qualified Hermes Agent adapter
+# Hermes Agent adapter and qualification status
 
-Steward includes a qualified adapter definition for Hermes Agent commit
+Steward includes an adapter definition for Hermes Agent commit
 [`3ef6bbd201263d354fd83ec55b3c306ded2eb72a`](https://github.com/NousResearch/hermes-agent/commit/3ef6bbd201263d354fd83ec55b3c306ded2eb72a).
 The adapter builds Hermes from that exact source revision into a hardened image that
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
-upstream image.
+upstream image. The current v2 bridge adds a fixed, run-specific stop operation;
+its new bytes require qualification before deployment. Retained v1 evidence does
+not establish that an active tool stops under this version.
 
-Qualification means this pinned source and Steward adapter passed the documented
+The retained v1 qualification means its pinned source and adapter passed the documented
 runtime qualification under gVisor on `linux/amd64`, including a signed workspace audit, an
 authenticated connector effect through a signed custom skill, and the
 tenant-authorized service path used to submit an exact run request. The state test
@@ -261,6 +263,13 @@ and does not independently prove source provenance; authenticate the Steward rel
 or checkout and the source transfer through your own trust process.
 
 ## Rerun the end-to-end qualification
+
+Local development runs build, vet, and all ordinary tests without certifying an
+adapter release. Exact-source evidence verification uses the `qualification` Go
+test tag. The required CI job and release packager always enable it and discard
+ambient Go skip/list settings. This lets maintainers commit an unqualified source
+candidate for the hosted job without bypassing hooks or editing old evidence.
+The candidate cannot pass release checks until both fresh evidence files match.
 
 Run qualification only on a disposable `linux/amd64` host with Docker, the `runsc`
 gVisor runtime, Python 3, util-linux `setpriv`, `curl`, `base64`, and standard
