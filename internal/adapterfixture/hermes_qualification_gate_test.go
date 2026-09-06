@@ -18,6 +18,7 @@ func TestHermesQualificationIsMandatoryForCIAndRelease(t *testing.T) {
 		"run: GOENV=off GOFLAGS= go test -race -tags=qualification -skip= ./...",
 		"GOENV=off GOFLAGS= go test -tags=qualification ./internal/adapterfixture \\",
 		"-run '^TestHermesQualificationEvidenceBindsCurrentInputs$'",
+		"args: --build-tags=qualification",
 	} {
 		if !strings.Contains(ci, required) {
 			t.Fatalf("CI is missing mandatory qualification command %q", required)
