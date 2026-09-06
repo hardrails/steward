@@ -923,7 +923,7 @@ func TestHermesBuilderNormalizesPrivateArchiveInputsBeforeSandboxing(t *testing.
 	}
 }
 
-func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
+func TestHermesQualificationContracts(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	repositoryRoot := filepath.Join(root, "..", "..")
 	var adapter struct {
@@ -993,6 +993,20 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		}
 	}
 
+}
+
+// Called by the qualification-tagged release test. Local development still runs
+// all protocol, isolation, fixture, and harness-contract tests above.
+func verifyHermesQualificationEvidence(t *testing.T) {
+	t.Helper()
+	root := hermesAdapterRoot(t)
+	repositoryRoot := filepath.Join(root, "..", "..")
+	var adapter struct {
+		Upstream struct {
+			Revision string `json:"revision"`
+		} `json:"upstream"`
+	}
+	decodeEvidence(t, filepath.Join(root, "adapter.json"), &adapter)
 	var feasibility struct {
 		SchemaVersion        string `json:"schema_version"`
 		Overall              string `json:"overall"`
