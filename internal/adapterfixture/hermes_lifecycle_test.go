@@ -125,6 +125,39 @@ with tempfile.TemporaryDirectory() as temporary:
 	}
 }
 
+func TestHermesStopStartupDiagnostics(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	program := `
+import json, pathlib, shlex, subprocess, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+line = next(line for line in source.splitlines() if 'stop_phase=$(python3' in line)
+classifier = shlex.split(line.split('python3 -I -c ', 1)[1])[0]
+assert 'completed|failed|cancelled) stop_gate task.stop "tool_not_observed_run_$stop_phase"' in source
+run = 'run_' + 'a' * 32
+for status in ('completed', 'failed', 'cancelled', 'queued', 'running', 'unknown', 'private-content\\nsecret'):
+    result = subprocess.run([sys.executable, '-I', '-c', classifier, run], input=json.dumps({'run_id': run, 'status': status}), text=True, capture_output=True, timeout=2)
+    assert result.returncode == 0
+    assert result.stdout == (status if status in {'completed', 'failed', 'cancelled'} else 'nonterminal') + '\n'
+for payload in ({}, [], {'run_id': 'wrong', 'status': 'cancelled'}, {'run_id': run}, {'run_id': run, 'status': 42}):
+    result = subprocess.run([sys.executable, '-I', '-c', classifier, run], input=json.dumps(payload), text=True, capture_output=True, timeout=2)
+    assert result.returncode != 0 and not result.stdout
+fixture = pathlib.Path(sys.argv[2])
+result = subprocess.run([sys.executable, '-I', str(fixture), '--stop-fixture', 'unexpected'], text=True, capture_output=True, timeout=2)
+assert result.returncode != 0 and 'exactly --stop-fixture' in result.stderr
+`
+	command := exec.CommandContext(ctx, python, "-I", "-c", program,
+		filepath.Join(hermesAdapterRoot(t), "..", "..", "scripts", "hermes-feasibility.sh"),
+		filepath.Join(hermesAdapterRoot(t), "fixture_model.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("stop startup diagnostics failed: %v\n%s", err, output)
+	}
+}
+
 func TestHermesBridgeRunStopBoundary(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {

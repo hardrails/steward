@@ -753,6 +753,11 @@ for _ in $(seq 1 "$run_timeout"); do
 		tool_active=yes
 		break
 	fi
+	stop_progress=$(agent_get "/v1/runs/$stop_run") || stop_gate task.stop startup_status_unavailable
+	stop_phase=$(python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert isinstance(p,dict) and p.get("run_id")==sys.argv[1]; s=p.get("status"); assert isinstance(s,str); print(s if s in {"completed","failed","cancelled"} else "nonterminal")' "$stop_run" <<<"$stop_progress") || stop_gate task.stop startup_status_invalid
+	case $stop_phase in
+	completed|failed|cancelled) stop_gate task.stop "tool_not_observed_run_$stop_phase" ;;
+	esac
 	sleep 1
 done
 [[ $tool_active == yes ]] || stop_gate task.stop active_tool_not_observed
