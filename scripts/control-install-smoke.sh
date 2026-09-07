@@ -1085,18 +1085,30 @@ reject_hostile_local_source checksums-symlink "$valid_artifact" "$hostile_source
 truncate -s 4194305 "$hostile_sources/checksums.oversized"
 reject_hostile_local_source checksums-oversized "$valid_artifact" "$hostile_sources/checksums.oversized"
 cp "$fixture/assets/checksums.txt" "$hostile_sources/checksums.growing"
-truncate -s 4194304 "$hostile_sources/checksums.growing"
-touch "$hostile_sources/grow"
-(
-	while [[ -e $hostile_sources/grow ]]; do
-		truncate -s 4194305 "$hostile_sources/checksums.growing"
-		truncate -s 4194304 "$hostile_sources/checksums.growing"
-	done
-) &
-growth_pid=$!
+# Mutate after bounded_snapshot measures the source, immediately before its copy.
+# A background truncate loop can be descheduled for the entire snapshot and leave
+# a valid stable manifest; accepting that snapshot is not an installer defect.
+# Substitute only the disposable container's dd, as with its fake systemctl.
+mv /usr/bin/dd /usr/bin/steward-smoke-real-dd
+cat >/usr/bin/dd <<'EOF'
+#!/bin/bash -p
+set -euo pipefail
+for argument in "$@"; do
+	case "$argument" in
+		if=*/hostile-sources/checksums.growing)
+			printf '\n' >>"${argument#if=}"
+			: >/run/control-smoke-source-mutated
+			;;
+	esac
+done
+exec /usr/bin/steward-smoke-real-dd "$@"
+EOF
+chmod 0755 /usr/bin/dd
 reject_hostile_local_source checksums-growth "$valid_artifact" "$hostile_sources/checksums.growing"
-rm -f "$hostile_sources/grow"
-wait "$growth_pid"
+[[ -f /run/control-smoke-source-mutated ]]
+grep -Fq 'checksums manifest is missing, oversized, special, or changed while creating its bounded snapshot' \
+	/tmp/control-hostile-source.out
+mv /usr/bin/steward-smoke-real-dd /usr/bin/dd
 hostile_artifact_name="steward-control_v1.1.0_linux_${test_goarch}.tar.gz"
 mkfifo "$hostile_sources/artifact-fifo/$hostile_artifact_name"
 reject_hostile_local_source artifact-fifo "$hostile_sources/artifact-fifo/$hostile_artifact_name" \
