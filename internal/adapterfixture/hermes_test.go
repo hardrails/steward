@@ -1155,6 +1155,9 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		!validHexObjectID(stewardSource.Commit) || !validHexObjectID(stewardSource.Tree) {
 		t.Fatalf("Hermes integration evidence does not bind a clean Steward source: %#v", stewardSource)
 	}
+	if err := verifyHermesRuntimeSource(repositoryRoot, stewardSource.Commit); err != nil {
+		t.Fatal(err)
+	}
 	expectedBinaries := map[string]string{
 		"ctl": "stewardctl", "executor": "steward-executor", "gateway": "steward-gateway", "relay": "steward-relay",
 	}
