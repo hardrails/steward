@@ -146,7 +146,7 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 	}()
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	if request.URL.Path != "/v1/tasks" || request.URL.RawQuery != "" {
+	if request.RequestURI != "/v1/tasks" {
 		writeTaskIssuerError(writer, 404, "not_found", "Task signing route is unavailable.")
 		return
 	}
