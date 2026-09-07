@@ -161,24 +161,14 @@ func issueTask(arguments []string, stdout io.Writer) error {
 			return fmt.Errorf("decode instance intent: %w", err)
 		}
 	}
-	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
-		return fmt.Errorf("validate instance intent: %w", err)
-	}
-	if !intent.Capabilities.Service || intent.ServiceID == "" || admitted.ServiceID != intent.ServiceID ||
-		admitted.Generation != intent.Generation || admitted.CapsuleDigest != intent.CapsuleDigest ||
-		admitted.PolicyDigest == "" || admitted.RoutePolicyDigest == "" || admitted.RuntimeRef == "" ||
-		admitted.GrantID != gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation) ||
-		admitted.ServicePath != "/v1/services/"+admitted.GrantID+"/" ||
-		!gateway.TaskAuthoritiesValid(admitted.TaskAuthorities) {
-		return errors.New("admission response and instance intent do not bind one task-enabled service")
-	}
 	privateKey, err := readPrivateKey(*privateKeyPath)
 	if err != nil {
 		return err
 	}
+	defer clear(privateKey)
 	public := privateKey.Public().(ed25519.PublicKey)
-	if !admissionTrustsTaskKey(admitted.TaskAuthorities, *keyID, public) {
-		return errors.New("admission response does not bind this task-authority key to the service")
+	if err := validateTaskIssuanceAuthority(admitted, intent, *keyID, public); err != nil {
+		return err
 	}
 	operation, err := readServiceTrust(*trustPath, intent, *operationID)
 	if err != nil {
@@ -256,6 +246,24 @@ func issueTask(arguments []string, stdout io.Writer) error {
 		RequestDigest string `json:"request_digest"`
 	}{BundlePath: *output, TaskID: selectedTaskID, PermitDigest: verified.Verified.EnvelopeDigest,
 		RequestDigest: statement.RequestDigest})
+}
+
+func validateTaskIssuanceAuthority(admitted permitAdmission, intent admission.InstanceIntent, keyID string, public ed25519.PublicKey) error {
+	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
+		return fmt.Errorf("validate instance intent: %w", err)
+	}
+	if !intent.Capabilities.Service || intent.ServiceID == "" || admitted.ServiceID != intent.ServiceID ||
+		admitted.Generation != intent.Generation || admitted.CapsuleDigest != intent.CapsuleDigest ||
+		admitted.PolicyDigest == "" || admitted.RoutePolicyDigest == "" || admitted.RuntimeRef == "" ||
+		admitted.GrantID != gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation) ||
+		admitted.ServicePath != "/v1/services/"+admitted.GrantID+"/" ||
+		!gateway.TaskAuthoritiesValid(admitted.TaskAuthorities) {
+		return errors.New("admission response and instance intent do not bind one task-enabled service")
+	}
+	if !admissionTrustsTaskKey(admitted.TaskAuthorities, keyID, public) {
+		return errors.New("admission response does not bind this task-authority key to the service")
+	}
+	return nil
 }
 
 func readTaskDeployment(path string) (permitAdmission, admission.InstanceIntent, error) {
