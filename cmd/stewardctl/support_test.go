@@ -26,7 +26,7 @@ func TestSupportMatrixJSONIsStableAndHonest(t *testing.T) {
 		t.Fatalf("executor support contract = %+v isolation=%+v", matrix.Platforms[1], matrix.Isolation)
 	}
 	if len(matrix.AgentRuntimes) != 2 || matrix.AgentRuntimes[0].Name != "hermes-agent" ||
-		matrix.AgentRuntimes[0].Status != "qualified" || matrix.AgentRuntimes[1].Status != "not_supported" {
+		matrix.AgentRuntimes[0].Status != "qualification_pending" || matrix.AgentRuntimes[1].Status != "not_supported" {
 		t.Fatalf("runtime support contract = %+v", matrix.AgentRuntimes)
 	}
 	metadata, err := os.ReadFile(filepath.Join("..", "..", "adapters", "hermes-agent", "adapter.json"))
@@ -39,8 +39,8 @@ func TestSupportMatrixJSONIsStableAndHonest(t *testing.T) {
 	if err := json.Unmarshal(metadata, &adapter); err != nil {
 		t.Fatal(err)
 	}
-	if matrix.AgentRuntimes[0].Contract != adapter.Contract || len(matrix.AgentRuntimes[0].QualifiedPlatforms) != 1 || matrix.AgentRuntimes[0].QualifiedPlatforms[0] != "linux/amd64" {
-		t.Fatal("support matrix misidentifies the adapter or its qualified platform")
+	if matrix.AgentRuntimes[0].Contract != adapter.Contract || len(matrix.AgentRuntimes[0].QualifiedPlatforms) != 0 || matrix.AgentRuntimes[0].Reason == "" {
+		t.Fatal("support matrix misidentifies the adapter or overclaims pending qualification")
 	}
 	if matrix.Compatibility.NodeManifest != "release.json" || matrix.Compatibility.SupportSchema != supportMatrixSchemaV1 || len(matrix.KnownLimits) < 5 {
 		t.Fatalf("compatibility or limits = %+v %+v", matrix.Compatibility, matrix.KnownLimits)
@@ -52,7 +52,7 @@ func TestSupportMatrixHumanOutputAndBoundaries(t *testing.T) {
 	if err := supportCommand([]string{"matrix"}, &output); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"support matrix", "executor: production", "Hermes (qualified", "Known limits", "-output json"} {
+	for _, expected := range []string{"support matrix", "executor: production", "Hermes (qualification_pending", "Known limits", "-output json"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("human support matrix missing %q: %s", expected, output.String())
 		}

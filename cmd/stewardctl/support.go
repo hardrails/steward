@@ -113,8 +113,9 @@ func currentSupportMatrix() supportMatrix {
 		},
 		AgentRuntimes: []supportAgentRuntime{
 			{
-				Name: "hermes-agent", Status: "qualified", Contract: agentapp.HermesAdapterContractV2,
-				QualifiedPlatforms: []string{"linux/amd64"}, SourceMetadata: "adapters/hermes-agent/adapter.json",
+				Name: "hermes-agent", Status: "qualification_pending", Contract: agentapp.HermesAdapterContractV2,
+				Reason:             "changed adapter requires fresh exact-source Linux/amd64 gVisor evidence before deployment",
+				QualifiedPlatforms: []string{}, SourceMetadata: "adapters/hermes-agent/adapter.json",
 				Capabilities: []string{"bounded tasks", "custom skills", "web research", "Codex worker", "Claude Code worker", "controller events"},
 			},
 			{Name: "openclaw", Status: "not_supported", Reason: "active support is retired pending a separately qualified runtime contract"},
