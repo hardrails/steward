@@ -71,7 +71,7 @@ func DefinitionFromTemplate(id, name, image string) (Definition, error) {
 	definition := Definition{
 		Schema: DefinitionSchema, Name: name, ToolProfile: template.ToolProfile,
 		Runtime: Runtime{
-			Engine: "hermes", Image: image, AdapterContract: "steward.hermes-agent.v1",
+			Engine: "hermes", Image: image, AdapterContract: HermesAdapterContractV2,
 		},
 		Model:  Model{Route: "local/default"},
 		Skills: append([]string(nil), template.Skills...),

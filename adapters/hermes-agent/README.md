@@ -32,10 +32,38 @@ know only logical Steward connector names; provider credentials and upstream
 origins never enter Hermes state. The adapter does not change Hermes core source
 or seed workspace content into the image.
 
+As container PID 1, the entrypoint reaps orphaned tool processes while preserving
+the gateway's exit status. Container SIGTERM/SIGINT starts one ten-second gateway
+shutdown deadline; repeated signals do not extend it. The wait loop enters bounded
+kill/reap cleanup if the gateway ignores termination, including during startup.
+Bridge cleanup uses the same deadline, so a slow HTTP client cannot keep PID 1
+waiting indefinitely. At container startup, PID 1 holds the gateway's runtime lock
+while removing only `gateway.pid` and `gateway_state.json`: process identity from
+an earlier PID namespace is not reusable identity. Sessions, workspace, and the
+lock inode remain intact, and an active lock prevents this cleanup.
+This container-level shutdown is separate from the run-specific stop operation.
+
+The v2 service contract adds a bounded stop operation. Local HTTP boundary tests
+do not qualify an adapter release. CI and release packaging require retained
+successful disposable-host gVisor evidence matching the current adapter inputs,
+including stopping an active tool. Evidence for different bytes is not sufficient.
+
 The port 8766 service is intended to sit behind a Steward authenticated service
 grant. It serves `GET /steward/v1/negotiation` itself and forwards only
 `GET /health`, `POST /v1/runs`, and `GET /v1/runs/run_<32 lowercase hex>` to the
-Hermes API on loopback. It replaces caller credentials with a fixed internal
+Hermes API on loopback. `POST /steward/v1/run-stop` accepts exactly the canonical
+49-byte JSON object `{"run_id":"run_<32 lowercase hex>"}` and forwards an empty
+object to that run's native `/stop` endpoint. The fixed operation path permits
+Gateway to require a signed exact-body operation without a wildcard path grant.
+It is not automatically authorized by an existing run-submission permit. The
+response may say `stopping`; this is not evidence that execution or an external
+effect has halted. Reconcile the same run's terminal status separately.
+Native `/approval`, `/events`, and `/stop` subroutes remain unavailable at the
+bridge. Existing bounded controller-event and signed-interaction channels are the
+intended substrate for progress and business questions; a Hermes workspace helper
+and controller integration still need implementation and acceptance. Upstream
+command-approval choices are not a business-question protocol.
+The bridge replaces caller credentials with a fixed internal
 Bearer token, never forwards cookies, requires a `Content-Length` on run
 submissions, limits request bodies to 64 KiB and responses to 1 MiB, and uses a
 30-second I/O timeout. The bridge is single-threaded with a bounded connection
@@ -54,16 +82,16 @@ this revision, the latter is the smallest locked extra that supplies `aiohttp`,
 which the native API-server adapter requires. No Home Assistant integration is
 configured or granted at runtime.
 
-On `linux/amd64`, qualification passed two independent paths. The closed-runtime
-gate built the exact source, ran the basic task, signed workspace-audit skill,
-qualification-only MCP fixture, and restart under gVisor. The Steward integration
-gate then imported the archive through signed admission, brokered inference,
-service, and connector traffic through Gateway, and required Hermes to discover and
-load the exact signed connector skill before executing it. The gate proved one
+On `linux/amd64`, qualification exercises two independent paths. The closed-runtime
+gate builds the exact source and runs the basic task, signed workspace-audit skill,
+qualification-only MCP fixture, active-tool stop, and restart under gVisor. The Steward
+integration gate imports the archive through signed admission, brokers inference,
+service, and connector traffic through Gateway, and requires Hermes to discover and
+load the exact signed connector skill before executing it. The gate checks one
 authenticated upstream effect, replay and forbidden-operation denial, secret and
 origin absence for the fixed qualification material, changed workspace output after
 a fresh resumed session, state purge, and verified Executor and connector receipt
-chains. These proofs remain limited to the exact pinned inputs and documented
+chains. Successful records remain limited to the exact pinned inputs and documented
 capability surface. Other platforms require their own qualification run.
 
 Maintainers can retain a non-sensitive integration summary by setting

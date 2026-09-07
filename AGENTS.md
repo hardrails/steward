@@ -42,6 +42,14 @@ job runs it too and is a required check, so a race can't reach `main` even
 if you forget — it'll just cost you a slower feedback loop than doing it
 locally first.
 
+Local development does not certify an adapter release. The `qualification` Go
+test tag enables exact-source retained Hermes evidence verification. The required
+CI build/vet/test job uses `go test -race -tags=qualification ./...`; release
+packaging independently runs that evidence test before producing artifacts.
+Changed adapter source may be committed for the disposable-host qualification
+job, but cannot pass CI or release packaging until fresh evidence is retained.
+Never edit historical evidence to make a source change appear qualified.
+
 `main` is
 branch-protected — `build / vet / test`, `golangci-lint`, and `openapi lint`
 must all pass before a PR can merge, and force-pushes/deletions are blocked —

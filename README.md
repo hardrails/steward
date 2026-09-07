@@ -186,8 +186,14 @@ adds elastic Executor capacity.
 ## Run an agent
 
 Steward supports containerized Hermes agents through a bounded service API. The
-included adapter makes a qualified Hermes surface usable behind Steward's fixed
-security boundary.
+adapter runs behind Steward's fixed security boundary. The v2 adapter includes
+a bounded signed-operation-compatible stop path, deadline-bounded container
+shutdown, and restart-safe gateway identity handling. Retained Linux/amd64 gVisor
+evidence covers active-tool interruption and the complete signed integration.
+A stop acknowledgement is not proof that the agent or an external effect halted.
+CI and release packaging reject changed adapter, harness, or runtime inputs until
+fresh successful qualification is retained. Runtime fixture evidence is not proof
+that an arbitrary customer workflow or external effect is safe.
 
 - [Run Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/)
 - [Run a web research agent](https://hardrails.github.io/steward/guides/research-agents/)

@@ -4,15 +4,23 @@ description: Build Steward's exact pinned Hermes Agent adapter, run a custom ski
 section: Agent compatibility
 ---
 
-# Build and run the qualified Hermes Agent adapter
+# Hermes Agent adapter and qualification status
 
-Steward includes a qualified adapter definition for Hermes Agent commit
+Steward includes an adapter definition for Hermes Agent commit
 [`3ef6bbd201263d354fd83ec55b3c306ded2eb72a`](https://github.com/NousResearch/hermes-agent/commit/3ef6bbd201263d354fd83ec55b3c306ded2eb72a).
 The adapter builds Hermes from that exact source revision into a hardened image that
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
-upstream image.
+upstream image. The v2 bridge provides a fixed, run-specific stop operation,
+deadline-bounded container shutdown, and restart-safe gateway identity handling.
+The retained [feasibility evidence]({{ '/reference/evidence/hermes-feasibility.json' | relative_url }})
+and [signed integration evidence]({{ '/reference/evidence/hermes-integration.json' | relative_url }})
+identify the exact source and artifacts that passed. CI and release packaging
+compare adapter/harness bytes, runtime source trees, and compiler/embed inputs
+against those records. Changed inputs cannot ship until requalified; records must
+be retained unchanged, never edited to cover another build. This is runtime fixture
+evidence, not a completed end-user workflow.
 
-Qualification means this pinned source and Steward adapter passed the documented
+The retained v2 qualification means its pinned source and adapter passed the documented
 runtime qualification under gVisor on `linux/amd64`, including a signed workspace audit, an
 authenticated connector effect through a signed custom skill, and the
 tenant-authorized service path used to submit an exact run request. The state test
@@ -262,6 +270,13 @@ or checkout and the source transfer through your own trust process.
 
 ## Rerun the end-to-end qualification
 
+Local development runs build, vet, and all ordinary tests without certifying an
+adapter release. Exact-source evidence verification uses the `qualification` Go
+test tag. The required CI job and release packager always enable it and discard
+ambient Go skip/list settings. This lets maintainers commit an unqualified source
+candidate for the hosted job without bypassing hooks or editing old evidence.
+The candidate cannot pass release checks until both fresh evidence files match.
+
 Run qualification only on a disposable `linux/amd64` host with Docker, the `runsc`
 gVisor runtime, Python 3, util-linux `setpriv`, `curl`, `base64`, and standard
 GNU userland tools. The harness uses fixed loopback ports, creates and removes
@@ -299,9 +314,13 @@ gh workflow run ci.yml \
   -f hermes_qualification=true
 ```
 
-Download the `hermes-qualification-<commit>` artifact from that exact run and
-commit its two files without editing or reserializing them. A pull-request or push
-CI run never starts this expensive job; it is manual and opt-in.
+After both harnesses and the exact-source verifier pass, download the
+`hermes-qualification-<commit>` artifact from that exact run and commit its two
+files without editing or reserializing them. The job also attempts to upload
+metadata from failed runs for diagnosis; partial or failed records do not qualify
+a release and must not replace the retained successful evidence. Artifacts retain
+only metadata JSON for three days, never runtime logs or credentials. A
+pull-request or push CI run never starts this expensive job; it is manual and opt-in.
 
 ## Inspect and import the exact output
 

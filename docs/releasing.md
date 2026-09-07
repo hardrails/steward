@@ -13,6 +13,18 @@ decisions that protect artifact consistency and publishing authority.
 
 ## Cut a release
 
+Local build, vet, and test success is development evidence, not runtime
+qualification. The required CI build/vet/test job enables the `qualification` Go
+test tag; `scripts/release.sh` independently verifies the retained Hermes evidence
+against the current adapter and harness bytes before building artifacts. Both
+ignore ambient `GOFLAGS` and persistent `GOENV` settings so a skip/list option
+cannot turn missing qualification into a successful release.
+
+After changing the adapter, commit the candidate through the ordinary hooks, run
+the [hosted qualification job](guides/hermes-agent.md#rerun-the-end-to-end-qualification),
+and retain its unchanged evidence files. Do not merge, publish, or deploy that
+candidate until required CI and exact-source qualification pass.
+
 ```console
 # 1. Make sure main is green and you are on the exact commit you want to ship.
 git checkout main

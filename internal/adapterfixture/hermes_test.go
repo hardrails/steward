@@ -923,7 +923,7 @@ func TestHermesBuilderNormalizesPrivateArchiveInputsBeforeSandboxing(t *testing.
 	}
 }
 
-func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
+func TestHermesQualificationContracts(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	repositoryRoot := filepath.Join(root, "..", "..")
 	var adapter struct {
@@ -993,6 +993,20 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		}
 	}
 
+}
+
+// Called by the qualification-tagged release test. Local development still runs
+// all protocol, isolation, fixture, and harness-contract tests above.
+func verifyHermesQualificationEvidence(t *testing.T) {
+	t.Helper()
+	root := hermesAdapterRoot(t)
+	repositoryRoot := filepath.Join(root, "..", "..")
+	var adapter struct {
+		Upstream struct {
+			Revision string `json:"revision"`
+		} `json:"upstream"`
+	}
+	decodeEvidence(t, filepath.Join(root, "adapter.json"), &adapter)
 	var feasibility struct {
 		SchemaVersion        string `json:"schema_version"`
 		Overall              string `json:"overall"`
@@ -1031,7 +1045,7 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		"source.inputs", "image.build", "image.contract", "network.internal",
 		"fixture.services", "fixture.network", "runtime.policy", "agent.readiness",
 		"adapter.negotiation", "service.boundary", "runtime.identity", "runtime.filesystem",
-		"runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp",
+		"runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp", "task.stop",
 		"restart.readiness", "task.restart", "restart.state", "feasibility.complete",
 		"evidence.coverage",
 	}
@@ -1090,9 +1104,10 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 				} `json:"source"`
 			} `json:"build_attestation"`
 			StewardSource struct {
-				Commit       string `json:"commit"`
-				TrackedDirty *bool  `json:"tracked_dirty"`
-				Tree         string `json:"tree"`
+				Commit            string `json:"commit"`
+				TrackedDirty      *bool  `json:"tracked_dirty"`
+				Tree              string `json:"tree"`
+				RuntimeTreeSHA256 string `json:"runtime_tree_sha256"`
 			} `json:"steward_source"`
 		} `json:"provenance"`
 		ReceiptChain struct {
@@ -1140,6 +1155,9 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	if stewardSource.TrackedDirty == nil || *stewardSource.TrackedDirty ||
 		!validHexObjectID(stewardSource.Commit) || !validHexObjectID(stewardSource.Tree) {
 		t.Fatalf("Hermes integration evidence does not bind a clean Steward source: %#v", stewardSource)
+	}
+	if err := verifyHermesRuntimeSource(repositoryRoot, stewardSource.RuntimeTreeSHA256); err != nil {
+		t.Fatal(err)
 	}
 	expectedBinaries := map[string]string{
 		"ctl": "stewardctl", "executor": "steward-executor", "gateway": "steward-gateway", "relay": "steward-relay",
@@ -1577,6 +1595,21 @@ try:
     tool_call = chunk["choices"][0]["delta"]["tool_calls"][0]
     assert tool_call["index"] == 0 and tool_call["function"]["name"] == "terminal"
 
+    _, wire = complete(user("STEWARD_STOP_ACTIVE_TOOL"), False)
+    stop_message = json.loads(wire)["choices"][0]["message"]
+    stop_call = stop_message["tool_calls"][0]
+    assert stop_call["id"] == "call_stop_fixture"
+    assert stop_call["function"]["name"] == "terminal"
+    stop_arguments = json.loads(stop_call["function"]["arguments"])
+    assert stop_arguments == {"command": module.STOP_FIXTURE_COMMAND, "timeout": 120, "background": False}
+    assert module.STOP_FIXTURE_COMMAND == "python3 /opt/steward/fixture_model.py --stop-fixture"
+    assert " -c " not in module.STOP_FIXTURE_COMMAND
+    assert module.STOP_FIXTURE_MARKER == "/tmp/steward-stop-active.json"
+    _, wire = complete(user("STEWARD_STOP_ACTIVE_TOOL") + [stop_message, {
+        "role": "tool", "tool_call_id": "call_stop_fixture", "content": "finished",
+    }], False)
+    assert json.loads(wire)["choices"][0]["message"]["content"] == "stop-fixture-finished-without-interruption"
+
     connector_input = "STEWARD_CONNECTOR_WORK task=fixture-task-1"
     try:
         complete(user(connector_input), False)
@@ -1732,7 +1765,10 @@ class Thread:
 module.verify_skill = lambda: None
 module.seed_state = lambda model, qualification_mcp, profile: None
 module.subprocess.Popen = popen
-module.wait_for_internal_api = lambda child: events.append("ready")
+module.wait_for_internal_api = lambda child, deadline: events.append("ready")
+# This test owns startup ordering; the supervisor has separate process/deadline tests.
+module.wait_for_gateway = lambda child, deadline: child.wait()
+module.shutdown_bridge = lambda server, deadline: (server.shutdown(), server.server_close())
 module.BoundedHTTPServer = Server
 module.threading.Thread = Thread
 module.signal.signal = lambda *args: None
@@ -1920,7 +1956,7 @@ func TestHermesBuilderPublicationRecoversEveryDurableState(t *testing.T) {
 		digest := sha256.Sum256(content)
 		document := map[string]any{
 			"adapter": map[string]any{
-				"contract":       "steward.hermes-agent.v1",
+				"contract":       "steward.hermes-agent.v2",
 				"git_tree":       expectedTree,
 				"source":         "git-checkout",
 				"steward_commit": expectedCommit,

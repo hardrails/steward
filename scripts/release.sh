@@ -30,6 +30,7 @@ if ! shopt -qo privileged; then
 	exit 2
 fi
 unset BASH_ENV ENV TAR_OPTIONS GZIP POSIXLY_CORRECT
+export GOENV=off GOFLAGS= GOWORK=off
 
 cd "$(dirname "$0")/.."
 
@@ -39,6 +40,7 @@ cd "$(dirname "$0")/.."
 /bin/bash -p scripts/check-release-inventory.sh
 /bin/bash -p scripts/check-docs-consistency.sh
 /bin/bash -p scripts/check-cli-docs-contract.sh
+GOENV=off GOFLAGS= go test -tags=qualification ./internal/adapterfixture -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' -skip= -count=1
 
 # The published target matrix: pure-stdlib Go with CGO off, so every target is a
 # trivial cross-compile from any host.

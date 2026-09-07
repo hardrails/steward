@@ -237,7 +237,13 @@ if (source_path / ".git").exists():
     index = git("diff", "--cached", "--no-ext-diff", "--no-textconv", "--quiet", "--", check=False).returncode
     if not re.fullmatch(r"[a-f0-9]{40,64}", commit) or not re.fullmatch(r"[a-f0-9]{40,64}", tree) or worktree not in (0, 1) or index not in (0, 1):
         raise SystemExit("hermes-steward-acceptance: source provenance cannot be determined")
-    source = {"commit": commit, "tracked_dirty": worktree == 1 or index == 1, "tree": tree}
+    runtime_tree = git("ls-tree", "HEAD", "--", "go.mod", "go.sum", "cmd", "internal").stdout.encode("utf-8")
+    source = {
+        "commit": commit,
+        "tracked_dirty": worktree == 1 or index == 1,
+        "tree": tree,
+        "runtime_tree_sha256": hashlib.sha256(runtime_tree).hexdigest(),
+    }
 
 script_sha256, _ = hash_file(pathlib.Path(script_path).resolve(strict=True))
 build = None
@@ -261,7 +267,7 @@ if attestation_path:
         or document["image"].get("runtime_image_id") not in {manifest_digest, config_digest}
         or document["image"].get("platform") != expected_platform
         or not isinstance(document.get("adapter"), dict)
-        or document["adapter"].get("contract") != "steward.hermes-agent.v1"
+        or document["adapter"].get("contract") != "steward.hermes-agent.v2"
         or not isinstance(document.get("source"), dict)
         or not isinstance(document.get("build_recipe"), dict)
     ):

@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/hardrails/steward/internal/agentapp"
 	"github.com/hardrails/steward/internal/buildinfo"
 )
 
@@ -112,7 +113,8 @@ func currentSupportMatrix() supportMatrix {
 		},
 		AgentRuntimes: []supportAgentRuntime{
 			{
-				Name: "hermes-agent", Status: "qualified", Contract: "steward.hermes-agent.v1",
+				Name: "hermes-agent", Status: "qualified", Contract: agentapp.HermesAdapterContractV2,
+				Reason:             "retained Linux/amd64 gVisor fixture evidence; changed inputs require fresh qualification",
 				QualifiedPlatforms: []string{"linux/amd64"}, SourceMetadata: "adapters/hermes-agent/adapter.json",
 				Capabilities: []string{"bounded tasks", "custom skills", "web research", "Codex worker", "Claude Code worker", "controller events"},
 			},

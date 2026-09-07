@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import http.client
 import http.server
@@ -18,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 REVISION = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
 STATE = pathlib.Path("/opt/data")
@@ -28,10 +29,13 @@ RESEARCH_SKILL = pathlib.Path("/opt/steward/profiles/research")
 DEVELOPER_SKILL = pathlib.Path("/opt/steward/profiles/developer")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 RUN_PATH_RE = re.compile(r"^/v1/runs/run_[a-f0-9]{32}$")
+RUN_ID_RE = re.compile(r"run_[a-f0-9]{32}")
+RUN_STOP_PATH = "/steward/v1/run-stop"
 INTERNAL_API_HOST = "127.0.0.1"
 INTERNAL_API_PORT = 8642
 INTERNAL_API_TOKEN = "steward-feasibility"
 MAX_REQUEST_BODY = 64 << 10
+MAX_STOP_REQUEST_BODY = 49
 MAX_RESPONSE_BODY = 1 << 20
 SERVICE_TIMEOUT_SECONDS = 30
 STARTUP_TIMEOUT_SECONDS = 120
@@ -113,7 +117,7 @@ PROFILE_SKILLS = {
 NEGOTIATION = {
     "schema_version": "steward.adapter-negotiation.v1",
     "adapter": "hermes-agent",
-    "adapter_contract": "steward.hermes-agent.v1",
+    "adapter_contract": "steward.hermes-agent.v2",
     "upstream_revision": REVISION,
     "task_protocol": "hermes.runs.v1",
     "native_protocols": ["http"],
@@ -565,12 +569,42 @@ def verify_profile_skill(expected: dict[str, Any]) -> None:
         prior = name
 
 
+def reset_gateway_identity() -> None:
+    # Only a fresh container's PID 1 may discard identity from the previous PID
+    # namespace. PID/start ticks can repeat under gVisor; user state must remain.
+    if os.getpid() != 1:
+        return
+    directory_fd = open_state_directory()
+    try:
+        lock_fd = os.open("gateway.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                          0o600, dir_fd=directory_fd)
+        try:
+            info = os.fstat(lock_fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+                fail("gateway identity lock is unsafe")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                fail("gateway identity is still locked by another process")
+            # Do not unlink the lock inode: that could split mutual exclusion.
+            for name in ("gateway.pid", "gateway_state.json"):
+                try:
+                    os.unlink(name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(lock_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def seed_state(model: str, qualification_mcp: bool, profile: str) -> None:
     if os.getuid() != 65532 or os.getgid() != 65532:
         fail("runtime identity must be exactly 65532:65532")
     for relative in ("home", "sessions", "logs", "memories", "skills", "workspace", "steward"):
         directory_fd = open_state_directory(relative)
         os.close(directory_fd)
+    reset_gateway_identity()
     disabled = {
         "workspace": ["browser", "computer_use", "cronjob", "delegation", "discord", "discord_admin", "feishu_doc", "feishu_drive", "homeassistant", "image_gen", "project", "spotify", "tts", "video", "video_gen", "vision", "web", "x_search"],
         "research": ["browser", "computer_use", "cronjob", "discord", "discord_admin", "feishu_doc", "feishu_drive", "homeassistant", "image_gen", "project", "spotify", "tts", "video", "video_gen", "vision", "web", "x_search"],
@@ -653,7 +687,8 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         self._send_error(404, "route_not_allowed")
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/v1/runs":
+        stopping = self.path == RUN_STOP_PATH
+        if self.path != "/v1/runs" and not stopping:
             self._send_error(404, "route_not_allowed")
             return
         if self.headers.get("Transfer-Encoding") is not None:
@@ -670,7 +705,8 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
             self._send_error(400, "invalid_content_length")
             return
         length = int(lengths[0])
-        if length > MAX_REQUEST_BODY:
+        maximum = MAX_STOP_REQUEST_BODY if stopping else MAX_REQUEST_BODY
+        if length > maximum:
             self._send_error(413, "request_body_too_large")
             return
         try:
@@ -681,9 +717,29 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         if len(body) != length:
             self._send_error(400, "incomplete_request_body")
             return
+        if stopping:
+            try:
+                value = json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                self._send_error(400, "invalid_stop_request")
+                return
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"run_id"}
+                or not isinstance(value["run_id"], str)
+                or RUN_ID_RE.fullmatch(value["run_id"]) is None
+                or body != json.dumps(value, separators=(",", ":")).encode("ascii")
+            ):
+                self._send_error(400, "invalid_stop_request")
+                return
+            # A fixed public operation lets Gateway bind the exact run ID in its
+            # signed request bytes without admitting a wildcard service path.
+            # Preserve upstream stopping; acknowledgement is not termination.
+            self._proxy("POST", b"{}", path=f"/v1/runs/{value['run_id']}/stop")
+            return
         self._proxy("POST", body)
 
-    def _proxy(self, method: str, body: bytes | None) -> None:
+    def _proxy(self, method: str, body: bytes | None, *, path: str | None = None) -> None:
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
@@ -699,7 +755,7 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         )
         deadline = time.monotonic() + SERVICE_TIMEOUT_SECONDS
         try:
-            connection.request(method, self.path, body=body, headers=headers)
+            connection.request(method, self.path if path is None else path, body=body, headers=headers)
             if connection.sock is not None:
                 connection.sock.settimeout(max(0.001, deadline - time.monotonic()))
             response = connection.getresponse()
@@ -737,7 +793,8 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
             connection.close()
 
     def _send_error(self, status_code: int, code: str) -> None:
-        body = json.dumps({"error": code}, separators=(",", ":"), sort_keys=True).encode()
+        message = "Hermes service bridge rejected the request: " + code.replace("_", " ") + "."
+        body = json.dumps({"error": code, "message": message}, separators=(",", ":"), sort_keys=True).encode()
         self._send_json(status_code, body)
 
     def _send_json(self, status_code: int, body: bytes) -> None:
@@ -753,9 +810,14 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
-def wait_for_internal_api(process: subprocess.Popen[bytes]) -> None:
+def wait_for_internal_api(
+    process: subprocess.Popen[bytes],
+    shutdown_deadline: Callable[[], float | None] = lambda: None,
+) -> None:
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if shutdown_deadline() is not None:
+            raise InterruptedError("Hermes gateway shutdown requested during startup")
         if process.poll() is not None:
             fail("Hermes gateway exited before its API became ready")
         connection = http.client.HTTPConnection(
@@ -779,6 +841,46 @@ def wait_for_internal_api(process: subprocess.Popen[bytes]) -> None:
             connection.close()
         time.sleep(0.1)
     fail("Hermes API did not become ready before the startup deadline")
+
+
+def wait_for_gateway(
+    process: subprocess.Popen,
+    shutdown_deadline: Callable[[], float | None] = lambda: None,
+) -> int:
+    """As container PID 1, reap adopted tool children as well as the gateway."""
+    while True:
+        if process.returncode is not None:
+            return process.returncode
+        deadline = shutdown_deadline()
+        if deadline is not None and time.monotonic() >= deadline:
+            # Enter main's bounded kill/reap cleanup even if SIGTERM was ignored.
+            raise subprocess.TimeoutExpired("Hermes gateway shutdown", 10)
+        if os.getpid() == 1:
+            try:
+                child, status = os.waitpid(-1, os.WNOHANG)
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                # Popen's signal dispatch may have observed/reaped the gateway.
+                if process.returncode is None:
+                    raise RuntimeError("Hermes gateway exit status is unavailable") from None
+                return process.returncode
+            if child == process.pid:
+                process.returncode = os.waitstatus_to_exitcode(status)
+                return process.returncode
+        elif process.poll() is not None:
+            return process.returncode
+        time.sleep(0.05)
+
+
+def shutdown_bridge(server: BoundedHTTPServer, deadline: float) -> None:
+    # HTTPServer.shutdown waits for an active handler, whose socket timeout is
+    # inactivity-based. Keep that wait off PID 1: both service threads are
+    # daemons, so a trickling client cannot hold container exit past the deadline.
+    thread = threading.Thread(target=server.shutdown, name="service-bridge-shutdown", daemon=True)
+    thread.start()
+    thread.join(timeout=max(0, deadline - time.monotonic()))
+    server.server_close()
 
 
 def main() -> int:
@@ -814,29 +916,34 @@ def main() -> int:
         stdin=subprocess.DEVNULL,
     )
 
+    shutdown_deadline: float | None = None
+
     def stop(_signum: int, _frame: Any) -> None:
+        nonlocal shutdown_deadline
+        if shutdown_deadline is None:
+            shutdown_deadline = time.monotonic() + 10
         process.terminate()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     server: BoundedHTTPServer | None = None
     try:
-        wait_for_internal_api(process)
+        wait_for_internal_api(process, lambda: shutdown_deadline)
         server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)
         thread = threading.Thread(target=server.serve_forever, name="service-bridge", daemon=True)
         thread.start()
-        return process.wait()
+        return wait_for_gateway(process, lambda: shutdown_deadline)
     finally:
-        if server is not None:
-            server.shutdown()
-            server.server_close()
         if process.poll() is None:
             process.terminate()
+            grace = 10 if shutdown_deadline is None else max(0, shutdown_deadline - time.monotonic())
             try:
-                process.wait(timeout=10)
+                process.wait(timeout=grace)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=10)
+        if server is not None:
+            shutdown_bridge(server, time.monotonic() + 10 if shutdown_deadline is None else shutdown_deadline)
 
 
 if __name__ == "__main__":

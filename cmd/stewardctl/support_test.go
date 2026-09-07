@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,6 +28,19 @@ func TestSupportMatrixJSONIsStableAndHonest(t *testing.T) {
 	if len(matrix.AgentRuntimes) != 2 || matrix.AgentRuntimes[0].Name != "hermes-agent" ||
 		matrix.AgentRuntimes[0].Status != "qualified" || matrix.AgentRuntimes[1].Status != "not_supported" {
 		t.Fatalf("runtime support contract = %+v", matrix.AgentRuntimes)
+	}
+	metadata, err := os.ReadFile(filepath.Join("..", "..", "adapters", "hermes-agent", "adapter.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adapter struct {
+		Contract string `json:"adapter_contract"`
+	}
+	if err := json.Unmarshal(metadata, &adapter); err != nil {
+		t.Fatal(err)
+	}
+	if matrix.AgentRuntimes[0].Contract != adapter.Contract || len(matrix.AgentRuntimes[0].QualifiedPlatforms) != 1 || matrix.AgentRuntimes[0].QualifiedPlatforms[0] != "linux/amd64" || matrix.AgentRuntimes[0].Reason == "" {
+		t.Fatal("support matrix misidentifies the adapter or its qualified platform")
 	}
 	if matrix.Compatibility.NodeManifest != "release.json" || matrix.Compatibility.SupportSchema != supportMatrixSchemaV1 || len(matrix.KnownLimits) < 5 {
 		t.Fatalf("compatibility or limits = %+v %+v", matrix.Compatibility, matrix.KnownLimits)

@@ -352,7 +352,7 @@ def validate_pair(archive_fd, metadata_fd, archive_entry=None, metadata_entry=No
         or source.get("repository") != expected_repository
         or source.get("revision") != expected_revision
         or not isinstance(adapter, dict)
-        or adapter.get("contract") != "steward.hermes-agent.v1"
+        or adapter.get("contract") != "steward.hermes-agent.v2"
         or adapter.get("source") != expected_adapter_source
         or not isinstance(recipe, dict)
         or recipe.get("id") != "steward.hermes-adapter.docker-build.v1"
@@ -1347,7 +1347,7 @@ import sys
     base_image, manifest_digest, config_digest, runtime_image_id, platform, archive_digest, archive_size,
 ) = sys.argv[1:]
 adapter = {
-    "contract": "steward.hermes-agent.v1",
+    "contract": "steward.hermes-agent.v2",
     "file_set_sha256": adapter_files,
     "source": adapter_source,
 }

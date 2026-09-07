@@ -28,6 +28,15 @@ controller events. The developer profile requires at
 least one separately operated Claude Code or Codex connector. Credentials stay
 in those services; they are not mounted into Hermes state.
 
+The host profile version and HTTP adapter contract are separate identities.
+`steward.hermes-agent.v2` retains the v1 Linux identity, state schema, command,
+tool-profile selection, and service port, so it uses the same three host profiles.
+Its additional stop endpoint needs a separately signed exact-run task permit;
+neither a v1 host profile nor a run-submission permit grants permission to stop.
+The immutable bundle records the exact HTTP adapter contract and image digest;
+the signed capsule binds that image's manifest/config digests and host profile.
+Existing v1 bundles remain valid; newly generated Hermes definitions select v2.
+
 Check an unsigned capsule before moving it to a signing workstation:
 
 ```console

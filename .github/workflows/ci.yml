@@ -51,7 +51,7 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test
-        run: go test -race ./...
+        run: GOENV=off GOFLAGS= go test -race -tags=qualification -skip= ./...
       - name: Install native RPM build tooling
         run: |
           sudo apt-get update
@@ -463,6 +463,7 @@ jobs:
       - uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6.5.2
         with:
           version: v1.64.8
+          args: --build-tags=qualification
 
   openapi:
     name: openapi lint
@@ -710,8 +711,8 @@ jobs:
             docs/reference/evidence/hermes-feasibility.json
           install -m 0644 "$evidence_root/hermes-integration.json" \
             docs/reference/evidence/hermes-integration.json
-          go test ./internal/adapterfixture \
-            -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' \
+          GOENV=off GOFLAGS= go test -tags=qualification ./internal/adapterfixture \
+            -run '^TestHermesQualificationEvidenceBindsCurrentInputs$' -skip= \
             -count=1
 
       - name: Report bounded Hermes build diagnostics
@@ -733,6 +734,7 @@ jobs:
           tail -n 250 -- "${build_logs[0]}" >&2
 
       - name: Upload metadata-only qualification evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hermes-qualification-${{ github.sha }}

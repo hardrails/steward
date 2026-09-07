@@ -18,12 +18,14 @@ import (
 )
 
 const (
-	DefinitionSchema = "steward.agent.v1"
-	BundleSchema     = "steward.agent.bundle.v1"
-	InventorySchema  = "steward.nodes.v1"
-	SnapshotSchema   = "steward.agent.snapshot.v1"
-	ForkSchema       = "steward.agent.fork.v1"
-	MaxArtifactBytes = 1 << 20
+	DefinitionSchema        = "steward.agent.v1"
+	BundleSchema            = "steward.agent.bundle.v1"
+	InventorySchema         = "steward.nodes.v1"
+	SnapshotSchema          = "steward.agent.snapshot.v1"
+	ForkSchema              = "steward.agent.fork.v1"
+	MaxArtifactBytes        = 1 << 20
+	HermesAdapterContractV1 = "steward.hermes-agent.v1"
+	HermesAdapterContractV2 = "steward.hermes-agent.v2"
 )
 
 type Definition struct {
@@ -193,11 +195,12 @@ func (value Definition) Validate() error {
 		return err
 	}
 	wantContract := map[string]string{
-		"hermes":                   "steward.hermes-agent.v1",
+		"hermes":                   HermesAdapterContractV2,
 		agentservice.RuntimeEngine: agentservice.AdapterContractV1,
 	}
 	contract, ok := wantContract[value.Runtime.Engine]
-	if !ok || value.Runtime.AdapterContract != contract {
+	legacyHermes := value.Runtime.Engine == "hermes" && value.Runtime.AdapterContract == HermesAdapterContractV1
+	if !ok || (value.Runtime.AdapterContract != contract && !legacyHermes) {
 		return errors.New("runtime must select a supported engine with its exact Steward adapter contract")
 	}
 	if !validImage(value.Runtime.Image) {
