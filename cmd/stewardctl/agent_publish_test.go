@@ -166,7 +166,7 @@ func TestAgentPublishEmitsFixedPortableServiceProfile(t *testing.T) {
 func publishedAgentBundle(t *testing.T, runtime, image string) agentapp.Bundle {
 	t.Helper()
 	contract := map[string]string{
-		"hermes":                   "steward.hermes-agent.v1",
+		"hermes":                   agentapp.HermesAdapterContractV2,
 		agentservice.RuntimeEngine: agentservice.AdapterContractV1,
 	}[runtime]
 	definition := agentapp.Definition{

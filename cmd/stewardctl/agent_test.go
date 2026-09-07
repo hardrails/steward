@@ -29,7 +29,7 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	cueRaw, err := os.ReadFile(filepath.Join(directory, "Stewardfile.cue"))
-	if err != nil || !bytes.Contains(cueRaw, []byte(`adapter_contract: "steward.hermes-agent.v1"`)) {
+	if err != nil || !bytes.Contains(cueRaw, []byte(`adapter_contract: "steward.hermes-agent.v2"`)) {
 		t.Fatalf("Stewardfile=%s err=%v", cueRaw, err)
 	}
 	output.Reset()
