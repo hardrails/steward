@@ -129,6 +129,32 @@ func TestTaskIssuerHTTPDistinguishesPrivatePreparationFailureAndRecovers(t *test
 	}
 }
 
+func TestTaskIssuerHTTPNewBundleMismatchIsPrivatePreparationFailure(t *testing.T) {
+	fixture, config := newTaskIssuerFixture(t)
+	issuer, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer issuer.Close()
+	intent := issuerRequest(fixture)
+	operation := issuer.operations[intent.OperationID]
+	operation.PolicyDigest = "sha256:" + strings.Repeat("f", 64)
+	issuer.operations[intent.OperationID] = operation
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("POST", "/v1/tasks", bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	issuer.serveHTTP(recorder, request)
+	var response map[string]string
+	if recorder.Code != 500 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+		response["error"] != "preparation_failed" || issuer.count != 0 {
+		t.Fatalf("private bundle mismatch became a caller conflict: status=%d count=%d", recorder.Code, issuer.count)
+	}
+}
+
 func TestTaskIssuerHTTPInvalidJSONRemainsClientRejection(t *testing.T) {
 	fixture, config := newTaskIssuerFixture(t)
 	issuer, err := openTaskIssuer(config)
