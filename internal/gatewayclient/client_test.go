@@ -429,6 +429,42 @@ func TestClientRejectsInvalidGatewayErrors(t *testing.T) {
 	}
 }
 
+func TestClientDistinguishesElapsedPollIntervalFromMissingHeader(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		header string
+		status int
+		code   string
+		valid  bool
+	}{
+		{"elapsed", "0", 504, "task_observation_timeout", true},
+		{"absent", "", 504, "task_observation_timeout", true},
+		{"wrong status", "0", 502, "task_observation_timeout", false},
+		{"wrong code", "0", 504, "unknown_timeout", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := http.Header{}
+			if test.header != "" {
+				headers.Set("Retry-After", test.header)
+			}
+			server := statusServer(t, test.status, headers, `{"error":"`+test.code+`","message":"try observation"}`)
+			defer server.Close()
+			client, err := New(server.URL, "secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Observe(context.Background(), testTaskDigest, testPermitDigest)
+			var apiError *APIError
+			if errors.As(err, &apiError) != test.valid {
+				t.Fatalf("error=%v valid=%v", err, test.valid)
+			}
+			if test.valid && (apiError.RetryAfter != 0 || apiError.RetryAfterPresent != (test.header != "")) {
+				t.Fatalf("lost Retry-After presence: %#v", apiError)
+			}
+		})
+	}
+}
+
 func statusServer(t *testing.T, status int, headers http.Header, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

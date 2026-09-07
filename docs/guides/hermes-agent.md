@@ -548,6 +548,15 @@ the new mode-`0600` file, and removes raw agent output from its standard output.
 Use `-discard-result` instead of `-result-out FILE` only when the work product is not
 needed.
 
+If a bounded status read times out, Gateway returns `504 task_observation_timeout`
+with `Retry-After`, calculated from the remaining signed polling interval. Zero
+means that interval has already elapsed. `task wait` re-observes the same task within its existing total
+wait deadline; it does not submit work again or extend signed authority. A timeout
+does not record a terminal outcome. Invalid responses (`502 invalid_task_status`)
+and revoked observation authority still fail immediately. If the total wait
+deadline expires, preserve the bundle and reconcile that task before considering
+new work.
+
 For a remote node, copy the owner-only bundle through an approved channel and run
 the commands over SSH so the Gateway token remains on the node:
 

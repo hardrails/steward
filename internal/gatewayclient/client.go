@@ -98,10 +98,11 @@ type TaskLifecycleStatus struct {
 // APIError is a valid structured error returned by Gateway. RetryAfter is set
 // when Gateway supplies a valid delta-seconds Retry-After header.
 type APIError struct {
-	Status     int
-	Code       string
-	Message    string
-	RetryAfter time.Duration
+	Status            int
+	Code              string
+	Message           string
+	RetryAfter        time.Duration
+	RetryAfterPresent bool
 }
 
 func (e *APIError) Error() string {
@@ -264,7 +265,12 @@ func decodeAPIError(response *http.Response, raw []byte) error {
 	if err != nil {
 		return fmt.Errorf("Gateway HTTP %d returned an invalid Retry-After header", response.StatusCode)
 	}
-	return &APIError{Status: response.StatusCode, Code: payload.Code, Message: payload.Message, RetryAfter: retryAfter}
+	present := len(response.Header.Values("Retry-After")) == 1
+	if present && retryAfter == 0 && (response.StatusCode != http.StatusGatewayTimeout || payload.Code != "task_observation_timeout") {
+		return fmt.Errorf("Gateway HTTP %d returned an invalid zero Retry-After header", response.StatusCode)
+	}
+	return &APIError{Status: response.StatusCode, Code: payload.Code, Message: payload.Message,
+		RetryAfter: retryAfter, RetryAfterPresent: present}
 }
 
 func parseRetryAfter(header http.Header) (time.Duration, error) {
@@ -276,7 +282,7 @@ func parseRetryAfter(header http.Header) (time.Duration, error) {
 		return 0, errors.New("multiple Retry-After values")
 	}
 	seconds, err := strconv.Atoi(values[0])
-	if err != nil || seconds < 1 || seconds > 3600 || strconv.Itoa(seconds) != values[0] {
+	if err != nil || seconds < 0 || seconds > 3600 || strconv.Itoa(seconds) != values[0] {
 		return 0, errors.New("invalid Retry-After delta-seconds")
 	}
 	return time.Duration(seconds) * time.Second, nil
