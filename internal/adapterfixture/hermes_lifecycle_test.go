@@ -259,6 +259,73 @@ assert not worker.is_alive(), 'worker did not finish after client closure'
 	}
 }
 
+func TestHermesContainerIdentityReset(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	program := `
+import fcntl, importlib.util, os, pathlib, sys, tempfile
+from unittest import mock
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('entrypoint', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+with tempfile.TemporaryDirectory() as temporary:
+    root = pathlib.Path(temporary)
+    markers = [root / name for name in ('gateway.pid', 'gateway_state.json')]
+    for path in markers:
+        path.write_text('previous container identity')
+    preserved = root / 'sessions'
+    preserved.mkdir()
+    (preserved / 'history.json').write_text('retained user history')
+    lock = root / 'gateway.lock'
+    lock.write_text('previous lock metadata')
+    inode = lock.stat().st_ino
+    def open_root():
+        return os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    with mock.patch.object(module, 'open_state_directory', side_effect=open_root), mock.patch.object(module.os, 'getpid', return_value=123):
+        module.reset_gateway_identity()
+        assert all(path.exists() for path in markers), 'non-PID-1 process discarded identity'
+    with mock.patch.object(module, 'open_state_directory', side_effect=open_root), mock.patch.object(module.os, 'getpid', return_value=1):
+        with lock.open('r+') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                module.reset_gateway_identity()
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError('active gateway identity was removed')
+            assert all(path.exists() for path in markers)
+        module.reset_gateway_identity()
+        module.reset_gateway_identity()  # Already missing records are safe.
+        assert all(not path.exists() for path in markers)
+        assert lock.stat().st_ino == inode and lock.read_text() == 'previous lock metadata'
+        assert (preserved / 'history.json').read_text() == 'retained user history'
+        markers[0].symlink_to(preserved / 'history.json')
+        module.reset_gateway_identity()
+        assert not markers[0].is_symlink()
+        assert (preserved / 'history.json').read_text() == 'retained user history'
+        lock.unlink()
+        lock.symlink_to(preserved / 'history.json')
+        try:
+            module.reset_gateway_identity()
+        except OSError:
+            pass
+        else:
+            raise AssertionError('symlink identity lock accepted')
+        assert (preserved / 'history.json').read_text() == 'retained user history'
+`
+	command := exec.CommandContext(ctx, python, "-I", "-c", program,
+		filepath.Join(hermesAdapterRoot(t), "entrypoint.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("container identity reset failed: %v\n%s", err, output)
+	}
+}
+
 func TestHermesImageOwnedStopFixture(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {

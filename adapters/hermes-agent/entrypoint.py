@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import http.client
 import http.server
@@ -568,12 +569,42 @@ def verify_profile_skill(expected: dict[str, Any]) -> None:
         prior = name
 
 
+def reset_gateway_identity() -> None:
+    # Only a fresh container's PID 1 may discard identity from the previous PID
+    # namespace. PID/start ticks can repeat under gVisor; user state must remain.
+    if os.getpid() != 1:
+        return
+    directory_fd = open_state_directory()
+    try:
+        lock_fd = os.open("gateway.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                          0o600, dir_fd=directory_fd)
+        try:
+            info = os.fstat(lock_fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+                fail("gateway identity lock is unsafe")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                fail("gateway identity is still locked by another process")
+            # Do not unlink the lock inode: that could split mutual exclusion.
+            for name in ("gateway.pid", "gateway_state.json"):
+                try:
+                    os.unlink(name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(lock_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def seed_state(model: str, qualification_mcp: bool, profile: str) -> None:
     if os.getuid() != 65532 or os.getgid() != 65532:
         fail("runtime identity must be exactly 65532:65532")
     for relative in ("home", "sessions", "logs", "memories", "skills", "workspace", "steward"):
         directory_fd = open_state_directory(relative)
         os.close(directory_fd)
+    reset_gateway_identity()
     disabled = {
         "workspace": ["browser", "computer_use", "cronjob", "delegation", "discord", "discord_admin", "feishu_doc", "feishu_drive", "homeassistant", "image_gen", "project", "spotify", "tts", "video", "video_gen", "vision", "web", "x_search"],
         "research": ["browser", "computer_use", "cronjob", "discord", "discord_admin", "feishu_doc", "feishu_drive", "homeassistant", "image_gen", "project", "spotify", "tts", "video", "video_gen", "vision", "web", "x_search"],
