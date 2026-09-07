@@ -784,16 +784,19 @@ def observe_stop(run_id, marker, request, process_matches, clock, sleep):
     body = json.dumps({'run_id': run_id}, separators=(',', ':')).encode()
     ack = request('POST', '/steward/v1/run-stop', body, deadline)
     assert ack == {'run_id': run_id, 'status': 'stopping'}
+    status = 'stopping'
+    alive = True
     while clock() < deadline:
         result = request('GET', '/v1/runs/' + run_id, None, deadline)
         assert result.get('run_id') == run_id
         status = result.get('status')
         assert status in ('queued', 'running', 'stopping', 'cancelled')
-        if status == 'cancelled' and not process_matches(marker):
+        alive = process_matches(marker)
+        if status == 'cancelled' and not alive:
             assert clock() < deadline, 'interruption exceeded observation deadline'
             return
         sleep(min(0.1, max(0, deadline - clock())))
-    raise AssertionError('terminal cancellation and tool interruption not observed within five seconds')
+    raise AssertionError(f'terminal cancellation and tool interruption not observed within five seconds: status={status}, same_process_alive={alive}')
 # END STOP OBSERVATION ORACLE
 
 def request(method, path, body, deadline):

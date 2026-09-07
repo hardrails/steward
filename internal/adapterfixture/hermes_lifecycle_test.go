@@ -46,6 +46,18 @@ def trial(status='cancelled', survives=False, born=99.0, request_delay=0, active
     return now[0]
 
 assert trial() < 105.0
+try:
+    trial(survives=True)
+except AssertionError as error:
+    assert 'status=cancelled, same_process_alive=True' in str(error)
+else:
+    raise AssertionError('surviving process was accepted')
+try:
+    trial(status='stopping', survives=False)
+except AssertionError as error:
+    assert 'status=stopping, same_process_alive=False' in str(error)
+else:
+    raise AssertionError('missing terminal cancellation was accepted')
 for kwargs in (
     {'survives': True},  # Lying terminal status must not count as stopping work.
     {'status': 'stopping', 'survives': True},  # Ignored stop cannot wait for natural exit.
