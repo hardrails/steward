@@ -58,6 +58,42 @@ current question, validates the option or text rule, signs a short-lived respons
 and submits the unchanged response and permit to Control. Control cannot alter the
 answer without invalidating its digest.
 
+## Deliver an already-signed response without a signing key
+
+A service that only carries answers should not receive a task-authority private
+key. After a separate trusted signer produces a permit and exact response body,
+use:
+
+```console
+stewardctl control interaction submit-response \
+  -no-context \
+  -control-url https://control.example.com:8443 \
+  -token-file operator.token \
+  -tenant-id TENANT_ID \
+  -interaction-id INTERACTION_ID \
+  -permit-file answer.permit.json \
+  -response-file answer.json
+```
+
+For a private CA, also supply `-ca-file`. Both answer files must be non-empty
+regular files with no group/other permissions (for example, mode `0600`), not
+symlinks. The permit is limited to 16 KiB and the response to 4 KiB. Bytes are sent
+unchanged, including whitespace and Unicode; do not reformat either file after
+signing. This command does not accept signing-key flags or load task keys from a
+CLI context. The operator token still authorizes access to Control. Control and
+Gateway remain responsible for their existing permit and signature checks.
+
+The returned record must match the submitted permit digest, response digest, and
+byte count. `response_queued` means retained for delivery, **not** accepted by the
+running instance. Use `interaction show` to observe `resolved`, which follows the
+executor's acknowledgement after Gateway accepts the answer. This is still not
+proof that the agent has consumed it or completed its work.
+
+The command does not automatically retry a POST or follow redirects. If delivery
+times out or the receipt cannot be validated, inspect the retained interaction
+before deciding whether to resend the **same** signed bytes. Do not generate a
+different answer merely because the first receipt was lost.
+
 ## Security and failure behavior
 
 An interaction response is context, not permission for an unrelated external
