@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,6 +69,35 @@ func TestLifecycleObservationTimeoutPreservesOriginalTaskForRecovery(t *testing.
 				t.Fatalf("timeout redispatched work: %d", dispatches.Load())
 			}
 			requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), connectorledger.Authorize, connectorledger.Dispatch, connectorledger.Terminal)
+		})
+	}
+}
+
+func TestLifecycleObservationTimeoutReportsRemainingPollDelay(t *testing.T) {
+	for _, elapsed := range []time.Duration{0, 500 * time.Millisecond, 2 * time.Second, 15 * time.Second} {
+		t.Run(elapsed.String(), func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, `{"run_id":"`+lifecycleTestRunID+`"}`)
+			}))
+			defer upstream.Close()
+			rig := newLifecycleServiceTaskRig(t, upstream.URL)
+			digest := dispatchLifecycleTask(t, rig, "timeout-poll-delay", []byte(`{"input":"work"}`))
+			rig.server.client = &http.Client{Transport: lifecycleRoundTripper(func(_ *http.Request) (*http.Response, error) {
+				rig.server.now = func() time.Time { return rig.now.Add(elapsed) }
+				return nil, context.DeadlineExceeded
+			})}
+			response := invokeLifecycleTaskEndpoint(rig, http.MethodPost, digest, true, nil)
+			requireGatewayErrorCode(t, response, http.StatusGatewayTimeout)
+			remaining := time.Duration(rig.operation.PollIntervalSeconds)*time.Second - elapsed
+			want := "0"
+			if remaining > 0 {
+				want = strconv.Itoa(int((remaining + time.Second - 1) / time.Second))
+			}
+			if got := response.Header().Get("Retry-After"); got != want {
+				t.Fatalf("Retry-After=%q, want remaining interval %q", got, want)
+			}
 		})
 	}
 }

@@ -228,7 +228,7 @@ func (s *Server) observeTaskLifecycle(w http.ResponseWriter, request *http.Reque
 		}
 		var networkError net.Error
 		if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &networkError) && networkError.Timeout() {
-			w.Header().Set("Retry-After", strconv.Itoa(observation.operation.PollIntervalSeconds))
+			w.Header().Set("Retry-After", strconv.Itoa(s.taskObservationRetryAfter(observation)))
 			writeGatewayError(w, http.StatusGatewayTimeout, "task_observation_timeout", "agent status observation timed out; retry observation of this task without resubmitting work")
 			return
 		}
@@ -363,6 +363,16 @@ func (s *Server) startTaskObservation(observation taskObservation) bool {
 }
 
 var errTaskObservationRevoked = errors.New("task observation authority was revoked")
+
+func (s *Server) taskObservationRetryAfter(observation taskObservation) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	remaining := s.serviceTasks[observation.taskDigest].nextObservationAt.Sub(s.now())
+	if remaining <= 0 {
+		return 0
+	}
+	return int((remaining + time.Second - 1) / time.Second)
+}
 
 func (s *Server) commitTaskObservation(observation taskObservation, terminal connectorledger.Event) error {
 	// A terminal receipt and grant revocation share this barrier. The reader
