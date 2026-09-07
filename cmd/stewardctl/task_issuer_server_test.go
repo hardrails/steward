@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -91,6 +93,42 @@ func TestTaskIssuerPanicRetainsJSONErrorBoundary(t *testing.T) {
 	if recorder.Code != 500 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
 		len(response) != 2 || response["error"] != "internal_error" || response["message"] == "" {
 		t.Fatalf("panic escaped JSON error boundary: %d", recorder.Code)
+	}
+}
+
+func TestTaskIssuerCommandReadinessFailureReleasesPrivateResources(t *testing.T) {
+	_, config := newTaskIssuerFixture(t)
+	socket := filepath.Join(issuerSocketDirectory(t), "station.sock")
+	reader, writer := io.Pipe()
+	_ = reader.Close()
+	defer writer.Close()
+	err := serveTaskIssuer([]string{
+		"-admission", config.Admission, "-intent", config.Intent,
+		"-trust", config.Trust, "-key", config.Key, "-key-id", config.KeyID,
+		"-store", config.Store, "-operations", strings.Join(config.Operations, ","),
+		"-socket", socket, "-client-gid", fmt.Sprint(issuerTestClientGID()), "-capacity", "2",
+	}, writer)
+	if !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("readiness failure was not returned: %v", err)
+	}
+	if _, err = os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed startup left a socket: %v", err)
+	}
+	reopened, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatalf("failed startup retained its store lock: %v", err)
+	}
+	defer reopened.Close()
+	if reopened.count != 0 {
+		t.Fatal("failed startup issued task authority")
+	}
+}
+
+func TestTaskIssuerListenerRejectsInvalidClientGroupsBeforeFilesystemAccess(t *testing.T) {
+	for _, gid := range []int{-1, 0, int(^uint32(0))} {
+		if _, err := listenTaskIssuer("/missing/station.sock", gid); err == nil || !strings.Contains(err.Error(), "client group ID") {
+			t.Fatalf("invalid group %d reached the filesystem: %v", gid, err)
+		}
 	}
 }
 
