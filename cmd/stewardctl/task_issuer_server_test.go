@@ -57,6 +57,21 @@ func TestTaskIssuerHTTPRejectsInvalidRequestsWithoutIssuing(t *testing.T) {
 	}
 }
 
+func TestTaskIssuerCommandIsDiscoverableAndRequiresPrivateConfiguration(t *testing.T) {
+	candidates := stewardctlCompletionCandidates([]string{"task", "serve-"})
+	if len(candidates) != 1 || candidates[0] != "serve-issuer" {
+		t.Fatalf("station is absent from completion: %v", candidates)
+	}
+	candidates = stewardctlCompletionCandidates([]string{"task", "serve-issuer", "-sock"})
+	if len(candidates) != 1 || candidates[0] != "-socket" {
+		t.Fatalf("station socket flag is absent: %v", candidates)
+	}
+	if err := taskCommand([]string{"serve-issuer"}, io.Discard); err == nil ||
+		!strings.Contains(err.Error(), "absolute private socket") {
+		t.Fatalf("station command did not enforce configuration: %v", err)
+	}
+}
+
 func issuerSocketDirectory(t *testing.T) string {
 	t.Helper()
 	// macOS has a short Unix socket pathname bound; Go's test path can exceed it.
