@@ -176,11 +176,11 @@ components:
         type: string
         enum: [nosniff]
     RetryAfter:
-      description: Whole seconds until host policy permits another observation. Present for poll-interval throttling.
+      description: Whole seconds until host policy permits another observation. Present for poll-interval throttling and observation timeouts. Zero is permitted only for task_observation_timeout when the signed poll interval has already elapsed.
       schema:
         type: integer
         format: int32
-        minimum: 1
+        minimum: 0
   schemas:
     SHA256Digest:
       type: string
