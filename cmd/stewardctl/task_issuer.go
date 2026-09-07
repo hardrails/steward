@@ -264,6 +264,11 @@ func (issuer *taskIssuer) issue(request taskIssuerRequest) ([]byte, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.Join(errTaskIssuerConflict, err)
 	}
+	// A dangling symlink can read as missing. It is still retained state,
+	// never permission to sign a replacement for this identity.
+	if _, statErr := issuer.root.Lstat(name); !errors.Is(statErr, os.ErrNotExist) {
+		return nil, errors.Join(errTaskIssuerConflict, statErr)
+	}
 	if issuer.count >= issuer.config.Capacity {
 		return nil, errTaskIssuerCapacity
 	}
