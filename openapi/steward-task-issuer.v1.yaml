@@ -97,9 +97,11 @@ components:
       description: |
         No replacement authority returned. 400 invalid JSON/headers; 404 invalid
         route/query; 405 wrong method; 409 conflicting, expired or invalid retained
-        authority; 413 oversized/unreadable body; 422 invalid intent or issuance
-        failure; 500 unconfirmed storage durability or unexpected server failure;
+        authority; 413 oversized/unreadable body; 422 invalid intent or exact request;
+        500 private preparation failure, unconfirmed storage durability or
+        unexpected server failure;
         503 signer busy or retained capacity reached. Error codes distinguish
+        preparation_failed (repair private staging storage and pinned authority),
         storage_unconfirmed, internal_error, signer_busy and capacity_exhausted.
         Keep the original
         task ID and reconcile; an error does not prove no authority was retained.
