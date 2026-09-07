@@ -52,10 +52,11 @@ type taskIssuer struct {
 }
 
 var (
-	errTaskIssuerConflict = errors.New("task issuance conflicts with retained authority")
-	errTaskIssuerCapacity = errors.New("task signing station reached its retained capacity")
-	errTaskIssuerBusy     = errors.New("task signing station is busy")
-	errTaskIssuerStorage  = errors.New("task signing station storage durability is unconfirmed")
+	errTaskIssuerConflict    = errors.New("task issuance conflicts with retained authority")
+	errTaskIssuerCapacity    = errors.New("task signing station reached its retained capacity")
+	errTaskIssuerBusy        = errors.New("task signing station is busy")
+	errTaskIssuerStorage     = errors.New("task signing station storage durability is unconfirmed")
+	errTaskIssuerPreparation = errors.New("task signing station private preparation failed")
 )
 
 func openTaskIssuer(config taskIssuerConfig) (_ *taskIssuer, returnErr error) {
@@ -280,14 +281,21 @@ func (issuer *taskIssuer) issue(request taskIssuerRequest) ([]byte, error) {
 	if issuer.count >= issuer.config.Capacity {
 		return nil, errTaskIssuerCapacity
 	}
+	// Reuse native request validation before entering the private preparation
+	// boundary. Subsequent failures concern operator-owned snapshots, signing or
+	// staging, not a request the caller can repair by changing its task identity.
+	operation := issuer.operations[request.OperationID]
+	if int64(len(body)) > operation.MaxRequestBytes || !validExactTaskJSON(body, int(operation.MaxRequestBytes)) {
+		return nil, errors.New("exact task request is empty, oversized, ambiguous, or not one JSON value")
+	}
 	directory, err := os.MkdirTemp(issuer.snapshots, "request-")
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errTaskIssuerPreparation, err)
 	}
 	defer os.RemoveAll(directory)
 	requestPath, bundlePath := filepath.Join(directory, "request"), filepath.Join(directory, "bundle")
 	if err = writeNewFile(requestPath, body, 0o600); err != nil {
-		return nil, err
+		return nil, errors.Join(errTaskIssuerPreparation, err)
 	}
 	// Reuse the existing native issuer. No subprocess, shell or second signing
 	// implementation, and no dispatch or runtime activation occurs here.
@@ -300,14 +308,14 @@ func (issuer *taskIssuer) issue(request taskIssuerRequest) ([]byte, error) {
 		"-valid-for", issuer.config.Validity.String(), "-out", bundlePath,
 	}, io.Discard)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errTaskIssuerPreparation, err)
 	}
 	bundle, err := securefile.Read(bundlePath, maxTaskBundleBytes, securefile.OwnerOnly)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errTaskIssuerPreparation, err)
 	}
 	if err = issuer.match(bundle, request, body); err != nil {
-		return nil, err
+		return nil, errors.Join(errTaskIssuerPreparation, err)
 	}
 	issuer.count++ // Failed persistence consumes capacity until a verified restart.
 	if err = issuer.write(name, bundle); err != nil {

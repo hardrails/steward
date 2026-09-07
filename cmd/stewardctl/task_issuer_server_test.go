@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +63,101 @@ func TestTaskIssuerHTTPRejectsInvalidRequestsWithoutIssuing(t *testing.T) {
 				t.Fatalf("invalid error contract or issuance: status=%d count=%d", recorder.Code, issuer.count)
 			}
 		})
+	}
+}
+
+func TestTaskIssuerHTTPDistinguishesPrivatePreparationFailureAndRecovers(t *testing.T) {
+	for _, snapshot := range []string{"", "admission", "intent", "trust", "key"} {
+		t.Run("missing-"+snapshot, func(t *testing.T) {
+			fixture, config := newTaskIssuerFixture(t)
+			issuer, err := openTaskIssuer(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer issuer.Close()
+			intent := issuerRequest(fixture)
+			original, err := issuer.issue(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Move only this fixture's private snapshot, preserving it for repair.
+			path := issuer.snapshots
+			if snapshot != "" {
+				path = filepath.Join(path, snapshot)
+			}
+			backup := filepath.Join(t.TempDir(), "private-snapshot")
+			if err = os.Rename(path, backup); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Rename(backup, path) })
+			intent.TaskID = "issuer-task-2"
+			raw, err := json.Marshal(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				request := httptest.NewRequest("POST", "/v1/tasks", bytes.NewReader(raw))
+				request.Header.Set("Content-Type", "application/json")
+				recorder := httptest.NewRecorder()
+				issuer.serveHTTP(recorder, request)
+				var response map[string]string
+				if recorder.Code != 500 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+					len(response) != 2 || response["error"] != "preparation_failed" ||
+					!strings.Contains(response["message"], "Repair") ||
+					strings.Contains(recorder.Body.String(), path) ||
+					strings.Contains(recorder.Body.String(), intent.TaskID) ||
+					recorder.Body.Len() > 512 || issuer.count != 1 {
+					t.Fatalf("private failure was misclassified or leaked details: status=%d count=%d", recorder.Code, issuer.count)
+				}
+			}
+			// Retained authority is independent of temporary staging availability.
+			replayed, err := issuer.issue(issuerRequest(fixture))
+			if err != nil || !bytes.Equal(original, replayed) {
+				t.Fatalf("staging failure changed retained authority: %v", err)
+			}
+			if err = os.Rename(backup, path); err != nil {
+				t.Fatal(err)
+			}
+			issued, err := issuer.issue(intent)
+			if err != nil || issuer.count != 2 {
+				t.Fatalf("same task failed after repair: %v", err)
+			}
+			if err = issuer.match(issued, intent, fixture.request); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestTaskIssuerHTTPInvalidJSONRemainsClientRejection(t *testing.T) {
+	fixture, config := newTaskIssuerFixture(t)
+	issuer, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer issuer.Close()
+	for _, body := range []string{"not-json", `{"input":1,"input":2}`, `{}`} {
+		intent := issuerRequest(fixture)
+		intent.RequestBase64 = base64.StdEncoding.EncodeToString([]byte(body))
+		// Exercise the operation-specific bound as well as native JSON checks.
+		if body == "{}" {
+			operation := issuer.operations[intent.OperationID]
+			operation.MaxRequestBytes = 1
+			issuer.operations[intent.OperationID] = operation
+		}
+		raw, err := json.Marshal(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest("POST", "/v1/tasks", bytes.NewReader(raw))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		issuer.serveHTTP(recorder, request)
+		var response map[string]string
+		if recorder.Code != 422 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+			response["error"] != "issuance_rejected" || issuer.count != 0 {
+			t.Fatalf("invalid request became a server fault: status=%d count=%d", recorder.Code, issuer.count)
+		}
 	}
 }
 

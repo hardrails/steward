@@ -181,6 +181,9 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 			status, code = 503, "signer_busy"
 		} else if errors.Is(err, errTaskIssuerStorage) {
 			status, code = 500, "storage_unconfirmed"
+		} else if errors.Is(err, errTaskIssuerPreparation) {
+			writeTaskIssuerError(writer, 500, "preparation_failed", "Repair the station's private staging storage and pinned authority. Keep the original task identity and reconcile before retrying.")
+			return
 		}
 		writeTaskIssuerError(writer, status, code, "No replacement authority was issued. Reconcile the original task and signing station.")
 		return
