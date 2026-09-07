@@ -762,7 +762,8 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
             connection.close()
 
     def _send_error(self, status_code: int, code: str) -> None:
-        body = json.dumps({"error": code}, separators=(",", ":"), sort_keys=True).encode()
+        message = "Hermes service bridge rejected the request: " + code.replace("_", " ") + "."
+        body = json.dumps({"error": code, "message": message}, separators=(",", ":"), sort_keys=True).encode()
         self._send_json(status_code, body)
 
     def _send_json(self, status_code: int, body: bytes) -> None:

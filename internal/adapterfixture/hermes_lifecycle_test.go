@@ -454,13 +454,19 @@ try:
         (b"", [("Content-Length", "-1")], 400),
     ]
     for body, headers, expected in invalid_requests:
-        status, _ = request("POST", stop_path, body=body, headers=headers)
+        status, response_body = request("POST", stop_path, body=body, headers=headers)
         assert status == expected, (body, headers, status, expected)
+        error = json.loads(response_body)
+        assert set(error) == {'error', 'message'} and error['message'], error
     for invalid_run in ("run_" + "a" * 31, "RUN_" + "a" * 32, "run_" + "A" * 32,
                         "run_" + "g" * 32, "../other", 3, None, True):
         body = json.dumps({"run_id": invalid_run}, separators=(",", ":")).encode()
-        status, _ = request("POST", stop_path, body=body)
+        status, response_body = request("POST", stop_path, body=body)
         assert status == 400, (body, status)
+        assert json.loads(response_body) == {
+            'error': 'invalid_stop_request',
+            'message': 'Hermes service bridge rejected the request: invalid stop request.',
+        }
     for body in (b'{"run_id": "' + run.encode() + b'"}',
                  b'{"run_id":"' + run.encode() + b'","all":true}',
                  b'{"run_id":"' + run.encode() + b'","run_id":"' + run.encode() + b'"}'):
