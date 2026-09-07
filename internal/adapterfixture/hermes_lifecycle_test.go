@@ -74,6 +74,42 @@ for kwargs in (
 	}
 }
 
+func TestHermesGatewayChildReaping(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	program := `
+import importlib.util, sys
+from unittest import mock
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('entrypoint', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+for status, expected in ((7 << 8, 7), (15, -15)):
+    process = mock.Mock(pid=42, returncode=None)
+    with mock.patch.object(module.os, 'getpid', return_value=1), mock.patch.object(module.os, 'waitpid', side_effect=[InterruptedError(), (43, 0), (44, 0), (42, status)]) as wait:
+        assert module.wait_for_gateway(process) == expected
+        assert process.returncode == expected
+        assert wait.call_args_list == [mock.call(-1, 0)] * 4
+        process.wait.assert_not_called()
+process = mock.Mock()
+process.wait.return_value = 9
+with mock.patch.object(module.os, 'getpid', return_value=123), mock.patch.object(module.os, 'waitpid') as wait:
+    assert module.wait_for_gateway(process) == 9
+    wait.assert_not_called()
+    process.wait.assert_called_once_with()
+`
+	command := exec.CommandContext(ctx, python, "-I", "-c", program,
+		filepath.Join(hermesAdapterRoot(t), "entrypoint.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("gateway child reaping failed: %v\n%s", err, output)
+	}
+}
+
 func TestHermesImageOwnedStopFixture(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {

@@ -806,6 +806,20 @@ def wait_for_internal_api(process: subprocess.Popen[bytes]) -> None:
     fail("Hermes API did not become ready before the startup deadline")
 
 
+def wait_for_gateway(process: subprocess.Popen) -> int:
+    """As container PID 1, reap adopted tool children as well as the gateway."""
+    if os.getpid() != 1:
+        return process.wait()
+    while True:
+        try:
+            child, status = os.waitpid(-1, 0)
+        except InterruptedError:
+            continue
+        if child == process.pid:
+            process.returncode = os.waitstatus_to_exitcode(status)
+            return process.returncode
+
+
 def main() -> int:
     if sys.argv[1:] != ["serve"]:
         fail("command must be exactly: serve")
@@ -840,7 +854,12 @@ def main() -> int:
     )
 
     def stop(_signum: int, _frame: Any) -> None:
-        process.terminate()
+        # Do not poll/reap the gateway from this signal handler: PID 1's wait
+        # loop owns every child exit and must retain the gateway's exact status.
+        try:
+            os.kill(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -850,7 +869,7 @@ def main() -> int:
         server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)
         thread = threading.Thread(target=server.serve_forever, name="service-bridge", daemon=True)
         thread.start()
-        return process.wait()
+        return wait_for_gateway(process)
     finally:
         if server is not None:
             server.shutdown()
