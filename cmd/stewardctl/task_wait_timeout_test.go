@@ -22,6 +22,7 @@ func TestTaskWaitRecoversOnlyExplicitObservationTimeout(t *testing.T) {
 	}{
 		{"observation timeout", 504, "task_observation_timeout", true, false},
 		{"terminal recovery timeout", 504, "task_observation_timeout", true, true},
+		{"elapsed polling interval", 504, "task_observation_timeout", true, false},
 		{"invalid response", 502, "invalid_task_status", false, false},
 		{"wrong status", 502, "task_observation_timeout", false, false},
 		{"unknown timeout", 504, "unknown_timeout", false, false},
@@ -53,6 +54,9 @@ func TestTaskWaitRecoversOnlyExplicitObservationTimeout(t *testing.T) {
 				if observations.Add(1) == 1 {
 					w.Header().Set("Content-Type", "application/json")
 					w.Header().Set("Retry-After", "1")
+					if test.name == "elapsed polling interval" {
+						w.Header().Set("Retry-After", "0")
+					}
 					w.WriteHeader(test.status)
 					_, _ = io.WriteString(w, `{"error":"`+test.code+`","message":"observation failed"}`)
 					return
@@ -62,7 +66,11 @@ func TestTaskWaitRecoversOnlyExplicitObservationTimeout(t *testing.T) {
 			defer server.Close()
 			result := filepath.Join(fixture.cli.directory, "recovered.json")
 			var output bytes.Buffer
-			err := run(fixture.arguments("wait", server.URL, "-result-out", result, "-wait-timeout", "5s"), &output, &bytes.Buffer{})
+			deadline := "5s"
+			if test.name == "elapsed polling interval" {
+				deadline = "1s"
+			}
+			err := run(fixture.arguments("wait", server.URL, "-result-out", result, "-wait-timeout", deadline), &output, &bytes.Buffer{})
 			if test.recover {
 				if err != nil || observations.Load() != 2 {
 					t.Fatalf("error=%v observations=%d", err, observations.Load())

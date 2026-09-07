@@ -201,7 +201,7 @@ func waitTask(arguments []string, stdout io.Writer) (returnErr error) {
 			if errors.As(err, &apiError) && (apiError.Status == http.StatusTooManyRequests ||
 				apiError.Status == http.StatusGatewayTimeout && apiError.Code == "task_observation_timeout") {
 				retryAfter := apiError.RetryAfter
-				if retryAfter <= 0 {
+				if !apiError.RetryAfterPresent {
 					retryAfter = pollInterval
 				}
 				if waitErr := waitTaskPoll(ctx, retryAfter); waitErr != nil {
