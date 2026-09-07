@@ -12,8 +12,8 @@ The adapter builds Hermes from that exact source revision into a hardened image 
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
 upstream image. The v2 bridge provides a fixed, run-specific stop operation,
 deadline-bounded container shutdown, and restart-safe gateway identity handling.
-The retained [feasibility evidence](../reference/evidence/hermes-feasibility.json)
-and [signed integration evidence](../reference/evidence/hermes-integration.json)
+The retained [feasibility evidence]({{ '/reference/evidence/hermes-feasibility.json' | relative_url }})
+and [signed integration evidence]({{ '/reference/evidence/hermes-integration.json' | relative_url }})
 identify the exact source and artifacts that passed. CI and release packaging
 compare adapter/harness bytes, runtime source trees, and compiler/embed inputs
 against those records. Changed inputs cannot ship until requalified; records must
