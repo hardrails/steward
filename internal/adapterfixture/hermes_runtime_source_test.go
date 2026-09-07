@@ -3,6 +3,7 @@ package adapterfixture
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,9 +27,9 @@ func isolatedGitEnvironment() []string {
 
 // Compare production trees as well as the actual compiler/embed inventory.
 // The latter catches untracked (even gitignored) files that git diff omits.
-func verifyHermesRuntimeSource(root, commit string) error {
-	if !validHexObjectID(commit) {
-		return fmt.Errorf("invalid qualified runtime source commit")
+func verifyHermesRuntimeSource(root, qualifiedTreeSHA256 string) error {
+	if !validSHA256Hex(qualifiedTreeSHA256) {
+		return fmt.Errorf("invalid qualified runtime tree digest")
 	}
 	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -47,8 +48,14 @@ func verifyHermesRuntimeSource(root, commit string) error {
 			"GOPROXY=off", "GOSUMDB=off", "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
 		return command.Output()
 	}
-	if _, err := run("git", "diff", "--quiet", "--no-ext-diff", "--no-textconv", commit, "--", "go.mod", "go.sum", "cmd", "internal"); err != nil {
-		return fmt.Errorf("Steward runtime source differs from qualification (or its commit is unavailable): %w", err)
+	// A squash merge can remove the qualified commit from reachable history.
+	// These content-addressed subtrees survive metadata-only retention and merge.
+	snapshot, err := run("git", "ls-tree", "HEAD", "--", "go.mod", "go.sum", "cmd", "internal")
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(snapshot)) != qualifiedTreeSHA256 {
+		return fmt.Errorf("Steward runtime tree differs from qualification or cannot be read")
+	}
+	if _, err := run("git", "diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--", "go.mod", "go.sum", "cmd", "internal"); err != nil {
+		return fmt.Errorf("Steward runtime has unqualified working-tree changes: %w", err)
 	}
 	raw, err := run("go", "list", "-deps", "-json", "./cmd/stewardctl", "./cmd/steward-executor", "./cmd/steward-gateway", "./cmd/steward-relay")
 	if err != nil {
@@ -136,11 +143,13 @@ func TestHermesRuntimeSourceBinding(t *testing.T) {
 	git("add", ".")
 	git("-c", "user.name=Qualification fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-qm", "Qualified fixture")
 	commit := git("rev-parse", "HEAD")
-	if err := verifyHermesRuntimeSource(root, commit); err != nil {
+	snapshot := git("ls-tree", "HEAD", "--", "go.mod", "go.sum", "cmd", "internal") + "\n"
+	qualifiedTree := fmt.Sprintf("%x", sha256.Sum256([]byte(snapshot)))
+	if err := verifyHermesRuntimeSource(root, qualifiedTree); err != nil {
 		t.Fatal(err)
 	}
 	write("docs/reference/evidence/record.json", "new retained evidence")
-	if err := verifyHermesRuntimeSource(root, commit); err != nil {
+	if err := verifyHermesRuntimeSource(root, qualifiedTree); err != nil {
 		t.Fatalf("retaining evidence invalidated runtime source: %v", err)
 	}
 	for _, test := range []struct{ name, content, restore string }{
@@ -152,7 +161,7 @@ func TestHermesRuntimeSourceBinding(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			write(test.name, test.content)
-			if err := verifyHermesRuntimeSource(root, commit); err == nil {
+			if err := verifyHermesRuntimeSource(root, qualifiedTree); err == nil {
 				t.Fatal("changed runtime input accepted")
 			}
 			if test.restore != "" {
@@ -162,7 +171,28 @@ func TestHermesRuntimeSourceBinding(t *testing.T) {
 			}
 		})
 	}
-	if err := verifyHermesRuntimeSource(root, strings.Repeat("0", 40)); err == nil {
-		t.Fatal("unavailable qualification commit accepted")
+	for _, digest := range []string{"", "invalid", strings.Repeat("0", 64)} {
+		if err := verifyHermesRuntimeSource(root, digest); err == nil {
+			t.Fatal("missing or incorrect qualified tree accepted")
+		}
+	}
+	git("add", "docs")
+	git("-c", "user.name=Qualification fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-qm", "Retain qualification evidence")
+	clone := t.TempDir()
+	git("clone", "--no-local", "--depth=1", root, clone)
+	probe := exec.Command("git", "cat-file", "-e", commit+"^{commit}")
+	probe.Dir = clone
+	probe.Env = isolatedGitEnvironment()
+	if err := probe.Run(); err == nil {
+		t.Fatal("negative control: qualified commit still exists in shallow clone")
+	}
+	if err := verifyHermesRuntimeSource(clone, qualifiedTree); err != nil {
+		t.Fatalf("unchanged shallow/squashed release cannot use retained tree evidence: %v", err)
+	}
+	write("internal/shared/shared.go", shared+"const CommittedChange = true\n")
+	git("add", "internal/shared/shared.go")
+	git("-c", "user.name=Qualification fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-qm", "Change runtime source")
+	if err := verifyHermesRuntimeSource(root, qualifiedTree); err == nil {
+		t.Fatal("committed source change reused old tree qualification")
 	}
 }

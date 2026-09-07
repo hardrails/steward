@@ -1104,9 +1104,10 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 				} `json:"source"`
 			} `json:"build_attestation"`
 			StewardSource struct {
-				Commit       string `json:"commit"`
-				TrackedDirty *bool  `json:"tracked_dirty"`
-				Tree         string `json:"tree"`
+				Commit            string `json:"commit"`
+				TrackedDirty      *bool  `json:"tracked_dirty"`
+				Tree              string `json:"tree"`
+				RuntimeTreeSHA256 string `json:"runtime_tree_sha256"`
 			} `json:"steward_source"`
 		} `json:"provenance"`
 		ReceiptChain struct {
@@ -1155,7 +1156,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		!validHexObjectID(stewardSource.Commit) || !validHexObjectID(stewardSource.Tree) {
 		t.Fatalf("Hermes integration evidence does not bind a clean Steward source: %#v", stewardSource)
 	}
-	if err := verifyHermesRuntimeSource(repositoryRoot, stewardSource.Commit); err != nil {
+	if err := verifyHermesRuntimeSource(repositoryRoot, stewardSource.RuntimeTreeSHA256); err != nil {
 		t.Fatal(err)
 	}
 	expectedBinaries := map[string]string{
