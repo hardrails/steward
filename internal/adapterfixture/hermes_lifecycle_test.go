@@ -152,6 +152,62 @@ with mock.patch.object(module.os, 'getpid', return_value=1), mock.patch.object(m
 	}
 }
 
+func TestHermesLateShutdownSignalsPreserveExitStatus(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	program := `
+import importlib.util, subprocess, sys
+from unittest import mock
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('entrypoint', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+native_waitpid = module.os.waitpid
+for supervisor_pid in (1, 123):
+    handlers = {}
+    deadlines = []
+    server = mock.Mock()
+    with subprocess.Popen([sys.executable, '-I', '-c', 'raise SystemExit(7)']) as child:
+        def late_signals():
+            for signum in (module.signal.SIGTERM, module.signal.SIGINT) * 3:
+                handlers[signum](signum, None)
+        def reap(pid, options):
+            result = native_waitpid(pid, options)
+            if result[0] == child.pid:
+                # Exercise the PID 1 window after waitpid but before returncode
+                # assignment using real Popen signal/poll behavior.
+                late_signals()
+            return result
+        def ready(process, deadline):
+            assert process is child
+            deadlines.append(deadline)
+        def shutdown():
+            assert child.returncode == 7
+            late_signals()
+            assert child.returncode == 7
+        server.shutdown.side_effect = shutdown
+        with mock.patch.object(module.sys, 'argv', ['entrypoint.py', 'serve']), mock.patch.dict(module.os.environ, {}, clear=True), mock.patch.object(module, 'verify_skill'), mock.patch.object(module, 'seed_state'), mock.patch.object(module.subprocess, 'Popen', return_value=child), mock.patch.object(module.signal, 'signal', side_effect=lambda signum, handler: handlers.__setitem__(signum, handler)), mock.patch.object(module, 'wait_for_internal_api', side_effect=ready), mock.patch.object(module, 'BoundedHTTPServer', return_value=server), mock.patch.object(module.threading, 'Thread'), mock.patch.object(module.os, 'getpid', return_value=supervisor_pid), mock.patch.object(module.os, 'waitpid', side_effect=reap):
+            assert module.main() == 7
+            deadline = deadlines[0]()
+            assert deadline is not None
+            late_signals()
+            assert deadlines[0]() == deadline, 'repeated signals extended shutdown'
+            assert child.returncode == 7
+        server.shutdown.assert_called_once()
+        server.server_close.assert_called_once()
+`
+	command := exec.CommandContext(ctx, python, "-I", "-c", program,
+		filepath.Join(hermesAdapterRoot(t), "entrypoint.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("late shutdown signal regression failed: %v\n%s", err, output)
+	}
+}
+
 func TestHermesImageOwnedStopFixture(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
