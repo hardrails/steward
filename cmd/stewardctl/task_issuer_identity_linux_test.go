@@ -31,6 +31,13 @@ func TestTaskIssuerSeparatesClientFromSigningIdentity(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("identity test requires root to start three different unprivileged UIDs")
 	}
+	for _, phase := range []string{"configured", "before-socket-restriction"} {
+		t.Run(phase, func(t *testing.T) { proveTaskIssuerIdentities(t, phase) })
+	}
+}
+
+func proveTaskIssuerIdentities(t *testing.T, phase string) {
+	t.Helper()
 	directory, err := os.MkdirTemp("/tmp", "issuer-identity-")
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +57,7 @@ func TestTaskIssuerSeparatesClientFromSigningIdentity(t *testing.T) {
 	defer cancel()
 	signer := issuerIdentityCommand(t, ctx, "signer", 65532, 65532, []uint32{65533})
 	signer.Env = append(signer.Env, "STEWARD_ISSUER_TEST_SOCKET="+filepath.Join(socketDirectory, "station.sock"))
+	signer.Env = append(signer.Env, "STEWARD_ISSUER_TEST_PHASE="+phase)
 	var diagnostics bytes.Buffer
 	signer.Stderr = &diagnostics
 	output, err := signer.StdoutPipe()
@@ -122,7 +130,24 @@ func TestTaskIssuerIdentityProcess(t *testing.T) {
 		}
 		defer issuer.Close()
 		socket := os.Getenv("STEWARD_ISSUER_TEST_SOCKET")
-		listener, err := listenTaskIssuer(socket, 65533)
+		var listener net.Listener
+		if os.Getenv("STEWARD_ISSUER_TEST_PHASE") == "before-socket-restriction" {
+			// Hold the review's suspected startup window open for the whole test:
+			// an even more permissive 000 umask, no Chown/Chmod on the socket,
+			// and an accepting signing handler. Parent traversal must still deny
+			// outsiders before any connection can be queued.
+			previousMask := syscall.Umask(0)
+			listener, err = net.Listen("unix", socket)
+			syscall.Umask(previousMask)
+			if err == nil {
+				info, statErr := os.Lstat(socket)
+				if statErr != nil || info.Mode().Perm() != 0o777 || info.Sys().(*syscall.Stat_t).Gid != 65532 {
+					t.Fatalf("startup probe did not preserve unrestricted socket: %v", statErr)
+				}
+			}
+		} else {
+			listener, err = listenTaskIssuer(socket, 65533)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
