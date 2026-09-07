@@ -30,6 +30,7 @@ if ! shopt -qo privileged; then
 	exit 2
 fi
 unset BASH_ENV ENV TAR_OPTIONS GZIP POSIXLY_CORRECT
+export GOENV=off GOFLAGS= GOWORK=off
 
 cd "$(dirname "$0")/.."
 
