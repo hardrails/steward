@@ -4,7 +4,7 @@
   "runtime": {
     "engine": "hermes",
     "image": "replace.invalid/steward-hermes@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "adapter_contract": "steward.hermes-agent.v1"
+    "adapter_contract": "steward.hermes-agent.v2"
   },
   "model": {"route": "local/default"},
   "skills": ["workspace-audit"],
