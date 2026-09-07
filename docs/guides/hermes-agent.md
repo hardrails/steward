@@ -15,7 +15,7 @@ it passed active-tool interruption and signed integration on a disposable gVisor
 runner at source `ff565abc95610aeff7bdf7f21d113840719435e8`. Publication-registration
 changes still require the final exact-source qualification before release. The
 historical v1 evidence is not proof for v2; retain fresh successful records rather
-than editing it. This is runtime fixture evidence, not a completed Railyard job.
+than editing it. This is runtime fixture evidence, not a completed end-user workflow.
 
 The retained v1 qualification means its pinned source and adapter passed the documented
 runtime qualification under gVisor on `linux/amd64`, including a signed workspace audit, an
