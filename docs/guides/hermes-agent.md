@@ -637,6 +637,9 @@ exposes this fixed allowlist:
 - `POST /v1/runs`
 - `GET /v1/runs/{run_id}`, where the ID is `run_` plus 32 lowercase hexadecimal
   characters
+- `POST /steward/v1/run-stop`, with the exact body
+  `{"run_id":"run_<32 lowercase hex>"}`; a stop acknowledgement is not terminal
+  completion, so observe the original run before starting a continuation
 
 Run event streams are not exposed. The bridge requires `Content-Length` for a run
 submission, limits request bodies to 64 KiB and responses to 1 MiB, applies a
