@@ -187,7 +187,9 @@ adds elastic Executor capacity.
 
 Steward supports containerized Hermes agents through a bounded service API. The
 adapter runs behind Steward's fixed security boundary. The v2 adapter change adds
-a bounded signed-operation-compatible stop path; it remains qualification-pending.
+a bounded signed-operation-compatible stop path. Active-tool interruption and the
+signed integration passed on the disposable qualification runner; final release
+qualification for the publishing changes is still pending.
 A stop acknowledgement is not proof that the agent or an external effect halted.
 The prior retained v1 qualification does not cover the changed adapter bytes.
 

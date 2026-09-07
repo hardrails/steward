@@ -11,8 +11,11 @@ Steward includes an adapter definition for Hermes Agent commit
 The adapter builds Hermes from that exact source revision into a hardened image that
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
 upstream image. The current v2 bridge adds a fixed, run-specific stop operation;
-its new bytes require qualification before deployment. Retained v1 evidence does
-not establish that an active tool stops under this version.
+it passed active-tool interruption and signed integration on a disposable gVisor
+runner at source `ff565abc95610aeff7bdf7f21d113840719435e8`. Publication-registration
+changes still require the final exact-source qualification before release. The
+historical v1 evidence is not proof for v2; retain fresh successful records rather
+than editing it. This is runtime fixture evidence, not a completed Railyard job.
 
 The retained v1 qualification means its pinned source and adapter passed the documented
 runtime qualification under gVisor on `linux/amd64`, including a signed workspace audit, an
