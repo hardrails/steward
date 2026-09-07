@@ -176,7 +176,13 @@ components:
         type: string
         enum: [nosniff]
     RetryAfter:
-      description: Whole seconds until host policy permits another observation. Present for poll-interval throttling and observation timeouts. Zero is permitted only for task_observation_timeout when the signed poll interval has already elapsed.
+      description: Positive whole seconds until host policy permits another observation after throttling.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+    TimeoutRetryAfter:
+      description: Whole seconds until host policy permits another observation after task_observation_timeout. Zero means that the signed poll interval has already elapsed.
       schema:
         type: integer
         format: int32
@@ -393,7 +399,7 @@ components:
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
         Retry-After:
-          $ref: "#/components/headers/RetryAfter"
+          $ref: "#/components/headers/TimeoutRetryAfter"
       content:
         application/json:
           schema:
