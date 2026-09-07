@@ -10,15 +10,17 @@ Steward includes an adapter definition for Hermes Agent commit
 [`3ef6bbd201263d354fd83ec55b3c306ded2eb72a`](https://github.com/NousResearch/hermes-agent/commit/3ef6bbd201263d354fd83ec55b3c306ded2eb72a).
 The adapter builds Hermes from that exact source revision into a hardened image that
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
-upstream image. The current v2 bridge adds a fixed, run-specific stop operation;
-it passed active-tool interruption and signed integration on a disposable gVisor
-runner at source `ff565abc95610aeff7bdf7f21d113840719435e8`. Publication-registration
-and container-shutdown changes still require fresh exact-source qualification
-before release; support output remains `qualification_pending`. The
-historical v1 evidence is not proof for v2; retain fresh successful records rather
-than editing it. This is runtime fixture evidence, not a completed end-user workflow.
+upstream image. The v2 bridge provides a fixed, run-specific stop operation,
+deadline-bounded container shutdown, and restart-safe gateway identity handling.
+The retained [feasibility evidence](../reference/evidence/hermes-feasibility.json)
+and [signed integration evidence](../reference/evidence/hermes-integration.json)
+identify the exact source and artifacts that passed. CI and release packaging
+compare adapter/harness bytes, runtime source trees, and compiler/embed inputs
+against those records. Changed inputs cannot ship until requalified; records must
+be retained unchanged, never edited to cover another build. This is runtime fixture
+evidence, not a completed end-user workflow.
 
-The retained v1 qualification means its pinned source and adapter passed the documented
+The retained v2 qualification means its pinned source and adapter passed the documented
 runtime qualification under gVisor on `linux/amd64`, including a signed workspace audit, an
 authenticated connector effect through a signed custom skill, and the
 tenant-authorized service path used to submit an exact run request. The state test
