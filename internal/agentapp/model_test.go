@@ -40,6 +40,10 @@ func validPortableServiceDefinition() Definition {
 }
 
 func TestHermesAdapterVersionsShareOnlyTheUnchangedHostContract(t *testing.T) {
+	schema, err := os.ReadFile(filepath.Join("..", "..", "schemas", "agent.cue"))
+	if err != nil || !bytes.Contains(schema, []byte(`adapter_contract: "steward.hermes-agent.v1" | "steward.hermes-agent.v2"`)) {
+		t.Fatalf("authoring schema must accept both exact Hermes contracts: %v", err)
+	}
 	for _, contract := range []string{HermesAdapterContractV1, HermesAdapterContractV2} {
 		definition := validDefinition()
 		definition.Runtime.AdapterContract = contract

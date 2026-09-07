@@ -6,7 +6,7 @@
   name: =~"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
   runtime: ({
     engine: "hermes"
-    adapter_contract: "steward.hermes-agent.v1"
+    adapter_contract: "steward.hermes-agent.v1" | "steward.hermes-agent.v2"
   } | {
     engine: "agent-service"
     adapter_contract: "steward.agent-service.v1"
