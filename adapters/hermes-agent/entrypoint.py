@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 REVISION = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
 STATE = pathlib.Path("/opt/data")
@@ -778,9 +778,14 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
-def wait_for_internal_api(process: subprocess.Popen[bytes]) -> None:
+def wait_for_internal_api(
+    process: subprocess.Popen[bytes],
+    shutdown_deadline: Callable[[], float | None] = lambda: None,
+) -> None:
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if shutdown_deadline() is not None:
+            raise InterruptedError("Hermes gateway shutdown requested during startup")
         if process.poll() is not None:
             fail("Hermes gateway exited before its API became ready")
         connection = http.client.HTTPConnection(
@@ -806,18 +811,34 @@ def wait_for_internal_api(process: subprocess.Popen[bytes]) -> None:
     fail("Hermes API did not become ready before the startup deadline")
 
 
-def wait_for_gateway(process: subprocess.Popen) -> int:
+def wait_for_gateway(
+    process: subprocess.Popen,
+    shutdown_deadline: Callable[[], float | None] = lambda: None,
+) -> int:
     """As container PID 1, reap adopted tool children as well as the gateway."""
-    if os.getpid() != 1:
-        return process.wait()
     while True:
-        try:
-            child, status = os.waitpid(-1, 0)
-        except InterruptedError:
-            continue
-        if child == process.pid:
-            process.returncode = os.waitstatus_to_exitcode(status)
+        if process.returncode is not None:
             return process.returncode
+        deadline = shutdown_deadline()
+        if deadline is not None and time.monotonic() >= deadline:
+            # Enter main's bounded kill/reap cleanup even if SIGTERM was ignored.
+            raise subprocess.TimeoutExpired("Hermes gateway shutdown", 10)
+        if os.getpid() == 1:
+            try:
+                child, status = os.waitpid(-1, os.WNOHANG)
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                # Popen's signal dispatch may have observed/reaped the gateway.
+                if process.returncode is None:
+                    raise RuntimeError("Hermes gateway exit status is unavailable") from None
+                return process.returncode
+            if child == process.pid:
+                process.returncode = os.waitstatus_to_exitcode(status)
+                return process.returncode
+        elif process.poll() is not None:
+            return process.returncode
+        time.sleep(0.05)
 
 
 def main() -> int:
@@ -853,34 +874,35 @@ def main() -> int:
         stdin=subprocess.DEVNULL,
     )
 
+    shutdown_deadline: float | None = None
+
     def stop(_signum: int, _frame: Any) -> None:
-        # Do not poll/reap the gateway from this signal handler: PID 1's wait
-        # loop owns every child exit and must retain the gateway's exact status.
-        try:
-            os.kill(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        nonlocal shutdown_deadline
+        if shutdown_deadline is None:
+            shutdown_deadline = time.monotonic() + 10
+        process.terminate()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     server: BoundedHTTPServer | None = None
     try:
-        wait_for_internal_api(process)
+        wait_for_internal_api(process, lambda: shutdown_deadline)
         server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)
         thread = threading.Thread(target=server.serve_forever, name="service-bridge", daemon=True)
         thread.start()
-        return wait_for_gateway(process)
+        return wait_for_gateway(process, lambda: shutdown_deadline)
     finally:
-        if server is not None:
-            server.shutdown()
-            server.server_close()
         if process.poll() is None:
             process.terminate()
+            grace = 10 if shutdown_deadline is None else max(0, shutdown_deadline - time.monotonic())
             try:
-                process.wait(timeout=10)
+                process.wait(timeout=grace)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=10)
+        if server is not None:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

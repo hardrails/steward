@@ -106,14 +106,44 @@ for status, expected in ((7 << 8, 7), (15, -15)):
     with mock.patch.object(module.os, 'getpid', return_value=1), mock.patch.object(module.os, 'waitpid', side_effect=[InterruptedError(), (43, 0), (44, 0), (42, status)]) as wait:
         assert module.wait_for_gateway(process) == expected
         assert process.returncode == expected
-        assert wait.call_args_list == [mock.call(-1, 0)] * 4
+        assert wait.call_args_list == [mock.call(-1, module.os.WNOHANG)] * 4
         process.wait.assert_not_called()
-process = mock.Mock()
-process.wait.return_value = 9
+process = mock.Mock(returncode=None)
+def finished():
+    process.returncode = 9
+    return 9
+process.poll.side_effect = finished
 with mock.patch.object(module.os, 'getpid', return_value=123), mock.patch.object(module.os, 'waitpid') as wait:
     assert module.wait_for_gateway(process) == 9
     wait.assert_not_called()
-    process.wait.assert_called_once_with()
+    process.wait.assert_not_called()
+for pid in (1, 123):
+    process = mock.Mock(pid=42, returncode=None)
+    process.poll.return_value = None
+    with mock.patch.object(module.os, 'getpid', return_value=pid), mock.patch.object(module.os, 'waitpid', return_value=(0, 0)), mock.patch.object(module.time, 'monotonic', return_value=10):
+        try:
+            module.wait_for_gateway(process, lambda: 10)
+        except module.subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError('ignored shutdown exceeded its deadline')
+        process.wait.assert_not_called()
+with mock.patch.object(module.http.client, 'HTTPConnection') as connection:
+    try:
+        module.wait_for_internal_api(mock.Mock(), lambda: 10)
+    except InterruptedError:
+        pass
+    else:
+        raise AssertionError('shutdown during startup continued readiness work')
+    connection.assert_not_called()
+process = mock.Mock(pid=42, returncode=None)
+with mock.patch.object(module.os, 'getpid', return_value=1), mock.patch.object(module.os, 'waitpid', side_effect=ChildProcessError()):
+    try:
+        module.wait_for_gateway(process)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('missing gateway exit status was turned into success')
 `
 	command := exec.CommandContext(ctx, python, "-I", "-c", program,
 		filepath.Join(hermesAdapterRoot(t), "entrypoint.py"))

@@ -1761,7 +1761,9 @@ class Thread:
 module.verify_skill = lambda: None
 module.seed_state = lambda model, qualification_mcp, profile: None
 module.subprocess.Popen = popen
-module.wait_for_internal_api = lambda child: events.append("ready")
+module.wait_for_internal_api = lambda child, deadline: events.append("ready")
+# This test owns startup ordering; the supervisor has separate process/deadline tests.
+module.wait_for_gateway = lambda child, deadline: child.wait()
 module.BoundedHTTPServer = Server
 module.threading.Thread = Thread
 module.signal.signal = lambda *args: None
