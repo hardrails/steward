@@ -29,6 +29,23 @@ func TestCompletionScriptsUseOnlyTheLocalStewardctlCandidateSource(t *testing.T)
 }
 
 func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
+	if candidates := stewardctlCompletionCandidates([]string{"control", "interaction", ""}); !slices.Equal(candidates, []string{"list", "respond", "show", "submit-response"}) {
+		t.Fatalf("interaction commands = %v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"control", "interaction", "sub"}); !slices.Equal(candidates, []string{"submit-response"}) {
+		t.Fatalf("interaction command prefix = %v", candidates)
+	}
+	answerFlags := stewardctlCompletionCandidates([]string{"control", "interaction", "submit-response", "-"})
+	for _, flag := range []string{"-permit-file", "-response-file", "-no-context"} {
+		if !slices.Contains(answerFlags, flag) {
+			t.Fatalf("answer courier flags %v missing %s", answerFlags, flag)
+		}
+	}
+	for _, flag := range []string{"-key", "-key-id"} {
+		if slices.Contains(answerFlags, flag) {
+			t.Fatalf("keyless answer courier exposes signing flag %s", flag)
+		}
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"co"}); !slices.Contains(candidates, "control") || !slices.Contains(candidates, "context") {
 		t.Fatalf("top-level candidates=%v", candidates)
 	}

@@ -67,7 +67,7 @@ var completionTree = map[string][]string{
 	"control agent":            {"list"},
 	"control event":            {"list"},
 	"control task":             {"list"},
-	"control interaction":      {"list", "show", "respond"},
+	"control interaction":      {"list", "show", "respond", "submit-response"},
 	"control command":          {"submit", "status", "list"},
 	"control credential":       {"list"},
 	"control evidence":         {"status", "export", "verify"},
