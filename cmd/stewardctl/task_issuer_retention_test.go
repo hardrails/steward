@@ -115,3 +115,31 @@ func TestTaskIssuerRefusesValidAuthorityFromDifferentRuntime(t *testing.T) {
 		t.Fatalf("foreign authority was replaced: %v", err)
 	}
 }
+
+func TestTaskIssuerCloseSerializesWithIssuanceAndRefusesLaterRequests(t *testing.T) {
+	fixture, config := newTaskIssuerFixture(t)
+	issuer, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer issuer.Close()
+	issuer.mu.Lock()
+	closed := make(chan error, 1)
+	go func() { closed <- issuer.Close() }()
+	select {
+	case err := <-closed:
+		issuer.mu.Unlock()
+		t.Fatalf("close bypassed the issuance lock: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	issuer.mu.Unlock()
+	if err = <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if _, err = issuer.issue(issuerRequest(fixture)); !errors.Is(err, errTaskIssuerBusy) {
+		t.Fatalf("closed signer accepted a request: %v", err)
+	}
+	if err = issuer.Close(); err != nil {
+		t.Fatalf("close was not idempotent: %v", err)
+	}
+}

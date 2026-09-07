@@ -177,6 +177,10 @@ func openTaskIssuer(config taskIssuerConfig) (_ *taskIssuer, returnErr error) {
 }
 
 func (issuer *taskIssuer) Close() error {
+	// Shutdown may time out while a handler is still syncing retained authority.
+	// Do not close its root or remove its key snapshot underneath that handler.
+	issuer.mu.Lock()
+	defer issuer.mu.Unlock()
 	var result error
 	if issuer.snapshots != "" {
 		result = errors.Join(result, os.RemoveAll(issuer.snapshots))
@@ -234,6 +238,9 @@ func (issuer *taskIssuer) issue(request taskIssuerRequest) ([]byte, error) {
 		return nil, errTaskIssuerBusy
 	}
 	defer issuer.mu.Unlock()
+	if issuer.root == nil {
+		return nil, errTaskIssuerBusy
+	}
 	if request.TaskID == "" || !validOptionalControlIdentifier(request.TaskID, 128) ||
 		!slices.Contains(issuer.config.Operations, request.OperationID) {
 		return nil, errors.New("task identity or operation is not permitted by this signing station")
