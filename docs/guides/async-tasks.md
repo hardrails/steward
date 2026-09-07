@@ -64,6 +64,12 @@ stewardctl task enqueue -bundle ./task.bundle.json
 An exact retry is idempotent. Reusing the same tenant and task ID with different
 permit or request bytes returns a conflict.
 
+Retry the existing bundle while its permit is valid; do not issue a new task ID
+to repair a lost submission response. Control retains even a completed or cancelled
+task until its permit expires, so retrying cannot turn queued cancellation back
+into new work. After expiry, use `task get` to reconcile retained status instead
+of extending authority for an outcome you have not verified.
+
 ## Follow progress
 
 List recent submitted tasks:
@@ -113,7 +119,10 @@ and 64 MiB site-wide result ceilings. It retains task request and permit courier
 material under separate 16 MiB per-tenant and 64 MiB site-wide ceilings. When a
 result cannot fit, metadata remains available but the result endpoint returns
 `task_result_unavailable`. When new courier material cannot fit after terminal
-record eviction, submission fails closed with `capacity_exceeded`. Use a
+record eviction, submission fails closed with `capacity_exceeded`. Only terminal
+records whose permits have expired can be evicted. If all retained permits remain
+valid, wait for expiry or reconcile existing work; the store does not raise its
+limits or forget cancellation to admit more work. Use a
 separately governed artifact service for large files.
 
 Treat agent output as untrusted data. A matching digest proves that the downloaded

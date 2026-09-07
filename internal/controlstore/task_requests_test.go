@@ -142,6 +142,10 @@ func TestAsyncTaskCancellationDistinguishesQueuedFromDispatched(t *testing.T) {
 	if err != nil || !changed || cancelled.State != TaskRequestCancelled || cancelled.OutcomeMayContinue {
 		t.Fatalf("queued cancellation = (%+v, %v, %v)", cancelled, changed, err)
 	}
+	replayed, changed, err := fixture.store.SubmitTaskRequest(fixture.admin, queuedInput, now.Add(2*time.Second))
+	if err != nil || changed || replayed != cancelled {
+		t.Fatalf("exact replay resurrected queued cancellation = (%+v, %v, %v)", replayed, changed, err)
+	}
 
 	dispatchedInput := signedTaskRequestInput(t, now, deployment, instance, "dispatched-task", []byte(`{"input":"dispatched"}`))
 	created, _, err := fixture.store.SubmitTaskRequest(fixture.admin, dispatchedInput, now)
@@ -250,7 +254,7 @@ func TestAsyncTaskCourierBoundsAggregateBytesAndPollResponse(t *testing.T) {
 	if err != nil || len(raw)+1 > controlprotocol.MaxExecutorTaskPollResponseBytes {
 		t.Fatalf("poll response bytes=%d err=%v", len(raw)+1, err)
 	}
-	if _, err := fixture.store.taskCapacityMutationsLocked("tenant-a", MaxTaskCourierBytesPerTenant+1); !errors.Is(err, ErrCapacityExceeded) {
+	if _, err := fixture.store.taskCapacityMutationsLocked("tenant-a", MaxTaskCourierBytesPerTenant+1, now); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("oversized courier admission error=%v", err)
 	}
 	fixture.store.current.taskRequests = make(map[string]storedTaskRequest)
@@ -392,14 +396,66 @@ func TestAsyncTaskCapacityEvictsOldestTerminalRecord(t *testing.T) {
 		taskID := fmt.Sprintf("terminal-%04d", index)
 		terminalAt := fixture.now.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano)
 		fixture.store.current.taskRequests[taskRequestKey("tenant-a", taskID)] = storedTaskRequest{
-			TaskRequest: TaskRequest{TenantID: "tenant-a", TaskID: taskID, State: TaskRequestCompleted, TerminalAt: terminalAt},
+			TaskRequest: TaskRequest{TenantID: "tenant-a", TaskID: taskID, State: TaskRequestCompleted, TerminalAt: terminalAt, Deadline: fixture.now.Add(-time.Second).Format(time.RFC3339)},
 			TaskPermit:  "p", RequestBase64: "cg==",
 		}
 	}
-	mutations, err := fixture.store.taskCapacityMutationsLocked("tenant-a", 2)
+	mutations, err := fixture.store.taskCapacityMutationsLocked("tenant-a", 2, fixture.now)
 	if err != nil || len(mutations) != 1 || mutations[0].Kind != mutationTaskRequestDelete ||
 		mutations[0].TaskRequestRef == nil || mutations[0].TaskRequestRef.TaskID != "terminal-0000" {
 		t.Fatalf("capacity eviction=(%+v, %v)", mutations, err)
+	}
+}
+
+func TestAsyncTaskCapacityRetainsReplayProtectionUntilPermitExpiry(t *testing.T) {
+	for _, state := range []string{TaskRequestCompleted, TaskRequestCancelled, TaskRequestFailed, TaskRequestOutcomeUnknown} {
+		t.Run(state, func(t *testing.T) {
+			fixture := newRecordsFixture(t, DefaultLimits())
+			for index := range MaxTaskRequestsPerTenant {
+				taskID := fmt.Sprintf("protected-%04d", index)
+				fixture.store.current.taskRequests[taskRequestKey("tenant-a", taskID)] = storedTaskRequest{
+					TaskRequest: TaskRequest{
+						TenantID: "tenant-a", TaskID: taskID, State: state,
+						Deadline:   fixture.now.Add(time.Hour).Format(time.RFC3339),
+						TerminalAt: fixture.now.Format(time.RFC3339),
+					},
+					TaskPermit: "p", RequestBase64: "cg==",
+				}
+			}
+			mutations, err := fixture.store.taskCapacityMutationsLocked("tenant-a", 2, fixture.now)
+			if !errors.Is(err, ErrCapacityExceeded) || len(mutations) != 0 {
+				t.Fatalf("unexpired terminal permits lost replay protection: mutations=%v err=%v", mutations, err)
+			}
+			mutations, err = fixture.store.taskCapacityMutationsLocked("tenant-a", 2, fixture.now.Add(time.Hour))
+			if err != nil || len(mutations) != 1 || mutations[0].TaskRequestRef == nil || mutations[0].TaskRequestRef.TaskID != "protected-0000" {
+				t.Fatalf("expired terminal permit could not be reclaimed: mutations=%v err=%v", mutations, err)
+			}
+		})
+	}
+}
+
+func TestAsyncTaskCapacitySkipsOlderUnexpiredAndMalformedDeadlines(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	for index := range MaxTaskRequestsPerTenant {
+		taskID := fmt.Sprintf("mixed-%04d", index)
+		deadline := fixture.now.Add(time.Hour).Format(time.RFC3339)
+		if index == 0 {
+			deadline = "malformed"
+		} else if index == 2 {
+			deadline = fixture.now.Format(time.RFC3339)
+		}
+		fixture.store.current.taskRequests[taskRequestKey("tenant-a", taskID)] = storedTaskRequest{
+			TaskRequest: TaskRequest{TenantID: "tenant-a", TaskID: taskID, State: TaskRequestCancelled,
+				Deadline: deadline, TerminalAt: fixture.now.Add(time.Duration(index) * time.Second).Format(time.RFC3339)},
+			TaskPermit: "p", RequestBase64: "cg==",
+		}
+	}
+	if mutations, err := fixture.store.taskCapacityMutationsLocked("tenant-a", 2, time.Time{}); !errors.Is(err, ErrCapacityExceeded) || len(mutations) != 0 {
+		t.Fatalf("missing evaluation time permitted eviction: mutations=%v err=%v", mutations, err)
+	}
+	mutations, err := fixture.store.taskCapacityMutationsLocked("tenant-a", 2, fixture.now)
+	if err != nil || len(mutations) != 1 || mutations[0].TaskRequestRef == nil || mutations[0].TaskRequestRef.TaskID != "mixed-0002" {
+		t.Fatalf("capacity did not select the oldest eligible task: mutations=%v err=%v", mutations, err)
 	}
 }
 
