@@ -129,7 +129,7 @@ var completionFlags = map[string][]string{
 	"agent deployment remove":             {"-tenant", "-tenant-id", "-revision", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"agent fork":                          {"-bundle", "-snapshot", "-instance-id", "-lineage-id", "-ttl", "-on-expiry", "-out"},
 	"task issue":                          {"-deployment", "-admission", "-intent", "-trust", "-request", "-operation-id", "-task-id", "-valid-for", "-clock-skew", "-key", "-key-id", "-out"},
-	"task serve-issuer":                   {"-admission", "-intent", "-trust", "-key", "-key-id", "-store", "-operations", "-valid-for", "-capacity", "-socket"},
+	"task serve-issuer":                   {"-admission", "-intent", "-trust", "-key", "-key-id", "-store", "-operations", "-valid-for", "-capacity", "-socket", "-client-gid"},
 	"task run":                            {"-deployment", "-instance-id", "-trust", "-request", "-operation-id", "-task-id", "-valid-for", "-clock-skew", "-key", "-key-id", "-bundle-out", "-result-out", "-discard-result", "-run-dir", "-gateway-url", "-gateway-token-file", "-wait-timeout", "-deployment-timeout", "-tenant", "-tenant-id", "-control-url", "-control-token-file", "-ca-file", "-no-context"},
 	"task enqueue":                        {"-project", "-session", "-bundle", "-instance-id", "-trust", "-task-id", "-valid-for", "-clock-skew", "-key", "-key-id", "-run-dir", "-deployment-timeout", "-tenant-id", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"task list":                           {"-tenant-id", "-after", "-limit", "-control-url", "-token-file", "-ca-file", "-no-context"},

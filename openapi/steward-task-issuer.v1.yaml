@@ -4,8 +4,12 @@ info:
   version: "1.0.0"
   description: |
     Optional operator-pinned, single-runtime Unix-socket station. No TCP listener.
-    Owner-only socket access grants issuance authority for the configured operation
+    Dedicated client-group socket access grants issuance authority for the configured operation
     allowlist. The host and workload must not receive station key or store mounts.
+    Run the host under a different non-root UID from the signer. The explicit
+    client GID owns group access to the signer-owned 0710 socket directory and
+    0660 socket, never the owner-only key or store. Same-UID and root processes
+    are trusted operators, not isolated clients.
     Requests cannot choose runtime identity, trust inventory, key, or validity.
     Every successful response is retained before transmission and independently
     verified by the host before dispatch. This is not a business approval service.

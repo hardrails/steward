@@ -33,11 +33,15 @@ func serveTaskIssuer(arguments []string, stdout io.Writer) error {
 	flags.IntVar(&config.Capacity, "capacity", 1024, "retained task limit, at most 4096")
 	operations := flags.String("operations", "", "comma-separated allowed service operation identities")
 	socket := flags.String("socket", "", "private Unix socket; no TCP listener")
+	clientGID := flags.Int("client-gid", -1, "dedicated group allowed to request signatures from a separate UID")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || !filepath.IsAbs(*socket) {
 		return errors.New("task serve-issuer requires an absolute private socket path and no positional arguments")
+	}
+	if *clientGID < 1 || uint64(*clientGID) >= uint64(^uint32(0)) {
+		return errors.New("task serve-issuer requires an explicit non-root client group ID")
 	}
 	config.Operations = strings.Split(*operations, ",")
 	issuer, err := openTaskIssuer(config)
@@ -45,7 +49,7 @@ func serveTaskIssuer(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	defer issuer.Close()
-	listener, err := listenTaskIssuer(*socket)
+	listener, err := listenTaskIssuer(*socket, *clientGID)
 	if err != nil {
 		return err
 	}
@@ -58,15 +62,20 @@ func serveTaskIssuer(arguments []string, stdout io.Writer) error {
 	return runTaskIssuerServer(ctx, listener, issuer)
 }
 
-func listenTaskIssuer(socket string) (net.Listener, error) {
+func listenTaskIssuer(socket string, clientGID int) (net.Listener, error) {
+	if clientGID < 1 || uint64(clientGID) >= uint64(^uint32(0)) {
+		return nil, errors.New("task issuer requires an explicit non-root client group ID")
+	}
 	parent, err := os.Lstat(filepath.Dir(socket))
-	if err != nil || !parent.IsDir() || parent.Mode().Perm() != 0o700 ||
-		parent.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		return nil, errors.New("task issuer socket requires an owner-controlled 0700 parent directory")
+	if err != nil || !parent.IsDir() || parent.Mode().Perm() != 0o710 ||
+		parent.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) ||
+		parent.Sys().(*syscall.Stat_t).Gid != uint32(clientGID) {
+		return nil, errors.New("task issuer socket requires a signer-owned 0710 parent directory with the configured client group")
 	}
 	if existing, statErr := os.Lstat(socket); statErr == nil {
-		if existing.Mode()&os.ModeSocket == 0 || existing.Mode().Perm() != 0o600 ||
-			existing.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		if existing.Mode()&os.ModeSocket == 0 || existing.Mode().Perm() != 0o660 ||
+			existing.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) ||
+			existing.Sys().(*syscall.Stat_t).Gid != uint32(clientGID) {
 			return nil, errors.New("task issuer socket path is occupied by an unsafe artifact")
 		}
 		connection, dialErr := net.DialTimeout("unix", socket, time.Second)
@@ -91,7 +100,13 @@ func listenTaskIssuer(socket string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = os.Chmod(socket, 0o600); err != nil {
+	// Only the signer can mutate the directory. Grant the dedicated client group
+	// socket access, never access to the 0700 store or private key snapshots.
+	if err = os.Chown(socket, -1, clientGID); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	if err = os.Chmod(socket, 0o660); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}

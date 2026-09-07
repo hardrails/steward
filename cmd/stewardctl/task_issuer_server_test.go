@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -70,6 +71,14 @@ func TestTaskIssuerCommandIsDiscoverableAndRequiresPrivateConfiguration(t *testi
 		!strings.Contains(err.Error(), "absolute private socket") {
 		t.Fatalf("station command did not enforce configuration: %v", err)
 	}
+	for _, gid := range []string{"-1", "0", "4294967295", "4294967296"} {
+		if err := taskCommand([]string{"serve-issuer", "-socket", "/tmp/station.sock", "-client-gid", gid}, io.Discard); err == nil || !strings.Contains(err.Error(), "client group") {
+			t.Fatalf("unsafe client group %s accepted: %v", gid, err)
+		}
+	}
+	if err := taskCommand([]string{"serve-issuer", "-socket", "/tmp/station.sock"}, io.Discard); err == nil || !strings.Contains(err.Error(), "client group") {
+		t.Fatalf("implicit client group accepted: %v", err)
+	}
 }
 
 func TestTaskIssuerPanicRetainsJSONErrorBoundary(t *testing.T) {
@@ -93,7 +102,20 @@ func issuerSocketDirectory(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	if err = os.Chmod(directory, 0o710); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chown(directory, -1, issuerTestClientGID()); err != nil {
+		t.Fatal(err)
+	}
 	return directory
+}
+
+func issuerTestClientGID() int {
+	if os.Getegid() == 0 {
+		return 65533
+	}
+	return os.Getegid()
 }
 
 func TestTaskIssuerUnixHTTPReturnsExactBundleAndShutsDown(t *testing.T) {
@@ -104,7 +126,7 @@ func TestTaskIssuerUnixHTTPReturnsExactBundleAndShutsDown(t *testing.T) {
 	}
 	defer issuer.Close()
 	socket := filepath.Join(issuerSocketDirectory(t), "station.sock")
-	listener, err := listenTaskIssuer(socket)
+	listener, err := listenTaskIssuer(socket, issuerTestClientGID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +183,7 @@ func TestTaskIssuerSocketRefusesUnsafeOrActivePathsAndRecoversStaleSocket(t *tes
 	if err := os.WriteFile(socket, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := listenTaskIssuer(socket); err == nil {
+	if _, err := listenTaskIssuer(socket, issuerTestClientGID()); err == nil {
 		t.Fatal("regular file was replaced")
 	}
 	if raw, err := os.ReadFile(socket); err != nil || string(raw) != "keep" {
@@ -170,32 +192,40 @@ func TestTaskIssuerSocketRefusesUnsafeOrActivePathsAndRecoversStaleSocket(t *tes
 	if err := os.Remove(socket); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := listenTaskIssuer(socket)
+	listener, err := listenTaskIssuer(socket, issuerTestClientGID())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	if info, err := os.Lstat(socket); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Lstat(socket); err != nil || info.Mode().Perm() != 0o660 || info.Sys().(*syscall.Stat_t).Gid != uint32(issuerTestClientGID()) {
 		t.Fatalf("unsafe socket mode: %v", err)
 	}
-	if _, err := listenTaskIssuer(socket); err == nil {
+	if _, err := listenTaskIssuer(socket, issuerTestClientGID()); err == nil {
 		t.Fatal("active socket was replaced")
 	}
 	listener.(*net.UnixListener).SetUnlinkOnClose(false)
 	if err = listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := listenTaskIssuer(socket)
+	recovered, err := listenTaskIssuer(socket, issuerTestClientGID())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = recovered.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.Chmod(directory, 0o755); err != nil {
+	for _, mode := range []os.FileMode{0o700, 0o750, 0o770, 0o755} {
+		if err = os.Chmod(directory, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = listenTaskIssuer(socket, issuerTestClientGID()); err == nil {
+			t.Fatalf("unsafe socket parent mode %o accepted", mode)
+		}
+	}
+	if err = os.Chmod(directory, 0o710); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = listenTaskIssuer(socket); err == nil {
-		t.Fatal("public socket parent accepted")
+	if _, err = listenTaskIssuer(socket, issuerTestClientGID()+1); err == nil {
+		t.Fatal("different client group accepted")
 	}
 }
