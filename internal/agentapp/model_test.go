@@ -39,6 +39,36 @@ func validPortableServiceDefinition() Definition {
 	return definition
 }
 
+func TestHermesAdapterVersionsShareOnlyTheUnchangedHostContract(t *testing.T) {
+	for _, contract := range []string{HermesAdapterContractV1, HermesAdapterContractV2} {
+		definition := validDefinition()
+		definition.Runtime.AdapterContract = contract
+		bundle, err := Build(definition, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := MarshalCanonical(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeBundle(raw)
+		if err != nil || decoded.Definition.Runtime.AdapterContract != contract {
+			t.Fatalf("adapter contract was lost during bundle round trip: %v", err)
+		}
+		profile, service := agentRuntimeAdmissionContract(definition)
+		if profile != (admission.ProfileRef{ID: "hermes-v1", Version: "v1"}) || service != "hermes-api" {
+			t.Fatalf("HTTP contract changed the host isolation shape: %v %s", profile, service)
+		}
+	}
+	for _, contract := range []string{"steward.hermes-agent.v3", agentservice.AdapterContractV1, ""} {
+		definition := validDefinition()
+		definition.Runtime.AdapterContract = contract
+		if err := definition.Validate(); err == nil {
+			t.Fatalf("unsupported Hermes contract accepted: %q", contract)
+		}
+	}
+}
+
 func TestBuildIsDeterministicAndTamperEvident(t *testing.T) {
 	definition := validDefinition()
 	first, err := Build(definition, nil)
