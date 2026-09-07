@@ -124,6 +124,11 @@ func runTaskIssuerServer(ctx context.Context, listener net.Listener, issuer *tas
 }
 
 func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Request) {
+	defer func() {
+		if recover() != nil {
+			writeTaskIssuerError(writer, 500, "internal_error", "Signing failed unexpectedly. Reconcile the original task before retrying.")
+		}
+	}()
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	if request.URL.Path != "/v1/tasks" || request.URL.RawQuery != "" {
@@ -155,8 +160,12 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 		status, code := 422, "issuance_rejected"
 		if errors.Is(err, errTaskIssuerConflict) {
 			status, code = 409, "issuance_conflict"
-		} else if errors.Is(err, errTaskIssuerCapacity) || errors.Is(err, errTaskIssuerBusy) {
-			status, code = 503, "issuance_unavailable"
+		} else if errors.Is(err, errTaskIssuerCapacity) {
+			status, code = 503, "capacity_exhausted"
+		} else if errors.Is(err, errTaskIssuerBusy) {
+			status, code = 503, "signer_busy"
+		} else if errors.Is(err, errTaskIssuerStorage) {
+			status, code = 500, "storage_unconfirmed"
 		}
 		writeTaskIssuerError(writer, status, code, "No replacement authority was issued. Reconcile the original task and signing station.")
 		return

@@ -72,6 +72,19 @@ func TestTaskIssuerCommandIsDiscoverableAndRequiresPrivateConfiguration(t *testi
 	}
 }
 
+func TestTaskIssuerPanicRetainsJSONErrorBoundary(t *testing.T) {
+	var issuer *taskIssuer
+	request := httptest.NewRequest("POST", "/v1/tasks", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	issuer.serveHTTP(recorder, request)
+	var response map[string]string
+	if recorder.Code != 500 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+		len(response) != 2 || response["error"] != "internal_error" || response["message"] == "" {
+		t.Fatalf("panic escaped JSON error boundary: %d", recorder.Code)
+	}
+}
+
 func issuerSocketDirectory(t *testing.T) string {
 	t.Helper()
 	// macOS has a short Unix socket pathname bound; Go's test path can exceed it.

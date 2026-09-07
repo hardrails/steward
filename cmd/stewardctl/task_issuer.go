@@ -55,6 +55,7 @@ var (
 	errTaskIssuerConflict = errors.New("task issuance conflicts with retained authority")
 	errTaskIssuerCapacity = errors.New("task signing station reached its retained capacity")
 	errTaskIssuerBusy     = errors.New("task signing station is busy")
+	errTaskIssuerStorage  = errors.New("task signing station storage durability is unconfirmed")
 )
 
 func openTaskIssuer(config taskIssuerConfig) (_ *taskIssuer, returnErr error) {
@@ -261,10 +262,10 @@ func (issuer *taskIssuer) issue(request taskIssuerRequest) ([]byte, error) {
 		// Re-establish file and directory durability before returning a replay.
 		file, openErr := issuer.root.OpenFile(name, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if openErr != nil {
-			return nil, openErr
+			return nil, errors.Join(errTaskIssuerStorage, openErr)
 		}
 		if err = errors.Join(file.Sync(), file.Close(), issuer.sync()); err != nil {
-			return nil, err
+			return nil, errors.Join(errTaskIssuerStorage, err)
 		}
 		return retained, nil
 	}
@@ -310,7 +311,7 @@ func (issuer *taskIssuer) issue(request taskIssuerRequest) ([]byte, error) {
 	}
 	issuer.count++ // Failed persistence consumes capacity until a verified restart.
 	if err = issuer.write(name, bundle); err != nil {
-		return nil, err
+		return nil, errors.Join(errTaskIssuerStorage, err)
 	}
 	return bundle, nil
 }

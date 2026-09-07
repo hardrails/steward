@@ -1,0 +1,115 @@
+openapi: 3.0.3
+info:
+  title: Steward Private Task Signing Station
+  version: "1.0.0"
+  description: |
+    Optional operator-pinned, single-runtime Unix-socket station. No TCP listener.
+    Owner-only socket access grants issuance authority for the configured operation
+    allowlist. The host and workload must not receive station key or store mounts.
+    Requests cannot choose runtime identity, trust inventory, key, or validity.
+    Every successful response is retained before transmission and independently
+    verified by the host before dispatch. This is not a business approval service.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Steward
+    url: https://github.com/hardrails/steward
+servers:
+  - url: http://steward-task-authority
+    description: Virtual HTTP origin transported only over the operator's private Unix socket
+security: []
+tags:
+  - name: task-authority
+    description: Fixed-runtime exact task issuance without key transfer
+paths:
+  /v1/tasks:
+    post:
+      tags: [task-authority]
+      operationId: requestTaskAuthority
+      summary: Request or recover one exact task bundle
+      description: |
+        Body is bounded to 131072 bytes. Base64 must be canonical padded base64
+        encoding one unambiguous JSON value of 1–65536 decoded bytes, additionally
+        bounded by the configured operation. Unknown/duplicate fields, Origin
+        headers and query strings are rejected. Repeating an identical task ID,
+        operation and body recovers byte-identical unexpired authority. Expired
+        authority is never renewed under the same identity. Other HTTP methods
+        return 405 with Allow POST; unknown paths or any query return 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [task_id, operation_id, request_base64]
+              properties:
+                task_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                operation_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                request_base64:
+                  type: string
+                  format: byte
+                  minLength: 4
+                  maxLength: 87384
+      responses:
+        "200":
+          description: Exact retained native task bundle; no dispatch has occurred.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+            X-Content-Type-Options:
+              schema: {type: string, enum: [nosniff]}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary, maxLength: 131072}
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "405":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+components:
+  responses:
+    Error:
+      description: |
+        No replacement authority returned. 400 invalid JSON/headers; 404 invalid
+        route/query; 405 wrong method; 409 conflicting, expired or invalid retained
+        authority; 413 oversized/unreadable body; 422 invalid intent or issuance
+        failure; 500 unconfirmed storage durability or unexpected server failure;
+        503 signer busy or retained capacity reached. Error codes distinguish
+        storage_unconfirmed, internal_error, signer_busy and capacity_exhausted.
+        Keep the original
+        task ID and reconcile; an error does not prove no authority was retained.
+      headers:
+        Cache-Control:
+          schema: {type: string, enum: [no-store]}
+        X-Content-Type-Options:
+          schema: {type: string, enum: [nosniff]}
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [error, message]
+            properties:
+              error: {type: string}
+              message: {type: string}
