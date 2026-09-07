@@ -841,6 +841,16 @@ def wait_for_gateway(
         time.sleep(0.05)
 
 
+def shutdown_bridge(server: BoundedHTTPServer, deadline: float) -> None:
+    # HTTPServer.shutdown waits for an active handler, whose socket timeout is
+    # inactivity-based. Keep that wait off PID 1: both service threads are
+    # daemons, so a trickling client cannot hold container exit past the deadline.
+    thread = threading.Thread(target=server.shutdown, name="service-bridge-shutdown", daemon=True)
+    thread.start()
+    thread.join(timeout=max(0, deadline - time.monotonic()))
+    server.server_close()
+
+
 def main() -> int:
     if sys.argv[1:] != ["serve"]:
         fail("command must be exactly: serve")
@@ -901,8 +911,7 @@ def main() -> int:
                 process.kill()
                 process.wait(timeout=10)
         if server is not None:
-            server.shutdown()
-            server.server_close()
+            shutdown_bridge(server, time.monotonic() + 10 if shutdown_deadline is None else shutdown_deadline)
 
 
 if __name__ == "__main__":

@@ -172,6 +172,9 @@ for supervisor_pid in (1, 123):
     handlers = {}
     deadlines = []
     server = mock.Mock()
+    def shutdown_bridge(server, deadline):
+        server.shutdown()
+        server.server_close()
     with subprocess.Popen([sys.executable, '-I', '-c', 'raise SystemExit(7)']) as child:
         def late_signals():
             for signum in (module.signal.SIGTERM, module.signal.SIGINT) * 3:
@@ -191,7 +194,7 @@ for supervisor_pid in (1, 123):
             late_signals()
             assert child.returncode == 7
         server.shutdown.side_effect = shutdown
-        with mock.patch.object(module.sys, 'argv', ['entrypoint.py', 'serve']), mock.patch.dict(module.os.environ, {}, clear=True), mock.patch.object(module, 'verify_skill'), mock.patch.object(module, 'seed_state'), mock.patch.object(module.subprocess, 'Popen', return_value=child), mock.patch.object(module.signal, 'signal', side_effect=lambda signum, handler: handlers.__setitem__(signum, handler)), mock.patch.object(module, 'wait_for_internal_api', side_effect=ready), mock.patch.object(module, 'BoundedHTTPServer', return_value=server), mock.patch.object(module.threading, 'Thread'), mock.patch.object(module.os, 'getpid', return_value=supervisor_pid), mock.patch.object(module.os, 'waitpid', side_effect=reap):
+        with mock.patch.object(module.sys, 'argv', ['entrypoint.py', 'serve']), mock.patch.dict(module.os.environ, {}, clear=True), mock.patch.object(module, 'verify_skill'), mock.patch.object(module, 'seed_state'), mock.patch.object(module.subprocess, 'Popen', return_value=child), mock.patch.object(module.signal, 'signal', side_effect=lambda signum, handler: handlers.__setitem__(signum, handler)), mock.patch.object(module, 'wait_for_internal_api', side_effect=ready), mock.patch.object(module, 'BoundedHTTPServer', return_value=server), mock.patch.object(module.threading, 'Thread'), mock.patch.object(module, 'shutdown_bridge', side_effect=shutdown_bridge), mock.patch.object(module.os, 'getpid', return_value=supervisor_pid), mock.patch.object(module.os, 'waitpid', side_effect=reap):
             assert module.main() == 7
             deadline = deadlines[0]()
             assert deadline is not None
@@ -205,6 +208,54 @@ for supervisor_pid in (1, 123):
 		filepath.Join(hermesAdapterRoot(t), "entrypoint.py"))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("late shutdown signal regression failed: %v\n%s", err, output)
+	}
+}
+
+func TestHermesBridgeShutdownDeadline(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	program := `
+import http.server, importlib.util, socket, sys, threading, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('entrypoint', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+entered = threading.Event()
+class SlowBody(module.ServiceBridgeHandler):
+    def do_POST(self):
+        entered.set()
+        try:
+            super().do_POST()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+server = module.BoundedHTTPServer(('127.0.0.1', 0), SlowBody)
+worker = threading.Thread(target=server.serve_forever, daemon=True)
+worker.start()
+client = socket.create_connection(server.server_address, timeout=2)
+try:
+    client.sendall(b'POST /steward/v1/run-stop HTTP/1.0\r\nContent-Length: 49\r\n\r\n{')
+    assert entered.wait(2), 'request did not enter the handler'
+    started = time.monotonic()
+    module.shutdown_bridge(server, started + 0.15)
+    elapsed = time.monotonic() - started
+    assert elapsed < 1, ('stalled request held shutdown', elapsed)
+    assert server.socket.fileno() == -1, 'listener was not closed'
+    assert worker.is_alive(), 'negative control: handler was not still blocked'
+finally:
+    client.close()
+    worker.join(timeout=2)
+    server.server_close()
+assert not worker.is_alive(), 'worker did not finish after client closure'
+`
+	command := exec.CommandContext(ctx, python, "-I", "-c", program,
+		filepath.Join(hermesAdapterRoot(t), "entrypoint.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("bridge shutdown deadline failed: %v\n%s", err, output)
 	}
 }
 
