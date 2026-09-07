@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/interactionpermit"
+	"github.com/hardrails/steward/internal/securefile"
 )
 
 func controlInteractionList(arguments []string, stdout io.Writer) error {
@@ -62,6 +64,48 @@ func controlInteractionShow(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, interaction)
+}
+
+// controlInteractionSubmitResponse transports previously signed bytes. It must
+// not load signing keys, reconstruct the answer, or retry an uncertain write.
+func controlInteractionSubmitResponse(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control interaction submit-response", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	interactionID := flags.String("interaction-id", "", "exact interaction identity")
+	permitPath := flags.String("permit-file", "", "owner-only signed interaction permit file")
+	responsePath := flags.String("response-file", "", "owner-only exact signed response body file")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *tenantID == "" || *interactionID == "" || *permitPath == "" || *responsePath == "" || flags.NArg() != 0 {
+		return errors.New("control interaction submit-response requires a tenant, interaction ID, permit file, and response file")
+	}
+	permit, err := securefile.Read(*permitPath, interactionpermit.MaxEnvelopeBytes, securefile.OwnerOnly)
+	if err != nil {
+		return fmt.Errorf("read signed interaction permit: %w", err)
+	}
+	response, err := securefile.Read(*responsePath, interactionpermit.MaxResponseBytes, securefile.OwnerOnly)
+	if err != nil {
+		return fmt.Errorf("read signed interaction response: %w", err)
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	queued, err := client.SubmitInteractionResponse(ctx, *tenantID, *interactionID, permit, response)
+	if err != nil {
+		return err
+	}
+	if (queued.State != controlstore.InteractionResponseQueued && queued.State != controlstore.InteractionResolved) ||
+		queued.PermitDigest != dsse.Digest(permit) ||
+		queued.ResponseDigest != interactionpermit.ResponseDigest(response) || queued.ResponseBytes != int64(len(response)) {
+		return errors.New("controller interaction response receipt does not match submitted bytes; reconcile with interaction show")
+	}
+	return writeControlJSON(stdout, queued)
 }
 
 func controlInteractionRespond(arguments []string, stdout io.Writer) error {

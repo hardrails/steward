@@ -94,17 +94,20 @@ var controlContextCommands = map[string]controlContextCommandSpec{
 	"interaction list":          {network: true, token: true, tenant: true},
 	"interaction show":          {network: true, token: true, tenant: true},
 	"interaction respond":       {network: true, token: true, tenant: true, taskKey: true},
-	"command submit":            {network: true, token: true, tenant: true, node: true},
-	"command status":            {network: true, token: true, tenant: true, node: true},
-	"command list":              {network: true, token: true, tenant: true, node: true},
-	"credential list":           {network: true, token: true, tenant: true},
-	"evidence status":           {network: true, token: true, node: true},
-	"evidence export":           {network: true, token: true, node: true},
-	"evidence-capture arm":      {network: true, token: true, tenant: true, node: true},
-	"evidence-capture status":   {network: true, token: true, node: true},
-	"evidence-capture seal":     {network: true, token: true, node: true},
-	"evidence-capture export":   {network: true, token: true, node: true},
-	"evidence-capture delete":   {network: true, token: true, node: true},
+
+	"interaction submit-response": {network: true, token: true, tenant: true},
+
+	"command submit":          {network: true, token: true, tenant: true, node: true},
+	"command status":          {network: true, token: true, tenant: true, node: true},
+	"command list":            {network: true, token: true, tenant: true, node: true},
+	"credential list":         {network: true, token: true, tenant: true},
+	"evidence status":         {network: true, token: true, node: true},
+	"evidence export":         {network: true, token: true, node: true},
+	"evidence-capture arm":    {network: true, token: true, tenant: true, node: true},
+	"evidence-capture status": {network: true, token: true, node: true},
+	"evidence-capture seal":   {network: true, token: true, node: true},
+	"evidence-capture export": {network: true, token: true, node: true},
+	"evidence-capture delete": {network: true, token: true, node: true},
 }
 
 func contextCommand(arguments []string, stdout io.Writer) error {
