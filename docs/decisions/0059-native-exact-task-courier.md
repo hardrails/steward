@@ -65,8 +65,13 @@ operational authority without strengthening signature or replay enforcement.
 Delivery is at-least-once, while external dispatch is exact-per-permit because
 Gateway replays a recorded identity for the same spent permit. Cancellation is
 definitive only before dispatch; later cancellation records intent and preserves
-`outcome_may_continue`. The store evicts only terminal tasks when its per-tenant
-or site cap is reached.
+`outcome_may_continue`. The store evicts only terminal tasks whose permits have
+expired when its per-tenant or site cap is reached. The same clock used to admit
+the incoming task evaluates expiry for both immediate and scheduled submissions.
+An unexpired terminal record remains a replay fence, including queued cancellation
+that Gateway has never seen. Capacity pressure cannot remove that fence; new work
+fails closed until eligible space exists. This reuses the existing records rather
+than adding a separate tombstone ledger or increasing storage limits.
 
 This decision extends ADR 0057. Agent-reported task projections remain bounded,
 untrusted read models. Submitted task requests are a separate canonical courier
