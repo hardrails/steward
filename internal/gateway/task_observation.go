@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -223,6 +224,12 @@ func (s *Server) observeTaskLifecycle(w http.ResponseWriter, request *http.Reque
 	if err != nil {
 		if !s.taskObservationStillActive(observation) {
 			writeGatewayError(w, http.StatusServiceUnavailable, "task_observation_revoked", "task authority changed during observation")
+			return
+		}
+		var networkError net.Error
+		if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &networkError) && networkError.Timeout() {
+			w.Header().Set("Retry-After", strconv.Itoa(observation.operation.PollIntervalSeconds))
+			writeGatewayError(w, http.StatusGatewayTimeout, "task_observation_timeout", "agent status observation timed out; retry observation of this task without resubmitting work")
 			return
 		}
 		writeGatewayError(w, http.StatusBadGateway, "invalid_task_status", "agent service returned no valid bounded task status")
@@ -452,7 +459,13 @@ func (s *Server) fetchTaskObservation(ctx context.Context, observation taskObser
 		return nil, taskprotocol.Report{}, errors.New("task status response encoding or length is invalid")
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
-	if err != nil || int64(len(raw)) > maximum || response.ContentLength >= 0 && response.ContentLength != int64(len(raw)) {
+	if int64(len(raw)) > maximum {
+		return nil, taskprotocol.Report{}, errors.New("task status response exceeds its limit")
+	}
+	if err != nil {
+		return nil, taskprotocol.Report{}, err
+	}
+	if response.ContentLength >= 0 && response.ContentLength != int64(len(raw)) {
 		return nil, taskprotocol.Report{}, errors.New("task status response exceeds its limit")
 	}
 	report, err := taskprotocol.ParseReport(raw, int(maximum), observation.state.Dispatch.RunID)

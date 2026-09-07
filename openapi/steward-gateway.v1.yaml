@@ -141,6 +141,8 @@ paths:
           $ref: "#/components/responses/InvalidAgentStatus"
         "503":
           $ref: "#/components/responses/ObservationUnavailable"
+        "504":
+          $ref: "#/components/responses/ObservationTimeout"
 components:
   securitySchemes:
     bearerAuth:
@@ -374,6 +376,24 @@ components:
           $ref: "#/components/headers/NoStore"
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+                $ref: "#/components/schemas/Error"
+    ObservationTimeout:
+      description: |
+        The policy-bounded status request timed out (`task_observation_timeout`).
+        No terminal result was recorded and no work was resubmitted. Retry only
+        observation of this same task after Retry-After, within the caller's
+        existing total wait deadline. Invalid responses still return 502;
+        revoked authority still returns 503. No upstream body or error is exposed.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:
