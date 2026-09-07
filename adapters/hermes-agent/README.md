@@ -32,6 +32,12 @@ know only logical Steward connector names; provider credentials and upstream
 origins never enter Hermes state. The adapter does not change Hermes core source
 or seed workspace content into the image.
 
+As container PID 1, the entrypoint reaps orphaned tool processes while preserving
+the gateway's exit status. Container SIGTERM/SIGINT starts one ten-second gateway
+shutdown deadline; repeated signals do not extend it. The wait loop enters bounded
+kill/reap cleanup if the gateway ignores termination, including during startup.
+This container-level shutdown is separate from the run-specific stop operation.
+
 The v2 service contract adds a bounded stop operation. Its HTTP boundary has local
 tests; the existing retained v1 qualification does not qualify these changed
 adapter bytes. A new disposable-host gVisor qualification, including stopping an

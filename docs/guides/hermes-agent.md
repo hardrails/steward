@@ -13,7 +13,8 @@ runs every process as UID/GID `65532:65532`. It does not use or modify the offic
 upstream image. The current v2 bridge adds a fixed, run-specific stop operation;
 it passed active-tool interruption and signed integration on a disposable gVisor
 runner at source `ff565abc95610aeff7bdf7f21d113840719435e8`. Publication-registration
-changes still require the final exact-source qualification before release. The
+and container-shutdown changes still require fresh exact-source qualification
+before release; support output remains `qualification_pending`. The
 historical v1 evidence is not proof for v2; retain fresh successful records rather
 than editing it. This is runtime fixture evidence, not a completed end-user workflow.
 
