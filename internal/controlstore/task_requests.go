@@ -214,7 +214,7 @@ func (store *Store) SubmitTaskRequest(actor controlauth.Identity, input TaskRequ
 		project.UpdatedAt = canonicalTimestamp(now)
 		projectMutation = workroomProjectMutation(project)
 	}
-	mutations, err := store.taskCapacityMutationsLocked(input.TenantID, taskCourierBytes(stored))
+	mutations, err := store.taskCapacityMutationsLocked(input.TenantID, taskCourierBytes(stored), now)
 	if err != nil {
 		return TaskRequest{}, false, err
 	}
@@ -604,7 +604,7 @@ func normalizeTaskForPoll(task *storedTaskRequest, now time.Time) bool {
 	return changed
 }
 
-func (store *Store) taskCapacityMutationsLocked(tenantID string, incomingBytes int64) ([]mutation, error) {
+func (store *Store) taskCapacityMutationsLocked(tenantID string, incomingBytes int64, now time.Time) ([]mutation, error) {
 	total, tenantTotal := len(store.current.taskRequests), 0
 	var totalBytes, tenantBytes int64
 	terminal := make([]storedTaskRequest, 0)
@@ -615,7 +615,12 @@ func (store *Store) taskCapacityMutationsLocked(tenantID string, incomingBytes i
 			tenantTotal++
 			tenantBytes += bytes
 		}
-		if taskTerminal(task.State) {
+		// A terminal record is also the replay fence for its still-valid permit.
+		// In particular, evicting queued cancellation could allow the same permit
+		// to create fresh queued work that Gateway has never seen. Reclaim only
+		// after expiry, when SubmitTaskRequest rejects that permit before lookup.
+		deadline, err := time.Parse(time.RFC3339, task.Deadline)
+		if taskTerminal(task.State) && err == nil && !now.IsZero() && !now.Before(deadline) {
 			terminal = append(terminal, task)
 		}
 	}

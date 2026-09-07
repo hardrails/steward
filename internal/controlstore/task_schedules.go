@@ -330,7 +330,7 @@ func (store *Store) materializeDueTaskSchedule(
 		schedule.NextOrdinal++
 		schedule.EnqueuedRuns++
 		finishTaskSchedule(&schedule, now)
-		mutations, err := store.taskCapacityMutationsLocked(schedule.TenantID, taskCourierBytes(task))
+		mutations, err := store.taskCapacityMutationsLocked(schedule.TenantID, taskCourierBytes(task), now)
 		if err != nil {
 			return err
 		}
