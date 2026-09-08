@@ -50,6 +50,14 @@ jobs:
         run: go build ./...
       - name: go vet
         run: go vet ./...
+      - name: Signing station separate-user boundary
+        run: |
+          proof_dir=$(mktemp -d /tmp/steward-issuer-identity.XXXXXX)
+          trap 'sudo rm -f "$proof_dir/stewardctl.test"; rmdir "$proof_dir"' EXIT
+          chmod 0755 "$proof_dir"
+          go test -c -o "$proof_dir/stewardctl.test" ./cmd/stewardctl
+          sudo env STEWARD_REQUIRE_ISSUER_IDENTITY_TEST=1 "$proof_dir/stewardctl.test" \
+            -test.run '^TestTaskIssuerSeparatesClientFromSigningIdentity$' -test.v -test.timeout=45s
       - name: go test
         run: GOENV=off GOFLAGS= go test -race -tags=qualification -skip= ./...
       - name: Install native RPM build tooling

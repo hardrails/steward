@@ -1,0 +1,396 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+func TestTaskIssuerHTTPRejectsInvalidRequestsWithoutIssuing(t *testing.T) {
+	fixture, config := newTaskIssuerFixture(t)
+	issuer, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer issuer.Close()
+	valid, err := json.Marshal(issuerRequest(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, method, path, contentType, origin, body string
+		status                                        int
+	}{
+		{"method", "GET", "/v1/tasks", "application/json", "", string(valid), 405},
+		{"route", "POST", "/other", "application/json", "", string(valid), 404},
+		{"query", "POST", "/v1/tasks?key=secret", "application/json", "", string(valid), 404},
+		{"empty-query", "POST", "/v1/tasks?", "application/json", "", string(valid), 404},
+		{"encoded-path", "POST", "/v1/%74asks", "application/json", "", string(valid), 404},
+		{"encoded-slash", "POST", "/v1%2ftasks", "application/json", "", string(valid), 404},
+		{"absolute-form", "POST", "http://station/v1/tasks", "application/json", "", string(valid), 404},
+		{"trailing-slash", "POST", "/v1/tasks/", "application/json", "", string(valid), 404},
+		{"browser", "POST", "/v1/tasks", "application/json", "https://example.test", string(valid), 400},
+		{"content-type", "POST", "/v1/tasks", "text/plain", "", string(valid), 400},
+		{"unknown-field", "POST", "/v1/tasks", "application/json", "", `{"key":"secret"}`, 400},
+		{"duplicate-field", "POST", "/v1/tasks", "application/json", "", `{"task_id":"one","task_id":"two"}`, 400},
+		{"empty", "POST", "/v1/tasks", "application/json", "", `{}`, 422},
+		{"oversized", "POST", "/v1/tasks", "application/json", "", strings.Repeat("s", maxTaskBundleBytes+1), 413},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", test.contentType)
+			request.Header.Set("Origin", test.origin)
+			recorder := httptest.NewRecorder()
+			issuer.serveHTTP(recorder, request)
+			var response map[string]string
+			if recorder.Code != test.status || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+				len(response) != 2 || response["error"] == "" || response["message"] == "" ||
+				recorder.Header().Get("Cache-Control") != "no-store" ||
+				strings.Contains(recorder.Body.String(), "secret") || issuer.count != 0 {
+				t.Fatalf("invalid error contract or issuance: status=%d count=%d", recorder.Code, issuer.count)
+			}
+		})
+	}
+}
+
+func TestTaskIssuerHTTPDistinguishesPrivatePreparationFailureAndRecovers(t *testing.T) {
+	for _, snapshot := range []string{"", "admission", "intent", "trust", "key"} {
+		t.Run("missing-"+snapshot, func(t *testing.T) {
+			fixture, config := newTaskIssuerFixture(t)
+			issuer, err := openTaskIssuer(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer issuer.Close()
+			intent := issuerRequest(fixture)
+			original, err := issuer.issue(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Move only this fixture's private snapshot, preserving it for repair.
+			path := issuer.snapshots
+			if snapshot != "" {
+				path = filepath.Join(path, snapshot)
+			}
+			backup := filepath.Join(t.TempDir(), "private-snapshot")
+			if err = os.Rename(path, backup); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Rename(backup, path) })
+			intent.TaskID = "issuer-task-2"
+			raw, err := json.Marshal(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				request := httptest.NewRequest("POST", "/v1/tasks", bytes.NewReader(raw))
+				request.Header.Set("Content-Type", "application/json")
+				recorder := httptest.NewRecorder()
+				issuer.serveHTTP(recorder, request)
+				var response map[string]string
+				if recorder.Code != 500 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+					len(response) != 2 || response["error"] != "preparation_failed" ||
+					!strings.Contains(response["message"], "Repair") ||
+					strings.Contains(recorder.Body.String(), path) ||
+					strings.Contains(recorder.Body.String(), intent.TaskID) ||
+					recorder.Body.Len() > 512 || issuer.count != 1 {
+					t.Fatalf("private failure was misclassified or leaked details: status=%d count=%d", recorder.Code, issuer.count)
+				}
+			}
+			// Retained authority is independent of temporary staging availability.
+			replayed, err := issuer.issue(issuerRequest(fixture))
+			if err != nil || !bytes.Equal(original, replayed) {
+				t.Fatalf("staging failure changed retained authority: %v", err)
+			}
+			if err = os.Rename(backup, path); err != nil {
+				t.Fatal(err)
+			}
+			issued, err := issuer.issue(intent)
+			if err != nil || issuer.count != 2 {
+				t.Fatalf("same task failed after repair: %v", err)
+			}
+			if err = issuer.match(issued, intent, fixture.request); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestTaskIssuerHTTPNewBundleMismatchIsPrivatePreparationFailure(t *testing.T) {
+	fixture, config := newTaskIssuerFixture(t)
+	issuer, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer issuer.Close()
+	intent := issuerRequest(fixture)
+	operation := issuer.operations[intent.OperationID]
+	operation.PolicyDigest = "sha256:" + strings.Repeat("f", 64)
+	issuer.operations[intent.OperationID] = operation
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("POST", "/v1/tasks", bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	issuer.serveHTTP(recorder, request)
+	var response map[string]string
+	if recorder.Code != 500 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+		response["error"] != "preparation_failed" || issuer.count != 0 {
+		t.Fatalf("private bundle mismatch became a caller conflict: status=%d count=%d", recorder.Code, issuer.count)
+	}
+}
+
+func TestTaskIssuerHTTPInvalidJSONRemainsClientRejection(t *testing.T) {
+	fixture, config := newTaskIssuerFixture(t)
+	issuer, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer issuer.Close()
+	for _, body := range []string{"not-json", `{"input":1,"input":2}`, `{}`} {
+		intent := issuerRequest(fixture)
+		intent.RequestBase64 = base64.StdEncoding.EncodeToString([]byte(body))
+		// Exercise the operation-specific bound as well as native JSON checks.
+		if body == "{}" {
+			operation := issuer.operations[intent.OperationID]
+			operation.MaxRequestBytes = 1
+			issuer.operations[intent.OperationID] = operation
+		}
+		raw, err := json.Marshal(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest("POST", "/v1/tasks", bytes.NewReader(raw))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		issuer.serveHTTP(recorder, request)
+		var response map[string]string
+		if recorder.Code != 422 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+			response["error"] != "issuance_rejected" || issuer.count != 0 {
+			t.Fatalf("invalid request became a server fault: status=%d count=%d", recorder.Code, issuer.count)
+		}
+	}
+}
+
+func TestTaskIssuerCommandIsDiscoverableAndRequiresPrivateConfiguration(t *testing.T) {
+	candidates := stewardctlCompletionCandidates([]string{"task", "serve-"})
+	if len(candidates) != 1 || candidates[0] != "serve-issuer" {
+		t.Fatalf("station is absent from completion: %v", candidates)
+	}
+	candidates = stewardctlCompletionCandidates([]string{"task", "serve-issuer", "-sock"})
+	if len(candidates) != 1 || candidates[0] != "-socket" {
+		t.Fatalf("station socket flag is absent: %v", candidates)
+	}
+	if err := taskCommand([]string{"serve-issuer"}, io.Discard); err == nil ||
+		!strings.Contains(err.Error(), "absolute private socket") {
+		t.Fatalf("station command did not enforce configuration: %v", err)
+	}
+	for _, gid := range []string{"-1", "0", "4294967295", "4294967296"} {
+		if err := taskCommand([]string{"serve-issuer", "-socket", "/tmp/station.sock", "-client-gid", gid}, io.Discard); err == nil || !strings.Contains(err.Error(), "client group") {
+			t.Fatalf("unsafe client group %s accepted: %v", gid, err)
+		}
+	}
+	if err := taskCommand([]string{"serve-issuer", "-socket", "/tmp/station.sock"}, io.Discard); err == nil || !strings.Contains(err.Error(), "client group") {
+		t.Fatalf("implicit client group accepted: %v", err)
+	}
+}
+
+func TestTaskIssuerPanicRetainsJSONErrorBoundary(t *testing.T) {
+	var issuer *taskIssuer
+	request := httptest.NewRequest("POST", "/v1/tasks", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	issuer.serveHTTP(recorder, request)
+	var response map[string]string
+	if recorder.Code != 500 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil ||
+		len(response) != 2 || response["error"] != "internal_error" || response["message"] == "" {
+		t.Fatalf("panic escaped JSON error boundary: %d", recorder.Code)
+	}
+}
+
+func TestTaskIssuerCommandReadinessFailureReleasesPrivateResources(t *testing.T) {
+	_, config := newTaskIssuerFixture(t)
+	socket := filepath.Join(issuerSocketDirectory(t), "station.sock")
+	reader, writer := io.Pipe()
+	_ = reader.Close()
+	defer writer.Close()
+	err := serveTaskIssuer([]string{
+		"-admission", config.Admission, "-intent", config.Intent,
+		"-trust", config.Trust, "-key", config.Key, "-key-id", config.KeyID,
+		"-store", config.Store, "-operations", strings.Join(config.Operations, ","),
+		"-socket", socket, "-client-gid", fmt.Sprint(issuerTestClientGID()), "-capacity", "2",
+	}, writer)
+	if !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("readiness failure was not returned: %v", err)
+	}
+	if _, err = os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed startup left a socket: %v", err)
+	}
+	reopened, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatalf("failed startup retained its store lock: %v", err)
+	}
+	defer reopened.Close()
+	if reopened.count != 0 {
+		t.Fatal("failed startup issued task authority")
+	}
+}
+
+func TestTaskIssuerListenerRejectsInvalidClientGroupsBeforeFilesystemAccess(t *testing.T) {
+	for _, gid := range []int{-1, 0, int(^uint32(0))} {
+		if _, err := listenTaskIssuer("/missing/station.sock", gid); err == nil || !strings.Contains(err.Error(), "client group ID") {
+			t.Fatalf("invalid group %d reached the filesystem: %v", gid, err)
+		}
+	}
+}
+
+func issuerSocketDirectory(t *testing.T) string {
+	t.Helper()
+	// macOS has a short Unix socket pathname bound; Go's test path can exceed it.
+	directory, err := os.MkdirTemp("/tmp", "issuer-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	if err = os.Chmod(directory, 0o710); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chown(directory, -1, issuerTestClientGID()); err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
+func issuerTestClientGID() int {
+	if os.Getegid() == 0 {
+		return 65533
+	}
+	return os.Getegid()
+}
+
+func TestTaskIssuerUnixHTTPReturnsExactBundleAndShutsDown(t *testing.T) {
+	fixture, config := newTaskIssuerFixture(t)
+	issuer, err := openTaskIssuer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer issuer.Close()
+	socket := filepath.Join(issuerSocketDirectory(t), "station.sock")
+	listener, err := listenTaskIssuer(socket, issuerTestClientGID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- runTaskIssuerServer(ctx, listener, issuer) }()
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	intent := issuerRequest(fixture)
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original []byte
+	for attempt := 0; attempt < 2; attempt++ {
+		response, err := client.Post("http://station/v1/tasks", "application/json", bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, maxTaskBundleBytes+1))
+		_ = response.Body.Close()
+		if readErr != nil || response.StatusCode != 200 || len(body) > maxTaskBundleBytes ||
+			response.Header.Get("Content-Type") != "application/octet-stream" {
+			t.Fatalf("invalid task response: %d %v", response.StatusCode, readErr)
+		}
+		if err = issuer.match(body, intent, fixture.request); err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 0 {
+			original = body
+		} else if !bytes.Equal(original, body) {
+			t.Fatal("socket replay changed exact signed authority")
+		}
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("signing station did not shut down")
+	}
+}
+
+func TestTaskIssuerSocketRefusesUnsafeOrActivePathsAndRecoversStaleSocket(t *testing.T) {
+	directory := issuerSocketDirectory(t)
+	socket := filepath.Join(directory, "station.sock")
+	if err := os.WriteFile(socket, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listenTaskIssuer(socket, issuerTestClientGID()); err == nil {
+		t.Fatal("regular file was replaced")
+	}
+	if raw, err := os.ReadFile(socket); err != nil || string(raw) != "keep" {
+		t.Fatalf("regular file changed: %v", err)
+	}
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := listenTaskIssuer(socket, issuerTestClientGID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if info, err := os.Lstat(socket); err != nil || info.Mode().Perm() != 0o660 || info.Sys().(*syscall.Stat_t).Gid != uint32(issuerTestClientGID()) {
+		t.Fatalf("unsafe socket mode: %v", err)
+	}
+	if _, err := listenTaskIssuer(socket, issuerTestClientGID()); err == nil {
+		t.Fatal("active socket was replaced")
+	}
+	listener.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err = listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := listenTaskIssuer(socket, issuerTestClientGID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o700, 0o750, 0o770, 0o755} {
+		if err = os.Chmod(directory, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = listenTaskIssuer(socket, issuerTestClientGID()); err == nil {
+			t.Fatalf("unsafe socket parent mode %o accepted", mode)
+		}
+	}
+	if err = os.Chmod(directory, 0o710); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = listenTaskIssuer(socket, issuerTestClientGID()+1); err == nil {
+		t.Fatal("different client group accepted")
+	}
+}
