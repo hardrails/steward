@@ -3,6 +3,7 @@ package zfsstorage
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,5 +77,61 @@ func TestPackagedStorageRequiresFreshPolicyBeforeConfinedStart(t *testing.T) {
 		if !strings.Contains(read(path), "deploy/config/storage-zfs.apparmor") {
 			t.Errorf("profile not required by builder: %s", path)
 		}
+	}
+}
+
+func TestStorageUpgradePreflightFailsBeforeServicesStop(t *testing.T) {
+	raw, err := os.ReadFile("../../scripts/activate-node-release.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	start := strings.Index(script, "check_configured_storage() {\n")
+	if start < 0 {
+		t.Fatal("missing configured storage check")
+	}
+	end := strings.Index(script[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("missing configured storage function end")
+	}
+	check := strings.Index(script, "\ncheck_configured_storage /etc/steward/storage-zfs.json\n")
+	stop := strings.Index(script, "\n\tservices_stopped=true\n")
+	if check < 0 || stop < check {
+		t.Fatal("configured storage check must precede service shutdown")
+	}
+	preflight, err := os.ReadFile("../../scripts/node-preflight.sh")
+	if err != nil || !strings.Contains(string(preflight), `"$storage_bin" -check-packaged-config`) {
+		t.Fatalf("normal preflight must check packaged prerequisites: %v", err)
+	}
+	for _, scenario := range []string{"absent", "valid", "invalid", "dangling-config"} {
+		t.Run(scenario, func(t *testing.T) {
+			directory := t.TempDir()
+			config := filepath.Join(directory, "config")
+			if scenario == "dangling-config" {
+				if err := os.Symlink(filepath.Join(directory, "missing"), config); err != nil {
+					t.Fatal(err)
+				}
+			} else if scenario != "absent" {
+				if err := os.WriteFile(config, []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			binary := "#!/usr/bin/env bash\nset -eu\n[[ $1 == -check-packaged-config && $2 == -config && $4 == -client-token-file && $5 == /fixture/executor-token ]]\nprintf 'CHECKED\\n'\n"
+			if scenario == "invalid" || scenario == "dangling-config" {
+				binary += "exit 37\n"
+			}
+			if err := os.WriteFile(filepath.Join(directory, "steward-storage-zfs"), []byte(binary), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fixture := "set -euo pipefail\nrelease_dir=$1\nread_executor_setting() { [[ $1 == EXECUTOR_STATE_BACKEND_TOKEN_FILE ]]; printf '/fixture/executor-token'; }\n" + script[start:start+end+3] + "\ncheck_configured_storage \"$2\"\nprintf 'STOP\\n'\n"
+			output, err := exec.Command("bash", "-c", fixture, "storage-preflight-test", directory, config).CombinedOutput()
+			shouldStop := scenario == "valid" || scenario == "absent"
+			if (err == nil) != shouldStop || strings.Contains(string(output), "STOP") != shouldStop {
+				t.Fatalf("output=%s error=%v", output, err)
+			}
+			if strings.Contains(string(output), "CHECKED") != (scenario != "absent") {
+				t.Fatalf("configured backend check not invoked correctly: %s", output)
+			}
+		})
 	}
 }

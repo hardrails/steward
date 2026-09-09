@@ -712,6 +712,20 @@ prepare_uplink_delivery_state() {
 	write_executor_uplink_setup "$protocol_version" "$uplink_delivery_state"
 }
 
+check_configured_storage() {
+	local config=$1 token_file
+	if [[ -e $config || -L $config ]]; then
+		token_file=$(read_executor_setting EXECUTOR_STATE_BACKEND_TOKEN_FILE)
+		"$release_dir/steward-storage-zfs" -check-packaged-config -config "$config" \
+			-client-token-file "$token_file"
+	fi
+}
+
+# Catch stock-unit path/token migration and missing AppArmor prerequisites before
+# stopping any live service. This target-binary check is read-only: no policy
+# load, pool qualification, lock acquisition, or credential mutation.
+check_configured_storage /etc/steward/storage-zfs.json
+
 if [[ $restart == true && ( $was_gateway == true || $was_steward == true || $was_executor == true || $was_storage == true ) ]]; then
 	services_stopped=true
 	# Stop writers and capability entry points in a fixed order before checking

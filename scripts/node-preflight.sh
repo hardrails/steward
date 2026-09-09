@@ -542,7 +542,8 @@ runuser -u steward-executor -- "$executor_bin" -check-config \
 	-node-boot-identity-sha256 "${executor[EXECUTOR_NODE_BOOT_IDENTITY_SHA256]:-}" \
 	"${evidence_args[@]}" "${state_args[@]}" "${image_pull_args[@]}" "${admission_args[@]}" "${gateway_args[@]}"
 if [[ -e /etc/steward/storage-zfs.json || -L /etc/steward/storage-zfs.json ]]; then
-	"$storage_bin" -check-config -config /etc/steward/storage-zfs.json
+	"$storage_bin" -check-packaged-config -config /etc/steward/storage-zfs.json \
+		-client-token-file "${executor[EXECUTOR_STATE_BACKEND_TOKEN_FILE]:-}"
 fi
 if [[ -n $unit_dir ]]; then
 	if [[ ! -d $unit_dir || -L $unit_dir ]]; then
