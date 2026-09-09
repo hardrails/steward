@@ -126,6 +126,31 @@ The policy permits only the packaged configuration, token, binary, socket and
 state paths. Custom paths require a separately reviewed policy and unit override,
 not a broader wildcard. Existing configurations that point the worker at
 `storage-zfs-token` must migrate to the root-owned copy before starting this unit.
+Node activation runs the target binary's read-only `-check-packaged-config` before
+stopping any service. It refuses legacy paths, a missing or mismatched token copy,
+or missing AppArmor kernel/userspace support. It does not rotate credentials or
+repair configuration automatically.
+
+Before upgrading an existing stock installation:
+
+1. Install the host's AppArmor userspace tools and enable AppArmor in the kernel.
+   Both `/usr/sbin/apparmor_parser` and `/usr/bin/aa-exec` must be executable.
+2. Keep the current Executor token unchanged. If the worker copy does not exist,
+   copy that token to `/etc/steward/storage-zfs-worker-token` with owner `root:root`
+   and mode `0600`, using the `install` command from the setup instructions above.
+   If the copy already exists, compare it with `sudo cmp --silent` rather than
+   overwriting it. Investigate a mismatch; do not rotate a live worker's token.
+3. Use `sudoedit /etc/steward/storage-zfs.json` to change only `token_file` to the
+   new worker-copy path. Preserve the dataset, limits and existing token value.
+   Run the **target release's** `steward-storage-zfs -check-packaged-config`, with
+   `-client-token-file` pointing to Executor's configured token file. Correct any
+   error before retrying activation. This check leaves the running worker alone.
+
+These checks validate the stock unit and its fixed policy paths. Automated stock
+activation rejects custom paths even when an operator has a policy override;
+such installations need a separately reviewed deployment procedure, not a bypass
+that silently starts an unconfined service.
+
 For token rotation, quiesce storage callers, stop Executor and the worker, replace
 both owner-only copies with the same new value, then start the worker before
 Executor. Never put tokens in commands, service arguments, logs or agent files.
