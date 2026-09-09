@@ -29,7 +29,7 @@ func TestCompletionScriptsUseOnlyTheLocalStewardctlCandidateSource(t *testing.T)
 }
 
 func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
-	if candidates := stewardctlCompletionCandidates([]string{"control", "interaction", ""}); !slices.Equal(candidates, []string{"list", "respond", "show", "submit-response"}) {
+	if candidates := stewardctlCompletionCandidates([]string{"control", "interaction", ""}); !slices.Equal(candidates, []string{"list", "respond", "show", "submit-response", "verify-response"}) {
 		t.Fatalf("interaction commands = %v", candidates)
 	}
 	if candidates := stewardctlCompletionCandidates([]string{"control", "interaction", "sub"}); !slices.Equal(candidates, []string{"submit-response"}) {
