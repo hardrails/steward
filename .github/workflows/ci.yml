@@ -260,7 +260,8 @@ jobs:
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 9, "write": 9},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 83
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 84
+          grep -Fq '    "integration/deploy/config/storage-zfs.apparmor": "' "$stage/release.json"
           grep -Fq '    "integration/scripts/install-cluster.sh": "' "$stage/release.json"
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$stage/deploy/config/executor.env"

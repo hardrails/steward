@@ -48,6 +48,14 @@ for candidate in "$work/installer" "$work/activation"; do
 	fi
 done
 
+# Keep the native-package smoke assertion tied to the same inventory. This
+# catches adding a payload without updating CI before the expensive package job.
+inventory_count=$(wc -l <"$work/manifest" | tr -d '[:space:]')
+if ! grep -Fq -- "\" -eq $inventory_count" "$root/.github/workflows/ci.yml"; then
+	echo "check-release-inventory: CI asserts a stale release payload count (expected $inventory_count)" >&2
+	exit 1
+fi
+
 # The Debian builder copies selected top-level trees rather than the complete
 # stage. Derive those trees from the canonical inventory so adding a new payload
 # directory cannot produce a manifest that the package itself does not contain.
