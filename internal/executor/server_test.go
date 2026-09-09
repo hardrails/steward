@@ -2918,12 +2918,24 @@ func TestSecureProvisionCapacityAndCommitFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
-			request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
-			request.Header.Set("Authorization", "Bearer secret")
-			response := httptest.NewRecorder()
-			server.Handler().ServeHTTP(response, request)
-			if response.Code != test.want || len(test.docker.created) != 0 {
-				t.Fatalf("status=%d creates=%d body=%s", response.Code, len(test.docker.created), response.Body.String())
+			for attempt := 0; attempt < 2; attempt++ {
+				request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+				request.Header.Set("Authorization", "Bearer secret")
+				response := httptest.NewRecorder()
+				server.Handler().ServeHTTP(response, request)
+				if response.Code != test.want || len(test.docker.created) != 0 ||
+					len(config.Journal.Pending()) != 0 || config.Fences.Count() != 0 {
+					t.Fatalf("attempt=%d status=%d creates=%d pending=%v fences=%v body=%s",
+						attempt, response.Code, len(test.docker.created), config.Journal.Pending(), config.Fences.Records(), response.Body.String())
+				}
+				var refusal struct {
+					Error   string `json:"error"`
+					Message string `json:"message"`
+				}
+				if err := dsse.DecodeStrictInto(response.Body.Bytes(), 4096, &refusal); err != nil ||
+					refusal.Error != "capacity_exceeded" || strings.TrimSpace(refusal.Message) == "" {
+					t.Fatalf("capacity refusal=%s decode=%v", response.Body.String(), err)
+				}
 			}
 		})
 	}
