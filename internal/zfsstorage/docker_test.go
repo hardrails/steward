@@ -10,6 +10,34 @@ import (
 	"testing"
 )
 
+func TestDockerMigrationReferenceCheckIncludesStoppedContainersAndFailsClosed(t *testing.T) {
+	for _, response := range []string{"[]", "[ ]", `[{"State":"running"}]`, `[{"State":"exited"}]`, "null", "{}", "invalid", strings.Repeat(" ", maxDockerResponseBytes+1)} {
+		t.Run(response[:min(len(response), 40)], func(t *testing.T) {
+			binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				var filters map[string][]string
+				if request.Method != http.MethodGet || request.URL.Path != "/v1.41/containers/json" || request.URL.Query().Get("all") != "1" ||
+					json.Unmarshal([]byte(request.URL.Query().Get("filters")), &filters) != nil || len(filters["volume"]) != 1 || filters["volume"][0] != "steward-retained" {
+					t.Fatalf("unsafe Docker query: %s", request.URL)
+				}
+				return dockerResponse(http.StatusOK, response), nil
+			})})
+			err := binder.CheckUnused(context.Background(), "steward-retained")
+			if (err == nil) != (response == "[]" || response == "[ ]") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+	binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return dockerResponse(http.StatusServiceUnavailable, "[]"), nil
+	})})
+	if err := binder.CheckUnused(context.Background(), "steward-retained"); err == nil {
+		t.Fatal("failed Docker request accepted")
+	}
+	if err := binder.CheckUnused(context.Background(), "../escape"); !errors.Is(err, ErrBindingConflict) {
+		t.Fatalf("invalid handle accepted: %v", err)
+	}
+}
+
 func TestDockerBinderExactLifecycle(t *testing.T) {
 	engine := &fakeDockerVolumes{volumes: make(map[string]dockerVolume)}
 	binder := newDockerBinder(&http.Client{Transport: engine})

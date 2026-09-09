@@ -21,9 +21,37 @@ import (
 const maxDockerResponseBytes = 1 << 20
 
 // DockerBinder exposes a fixed, local-driver named-volume lifecycle over one
-// owner-selected Docker Unix socket. It has no container, image, network, or
-// general Docker request method.
+// owner-selected Docker Unix socket. Container access is limited to a read-only
+// reference check for offline migration; it cannot run containers or images.
 type DockerBinder struct{ client *http.Client }
+
+// CheckUnused rejects references from running AND stopped containers. It is a
+// point-in-time check: operators must quiesce container creators for maintenance.
+func (binder *DockerBinder) CheckUnused(ctx context.Context, handle string) error {
+	if !validDockerHandle(handle) {
+		return ErrBindingConflict
+	}
+	filters, err := json.Marshal(map[string][]string{"volume": {handle}})
+	if err != nil {
+		return err
+	}
+	query := url.Values{"all": {"1"}, "filters": {string(filters)}}
+	status, raw, err := binder.call(ctx, http.MethodGet, "/v1.41/containers/json?"+query.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return dockerStatusError(status)
+	}
+	var containers []json.RawMessage
+	if err := json.Unmarshal(raw, &containers); err != nil || containers == nil {
+		return errors.New("Docker reference check returned an invalid container list")
+	}
+	if len(containers) != 0 {
+		return ErrBindingInUse
+	}
+	return nil
+}
 
 func NewDockerBinder(socketPath string) (*DockerBinder, error) {
 	if socketPath == "" || !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath ||
