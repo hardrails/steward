@@ -15,7 +15,11 @@ key access, signing and submission. The private station previously signed only t
 Extend the existing single-runtime Unix-socket station with an explicit
 `-allow-responses` option. Reuse native question validation, response signing,
 signature verification, the station's lock and durable first-issuance store, and
-the separate keyless courier. Keep response and task record identities disjoint
+the separate keyless courier. Expose that same native verifier through the offline
+`control interaction verify-response` command so hosts need neither a second
+cryptographic implementation nor trust in the socket response alone. Hosts compare
+its verified statement to independently retained runtime, question and answer policy.
+Keep response and task record identities disjoint
 while sharing the capacity bound. The option is off by default and frozen in the
 store binding; existing task-only bindings remain byte-compatible.
 

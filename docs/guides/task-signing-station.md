@@ -114,8 +114,31 @@ The request is bounded to 64 KiB, decoded answer to 4 KiB, and returned opaque
 permit to 16 KiB. No answer text is retained in the signing store; the permit binds
 its digest and size. Treat the permit as private replayable authority.
 
-Verify the permit with the independently pinned public task key and exact question
-and answer, then deliver it through `stewardctl control interaction submit-response`
+Verify the permit offline with the independently pinned public task key and exact
+answer:
+
+```console
+stewardctl control interaction verify-response \
+  -permit-file /private/answer.permit \
+  -response-file /private/answer.json \
+  -public-key /trusted/task-authority.pub \
+  -key-id task-authority -max-validity 5m
+```
+
+The command uses no Control connection, ambient context or private key. It checks
+the native signature, local validity limit and exact answer digest and size, then
+returns `valid`, `evaluated_at`, `key_id`, `envelope_digest` and the verified
+`statement`. It never returns answer content. Both answer files must be owner-only.
+Use `-at` with canonical UTC whole seconds for reproducible verification; normal
+operation uses the current clock. Historical verification is not present authority.
+
+Before delivery, compare every runtime identity field, interaction ID and request
+digest in that statement to the independently retained question. Also require its
+expiry not to exceed the question's expiry. Verification alone does not check the
+question's offered choices, its current state, or the owner's business consent.
+These remain host policy and Gateway checks, not claims made by `valid: true`.
+
+Then deliver it through `stewardctl control interaction submit-response`
 with `-permit-file` and `-response-file`. The existing keyless courier transports the
 original bytes. Gateway must verify the signature and its own pending question;
 a queued receipt is not delivery confirmation.
