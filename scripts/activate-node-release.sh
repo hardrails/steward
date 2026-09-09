@@ -157,6 +157,7 @@ release_files=(
 	integration/deploy/config/steward-local.json
 	integration/deploy/config/steward.json
 	integration/deploy/config/storage-zfs.json.in
+	integration/deploy/config/storage-zfs.apparmor
 	integration/deploy/systemd/steward-executor.service
 	integration/deploy/systemd/steward-gateway.service
 	integration/deploy/systemd/steward-storage-zfs.service

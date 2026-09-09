@@ -1,0 +1,31 @@
+#include <tunables/global>
+# Loaded from the selected immutable release before every worker start.
+# This is host infrastructure: Docker and /dev/zfs remain privileged APIs.
+profile steward-storage-zfs {
+  #include <abstractions/base>
+  capability sys_admin,
+  capability chown,
+  network unix,
+  signal (receive) peer=unconfined,
+  signal peer=steward-storage-zfs,
+  /opt/steward/releases/*/steward-storage-zfs mrix,
+  /usr/sbin/zfs mrix,
+  /etc/steward/storage-zfs.json r,
+  /etc/steward/storage-zfs-worker-token r,
+  /dev/zfs rw,
+  /proc/*/mounts r,
+  /proc/*/mountinfo r,
+  /proc/filesystems r,
+  /proc/sys/net/core/somaxconn r,
+  /proc/spl/** r,
+  /sys/module/zfs/** r,
+  /etc/zfs/** r,
+  /run/docker.sock rw,
+  /run/systemd/notify w,
+  /run/steward-storage-zfs/ rw,
+  /run/steward-storage-zfs/** rwk,
+  /var/lib/steward-state/ rw,
+  /var/lib/steward-state/** rwk,
+  mount fstype=zfs -> /var/lib/steward-state/**,
+  umount /var/lib/steward-state/**,
+}
