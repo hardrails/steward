@@ -221,6 +221,15 @@ The dataset name is a hash, not a tenant name. Steward records the exact tenant,
 lineage, generation, limits, and request identity in a bounded ZFS user property.
 Do not infer ownership from the dataset name or edit that property manually.
 
+If Docker binding or its verification fails after dataset preparation, the worker
+retains that dataset and its exact creation record. A lost Docker acknowledgement
+does not prove that creation failed. Retry the original request after restoring
+connectivity; the worker verifies and reuses the retained state without replacing
+its files. A changed request or conflicting Docker binding is rejected. Reconcile
+conflicts explicitly; replay never deletes or adopts another binding. Use normal
+volume deletion when you intend to discard a reconciled volume. Failures before
+binding begins still clean up the newly created dataset.
+
 Executor also checks the worker's advertised capabilities at startup. It refuses
 qualified state if the backend does not report hard byte and object quotas,
 crash-safe metadata, immutable cold snapshots, copy-on-write clones, and exact
