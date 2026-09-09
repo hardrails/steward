@@ -9,6 +9,34 @@ import (
 
 const zfsFilesystemMagic = 0x2fc12fc1
 
+// MigrateLegacy never recurses. Only the previous default root:root 0755,
+// the interrupted chown step, or the already-migrated root are accepted.
+func (FilesystemMountAccess) MigrateLegacy(path string) error {
+	file, err := openZFSRoot(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return migrateLegacyRoot(file)
+}
+
+func migrateLegacyRoot(file *os.File) error {
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(int(file.Fd()), &stat); err != nil {
+		return err
+	}
+	if stat.Uid == 0 && stat.Gid == 65532 && stat.Mode&0o7777 == 0o770 {
+		return nil
+	}
+	if stat.Uid != 0 || (stat.Gid != 0 && stat.Gid != 65532) || stat.Mode&0o7777 != 0o755 {
+		return errors.New("migration accepts only legacy root:root 0755 or an interrupted root:65532 0755 root; investigate other permissions without recursive ownership changes")
+	}
+	if err := file.Chown(0, 65532); err != nil {
+		return err
+	}
+	return file.Chmod(0o770)
+}
+
 func (FilesystemMountAccess) Prepare(path string) error {
 	file, err := openZFSRoot(path)
 	if err != nil {

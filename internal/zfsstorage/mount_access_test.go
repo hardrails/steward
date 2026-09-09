@@ -111,6 +111,9 @@ func TestFilesystemMountAccessRejectsUnquotaedAndSymlinkDirectories(t *testing.T
 		if err := (FilesystemMountAccess{}).Verify(candidate); err == nil {
 			t.Fatalf("verified unsafe path %q", candidate)
 		}
+		if err := (FilesystemMountAccess{}).MigrateLegacy(candidate); err == nil {
+			t.Fatalf("migrated unsafe path %q", candidate)
+		}
 	}
 	info, err := os.Stat(path)
 	if err != nil {
