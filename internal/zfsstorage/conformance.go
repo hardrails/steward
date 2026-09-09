@@ -190,11 +190,25 @@ func (FilesystemQuotaProbe) Verify(ctx context.Context, mountpoint string, byteL
 		return err
 	}
 	defer func() { _ = file.Close(); _ = os.Remove(bytePath) }()
+	return verifyByteQuota(ctx, file, byteLimit)
+}
+
+type quotaProbeFile interface {
+	io.Writer
+	Sync() error
+}
+
+func verifyByteQuota(ctx context.Context, file quotaProbeFile, byteLimit int64) error {
 	block := make([]byte, 1<<20)
 	byteLimited := false
 	for written := int64(0); written < byteLimit+(4<<20); written += int64(len(block)) {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// ZFS stores zero blocks as holes. Fresh random data exercises allocated
+		// bytes even when compression or deduplication is enabled on the pool.
+		if _, err := rand.Read(block); err != nil {
+			return fmt.Errorf("generate quota probe data: %w", err)
 		}
 		count, writeErr := file.Write(block)
 		if writeErr != nil || count != len(block) {

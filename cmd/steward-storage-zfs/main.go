@@ -51,7 +51,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	version := flags.Bool("version", false, "print the Steward ZFS storage worker version and exit")
 	checkConfig := flags.Bool("check-config", false, "validate configuration and token files, then exit")
+	checkPackaged := flags.Bool("check-packaged-config", false, "read-only check of configuration, token migration, and packaged AppArmor prerequisites")
+	clientTokenFile := flags.String("client-token-file", "/etc/steward/storage-zfs-token", "Executor token file to compare during -check-packaged-config")
 	checkBackend := flags.Bool("check-backend", false, "destructively verify ZFS quotas, snapshots, clones, and Docker bindings, then exit")
+	migrateScope := flags.String("migrate-volume-access", "", "offline, root-only migration of one retained volume selected by a strict JSON scope file")
 	configPath := flags.String("config", "/etc/steward/storage-zfs.json", "strict ZFS storage worker configuration")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return 2
@@ -60,21 +63,35 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "steward-storage-zfs "+buildinfo.Resolve())
 		return 0
 	}
-	if *checkConfig && *checkBackend {
-		fmt.Fprintln(stderr, "steward-storage-zfs: -check-config and -check-backend are mutually exclusive")
+	if (*checkConfig && *checkBackend) || (*checkPackaged && (*checkConfig || *checkBackend)) ||
+		(*migrateScope != "" && (*checkConfig || *checkPackaged || *checkBackend)) {
+		fmt.Fprintln(stderr, "steward-storage-zfs: configuration and backend checks are mutually exclusive")
 		return 2
 	}
 	loaded, token, err := loadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "steward-storage-zfs: load configuration:", err)
+		if *checkPackaged {
+			fmt.Fprintln(stderr, "Packaged upgrade requires a root-owned 0600 storage-zfs-worker-token copy and token_file updated to that path; see the persistent-state upgrade guide. No services need to be stopped to run this check.")
+		}
 		return 2
+	}
+	if *checkPackaged {
+		if err := checkPackagedConfig(loaded, os.DirFS("/")); err != nil {
+			fmt.Fprintln(stderr, "steward-storage-zfs: packaged preflight:", err)
+			return 2
+		}
+		if err := checkPackagedToken(loaded.TokenFile, token, *clientTokenFile); err != nil {
+			fmt.Fprintln(stderr, "steward-storage-zfs: packaged token migration:", err)
+			return 2
+		}
 	}
 	backend, err := openBackend(loaded)
 	if err != nil {
 		fmt.Fprintln(stderr, "steward-storage-zfs: validate configuration:", err)
 		return 2
 	}
-	if *checkConfig {
+	if *checkConfig || *checkPackaged {
 		if _, err := storagebackend.NewHandler(backend, token); err != nil {
 			fmt.Fprintln(stderr, "steward-storage-zfs: validate token:", err)
 			return 2
@@ -88,6 +105,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer lock.Close()
+	if *migrateScope != "" {
+		return migrateVolume(ctx, backend, *migrateScope, stdout, stderr)
+	}
 	if err := backend.Initialize(ctx); err != nil {
 		fmt.Fprintln(stderr, "steward-storage-zfs: initialize backend:", err)
 		return 1

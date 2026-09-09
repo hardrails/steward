@@ -500,8 +500,10 @@ bundles.
 
 For a shared host, set all four `EXECUTOR_STATE_BACKEND_*` and
 `EXECUTOR_STATE_VOLUME_*` values in `/etc/steward/executor.env`. The worker token
-must be owned by `steward-executor` with mode `0600`; the root worker can read that
-file without widening its permissions. Start `steward-storage-zfs` before Executor.
+must be owned by `steward-executor` with mode `0600`. The confined root worker
+uses an identical root-owned `0600` copy at `/etc/steward/storage-zfs-worker-token`,
+so neither process needs permission to bypass file ownership. Start
+`steward-storage-zfs` before Executor.
 See [Configure quota-enforced persistent state]({{ '/guides/persistent-state/' |
 relative_url }}).
 
@@ -536,14 +538,39 @@ enable the worker automatically.
 | --- | --- |
 | `schema` | Must be `steward.storage-zfs.config.v1` |
 | `socket` | Protected Unix socket used by Executor |
-| `token_file` | Bearer token file; the packaged path is `/etc/steward/storage-zfs-token` |
+| `token_file` | Root-owned bearer token copy; packaged path `/etc/steward/storage-zfs-worker-token` |
 | `dataset_root` | Existing operator-selected ZFS parent reserved for Steward |
 | `mount_root` | Fixed parent for worker-created dataset mount points |
 | `docker_socket` | Docker Engine Unix socket used only for exact volume operations |
 | `zfs_binary` | Clean absolute path to the OpenZFS CLI |
 
+The packaged systemd unit requires AppArmor, reloads the policy from the selected
+verified release before each start, and launches the worker through `aa-exec`.
+The policy allows the packaged paths only. A custom path needs a reviewed policy
+and unit override; do not disable confinement. Existing worker configurations must
+migrate their token path to the root-owned copy above. See the persistent-state
+guide for startup and rotation order.
+
 `-check-config` validates the strict file, token, paths, Docker client construction,
-and ZFS executable without changing the pool. `-check-backend` additionally runs a
+and ZFS executable without changing the pool. `-check-packaged-config` additionally
+requires the stock policy paths, enabled kernel AppArmor, executable
+`apparmor_parser` and `aa-exec`, and a root-owned `0600` worker token copy matching
+the distinct Executor token. Supply Executor's actual path with
+`-client-token-file` (default `/etc/steward/storage-zfs-token`). This check is
+read-only and runs before node activation stops any services, as well as during
+normal node preflight. It does not load the policy; systemd must still load the
+selected release's policy successfully at startup. The three check modes are
+mutually exclusive.
+
+`-migrate-volume-access /absolute/scope.json` is a separate root-only offline mode.
+It takes the worker lifetime lock, rejects check-mode combinations and migrates
+one exact retained volume's legacy root permissions. It does not initialize the
+backend namespaces, run scratch conformance or serve requests. The bounded,
+owner-only strict JSON scope contains `volume_id`, `tenant_id`, `lineage_id` and
+`generation`. The [retained-volume migration procedure](../guides/persistent-state.md#migrate-retained-volume-roots-before-upgrading)
+defines quiescence, accepted permission states and refusal/recovery behavior.
+
+`-check-backend` runs a
 bounded destructive scratch test of quota exhaustion, snapshots, clones, Docker
 bindings, and cleanup. Normal startup runs the same conformance test before it
 signals systemd readiness and serves the authenticated storage protocol. The worker

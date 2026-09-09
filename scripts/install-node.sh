@@ -941,6 +941,7 @@ release_files=(
 	integration/deploy/config/steward-local.json
 	integration/deploy/config/steward.json
 	integration/deploy/config/storage-zfs.json.in
+	integration/deploy/config/storage-zfs.apparmor
 	integration/deploy/systemd/steward-executor.service
 	integration/deploy/systemd/steward-gateway.service
 	integration/deploy/systemd/steward-storage-zfs.service
@@ -1261,7 +1262,7 @@ for file in Dockerfile README.md package-lock.json package.json security.mjs ser
 		"$incoming/integration/workers/browser/$file"
 done
 for file in deploy/config/executor-gateway.env deploy/config/executor.env \
-	deploy/config/gateway.json.in deploy/config/steward-local.json deploy/config/steward.json deploy/config/storage-zfs.json.in \
+	deploy/config/gateway.json.in deploy/config/steward-local.json deploy/config/steward.json deploy/config/storage-zfs.json.in deploy/config/storage-zfs.apparmor \
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service deploy/systemd/steward-storage-zfs.service \
 	deploy/systemd/steward.service; do
 	install -o root -g root -m 0644 "$root/$file" "$incoming/integration/$file"

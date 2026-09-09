@@ -20,10 +20,44 @@ import (
 
 const maxDockerResponseBytes = 1 << 20
 
+// bindingNotCreatedError certifies that Ensure failed before sending any create
+// request. Other errors are uncertain, regardless of the returned changed flag.
+type bindingNotCreatedError struct{ error }
+
+func (err bindingNotCreatedError) Unwrap() error { return err.error }
+
 // DockerBinder exposes a fixed, local-driver named-volume lifecycle over one
-// owner-selected Docker Unix socket. It has no container, image, network, or
-// general Docker request method.
+// owner-selected Docker Unix socket. Container access is limited to a read-only
+// reference check for offline migration; it cannot run containers or images.
 type DockerBinder struct{ client *http.Client }
+
+// CheckUnused rejects references from running AND stopped containers. It is a
+// point-in-time check: operators must quiesce container creators for maintenance.
+func (binder *DockerBinder) CheckUnused(ctx context.Context, handle string) error {
+	if !validDockerHandle(handle) {
+		return ErrBindingConflict
+	}
+	filters, err := json.Marshal(map[string][]string{"volume": {handle}})
+	if err != nil {
+		return err
+	}
+	query := url.Values{"all": {"1"}, "filters": {string(filters)}}
+	status, raw, err := binder.call(ctx, http.MethodGet, "/v1.41/containers/json?"+query.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return dockerStatusError(status)
+	}
+	var containers []json.RawMessage
+	if err := json.Unmarshal(raw, &containers); err != nil || containers == nil {
+		return errors.New("Docker reference check returned an invalid container list")
+	}
+	if len(containers) != 0 {
+		return ErrBindingInUse
+	}
+	return nil
+}
 
 func NewDockerBinder(socketPath string) (*DockerBinder, error) {
 	if socketPath == "" || !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath ||
@@ -47,17 +81,21 @@ func NewDockerBinder(socketPath string) (*DockerBinder, error) {
 
 func newDockerBinder(client *http.Client) *DockerBinder { return &DockerBinder{client: client} }
 
+// Ensure reports a newly created binding only after verification. An error with
+// false does not prove that Docker did not commit: callers must retain the source
+// dataset until exact replay or explicit, verified deletion resolves the binding.
+// Only bindingNotCreatedError proves this invocation could not create a binding.
 func (binder *DockerBinder) Ensure(ctx context.Context, binding Binding) (bool, error) {
 	if err := validateBinding(binding); err != nil {
-		return false, err
+		return false, bindingNotCreatedError{err}
 	}
 	if existing, err := binder.Inspect(ctx, binding.Handle); err == nil {
 		if !sameBinding(existing, binding) {
-			return false, ErrBindingConflict
+			return false, bindingNotCreatedError{ErrBindingConflict}
 		}
 		return false, nil
 	} else if !errors.Is(err, ErrBindingNotFound) {
-		return false, err
+		return false, bindingNotCreatedError{err}
 	}
 	body, err := json.Marshal(struct {
 		Name       string            `json:"Name"`
@@ -70,7 +108,7 @@ func (binder *DockerBinder) Ensure(ctx context.Context, binding Binding) (bool, 
 		Labels:     cloneStringMap(binding.Labels),
 	})
 	if err != nil {
-		return false, err
+		return false, bindingNotCreatedError{err}
 	}
 	status, _, err := binder.call(ctx, http.MethodPost, "/v1.41/volumes/create", body)
 	if err != nil {
@@ -104,12 +142,25 @@ func (binder *DockerBinder) Inspect(ctx context.Context, handle string) (Binding
 		return Binding{}, dockerStatusError(status)
 	}
 	var response struct {
-		Name    string          `json:"Name"`
-		Driver  string          `json:"Driver"`
-		Labels  json.RawMessage `json:"Labels"`
-		Options json.RawMessage `json:"Options"`
+		Name       string                     `json:"Name"`
+		Driver     string                     `json:"Driver"`
+		Mountpoint string                     `json:"Mountpoint"`
+		CreatedAt  string                     `json:"CreatedAt"`
+		Scope      string                     `json:"Scope"`
+		Status     map[string]json.RawMessage `json:"Status"`
+		Labels     json.RawMessage            `json:"Labels"`
+		Options    json.RawMessage            `json:"Options"`
+		UsageData  *struct {
+			Size     int64 `json:"Size"`
+			RefCount int64 `json:"RefCount"`
+		} `json:"UsageData"`
 	}
-	if err := dsse.DecodeStrictInto(raw, maxDockerResponseBytes, &response); err != nil || response.Driver != "local" {
+	// Decode the complete Engine v1.41 Volume shape. Daemon metadata does not
+	// choose a source path: the exact local bind still comes from Options.device.
+	if err := dsse.DecodeStrictInto(raw, maxDockerResponseBytes, &response); err != nil ||
+		response.Driver != "local" || response.Scope != "local" ||
+		!filepath.IsAbs(response.Mountpoint) || filepath.Clean(response.Mountpoint) != response.Mountpoint ||
+		response.Mountpoint == "/" || len(response.Mountpoint) > 4096 || strings.ContainsRune(response.Mountpoint, '\x00') {
 		return Binding{}, ErrBindingConflict
 	}
 	options, err := decodeStringMap(response.Options, 8)

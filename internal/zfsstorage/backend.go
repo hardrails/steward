@@ -59,17 +59,19 @@ type Config struct {
 	Runner      Runner
 	Binder      VolumeBinder
 	QuotaProbe  QuotaProbe
+	MountAccess MountAccess
 	Now         func() time.Time
 }
 
 type Backend struct {
-	root       string
-	mountRoot  string
-	runner     Runner
-	binder     VolumeBinder
-	quotaProbe QuotaProbe
-	now        func() time.Time
-	mu         sync.Mutex
+	root        string
+	mountRoot   string
+	runner      Runner
+	binder      VolumeBinder
+	quotaProbe  QuotaProbe
+	mountAccess MountAccess
+	now         func() time.Time
+	mu          sync.Mutex
 }
 
 func New(config Config) (*Backend, error) {
@@ -87,9 +89,13 @@ func New(config Config) (*Backend, error) {
 	if probe == nil {
 		probe = FilesystemQuotaProbe{}
 	}
+	access := config.MountAccess
+	if access == nil {
+		access = FilesystemMountAccess{}
+	}
 	return &Backend{
 		root: config.DatasetRoot, mountRoot: config.MountRoot, runner: config.Runner,
-		binder: config.Binder, quotaProbe: probe, now: now,
+		binder: config.Binder, quotaProbe: probe, mountAccess: access, now: now,
 	}, nil
 }
 
@@ -183,7 +189,13 @@ func (backend *Backend) DeleteVolume(ctx context.Context, request storagebackend
 			return storagebackend.Volume{}, false, storagebackend.ErrInUse
 		}
 	}
-	if _, err := backend.binder.Delete(ctx, record.DockerHandle); err != nil && !errors.Is(err, ErrBindingNotFound) {
+	// A retained creation record is not proof that the current Docker handle
+	// still belongs to it. Never delete a conflicting or unobservable binding.
+	if err := backend.bindingMatches(ctx, record); err == nil {
+		if _, err := backend.binder.Delete(ctx, record.DockerHandle); err != nil && !errors.Is(err, ErrBindingNotFound) {
+			return storagebackend.Volume{}, false, mapBindingError(err)
+		}
+	} else if !errors.Is(err, ErrBindingNotFound) {
 		return storagebackend.Volume{}, false, mapBindingError(err)
 	}
 	if record.DeleteRequestID == "" {
@@ -455,20 +467,22 @@ func (backend *Backend) createVolumeLocked(ctx context.Context, request storageb
 	if _, err := backend.runner.Run(ctx, "project", "-p", strconv.FormatUint(uint64(record.ProjectID), 10), "-rs", mountpoint); err != nil {
 		return storagebackend.Volume{}, false, mapCommandError(err)
 	}
-	bindingCreated, err := backend.ensureBinding(ctx, record)
-	if err != nil {
-		return storagebackend.Volume{}, false, err
+	if err := backend.mountAccess.Prepare(mountpoint); err != nil {
+		return storagebackend.Volume{}, false, fmt.Errorf("prepare runtime state mount: %w", err)
 	}
-	defer func() {
-		if cleanup && bindingCreated {
-			_, _ = backend.binder.Delete(context.Background(), record.DockerHandle)
-		}
-	}()
+	// Docker can commit before its response or verification fails. Retain the
+	// fully prepared dataset once binding begins; exact-request replay reconciles
+	// it without replacing state or deleting an uncertain/foreign Docker binding.
+	if _, err := backend.binder.Ensure(ctx, backend.binding(record)); err != nil {
+		var notCreated bindingNotCreatedError
+		cleanup = errors.As(err, &notCreated)
+		return storagebackend.Volume{}, false, mapBindingError(err)
+	}
+	cleanup = false
 	projection, err := backend.inspectVolumeRecord(ctx, dataset, record)
 	if err != nil {
 		return storagebackend.Volume{}, false, err
 	}
-	cleanup = false
 	return projection, true, nil
 }
 
@@ -495,6 +509,9 @@ func (backend *Backend) inspectVolumeRecord(ctx context.Context, location string
 	}
 	if !found || properties["mountpoint"] != backend.volumeMountpoint(record.Volume.Scope()) {
 		return storagebackend.Volume{}, storagebackend.ErrConflict
+	}
+	if err := backend.mountAccess.Verify(properties["mountpoint"]); err != nil {
+		return storagebackend.Volume{}, fmt.Errorf("verify runtime state mount: %w", err)
 	}
 	usedBytes, err := parseNonnegative(properties["projectused@"+strconv.FormatUint(uint64(record.ProjectID), 10)])
 	if err != nil {

@@ -23,12 +23,37 @@ dedicated single-tenant host.
 
 ## Before you begin
 
+The packaged worker requires AppArmor and runs in the host mount namespace so
+Docker sees its ZFS mounts. A private mount namespace can pass worker-local checks
+while Docker binds the underlying, unquotaed directory. Do not add namespace-based
+hardening to this unit or bypass the mandatory profile. Before attaching tenant
+work on a new host image, prove that Docker receives the mounted ZFS dataset and
+that the sandbox runtime UID can write there and exhaust both quotas.
+
+An Ubuntu 24.04 development deployment passed byte/object quota exhaustion from
+gVisor, retained a marker across container replacement, and denied changes to
+root-directory permissions. AppArmor also denied off-allowlist reads and mounts.
+These results do not qualify every distribution, a production storage topology,
+or a changed runtime source revision. Release qualification is a separate gate.
+
+New and cloned roots are prepared as `root:65532` mode `0770`: the fixed runtime
+group can create state, but the agent cannot chmod the dataset root. Preparation
+requires `CAP_CHOWN` in the separate worker, in addition to ZFS administration.
+Before changing ownership, the worker opens the directory without following a
+final symlink and requires a distinct ZFS mount, not an underlying host directory
+or an ordinary subdirectory on a ZFS-backed host. Inspection rejects changed
+ownership or mode; replay does not silently repair it. The default access verifier
+fails closed on non-Linux platforms. Deterministic tests inject a mount accessor;
+that fake is not evidence of kernel quota enforcement.
+
 You need:
 
 - a Linux node installed from a Steward node package;
 - Docker and gVisor configured as described in the
   [node setup guide]({{ '/getting-started/' | relative_url }});
 - OpenZFS installed by the operating-system administrator;
+- an AppArmor-enabled kernel, `/usr/sbin/apparmor_parser` and `/usr/bin/aa-exec`
+  (on Ubuntu, provided by the `apparmor` package);
 - an existing ZFS parent dataset reserved for Steward, such as
   `tank/steward`; and
 - complete signed-admission configuration.
@@ -42,12 +67,14 @@ administrator's control.
 The following example selects `tank/steward` and applies the packaged defaults: a
 10 GiB byte limit and 1,000,000-object limit for each lineage.
 
-1. Create an authentication token that only Executor can read:
+1. Create an owner-only Executor token and a separate root-owned worker copy:
 
    ```bash
    sudo install -d -o root -g root -m 0755 /etc/steward
    openssl rand -hex 32 | sudo install -o steward-executor -g steward-executor \
      -m 0600 /dev/stdin /etc/steward/storage-zfs-token
+   sudo install -o root -g root -m 0600 /etc/steward/storage-zfs-token \
+     /etc/steward/storage-zfs-worker-token
    ```
 
 2. Install the worker configuration and replace the dataset placeholder:
@@ -75,23 +102,111 @@ The following example selects `tank/steward` and applies the packaged defaults: 
 
    ```bash
    sudo steward-storage-zfs -check-config
-   sudo steward-storage-zfs -check-backend
    sudo systemctl enable --now steward-storage-zfs
    sudo /usr/local/libexec/steward/node-preflight
    sudo systemctl restart steward-executor
    sudo /usr/local/libexec/steward/node-doctor
    ```
 
-`-check-backend` is intentionally mutating. It creates a random scratch lineage,
+Normal service startup is intentionally mutating. It creates a random scratch lineage,
 proves real byte and object quota exhaustion, then exercises snapshot, clone,
 Docker binding, and deletion. It removes the scratch objects before returning.
-Normal worker startup repeats this test and does not signal systemd readiness until
-it passes. Executor therefore starts only after the configured host substrate is
-qualified.
+It does not signal systemd readiness until these checks pass. Running
+`steward-storage-zfs -check-backend` directly repeats the backend check but does not
+prove the packaged service's confinement or the sandbox boundary.
+
+Before each worker start, systemd loads the policy from the selected immutable
+release, then `aa-exec` starts the worker under that profile. An invalid policy
+fails startup even if an older profile is already loaded; a missing profile does
+not fall back to an unconfined worker. The policy is part of the verified node
+payload. Only the fixed policy-loading command receives unrestricted host
+privilege; the serving process does not.
+
+The policy permits only the packaged configuration, token, binary, socket and
+state paths. Custom paths require a separately reviewed policy and unit override,
+not a broader wildcard. Existing configurations that point the worker at
+`storage-zfs-token` must migrate to the root-owned copy before starting this unit.
+Node activation runs the target binary's read-only `-check-packaged-config` before
+stopping any service. It refuses legacy paths, a missing or mismatched token copy,
+or missing AppArmor kernel/userspace support. It does not rotate credentials or
+repair configuration automatically.
+
+Before upgrading an existing stock installation:
+
+1. Install the host's AppArmor userspace tools and enable AppArmor in the kernel.
+   Both `/usr/sbin/apparmor_parser` and `/usr/bin/aa-exec` must be executable.
+2. Keep the current Executor token unchanged. If the worker copy does not exist,
+   copy that token to `/etc/steward/storage-zfs-worker-token` with owner `root:root`
+   and mode `0600`, using the `install` command from the setup instructions above.
+   If the copy already exists, compare it with `sudo cmp --silent` rather than
+   overwriting it. Investigate a mismatch; do not rotate a live worker's token.
+3. Use `sudoedit /etc/steward/storage-zfs.json` to change only `token_file` to the
+   new worker-copy path. Preserve the dataset, limits and existing token value.
+   Run the **target release's** `steward-storage-zfs -check-packaged-config`, with
+   `-client-token-file` pointing to Executor's configured token file. Correct any
+   error before retrying activation. This check leaves the running worker alone.
+
+These checks validate the stock unit and its fixed policy paths. Automated stock
+activation rejects custom paths even when an operator has a policy override;
+such installations need a separately reviewed deployment procedure, not a bypass
+that silently starts an unconfined service.
+
+For token rotation, quiesce storage callers, stop Executor and the worker, replace
+both owner-only copies with the same new value, then start the worker before
+Executor. Never put tokens in commands, service arguments, logs or agent files.
 
 The worker creates only fixed `volumes` and `tombstones` children beneath the
 selected parent. After qualification, it creates a tenant dataset lazily when
 Executor admits a signed workload that requests state.
+
+## Migrate retained volume roots before upgrading
+
+Releases that created ZFS roots as `root:root 0755` require an explicit offline
+migration before you resume their workspaces under the sandbox-group contract.
+Normal inspection and create replay never repair permissions. Back up retained
+state and keep all workload/container creators and host writers quiesced throughout
+the procedure. Stop or park workloads through their authorized lifecycle, remove
+their container references through that lifecycle, and stop Executor and the
+storage worker. A stopped container still counts as a reference.
+
+Create an owner-only JSON file with the exact retained volume scope, for example:
+
+```json
+{"volume_id":"retained-volume","tenant_id":"tenant-a","lineage_id":"lineage-a","generation":1}
+```
+
+Use the values from the retained admission/storage record, not IDs inferred from
+hashed dataset names. The migration accepts no host path, ownership choice or
+quota override. Use the target release binary, before switching the active release:
+
+```bash
+sudo install -d -o root -g steward-executor -m 0750 /run/steward-storage-zfs
+sudo /opt/steward/releases/vX.Y.Z/steward-storage-zfs \
+  -config /etc/steward/storage-zfs.json \
+  -migrate-volume-access /root/retained-volume-scope.json
+```
+
+Replace `vX.Y.Z` with your verified staged version. The scope file must be regular,
+owner-only, bounded and non-symlink. The command holds the serving worker's lifetime
+lock and verifies tenant, lineage, generation, deterministic references, quotas,
+mount point and Docker binding. Docker must confirm that no running or stopped
+container references the binding. This is a point-in-time check, not a lock against
+other root-equivalent Docker clients; keep those clients and host writers stopped.
+
+Only the distinct ZFS mount root changes, from `root:root 0755` to
+`root:65532 0770`. An interrupted `root:65532 0755` transition resumes; an already
+migrated root is a no-op. Other ownership/mode combinations require investigation
+and are refused. The command never recursively changes files, edits ZFS records,
+changes limits, deletes/recreates bindings or alters snapshots. Repeat the command
+for each retained volume before completing the upgrade. If it fails, keep work
+parked and investigate the named boundary; do not use recursive `chown` or weaken
+inspection. After successful migration and target preflight, activate the release,
+start the worker before Executor, and resume through the normal signed lifecycle.
+
+The opt-in Linux test `TestOfflineVolumeMigrationOnRealZFS` proves CLI lock refusal,
+running/stopped container refusal, migration/replay and preservation of contents,
+file ownership/modes, identity, quotas and snapshots on a disposable child dataset.
+It does not claim that arbitrary host processes are fenced by Docker's check.
 
 ## Verify enforcement
 
@@ -106,6 +221,23 @@ The dataset name is a hash, not a tenant name. Steward records the exact tenant,
 lineage, generation, limits, and request identity in a bounded ZFS user property.
 Do not infer ownership from the dataset name or edit that property manually.
 
+If Docker creation was attempted and binding or verification fails, the worker
+retains the prepared dataset and its exact creation record. A lost Docker acknowledgement
+does not prove that creation failed. Retry the original request after restoring
+connectivity; the worker verifies and reuses the retained state without replacing
+its files. A changed request or conflicting Docker binding is rejected. Reconcile
+conflicts explicitly; replay never deletes or adopts another binding. Use normal
+volume deletion when you intend to discard a reconciled volume. A definite failure
+before the Docker create request (including an existing conflicting handle) cleans
+up only the newly created dataset and does not retain deletion authority. Deletion
+checks the current source and labels against the retained record; a conflict or
+failed inspection preserves both the dataset and binding. A confirmed missing
+binding permits cleanup and replay after a lost delete acknowledgement.
+
+Docker does not offer conditional volume deletion. Ownership inspection is a
+point-in-time check, not a fence against other root-equivalent Docker clients.
+Do not concurrently replace Steward-managed handles with out-of-band Docker tools.
+
 Executor also checks the worker's advertised capabilities at startup. It refuses
 qualified state if the backend does not report hard byte and object quotas,
 crash-safe metadata, immutable cold snapshots, copy-on-write clones, and exact
@@ -115,9 +247,11 @@ Docker configuration behind that claim.
 ## What the worker is trusted to do
 
 `steward-storage-zfs` runs as root because OpenZFS administration requires host
-authority. Its systemd service bounds the process to `CAP_SYS_ADMIN`, a protected
-runtime directory, the configured state path, Unix sockets, and the packaged
-binary. It can still affect the selected ZFS pool and can reach Docker's
+authority. Its systemd service bounds the worker to `CAP_SYS_ADMIN` and `CAP_CHOWN`,
+with no new privileges and Unix sockets only. AppArmor confines filesystem access,
+executables and mount targets without hiding those mounts from Docker. This is
+not per-dataset authorization of ZFS ioctls: the worker can still affect ZFS and
+can reach Docker's
 root-equivalent socket. Treat the worker, Docker daemon, OpenZFS, Linux kernel, and
 host root as trusted node infrastructure.
 

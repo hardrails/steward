@@ -1,7 +1,7 @@
 {
   "schema": "steward.storage-zfs.config.v1",
   "socket": "/run/steward-storage-zfs/storage.sock",
-  "token_file": "/etc/steward/storage-zfs-token",
+  "token_file": "/etc/steward/storage-zfs-worker-token",
   "dataset_root": "@ZFS_DATASET_ROOT@",
   "mount_root": "/var/lib/steward-state",
   "docker_socket": "/var/run/docker.sock",

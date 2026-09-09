@@ -20,7 +20,7 @@ import (
 func TestBackendLifecycleIsScopedDurableAndIdempotent(t *testing.T) {
 	runner := newFakeZFS("tank/steward")
 	binder := &fakeBinder{bindings: make(map[string]Binding)}
-	backend, err := New(Config{
+	backend, err := newTestBackend(Config{
 		DatasetRoot: "tank/steward", MountRoot: "/var/lib/steward-state",
 		Runner: runner, Binder: binder,
 		Now: func() time.Time { return time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC) },
@@ -126,7 +126,7 @@ func TestBackendConformanceExercisesQualifiedLifecycle(t *testing.T) {
 	runner := newFakeZFS("tank/steward")
 	binder := &fakeBinder{bindings: make(map[string]Binding)}
 	probe := &recordingQuotaProbe{}
-	backend, err := New(Config{
+	backend, err := newTestBackend(Config{
 		DatasetRoot: "tank/steward", MountRoot: "/var/lib/steward-state",
 		Runner: runner, Binder: binder, QuotaProbe: probe,
 		Now: func() time.Time { return time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC) },
@@ -140,6 +140,9 @@ func TestBackendConformanceExercisesQualifiedLifecycle(t *testing.T) {
 	}
 	if err := backend.VerifyConformance(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if len(backend.mountAccess.(*fakeMountAccess).prepared) != 2 {
+		t.Fatal("conformance did not prepare both fresh and cloned roots")
 	}
 	if probe.calls != 1 || probe.byteLimit != conformanceByteLimit || probe.objectLimit != conformanceObjectLimit ||
 		!strings.HasPrefix(probe.mountpoint, "/var/lib/steward-state/v-") {
@@ -210,11 +213,11 @@ func TestBackendRejectsUnsafeConfigurationAndScopeCollisions(t *testing.T) {
 		{DatasetRoot: "tank/steward", MountRoot: "relative", Runner: runner, Binder: binder},
 		{DatasetRoot: "tank/steward", MountRoot: "/", Runner: runner, Binder: binder},
 	} {
-		if _, err := New(config); err == nil {
+		if _, err := newTestBackend(config); err == nil {
 			t.Fatalf("unsafe config accepted: %+v", config)
 		}
 	}
-	backend, err := New(Config{DatasetRoot: "tank/steward", MountRoot: "/state", Runner: runner, Binder: binder})
+	backend, err := newTestBackend(Config{DatasetRoot: "tank/steward", MountRoot: "/state", Runner: runner, Binder: binder})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +468,7 @@ func TestBackendPropertyReaderRejectsAmbiguousZFSOutput(t *testing.T) {
 		"missing":   "other\tvalue\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			backend, err := New(Config{
+			backend, err := newTestBackend(Config{
 				DatasetRoot: "tank/steward", MountRoot: "/state",
 				Runner: runnerFunc(func(context.Context, ...string) ([]byte, error) { return []byte(output), nil }),
 				Binder: &fakeBinder{bindings: make(map[string]Binding)},
@@ -483,7 +486,7 @@ func TestBackendPropertyReaderRejectsAmbiguousZFSOutput(t *testing.T) {
 		"failure": &CommandError{Stderr: "I/O failure", Err: errors.New("exit 1")},
 	} {
 		t.Run(name, func(t *testing.T) {
-			backend, err := New(Config{
+			backend, err := newTestBackend(Config{
 				DatasetRoot: "tank/steward", MountRoot: "/state",
 				Runner: runnerFunc(func(context.Context, ...string) ([]byte, error) { return nil, failure }),
 				Binder: &fakeBinder{bindings: make(map[string]Binding)},
@@ -714,7 +717,7 @@ func TestBackendInitializationRejectsConflictingRootDataset(t *testing.T) {
 	runner.datasets["tank/steward/volumes"] = &fakeDataset{properties: map[string]string{
 		"type": "volume", "canmount": "off", "mountpoint": "none",
 	}}
-	backend, err := New(Config{
+	backend, err := newTestBackend(Config{
 		DatasetRoot: "tank/steward", MountRoot: "/state", Runner: runner,
 		Binder: &fakeBinder{bindings: make(map[string]Binding)},
 	})
@@ -809,7 +812,7 @@ func TestBackendRejectsAdditionalCorruptMetadataAndHelperFailures(t *testing.T) 
 
 	base := newFakeZFS("tank/steward")
 	failing := &failingRunner{base: base, command: "create"}
-	uninitialized, err := New(Config{
+	uninitialized, err := newTestBackend(Config{
 		DatasetRoot: "tank/steward", MountRoot: "/state", Runner: failing,
 		Binder: &fakeBinder{bindings: make(map[string]Binding)},
 	})
@@ -845,7 +848,7 @@ func newBackendFixture(t *testing.T) (*Backend, *fakeZFS, *fakeBinder) {
 	t.Helper()
 	runner := newFakeZFS("tank/steward")
 	binder := &fakeBinder{bindings: make(map[string]Binding)}
-	backend, err := New(Config{DatasetRoot: "tank/steward", MountRoot: "/state", Runner: runner, Binder: binder,
+	backend, err := newTestBackend(Config{DatasetRoot: "tank/steward", MountRoot: "/state", Runner: runner, Binder: binder,
 		Now: func() time.Time { return time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC) }})
 	if err != nil {
 		t.Fatal(err)
