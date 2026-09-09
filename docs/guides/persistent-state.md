@@ -23,6 +23,16 @@ dedicated single-tenant host.
 
 ## Before you begin
 
+**Current deployment limitation:** a live systemd test found that namespace
+hardening can keep the worker's ZFS mounts invisible to the Docker daemon. The
+worker's own quota/snapshot checks can pass while a container receives the
+underlying, unquotaed host directory. Do not treat startup readiness as complete
+workload-storage qualification. Before attaching tenant work, prove from the
+daemon's host namespace that the named volume source is the intended mounted ZFS
+dataset, then prove the sandbox's runtime UID can write there and exhaust both
+quotas. Do not bypass this failure with world-writable paths, an unquotaed fallback,
+or an unreviewed removal of service isolation.
+
 You need:
 
 - a Linux node installed from a Steward node package;
