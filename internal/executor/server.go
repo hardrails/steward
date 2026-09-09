@@ -578,7 +578,7 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 				writeStateBackendError(w, err)
 				return
 			}
-			workload.State = &StateMount{VolumeName: plan.DockerVolumeHandle, Path: effective.Capsule.State.Path}
+			workload.State = &StateMount{VolumeName: plan.DockerVolumeHandle, Path: effective.Capsule.State.Path, NoCopy: true}
 		case !s.secure.allowUnquotaedState:
 			writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is disabled because the configured Docker volume has no hard byte or inode quota")
 			return

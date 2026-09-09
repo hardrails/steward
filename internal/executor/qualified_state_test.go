@@ -35,6 +35,9 @@ func TestQualifiedStateBackendCreatesReconcilesAndPurgesLineage(t *testing.T) {
 	if response.Code != http.StatusCreated || docker.observed == nil || docker.observed.Workload.State == nil || docker.volume != nil {
 		t.Fatalf("admit status=%d docker=%+v body=%s", response.Code, docker, response.Body.String())
 	}
+	if !docker.observed.Workload.State.NoCopy {
+		t.Fatal("qualified backend root must not be replaced by image copy-up")
+	}
 	spec := server.qualifiedStateSpec(intent.TenantID, intent.LineageID)
 	if spec.ByteLimit != config.StateVolumeByteLimit || spec.ObjectLimit != config.StateVolumeObjectLimit {
 		t.Fatalf("state spec = %+v", spec)

@@ -174,6 +174,7 @@ const managedStateLabel = "io.hardrails.state.managed"
 const stateLineageLabel = "io.hardrails.state.lineage"
 const stateVolumeLabel = "io.hardrails.state.volume"
 const statePathLabel = "io.hardrails.state.path"
+const stateNoCopyLabel = "io.hardrails.state.no-copy"
 const runtimeNetworkLabel = "io.hardrails.runtime.network"
 const runtimeGrantLabel = "io.hardrails.runtime.grant"
 const runtimeNodeIDLabel = "io.hardrails.runtime.node-id"
@@ -742,6 +743,10 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		mounts = []map[string]any{{
 			"Type": "volume", "Source": w.State.VolumeName, "Target": w.State.Path, "ReadOnly": false,
 		}}
+		if w.State.NoCopy {
+			mounts[0]["VolumeOptions"] = map[string]any{"NoCopy": true}
+			labels[stateNoCopyLabel] = "true"
+		}
 		labels[stateVolumeLabel] = w.State.VolumeName
 		labels[statePathLabel] = w.State.Path
 	}
@@ -883,21 +888,29 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		} `json:"Config"`
 		HostConfig struct {
 			dockerClosedHostPolicy
-			Memory          int64                      `json:"Memory"`
-			MemorySwap      int64                      `json:"MemorySwap"`
-			NanoCPUs        int64                      `json:"NanoCpus"`
-			Pids            int64                      `json:"PidsLimit"`
-			Runtime         string                     `json:"Runtime"`
-			NetworkMode     string                     `json:"NetworkMode"`
-			Readonly        bool                       `json:"ReadonlyRootfs"`
-			CapDrop         []string                   `json:"CapDrop"`
-			SecurityOpt     []string                   `json:"SecurityOpt"`
-			Tmpfs           map[string]string          `json:"Tmpfs"`
-			ExtraHosts      []string                   `json:"ExtraHosts"`
-			DNS             []string                   `json:"Dns"`
-			Privileged      bool                       `json:"Privileged"`
-			CapAdd          []string                   `json:"CapAdd"`
-			Binds           []string                   `json:"Binds"`
+			Memory      int64             `json:"Memory"`
+			MemorySwap  int64             `json:"MemorySwap"`
+			NanoCPUs    int64             `json:"NanoCpus"`
+			Pids        int64             `json:"PidsLimit"`
+			Runtime     string            `json:"Runtime"`
+			NetworkMode string            `json:"NetworkMode"`
+			Readonly    bool              `json:"ReadonlyRootfs"`
+			CapDrop     []string          `json:"CapDrop"`
+			SecurityOpt []string          `json:"SecurityOpt"`
+			Tmpfs       map[string]string `json:"Tmpfs"`
+			ExtraHosts  []string          `json:"ExtraHosts"`
+			DNS         []string          `json:"Dns"`
+			Privileged  bool              `json:"Privileged"`
+			CapAdd      []string          `json:"CapAdd"`
+			Binds       []string          `json:"Binds"`
+			Mounts      []struct {
+				Type          string `json:"Type"`
+				Source        string `json:"Source"`
+				Target        string `json:"Target"`
+				VolumeOptions struct {
+					NoCopy bool `json:"NoCopy"`
+				} `json:"VolumeOptions"`
+			} `json:"Mounts"`
 			Devices         []json.RawMessage          `json:"Devices"`
 			DeviceRequests  []json.RawMessage          `json:"DeviceRequests"`
 			PortBindings    map[string]json.RawMessage `json:"PortBindings"`
@@ -940,16 +953,29 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			payload.Config.Image == configuredRuntimeID && payload.Image == configuredRuntimeID
 	}
 	var state *StateMount
-	stateHardened := labels[stateVolumeLabel] == "" && labels[statePathLabel] == "" &&
+	stateHardened := labels[stateVolumeLabel] == "" && labels[statePathLabel] == "" && labels[stateNoCopyLabel] == "" &&
 		payload.Config.WorkingDir == "/workspace" && contains(payload.Config.Env, "HOME=/workspace") &&
 		exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs, "/workspace": workspaceTmpfs}) && len(payload.Mounts) == 0
 	if labels[stateVolumeLabel] != "" || labels[statePathLabel] != "" {
 		state = &StateMount{VolumeName: labels[stateVolumeLabel], Path: labels[statePathLabel]}
+		state.NoCopy = labels[stateNoCopyLabel] == "true"
+		copyPolicyHardened := labels[stateNoCopyLabel] == "" || state.NoCopy
+		if state.NoCopy {
+			copyPolicyHardened = len(payload.HostConfig.Mounts) == 1 &&
+				payload.HostConfig.Mounts[0].Type == "volume" &&
+				payload.HostConfig.Mounts[0].Source == state.VolumeName &&
+				payload.HostConfig.Mounts[0].Target == state.Path &&
+				payload.HostConfig.Mounts[0].VolumeOptions.NoCopy
+		} else {
+			for _, mount := range payload.HostConfig.Mounts {
+				copyPolicyHardened = copyPolicyHardened && !mount.VolumeOptions.NoCopy
+			}
+		}
 		layout := profileLayoutFor(labels["io.hardrails.profile"])
 		// Qualified backends own opaque handles (for example steward-zfs-*).
 		// The mount must match exactly; admission separately binds this handle
 		// to the signed tenant lineage and the backend's retained volume spec.
-		stateHardened = state.Path == layout.StatePath && validStateVolumeHandle(state.VolumeName) &&
+		stateHardened = copyPolicyHardened && state.Path == layout.StatePath && validStateVolumeHandle(state.VolumeName) &&
 			payload.Config.WorkingDir == layout.WorkDir && contains(payload.Config.Env, "HOME="+layout.Home) &&
 			exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs}) && hasExactStateMount(payload.Mounts, *state)
 	}
