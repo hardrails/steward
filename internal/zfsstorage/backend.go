@@ -59,17 +59,19 @@ type Config struct {
 	Runner      Runner
 	Binder      VolumeBinder
 	QuotaProbe  QuotaProbe
+	MountAccess MountAccess
 	Now         func() time.Time
 }
 
 type Backend struct {
-	root       string
-	mountRoot  string
-	runner     Runner
-	binder     VolumeBinder
-	quotaProbe QuotaProbe
-	now        func() time.Time
-	mu         sync.Mutex
+	root        string
+	mountRoot   string
+	runner      Runner
+	binder      VolumeBinder
+	quotaProbe  QuotaProbe
+	mountAccess MountAccess
+	now         func() time.Time
+	mu          sync.Mutex
 }
 
 func New(config Config) (*Backend, error) {
@@ -87,9 +89,13 @@ func New(config Config) (*Backend, error) {
 	if probe == nil {
 		probe = FilesystemQuotaProbe{}
 	}
+	access := config.MountAccess
+	if access == nil {
+		access = FilesystemMountAccess{}
+	}
 	return &Backend{
 		root: config.DatasetRoot, mountRoot: config.MountRoot, runner: config.Runner,
-		binder: config.Binder, quotaProbe: probe, now: now,
+		binder: config.Binder, quotaProbe: probe, mountAccess: access, now: now,
 	}, nil
 }
 
@@ -455,6 +461,9 @@ func (backend *Backend) createVolumeLocked(ctx context.Context, request storageb
 	if _, err := backend.runner.Run(ctx, "project", "-p", strconv.FormatUint(uint64(record.ProjectID), 10), "-rs", mountpoint); err != nil {
 		return storagebackend.Volume{}, false, mapCommandError(err)
 	}
+	if err := backend.mountAccess.Prepare(mountpoint); err != nil {
+		return storagebackend.Volume{}, false, fmt.Errorf("prepare runtime state mount: %w", err)
+	}
 	bindingCreated, err := backend.ensureBinding(ctx, record)
 	if err != nil {
 		return storagebackend.Volume{}, false, err
@@ -495,6 +504,9 @@ func (backend *Backend) inspectVolumeRecord(ctx context.Context, location string
 	}
 	if !found || properties["mountpoint"] != backend.volumeMountpoint(record.Volume.Scope()) {
 		return storagebackend.Volume{}, storagebackend.ErrConflict
+	}
+	if err := backend.mountAccess.Verify(properties["mountpoint"]); err != nil {
+		return storagebackend.Volume{}, fmt.Errorf("verify runtime state mount: %w", err)
 	}
 	usedBytes, err := parseNonnegative(properties["projectused@"+strconv.FormatUint(uint64(record.ProjectID), 10)])
 	if err != nil {
