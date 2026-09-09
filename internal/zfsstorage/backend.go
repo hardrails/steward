@@ -464,20 +464,17 @@ func (backend *Backend) createVolumeLocked(ctx context.Context, request storageb
 	if err := backend.mountAccess.Prepare(mountpoint); err != nil {
 		return storagebackend.Volume{}, false, fmt.Errorf("prepare runtime state mount: %w", err)
 	}
-	bindingCreated, err := backend.ensureBinding(ctx, record)
-	if err != nil {
+	// Docker can commit before its response or verification fails. Retain the
+	// fully prepared dataset once binding begins; exact-request replay reconciles
+	// it without replacing state or deleting an uncertain/foreign Docker binding.
+	cleanup = false
+	if _, err := backend.ensureBinding(ctx, record); err != nil {
 		return storagebackend.Volume{}, false, err
 	}
-	defer func() {
-		if cleanup && bindingCreated {
-			_, _ = backend.binder.Delete(context.Background(), record.DockerHandle)
-		}
-	}()
 	projection, err := backend.inspectVolumeRecord(ctx, dataset, record)
 	if err != nil {
 		return storagebackend.Volume{}, false, err
 	}
-	cleanup = false
 	return projection, true, nil
 }
 

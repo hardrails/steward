@@ -29,7 +29,7 @@ func newTestBackend(config Config) (*Backend, error) {
 	return New(config)
 }
 
-func TestMountAccessFailurePreventsReadyVolumeAndCleansBinding(t *testing.T) {
+func TestMountAccessFailureCleansBeforeBindingAndRetainsAfterBinding(t *testing.T) {
 	for _, phase := range []string{"prepare", "verify"} {
 		t.Run(phase, func(t *testing.T) {
 			runner := newFakeZFS("tank/steward")
@@ -55,11 +55,23 @@ func TestMountAccessFailurePreventsReadyVolumeAndCleansBinding(t *testing.T) {
 			if _, ready, err := backend.CreateVolume(ctx, storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); ready || !errors.Is(err, sentinel) {
 				t.Fatalf("ready=%v error=%v", ready, err)
 			}
-			if len(binder.bindings) != 0 {
-				t.Fatal("failed mount retained a Docker binding")
-			}
-			if _, exists := runner.datasets[backend.volumeDataset(spec.Scope())]; exists {
-				t.Fatal("failed mount retained its dataset")
+			_, retained := runner.datasets[backend.volumeDataset(spec.Scope())]
+			if phase == "prepare" {
+				if retained || len(binder.bindings) != 0 {
+					t.Fatal("pre-binding failure retained state")
+				}
+			} else {
+				if !retained || len(binder.bindings) != 1 {
+					t.Fatal("post-binding failure destroyed prepared state")
+				}
+				if _, err := backend.InspectVolume(ctx, spec.Scope()); !errors.Is(err, sentinel) {
+					t.Fatalf("failed mount inspection claimed readiness: %v", err)
+				}
+				access.verifyErr = nil
+				volume, changed, err := backend.CreateVolume(ctx, storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec})
+				if err != nil || changed || volume.State != storagebackend.StateReady {
+					t.Fatalf("prepared mount replay: %+v, %v, %v", volume, changed, err)
+				}
 			}
 		})
 	}

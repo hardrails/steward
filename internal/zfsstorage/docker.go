@@ -75,6 +75,9 @@ func NewDockerBinder(socketPath string) (*DockerBinder, error) {
 
 func newDockerBinder(client *http.Client) *DockerBinder { return &DockerBinder{client: client} }
 
+// Ensure reports a newly created binding only after verification. An error with
+// false does not prove that Docker did not commit: callers must retain the source
+// dataset until exact replay or explicit, verified deletion resolves the binding.
 func (binder *DockerBinder) Ensure(ctx context.Context, binding Binding) (bool, error) {
 	if err := validateBinding(binding); err != nil {
 		return false, err
