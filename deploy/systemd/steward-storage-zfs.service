@@ -4,7 +4,8 @@ Documentation=https://github.com/hardrails/steward
 After=docker.service
 Requires=docker.service
 ConditionPathExists=/etc/steward/storage-zfs.json
-ConditionPathExists=/etc/steward/storage-zfs-token
+ConditionPathExists=/etc/steward/storage-zfs-worker-token
+AssertSecurity=apparmor
 
 [Service]
 Type=notify
@@ -16,7 +17,10 @@ NotifyAccess=main
 User=root
 Group=steward-executor
 UMask=0007
-ExecStart=/usr/local/bin/steward-storage-zfs -config=/etc/steward/storage-zfs.json
+# Only the OS policy loader runs with full privilege. Its input is the selected
+# immutable release, never tenant configuration. A failed load prevents startup.
+ExecStartPre=+/usr/sbin/apparmor_parser --replace /opt/steward/current/integration/deploy/config/storage-zfs.apparmor
+ExecStart=/usr/bin/aa-exec -p steward-storage-zfs -- /usr/local/bin/steward-storage-zfs -config=/etc/steward/storage-zfs.json
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -27,18 +31,19 @@ StateDirectory=steward-state
 StateDirectoryMode=0700
 
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_SYS_ADMIN
-AmbientCapabilities=CAP_SYS_ADMIN
-PrivateTmp=yes
-ProtectClock=yes
-ProtectControlGroups=yes
-ProtectHome=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN
+AmbientCapabilities=CAP_SYS_ADMIN CAP_CHOWN
+# A private filesystem namespace hides newly created ZFS mounts from Docker.
+# Mandatory AppArmor supplies path/mount confinement in the host namespace.
+PrivateTmp=no
+ProtectClock=no
+ProtectControlGroups=no
+ProtectHome=no
 ProtectHostname=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/steward-state
+ProtectKernelLogs=no
+ProtectKernelModules=no
+ProtectKernelTunables=no
+ProtectSystem=no
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX
