@@ -240,6 +240,13 @@ instance, lineage, generation, admission template, node set, and the five durabl
 lifecycle operations. Its default validity is one hour and the hard maximum is 24
 hours. Both outputs are verified against signed site policy before they are written.
 
+For `agent authorize` and `executor-command delegation issue`, pass Control's
+`controller.public.pem` unchanged. Both commands accept its canonical PEM
+Ed25519 public key and the legacy raw-base64 public key format. They read one
+bounded, non-group-writable trust-file snapshot and bind the same raw public
+identity into the delegation. Do not copy the controller's private key to the
+tenant signing workstation or convert unrelated site-policy key files.
+
 These commands intentionally depend on the generated handoff key paths. Use the
 individual image, capsule, policy, and `executor-command delegation` tools when an
 external signer owns a key or the contract differs from the qualified defaults.
