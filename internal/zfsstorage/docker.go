@@ -20,6 +20,12 @@ import (
 
 const maxDockerResponseBytes = 1 << 20
 
+// bindingNotCreatedError certifies that Ensure failed before sending any create
+// request. Other errors are uncertain, regardless of the returned changed flag.
+type bindingNotCreatedError struct{ error }
+
+func (err bindingNotCreatedError) Unwrap() error { return err.error }
+
 // DockerBinder exposes a fixed, local-driver named-volume lifecycle over one
 // owner-selected Docker Unix socket. Container access is limited to a read-only
 // reference check for offline migration; it cannot run containers or images.
@@ -78,17 +84,18 @@ func newDockerBinder(client *http.Client) *DockerBinder { return &DockerBinder{c
 // Ensure reports a newly created binding only after verification. An error with
 // false does not prove that Docker did not commit: callers must retain the source
 // dataset until exact replay or explicit, verified deletion resolves the binding.
+// Only bindingNotCreatedError proves this invocation could not create a binding.
 func (binder *DockerBinder) Ensure(ctx context.Context, binding Binding) (bool, error) {
 	if err := validateBinding(binding); err != nil {
-		return false, err
+		return false, bindingNotCreatedError{err}
 	}
 	if existing, err := binder.Inspect(ctx, binding.Handle); err == nil {
 		if !sameBinding(existing, binding) {
-			return false, ErrBindingConflict
+			return false, bindingNotCreatedError{ErrBindingConflict}
 		}
 		return false, nil
 	} else if !errors.Is(err, ErrBindingNotFound) {
-		return false, err
+		return false, bindingNotCreatedError{err}
 	}
 	body, err := json.Marshal(struct {
 		Name       string            `json:"Name"`
@@ -101,7 +108,7 @@ func (binder *DockerBinder) Ensure(ctx context.Context, binding Binding) (bool, 
 		Labels:     cloneStringMap(binding.Labels),
 	})
 	if err != nil {
-		return false, err
+		return false, bindingNotCreatedError{err}
 	}
 	status, _, err := binder.call(ctx, http.MethodPost, "/v1.41/volumes/create", body)
 	if err != nil {

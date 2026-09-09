@@ -189,7 +189,13 @@ func (backend *Backend) DeleteVolume(ctx context.Context, request storagebackend
 			return storagebackend.Volume{}, false, storagebackend.ErrInUse
 		}
 	}
-	if _, err := backend.binder.Delete(ctx, record.DockerHandle); err != nil && !errors.Is(err, ErrBindingNotFound) {
+	// A retained creation record is not proof that the current Docker handle
+	// still belongs to it. Never delete a conflicting or unobservable binding.
+	if err := backend.bindingMatches(ctx, record); err == nil {
+		if _, err := backend.binder.Delete(ctx, record.DockerHandle); err != nil && !errors.Is(err, ErrBindingNotFound) {
+			return storagebackend.Volume{}, false, mapBindingError(err)
+		}
+	} else if !errors.Is(err, ErrBindingNotFound) {
 		return storagebackend.Volume{}, false, mapBindingError(err)
 	}
 	if record.DeleteRequestID == "" {
@@ -467,10 +473,12 @@ func (backend *Backend) createVolumeLocked(ctx context.Context, request storageb
 	// Docker can commit before its response or verification fails. Retain the
 	// fully prepared dataset once binding begins; exact-request replay reconciles
 	// it without replacing state or deleting an uncertain/foreign Docker binding.
-	cleanup = false
-	if _, err := backend.ensureBinding(ctx, record); err != nil {
-		return storagebackend.Volume{}, false, err
+	if _, err := backend.binder.Ensure(ctx, backend.binding(record)); err != nil {
+		var notCreated bindingNotCreatedError
+		cleanup = errors.As(err, &notCreated)
+		return storagebackend.Volume{}, false, mapBindingError(err)
 	}
+	cleanup = false
 	projection, err := backend.inspectVolumeRecord(ctx, dataset, record)
 	if err != nil {
 		return storagebackend.Volume{}, false, err
