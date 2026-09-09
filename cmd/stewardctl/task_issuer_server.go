@@ -31,6 +31,7 @@ func serveTaskIssuer(arguments []string, stdout io.Writer) error {
 	flags.StringVar(&config.Store, "store", "", "existing station-only 0700 issuance directory")
 	flags.DurationVar(&config.Validity, "valid-for", 5*time.Minute, "finite task permit validity")
 	flags.IntVar(&config.Capacity, "capacity", 1024, "retained task limit, at most 4096")
+	flags.BoolVar(&config.AllowResponses, "allow-responses", false, "also issue exact interaction responses for the pinned runtime")
 	operations := flags.String("operations", "", "comma-separated allowed service operation identities")
 	socket := flags.String("socket", "", "private Unix socket; no TCP listener")
 	clientGID := flags.Int("client-gid", -1, "dedicated group allowed to request signatures from a separate UID")
@@ -146,7 +147,8 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 	}()
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	if request.RequestURI != "/v1/tasks" {
+	responseRoute := request.RequestURI == "/v1/responses" && issuer.config.AllowResponses
+	if request.RequestURI != "/v1/tasks" && !responseRoute {
 		writeTaskIssuerError(writer, 404, "not_found", "Task signing route is unavailable.")
 		return
 	}
@@ -159,18 +161,34 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 		writeTaskIssuerError(writer, 400, "invalid_request", "Use the private host signing client with JSON.")
 		return
 	}
-	request.Body = http.MaxBytesReader(writer, request.Body, maxTaskBundleBytes)
+	limit := maxTaskBundleBytes
+	if responseRoute {
+		limit = 64 << 10
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, int64(limit))
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
 		writeTaskIssuerError(writer, 413, "request_too_large", "Task signing request exceeds its bound or is unreadable.")
 		return
 	}
-	var intent taskIssuerRequest
-	if err = dsse.DecodeStrictInto(body, maxTaskBundleBytes, &intent); err != nil {
-		writeTaskIssuerError(writer, 400, "invalid_request", "Task signing fields are invalid.")
-		return
+	var bundle []byte
+	if responseRoute {
+		var intent responseIssuerRequest
+		err = dsse.DecodeStrictInto(body, limit, &intent)
+		if err == nil {
+			bundle, err = issuer.issueResponse(intent)
+		} else {
+			writeTaskIssuerError(writer, 400, "invalid_request", "Response signing fields are invalid.")
+			return
+		}
+	} else {
+		var intent taskIssuerRequest
+		if err = dsse.DecodeStrictInto(body, limit, &intent); err != nil {
+			writeTaskIssuerError(writer, 400, "invalid_request", "Task signing fields are invalid.")
+			return
+		}
+		bundle, err = issuer.issue(intent)
 	}
-	bundle, err := issuer.issue(intent)
 	if err != nil {
 		if errors.Is(err, errTaskIssuerPreparation) {
 			writeTaskIssuerError(writer, 500, "preparation_failed", "Repair the station's private staging storage and pinned authority. Keep the original task identity and reconcile before retrying.")
