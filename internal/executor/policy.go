@@ -108,6 +108,11 @@ func ValidateImage(observed ObservedImage, expected ImageRequirement) error {
 type StateMount struct {
 	VolumeName string `json:"volume_name"`
 	Path       string `json:"path"`
+	// Qualified storage prepares its own root; image copy-up must not replace
+	// that root's ownership or seed files outside the backend's preparation.
+	// It is a creation policy, not a workload identity change: existing retained
+	// volumes must remain replayable after upgrading the Docker writer.
+	NoCopy bool `json:"-"`
 }
 
 type RuntimeGrant struct {
