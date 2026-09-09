@@ -219,7 +219,15 @@ def open_state_directory(*components: str) -> int:
     current = os.open(STATE, flags)
     try:
         root_stat = os.fstat(current)
-        if root_stat.st_uid != 65532 or root_stat.st_gid != 65532:
+        # Qualified storage owns its mount root and grants only our fixed group
+        # access. Legacy dedicated-host volumes retain sandbox-owned roots.
+        qualified_root = (
+            root_stat.st_uid == 0
+            and root_stat.st_gid == 65532
+            and stat.S_IMODE(root_stat.st_mode) == 0o770
+        )
+        legacy_root = root_stat.st_uid == 65532 and root_stat.st_gid == 65532
+        if not (qualified_root or legacy_root):
             fail("state root ownership is invalid")
         for component in components:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", component):
