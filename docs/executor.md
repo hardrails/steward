@@ -372,6 +372,14 @@ could have occurred. `outcome_unknown` means a mutating handler was entered but
 its result or the following fence write could not be proved. Legacy `failed`
 records remain non-replayable and are not compacted automatically.
 
+A complete native `POST /v1/admissions` response with HTTP 503 and the exact
+`capacity_exceeded` error shape is a pre-effect `rejected` result: Executor
+checks capacity before preparing its operation journal, creating the workload,
+or committing the admission fence. This exception applies to protocol 3 and 4;
+it does not classify every 503, another operation's response, malformed or
+truncated JSON, or a lost response as safe to retry. It does not rewrite an
+already retained `outcome_unknown` command; that still requires reconciliation.
+
 Every delivered command is a DSSE envelope with payload type
 `application/vnd.steward.executor-command.v2+json`. The verified payload has this
 fixed JSON shape:

@@ -104,6 +104,24 @@ func localHTTPStatusError(method string, status int, cause error) error {
 	return localCallError(method, cause)
 }
 
+// Only signed admission's native capacity refusal is known to precede the
+// operation journal, workload creation, and admission fence. Recognize its
+// complete, strict response from the in-process Executor, not an arbitrary
+// upstream error or all 503s. Lost/truncated responses remain uncertain.
+func localAdmissionHTTPStatusError(status int, raw []byte, cause error) error {
+	if status == http.StatusServiceUnavailable {
+		var response struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+		}
+		if dsse.DecodeStrictInto(raw, controlprotocol.MaxExecutorReportBytes, &response) == nil &&
+			response.Error == "capacity_exceeded" && strings.TrimSpace(response.Message) != "" {
+			return cause
+		}
+	}
+	return localHTTPStatusError(http.MethodPost, status, cause)
+}
+
 type workloadPayload struct {
 	ProfileID string             `json:"profile_id"`
 	Image     string             `json:"image"`
@@ -522,9 +540,9 @@ func (d *dispatcher) callAdmissionV4(
 		return "", nil, localCallError(http.MethodPost, errLocalResponseLimit)
 	}
 	if response.status >= 400 {
-		return "", nil, localHTTPStatusError(
-			http.MethodPost,
+		return "", nil, localAdmissionHTTPStatusError(
 			response.status,
+			response.body.Bytes(),
 			fmt.Errorf(
 				"local executor returned HTTP %d: %s",
 				response.status,
@@ -690,11 +708,11 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 		return "", localCallError(method, errLocalResponseLimit)
 	}
 	if res.status >= 400 {
-		return "", localHTTPStatusError(
-			method,
-			res.status,
-			fmt.Errorf("local executor returned HTTP %d: %s", res.status, strings.TrimSpace(res.body.String())),
-		)
+		cause := fmt.Errorf("local executor returned HTTP %d: %s", res.status, strings.TrimSpace(res.body.String()))
+		if method == http.MethodPost && target == "/v1/admissions" {
+			return "", localAdmissionHTTPStatusError(res.status, res.body.Bytes(), cause)
+		}
+		return "", localHTTPStatusError(method, res.status, cause)
 	}
 	if res.status == http.StatusNoContent {
 		return "stopped", nil
