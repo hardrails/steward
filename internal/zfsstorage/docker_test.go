@@ -5,10 +5,65 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+func TestDockerMigrationCheckUsesUnixSocketAndRefusesRedirects(t *testing.T) {
+	// Keep the socket below the portable Unix path-length limit, including on macOS.
+	directory, err := os.MkdirTemp("/tmp", "steward-docker-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	socket := filepath.Join(directory, "docker.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.URL.Path != "/v1.41/containers/json" {
+			t.Error("Docker redirect was followed")
+		}
+		if request.URL.Query().Get("filters") == `{"volume":["steward-redirect"]}` {
+			http.Redirect(response, request, "/forbidden", http.StatusTemporaryRedirect)
+			return
+		}
+		_, _ = io.WriteString(response, "[]")
+	}))
+	if err := server.Listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+	binder, err := NewDockerBinder(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(binder.client.CloseIdleConnections)
+	if err := binder.CheckUnused(context.Background(), "steward-retained"); err != nil {
+		t.Fatal(err)
+	}
+	if err := binder.CheckUnused(context.Background(), "steward-redirect"); err == nil || !strings.Contains(err.Error(), "redirects are disabled") {
+		t.Fatalf("redirect error=%v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("unexpected Docker requests: %d", calls.Load())
+	}
+	server.Close()
+	if err := binder.CheckUnused(context.Background(), "steward-retained"); err == nil {
+		t.Fatal("offline Docker socket accepted as proof of no references")
+	}
+}
 
 func TestDockerMigrationReferenceCheckIncludesStoppedContainersAndFailsClosed(t *testing.T) {
 	for _, response := range []string{"[]", "[ ]", `[{"State":"running"}]`, `[{"State":"exited"}]`, "null", "{}", "invalid", strings.Repeat(" ", maxDockerResponseBytes+1)} {
