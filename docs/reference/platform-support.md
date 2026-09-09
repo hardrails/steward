@@ -63,6 +63,17 @@ unit directive as an unsupported hardening gap, not a harmless warning.
 With explicit approval, the guided installer can install and register the official
 gVisor runtime. It never installs Docker.
 
+## Optional persistent storage
+
+The optional OpenZFS storage service has narrower requirements than node
+packaging: a host-enabled AppArmor kernel, `apparmor_parser`, `aa-exec`, OpenZFS,
+and a pre-existing operator-managed dataset. Its host-visible mount confinement
+has been exercised on Ubuntu 24.04 `amd64`. RPM artifact availability does not
+establish that this backend works on SELinux-only distributions. The unit refuses
+to start without AppArmor; there is no automatic unconfined fallback. See
+[persistent state]({{ '/guides/persistent-state/' | relative_url }}) for the
+additional host and sandbox acceptance requirements.
+
 ## Management-cluster substrate
 
 The optional cluster installer supports clean systemd Linux hosts on `amd64` and
