@@ -16,12 +16,31 @@ import (
 	"time"
 )
 
-func responseIssuerHTTP(issuer *taskIssuer, method, path, raw string) *httptest.ResponseRecorder {
+func responseIssuerHTTP(t *testing.T, issuer *taskIssuer, method, path, raw string) *httptest.ResponseRecorder {
+	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(raw))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	issuer.serveHTTP(w, r)
+	if w.Code >= 400 && path == "/v1/responses" {
+		if strings.Contains(w.Body.String(), "task") || strings.Contains(w.Body.String(), "Task") {
+			t.Fatal("response failure incorrectly directs recovery to a task")
+		}
+		if w.Code == 409 || w.Code == 422 || w.Code == 500 || w.Code == 503 {
+			if !strings.Contains(w.Body.String(), "interaction ID and exact answer") || !strings.Contains(w.Body.String(), "through Control") {
+				t.Fatal("response failure omits interaction recovery guidance")
+			}
+		}
+	}
 	return w
+}
+
+func TestResponseIssuerPanicIdentifiesInteractionRecovery(t *testing.T) {
+	var issuer *taskIssuer
+	w := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", `{}`)
+	if w.Code != 500 {
+		t.Fatalf("panic escaped response boundary: %d", w.Code)
+	}
 }
 
 func TestResponseIssuerUnixSocketServesTasksAndAnswers(t *testing.T) {
@@ -93,7 +112,7 @@ func TestResponseIssuerHTTPRejectsUnsafeRequestsAndDefaultsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(raw)); w.Code != 404 || issuer.count != 0 {
+	if w := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(raw)); w.Code != 404 || issuer.count != 0 {
 		t.Fatal("disabled endpoint issued response authority")
 	}
 	// Only this test mutates configuration; restart binding is tested separately.
@@ -112,7 +131,7 @@ func TestResponseIssuerHTTPRejectsUnsafeRequestsAndDefaultsOff(t *testing.T) {
 		{"oversize", "POST", "/v1/responses", strings.Repeat("s", (64<<10)+1), 413},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			w := responseIssuerHTTP(issuer, test.method, test.path, test.body)
+			w := responseIssuerHTTP(t, issuer, test.method, test.path, test.body)
 			var body map[string]string
 			if w.Code != test.status || issuer.count != 0 || json.Unmarshal(w.Body.Bytes(), &body) != nil ||
 				len(body) != 2 || body["error"] == "" || body["message"] == "" ||
@@ -146,7 +165,7 @@ func TestResponseIssuerHTTPPreservesReplayAndPrivateFailureBoundary(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(raw))
+	first := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(raw))
 	if first.Code != 200 || first.Header().Get("Content-Type") != "application/octet-stream" || first.Body.Len() > 16<<10 {
 		t.Fatalf("failed response signing: %d", first.Code)
 	}
@@ -157,7 +176,7 @@ func TestResponseIssuerHTTPPreservesReplayAndPrivateFailureBoundary(t *testing.T
 	}
 	t.Cleanup(func() { _ = os.Rename(backup, keyPath) })
 	// Recovery of already-retained authority needs no signing key.
-	replayed := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(raw))
+	replayed := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(raw))
 	if replayed.Code != 200 || !bytes.Equal(first.Body.Bytes(), replayed.Body.Bytes()) {
 		t.Fatal("replay needs private preparation")
 	}
@@ -167,7 +186,7 @@ func TestResponseIssuerHTTPPreservesReplayAndPrivateFailureBoundary(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(newRaw))
+	failed := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(newRaw))
 	var failure map[string]string
 	if failed.Code != 500 || json.Unmarshal(failed.Body.Bytes(), &failure) != nil || failure["error"] != "preparation_failed" ||
 		strings.Contains(failed.Body.String(), keyPath) || strings.Contains(failed.Body.String(), "Only read") || issuer.count != 1 {
@@ -176,7 +195,7 @@ func TestResponseIssuerHTTPPreservesReplayAndPrivateFailureBoundary(t *testing.T
 	if err = os.Rename(backup, keyPath); err != nil {
 		t.Fatal(err)
 	}
-	repaired := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(newRaw))
+	repaired := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(newRaw))
 	if repaired.Code != 200 || issuer.count != 2 {
 		t.Fatalf("same request failed after repair: %d", repaired.Code)
 	}
@@ -185,11 +204,11 @@ func TestResponseIssuerHTTPPreservesReplayAndPrivateFailureBoundary(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(changed)); w.Code != 409 {
+	if w := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(changed)); w.Code != 409 {
 		t.Fatalf("changed replay status=%d", w.Code)
 	}
 	issuer.mu.Lock()
-	busy := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(raw))
+	busy := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(raw))
 	issuer.mu.Unlock()
 	if busy.Code != 503 {
 		t.Fatalf("busy status=%d", busy.Code)
@@ -200,7 +219,7 @@ func TestResponseIssuerHTTPPreservesReplayAndPrivateFailureBoundary(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := responseIssuerHTTP(issuer, "POST", "/v1/responses", string(third)); w.Code != 503 {
+	if w := responseIssuerHTTP(t, issuer, "POST", "/v1/responses", string(third)); w.Code != 503 {
 		t.Fatalf("capacity status=%d", w.Code)
 	}
 }

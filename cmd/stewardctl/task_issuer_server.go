@@ -140,21 +140,26 @@ func runTaskIssuerServer(ctx context.Context, listener net.Listener, issuer *tas
 }
 
 func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Request) {
+	signing, retained, subject := "Task", "task ID and exact request", "task"
+	if request.RequestURI == "/v1/responses" {
+		signing, retained, subject = "Response", "interaction ID and exact answer", "interaction"
+	}
+	recovery := " Keep the original " + retained + ". Reconcile the original " + subject + " through Control before retrying."
 	defer func() {
 		if recover() != nil {
-			writeTaskIssuerError(writer, 500, "internal_error", "Signing failed unexpectedly. Reconcile the original task before retrying.")
+			writeTaskIssuerError(writer, 500, "internal_error", "Signing failed unexpectedly."+recovery)
 		}
 	}()
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	responseRoute := request.RequestURI == "/v1/responses" && issuer.config.AllowResponses
 	if request.RequestURI != "/v1/tasks" && !responseRoute {
-		writeTaskIssuerError(writer, 404, "not_found", "Task signing route is unavailable.")
+		writeTaskIssuerError(writer, 404, "not_found", "Signing route is unavailable.")
 		return
 	}
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", http.MethodPost)
-		writeTaskIssuerError(writer, 405, "method_not_allowed", "Task signing requires POST.")
+		writeTaskIssuerError(writer, 405, "method_not_allowed", signing+" signing requires POST.")
 		return
 	}
 	if request.Header.Get("Origin") != "" || request.Header.Get("Content-Type") != "application/json" {
@@ -168,7 +173,7 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 	request.Body = http.MaxBytesReader(writer, request.Body, int64(limit))
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
-		writeTaskIssuerError(writer, 413, "request_too_large", "Task signing request exceeds its bound or is unreadable.")
+		writeTaskIssuerError(writer, 413, "request_too_large", signing+" signing request exceeds its bound or is unreadable.")
 		return
 	}
 	var bundle []byte
@@ -191,7 +196,7 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 	}
 	if err != nil {
 		if errors.Is(err, errTaskIssuerPreparation) {
-			writeTaskIssuerError(writer, 500, "preparation_failed", "Repair the station's private staging storage and pinned authority. Keep the original task identity and reconcile before retrying.")
+			writeTaskIssuerError(writer, 500, "preparation_failed", "Repair the station's private staging storage and pinned authority."+recovery)
 			return
 		}
 		status, code := 422, "issuance_rejected"
@@ -204,7 +209,7 @@ func (issuer *taskIssuer) serveHTTP(writer http.ResponseWriter, request *http.Re
 		} else if errors.Is(err, errTaskIssuerStorage) {
 			status, code = 500, "storage_unconfirmed"
 		}
-		writeTaskIssuerError(writer, status, code, "No replacement authority was issued. Reconcile the original task and signing station.")
+		writeTaskIssuerError(writer, status, code, "No replacement authority was issued."+recovery)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/octet-stream")
