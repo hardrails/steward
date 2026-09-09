@@ -946,7 +946,10 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	if labels[stateVolumeLabel] != "" || labels[statePathLabel] != "" {
 		state = &StateMount{VolumeName: labels[stateVolumeLabel], Path: labels[statePathLabel]}
 		layout := profileLayoutFor(labels["io.hardrails.profile"])
-		stateHardened = state.Path == layout.StatePath && strings.HasPrefix(state.VolumeName, "steward-state-") &&
+		// Qualified backends own opaque handles (for example steward-zfs-*).
+		// The mount must match exactly; admission separately binds this handle
+		// to the signed tenant lineage and the backend's retained volume spec.
+		stateHardened = state.Path == layout.StatePath && validStateVolumeHandle(state.VolumeName) &&
 			payload.Config.WorkingDir == layout.WorkDir && contains(payload.Config.Env, "HOME="+layout.Home) &&
 			exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs}) && hasExactStateMount(payload.Mounts, *state)
 	}
