@@ -104,12 +104,25 @@ func (binder *DockerBinder) Inspect(ctx context.Context, handle string) (Binding
 		return Binding{}, dockerStatusError(status)
 	}
 	var response struct {
-		Name    string          `json:"Name"`
-		Driver  string          `json:"Driver"`
-		Labels  json.RawMessage `json:"Labels"`
-		Options json.RawMessage `json:"Options"`
+		Name       string                     `json:"Name"`
+		Driver     string                     `json:"Driver"`
+		Mountpoint string                     `json:"Mountpoint"`
+		CreatedAt  string                     `json:"CreatedAt"`
+		Scope      string                     `json:"Scope"`
+		Status     map[string]json.RawMessage `json:"Status"`
+		Labels     json.RawMessage            `json:"Labels"`
+		Options    json.RawMessage            `json:"Options"`
+		UsageData  *struct {
+			Size     int64 `json:"Size"`
+			RefCount int64 `json:"RefCount"`
+		} `json:"UsageData"`
 	}
-	if err := dsse.DecodeStrictInto(raw, maxDockerResponseBytes, &response); err != nil || response.Driver != "local" {
+	// Decode the complete Engine v1.41 Volume shape. Daemon metadata does not
+	// choose a source path: the exact local bind still comes from Options.device.
+	if err := dsse.DecodeStrictInto(raw, maxDockerResponseBytes, &response); err != nil ||
+		response.Driver != "local" || response.Scope != "local" ||
+		!filepath.IsAbs(response.Mountpoint) || filepath.Clean(response.Mountpoint) != response.Mountpoint ||
+		response.Mountpoint == "/" || len(response.Mountpoint) > 4096 || strings.ContainsRune(response.Mountpoint, '\x00') {
 		return Binding{}, ErrBindingConflict
 	}
 	options, err := decodeStringMap(response.Options, 8)

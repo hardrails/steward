@@ -128,10 +128,12 @@ func TestDockerBinderFailsClosedOnMalformedDaemonState(t *testing.T) {
 }
 
 type dockerVolume struct {
-	Name    string            `json:"Name"`
-	Driver  string            `json:"Driver"`
-	Options map[string]string `json:"Options"`
-	Labels  map[string]string `json:"Labels"`
+	Name       string            `json:"Name"`
+	Driver     string            `json:"Driver"`
+	Mountpoint string            `json:"Mountpoint"`
+	Scope      string            `json:"Scope"`
+	Options    map[string]string `json:"Options"`
+	Labels     map[string]string `json:"Labels"`
 }
 
 type fakeDockerVolumes struct{ volumes map[string]dockerVolume }
@@ -144,6 +146,8 @@ func (engine *fakeDockerVolumes) RoundTrip(request *http.Request) (*http.Respons
 		if !ok {
 			return dockerResponse(http.StatusNotFound, `{}`), nil
 		}
+		volume.Mountpoint = "/var/lib/docker/volumes/" + volume.Name + "/_data"
+		volume.Scope = "local"
 		raw, _ := json.Marshal(volume)
 		return dockerResponse(http.StatusOK, string(raw)), nil
 	case request.Method == http.MethodPost && request.URL.Path == "/v1.41/volumes/create":
@@ -169,6 +173,39 @@ func (engine *fakeDockerVolumes) RoundTrip(request *http.Request) (*http.Respons
 		return dockerResponse(http.StatusNoContent, ""), nil
 	default:
 		return dockerResponse(http.StatusNotFound, `{}`), nil
+	}
+}
+
+func TestDockerBinderAcceptsEngine141VolumeMetadata(t *testing.T) {
+	// Shape captured from a real Engine v1.41 volume inspect, not a reduced
+	// fixture. Docker's mountpoint is observational; Options.device is the bind.
+	const body = `{"CreatedAt":"2026-09-09T04:53:10Z","Driver":"local","Labels":{"io.hardrails.steward.backend-ref":"zfs-volume-probe","io.hardrails.steward.managed":"true"},"Mountpoint":"/var/lib/docker/volumes/steward-probe/_data","Name":"steward-probe","Options":{"device":"/var/lib/steward-state/probe","o":"bind","type":"none"},"Scope":"local"}`
+	for _, suffix := range []string{"", `,"Status":{"driver":{"ready":true}},"UsageData":{"Size":-1,"RefCount":0}`} {
+		binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return dockerResponse(http.StatusOK, strings.TrimSuffix(body, "}")+suffix+"}"), nil
+		})})
+		got, err := binder.Inspect(context.Background(), "steward-probe")
+		if err != nil || got.Source != "/var/lib/steward-state/probe" || got.Handle != "steward-probe" {
+			t.Fatalf("real Engine response = (%+v, %v)", got, err)
+		}
+	}
+	for name, changed := range map[string]string{
+		"duplicate identity":    strings.TrimSuffix(body, "}") + `,"Name":"steward-probe"}`,
+		"unknown field":         strings.TrimSuffix(body, "}") + `,"unexpected":true}`,
+		"global scope":          strings.Replace(body, `"Scope":"local"`, `"Scope":"global"`, 1),
+		"missing scope":         strings.Replace(body, `,"Scope":"local"`, "", 1),
+		"wrong mountpoint type": strings.Replace(body, `"/var/lib/docker/volumes/steward-probe/_data"`, "[]", 1),
+		"relative mountpoint":   strings.Replace(body, `"/var/lib/docker/volumes/steward-probe/_data"`, `"relative"`, 1),
+		"wrong options":         strings.Replace(body, `"o":"bind"`, `"o":"rbind"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return dockerResponse(http.StatusOK, changed), nil
+			})})
+			if _, err := binder.Inspect(context.Background(), "steward-probe"); !errors.Is(err, ErrBindingConflict) {
+				t.Fatalf("malformed Engine response: %v", err)
+			}
+		})
 	}
 }
 
