@@ -54,6 +54,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	checkPackaged := flags.Bool("check-packaged-config", false, "read-only check of configuration, token migration, and packaged AppArmor prerequisites")
 	clientTokenFile := flags.String("client-token-file", "/etc/steward/storage-zfs-token", "Executor token file to compare during -check-packaged-config")
 	checkBackend := flags.Bool("check-backend", false, "destructively verify ZFS quotas, snapshots, clones, and Docker bindings, then exit")
+	migrateScope := flags.String("migrate-volume-access", "", "offline, root-only migration of one retained volume selected by a strict JSON scope file")
 	configPath := flags.String("config", "/etc/steward/storage-zfs.json", "strict ZFS storage worker configuration")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return 2
@@ -62,7 +63,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "steward-storage-zfs "+buildinfo.Resolve())
 		return 0
 	}
-	if (*checkConfig && *checkBackend) || (*checkPackaged && (*checkConfig || *checkBackend)) {
+	if (*checkConfig && *checkBackend) || (*checkPackaged && (*checkConfig || *checkBackend)) ||
+		(*migrateScope != "" && (*checkConfig || *checkPackaged || *checkBackend)) {
 		fmt.Fprintln(stderr, "steward-storage-zfs: configuration and backend checks are mutually exclusive")
 		return 2
 	}
@@ -103,6 +105,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer lock.Close()
+	if *migrateScope != "" {
+		return migrateVolume(ctx, backend, *migrateScope, stdout, stderr)
+	}
 	if err := backend.Initialize(ctx); err != nil {
 		fmt.Fprintln(stderr, "steward-storage-zfs: initialize backend:", err)
 		return 1
