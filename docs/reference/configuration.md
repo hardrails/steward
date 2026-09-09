@@ -562,6 +562,14 @@ normal node preflight. It does not load the policy; systemd must still load the
 selected release's policy successfully at startup. The three check modes are
 mutually exclusive.
 
+`-migrate-volume-access /absolute/scope.json` is a separate root-only offline mode.
+It takes the worker lifetime lock, rejects check-mode combinations and migrates
+one exact retained volume's legacy root permissions. It does not initialize the
+backend namespaces, run scratch conformance or serve requests. The bounded,
+owner-only strict JSON scope contains `volume_id`, `tenant_id`, `lineage_id` and
+`generation`. The [retained-volume migration procedure](../guides/persistent-state.md#migrate-retained-volume-roots-before-upgrading)
+defines quiescence, accepted permission states and refusal/recovery behavior.
+
 `-check-backend` runs a
 bounded destructive scratch test of quota exhaustion, snapshots, clones, Docker
 bindings, and cleanup. Normal startup runs the same conformance test before it

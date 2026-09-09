@@ -159,6 +159,55 @@ The worker creates only fixed `volumes` and `tombstones` children beneath the
 selected parent. After qualification, it creates a tenant dataset lazily when
 Executor admits a signed workload that requests state.
 
+## Migrate retained volume roots before upgrading
+
+Releases that created ZFS roots as `root:root 0755` require an explicit offline
+migration before you resume their workspaces under the sandbox-group contract.
+Normal inspection and create replay never repair permissions. Back up retained
+state and keep all workload/container creators and host writers quiesced throughout
+the procedure. Stop or park workloads through their authorized lifecycle, remove
+their container references through that lifecycle, and stop Executor and the
+storage worker. A stopped container still counts as a reference.
+
+Create an owner-only JSON file with the exact retained volume scope, for example:
+
+```json
+{"volume_id":"retained-volume","tenant_id":"tenant-a","lineage_id":"lineage-a","generation":1}
+```
+
+Use the values from the retained admission/storage record, not IDs inferred from
+hashed dataset names. The migration accepts no host path, ownership choice or
+quota override. Use the target release binary, before switching the active release:
+
+```bash
+sudo install -d -o root -g steward-executor -m 0750 /run/steward-storage-zfs
+sudo /opt/steward/releases/vX.Y.Z/steward-storage-zfs \
+  -config /etc/steward/storage-zfs.json \
+  -migrate-volume-access /root/retained-volume-scope.json
+```
+
+Replace `vX.Y.Z` with your verified staged version. The scope file must be regular,
+owner-only, bounded and non-symlink. The command holds the serving worker's lifetime
+lock and verifies tenant, lineage, generation, deterministic references, quotas,
+mount point and Docker binding. Docker must confirm that no running or stopped
+container references the binding. This is a point-in-time check, not a lock against
+other root-equivalent Docker clients; keep those clients and host writers stopped.
+
+Only the distinct ZFS mount root changes, from `root:root 0755` to
+`root:65532 0770`. An interrupted `root:65532 0755` transition resumes; an already
+migrated root is a no-op. Other ownership/mode combinations require investigation
+and are refused. The command never recursively changes files, edits ZFS records,
+changes limits, deletes/recreates bindings or alters snapshots. Repeat the command
+for each retained volume before completing the upgrade. If it fails, keep work
+parked and investigate the named boundary; do not use recursive `chown` or weaken
+inspection. After successful migration and target preflight, activate the release,
+start the worker before Executor, and resume through the normal signed lifecycle.
+
+The opt-in Linux test `TestOfflineVolumeMigrationOnRealZFS` proves CLI lock refusal,
+running/stopped container refusal, migration/replay and preservation of contents,
+file ownership/modes, identity, quotas and snapshots on a disposable child dataset.
+It does not claim that arbitrary host processes are fenced by Docker's check.
+
 ## Verify enforcement
 
 Inspect one created dataset on the host:
