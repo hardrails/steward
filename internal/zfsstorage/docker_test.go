@@ -280,6 +280,9 @@ func TestDockerBinderAcceptsEngine141VolumeMetadata(t *testing.T) {
 		"wrong mountpoint type": strings.Replace(body, `"/var/lib/docker/volumes/steward-probe/_data"`, "[]", 1),
 		"relative mountpoint":   strings.Replace(body, `"/var/lib/docker/volumes/steward-probe/_data"`, `"relative"`, 1),
 		"wrong options":         strings.Replace(body, `"o":"bind"`, `"o":"rbind"`, 1),
+		"wrong name":            strings.Replace(body, `"Name":"steward-probe"`, `"Name":"steward-other"`, 1),
+		"invalid labels":        strings.Replace(body, `"io.hardrails.steward.managed":"true"`, `"io.hardrails.steward.managed":[]`, 1),
+		"empty label key":       strings.Replace(body, `"io.hardrails.steward.managed":"true"`, `"":"true"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -287,6 +290,51 @@ func TestDockerBinderAcceptsEngine141VolumeMetadata(t *testing.T) {
 			})})
 			if _, err := binder.Inspect(context.Background(), "steward-probe"); !errors.Is(err, ErrBindingConflict) {
 				t.Fatalf("malformed Engine response: %v", err)
+			}
+		})
+	}
+}
+
+func TestDockerMutationDoesNotClaimSuccessAfterTransportOrVerificationFailure(t *testing.T) {
+	binding := Binding{Handle: "steward-safe", Source: "/state", Labels: map[string]string{"managed": "true", "ref": "one"}}
+	for _, phase := range []string{"inspect", "create", "verify", "rebound", "delete"} {
+		t.Run(phase, func(t *testing.T) {
+			engine := &fakeDockerVolumes{volumes: make(map[string]dockerVolume)}
+			failure := errors.New("Docker connection lost")
+			created := false
+			binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if phase == "delete" || phase == "inspect" ||
+					phase == "create" && request.Method == http.MethodPost ||
+					phase == "verify" && created {
+					return nil, failure
+				}
+				response, err := engine.RoundTrip(request)
+				if request.Method == http.MethodPost && err == nil {
+					created = true
+					if phase == "rebound" {
+						volume := engine.volumes[binding.Handle]
+						volume.Options["device"] = "/other"
+						engine.volumes[binding.Handle] = volume
+					}
+				}
+				return response, err
+			})})
+			var changed bool
+			var err error
+			if phase == "delete" {
+				changed, err = binder.Delete(context.Background(), binding.Handle)
+			} else {
+				changed, err = binder.Ensure(context.Background(), binding)
+			}
+			want := failure
+			if phase == "rebound" {
+				want = ErrBindingConflict
+			}
+			if changed || !errors.Is(err, want) {
+				t.Fatalf("mutation claimed success or lost boundary: changed=%v, error=%v", changed, err)
+			}
+			if (phase == "verify" || phase == "rebound") && !created {
+				t.Fatal("verification failure did not follow creation")
 			}
 		})
 	}
