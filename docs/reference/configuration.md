@@ -552,7 +552,17 @@ migrate their token path to the root-owned copy above. See the persistent-state
 guide for startup and rotation order.
 
 `-check-config` validates the strict file, token, paths, Docker client construction,
-and ZFS executable without changing the pool. `-check-backend` additionally runs a
+and ZFS executable without changing the pool. `-check-packaged-config` additionally
+requires the stock policy paths, enabled kernel AppArmor, executable
+`apparmor_parser` and `aa-exec`, and a root-owned `0600` worker token copy matching
+the distinct Executor token. Supply Executor's actual path with
+`-client-token-file` (default `/etc/steward/storage-zfs-token`). This check is
+read-only and runs before node activation stops any services, as well as during
+normal node preflight. It does not load the policy; systemd must still load the
+selected release's policy successfully at startup. The three check modes are
+mutually exclusive.
+
+`-check-backend` runs a
 bounded destructive scratch test of quota exhaustion, snapshots, clones, Docker
 bindings, and cleanup. Normal startup runs the same conformance test before it
 signals systemd readiness and serves the authenticated storage protocol. The worker
