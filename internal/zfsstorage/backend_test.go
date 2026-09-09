@@ -141,6 +141,9 @@ func TestBackendConformanceExercisesQualifiedLifecycle(t *testing.T) {
 	if err := backend.VerifyConformance(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if len(backend.mountAccess.(*fakeMountAccess).prepared) != 2 {
+		t.Fatal("conformance did not prepare both fresh and cloned roots")
+	}
 	if probe.calls != 1 || probe.byteLimit != conformanceByteLimit || probe.objectLimit != conformanceObjectLimit ||
 		!strings.HasPrefix(probe.mountpoint, "/var/lib/steward-state/v-") {
 		t.Fatalf("quota probe = %+v", probe)

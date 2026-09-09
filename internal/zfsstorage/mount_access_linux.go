@@ -54,5 +54,21 @@ func openZFSRoot(path string) (*os.File, error) {
 		_ = file.Close()
 		return nil, errors.New("state directory is not a mounted ZFS filesystem")
 	}
+	// A subdirectory on a ZFS-backed host is not a separate quota boundary.
+	// Require this directory to begin a distinct mounted filesystem.
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if info.Sys().(*syscall.Stat_t).Dev == parent.Sys().(*syscall.Stat_t).Dev {
+		_ = file.Close()
+		return nil, errors.New("state directory is not a distinct ZFS mount root")
+	}
 	return file, nil
 }
