@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlwitness"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executoruplink"
 )
@@ -111,11 +112,10 @@ func TestExecutorCommandIssueRejectsUnsafeInputs(t *testing.T) {
 
 func TestExecutorCommandDelegationIssueVerifyAndEmbed(t *testing.T) {
 	directory := t.TempDir()
-	tenantPublic, tenantPrivate, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
+	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	controllerPublic, controllerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	tenantPublic, tenantPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,14 +123,13 @@ func TestExecutorCommandDelegationIssueVerifyAndEmbed(t *testing.T) {
 	tenantPublicPath := filepath.Join(directory, "tenant.pub")
 	controllerPrivatePath := filepath.Join(directory, "controller.pem")
 	controllerPublicPath := filepath.Join(directory, "controller.pub")
+	_, controllerPublic, err := controlwitness.Initialize(controllerPrivatePath, controllerPublicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeAgentPrivateKey(t, tenantPrivatePath, tenantPrivate)
-	writeAgentPrivateKey(t, controllerPrivatePath, controllerPrivate)
-	for path, public := range map[string]ed25519.PublicKey{
-		tenantPublicPath: tenantPublic, controllerPublicPath: controllerPublic,
-	} {
-		if err := os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(public)+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(tenantPublicPath, encodeSitePublicKey(tenantPublic), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	instancesPath := filepath.Join(directory, "instances.json")
 	templatePath := filepath.Join(directory, "admission.json")

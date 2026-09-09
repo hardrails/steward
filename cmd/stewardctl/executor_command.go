@@ -203,7 +203,7 @@ func issueExecutorCommandDelegation(arguments []string, stdout io.Writer) error 
 		}
 		admissionTemplate = &decoded
 	}
-	controllerPublic, err := readPublicKey(*controllerPublicPath)
+	controllerPublic, err := readControllerPublicKey(*controllerPublicPath)
 	if err != nil {
 		return fmt.Errorf("read controller public key: %w", err)
 	}
