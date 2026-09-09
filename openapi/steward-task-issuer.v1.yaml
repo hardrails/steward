@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Private Task Signing Station
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
     Optional operator-pinned, single-runtime Unix-socket station. No TCP listener.
     Dedicated client-group socket access grants issuance authority for the configured operation
@@ -13,6 +13,9 @@ info:
     Requests cannot choose runtime identity, trust inventory, key, or validity.
     Every successful response is retained before transmission and independently
     verified by the host before dispatch. This is not a business approval service.
+    An explicit allow-responses startup option adds exact owner-answer issuance
+    for the same pinned runtime. It defaults off and is bound into the store's
+    immutable configuration. Tasks and answers share the finite record capacity.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -91,6 +94,75 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /v1/responses:
+    post:
+      tags: [task-authority]
+      operationId: requestInteractionResponseAuthority
+      summary: Request or recover one exact interaction response permit
+      description: |
+        Available only when the operator starts the station with -allow-responses;
+        otherwise returns 404. This is a private trusted-host endpoint, not a browser
+        or agent API. Socket access authorizes any valid answer for the pinned runtime;
+        the host must first authenticate the question and retain the owner's answer.
+        The station checks native question identity and digest, pinned admission identity,
+        offered choices, text permission and exact response bytes. Gateway still verifies
+        that the exact question is pending; issuance alone proves neither consent nor delivery.
+        The body is bounded to 65536 bytes. Unknown/duplicate fields, Origin headers,
+        non-JSON Content-Type, noncanonical base64 and query strings are rejected.
+        Response bytes must contain a native steward.interaction-response-body.v1 JSON
+        object; whitespace and Unicode are not reserialized. Choice must be an exact
+        offered option. Text must be allowed, at most 2048 UTF-8 bytes, with no surrounding
+        whitespace or control characters. The first answer is retained by interaction ID
+        in a namespace disjoint from task IDs. A different question digest or response
+        conflicts; an expired permit is never renewed. Identical valid replays recover
+        the original permit even at capacity. Validity is at most -valid-for, including
+        five seconds of clock-skew allowance, and never exceeds the question's expiry.
+        Other methods return 405 with Allow POST. Unknown or encoded paths and any query
+        return 404. No Control submission, runtime activation or external effect occurs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [interaction, response_base64]
+              properties:
+                interaction:
+                  $ref: "./steward-control.v1.yaml#/components/schemas/InteractionRequest"
+                response_base64:
+                  type: string
+                  format: byte
+                  minLength: 4
+                  maxLength: 5464
+                  description: Canonical padded base64 encoding 1–4096 exact response bytes.
+      responses:
+        "200":
+          description: Exact retained native response permit; no delivery has occurred.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+            X-Content-Type-Options:
+              schema: {type: string, enum: [nosniff]}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary, maxLength: 16384}
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "405":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
 components:
   responses:
     Error:
@@ -104,7 +176,7 @@ components:
         preparation_failed (repair private staging storage and pinned authority),
         storage_unconfirmed, internal_error, signer_busy and capacity_exhausted.
         Keep the original
-        task ID and reconcile; an error does not prove no authority was retained.
+        task or interaction ID and reconcile; an error does not prove no authority was retained.
       headers:
         Cache-Control:
           schema: {type: string, enum: [no-store]}

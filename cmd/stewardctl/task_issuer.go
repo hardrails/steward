@@ -28,6 +28,7 @@ type taskIssuerConfig struct {
 	Operations                                  []string
 	Validity                                    time.Duration
 	Capacity                                    int
+	AllowResponses                              bool
 }
 
 type taskIssuerRequest struct {
@@ -161,13 +162,14 @@ func openTaskIssuer(config taskIssuerConfig) (_ *taskIssuer, returnErr error) {
 	// Only public authority contributes to the binding. The key never enters
 	// durable records or a response, and configuration cannot change on restart.
 	binding, err := json.Marshal(struct {
-		Inputs     map[string][]byte `json:"inputs"`
-		Public     []byte            `json:"public"`
-		KeyID      string            `json:"key_id"`
-		Operations []string          `json:"operations"`
-		Validity   int64             `json:"validity_seconds"`
-		Capacity   int               `json:"capacity"`
-	}{inputs, issuer.public, config.KeyID, config.Operations, int64(config.Validity / time.Second), config.Capacity})
+		Inputs         map[string][]byte `json:"inputs"`
+		Public         []byte            `json:"public"`
+		KeyID          string            `json:"key_id"`
+		Operations     []string          `json:"operations"`
+		Validity       int64             `json:"validity_seconds"`
+		Capacity       int               `json:"capacity"`
+		AllowResponses bool              `json:"allow_responses,omitempty"`
+	}{inputs, issuer.public, config.KeyID, config.Operations, int64(config.Validity / time.Second), config.Capacity, config.AllowResponses})
 	if err != nil {
 		return nil, err
 	}
@@ -254,33 +256,49 @@ func (issuer *taskIssuer) issue(request taskIssuerRequest) ([]byte, error) {
 	}
 	nameDigest := sha256.Sum256([]byte(request.TaskID))
 	name := hex.EncodeToString(nameDigest[:]) + ".json"
-	retained, err := securefile.ReadRootMode(issuer.root, name, maxTaskBundleBytes, 0o600)
+	if retained, found, err := issuer.recover(name, maxTaskBundleBytes, func(raw []byte) error {
+		return issuer.match(raw, request, body)
+	}); found || err != nil {
+		return retained, err
+	}
+	return issuer.issueNewTask(name, request, body)
+}
+
+// recover is called under mu. Existing authority is never replaced, even when
+// malformed, expired or only partly persisted. Task and response records share
+// the same finite capacity and durability boundary, not the same identity space.
+func (issuer *taskIssuer) recover(name string, limit int, match func([]byte) error) ([]byte, bool, error) {
+	retained, err := securefile.ReadRootMode(issuer.root, name, int64(limit), 0o600)
 	if err == nil {
-		if err = issuer.match(retained, request, body); err != nil {
-			return nil, errors.Join(errTaskIssuerConflict, err)
+		if err = match(retained); err != nil {
+			return nil, true, errors.Join(errTaskIssuerConflict, err)
 		}
 		// A previous file fsync may have failed after writing valid bytes.
 		// Re-establish file and directory durability before returning a replay.
 		file, openErr := issuer.root.OpenFile(name, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if openErr != nil {
-			return nil, errors.Join(errTaskIssuerStorage, openErr)
+			return nil, true, errors.Join(errTaskIssuerStorage, openErr)
 		}
 		if err = errors.Join(file.Sync(), file.Close(), issuer.sync()); err != nil {
-			return nil, errors.Join(errTaskIssuerStorage, err)
+			return nil, true, errors.Join(errTaskIssuerStorage, err)
 		}
-		return retained, nil
+		return retained, true, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return nil, errors.Join(errTaskIssuerConflict, err)
+		return nil, true, errors.Join(errTaskIssuerConflict, err)
 	}
 	// A dangling symlink can read as missing. It is still retained state,
 	// never permission to sign a replacement for this identity.
 	if _, statErr := issuer.root.Lstat(name); !errors.Is(statErr, os.ErrNotExist) {
-		return nil, errors.Join(errTaskIssuerConflict, statErr)
+		return nil, true, errors.Join(errTaskIssuerConflict, statErr)
 	}
 	if issuer.count >= issuer.config.Capacity {
-		return nil, errTaskIssuerCapacity
+		return nil, false, errTaskIssuerCapacity
 	}
+	return nil, false, nil
+}
+
+func (issuer *taskIssuer) issueNewTask(name string, request taskIssuerRequest, body []byte) ([]byte, error) {
 	// Reuse native request validation before entering the private preparation
 	// boundary. Subsequent failures concern operator-owned snapshots, signing or
 	// staging, not a request the caller can repair by changing its task identity.

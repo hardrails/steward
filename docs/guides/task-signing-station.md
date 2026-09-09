@@ -86,13 +86,71 @@ station's temporary storage private and remove orphaned snapshots only after
 confirming their process has stopped.
 
 At capacity, existing valid requests remain recoverable but new tasks receive
-503. Capacity is 1–4096 retained task records; expiry does not erase records.
+503. Capacity is 1–4096 retained records across tasks and enabled answers; expiry does not erase records.
 Do not clear the store to bypass the bound or recycle task identities. Plan a
 separate operator-controlled runtime lifecycle before exhausting the finite
 station. This version has no online rotation, retention compactor or fleet mode.
 
+## Sign owner answers without sharing the key
+
+Add `-allow-responses` when configuring a new station to enable `POST /v1/responses`
+on the same private socket. It is disabled by default. This choice is part of the
+immutable store binding: restarting a task-only store with the flag fails rather
+than broadening its authority. Plan the station before admitting work; do not
+delete or replace a store to bypass retained decisions.
+
+Send an object with exactly `interaction` and `response_base64`. `interaction` is
+the complete native `steward.interaction-request.v1` request, not Control's larger
+status projection. `response_base64` is canonical padded base64 of the exact
+`steward.interaction-response-body.v1` JSON answer. The host must retain these bytes
+after authenticating the question and the owner's decision. The station validates
+the question digest, its pinned runtime identity, offered choices and permission
+for free text. It does not normalize Unicode or reserialize the answer.
+
+Socket access now permits any valid answer for that one runtime, not only task
+issuance. The signer is not an owner-consent verifier. Keep the socket out of
+customer workloads and authenticate decisions in the host before requesting it.
+The request is bounded to 64 KiB, decoded answer to 4 KiB, and returned opaque
+permit to 16 KiB. No answer text is retained in the signing store; the permit binds
+its digest and size. Treat the permit as private replayable authority.
+
+Verify the permit offline with the independently pinned public task key and exact
+answer:
+
+```console
+stewardctl control interaction verify-response \
+  -permit-file /private/answer.permit \
+  -response-file /private/answer.json \
+  -public-key /trusted/task-authority.pub \
+  -key-id task-authority -max-validity 5m
+```
+
+The command uses no Control connection, ambient context or private key. It checks
+the native signature, local validity limit and exact answer digest and size, then
+returns `valid`, `evaluated_at`, `key_id`, `envelope_digest` and the verified
+`statement`. It never returns answer content. Both answer files must be owner-only.
+Use `-at` with canonical UTC whole seconds for reproducible verification; normal
+operation uses the current clock. Historical verification is not present authority.
+
+Before delivery, compare every runtime identity field, interaction ID and request
+digest in that statement to the independently retained question. Also require its
+expiry not to exceed the question's expiry. Verification alone does not check the
+question's offered choices, its current state, or the owner's business consent.
+These remain host policy and Gateway checks, not claims made by `valid: true`.
+
+Then deliver it through `stewardctl control interaction submit-response`
+with `-permit-file` and `-response-file`. The existing keyless courier transports the
+original bytes. Gateway must verify the signature and its own pending question;
+a queued receipt is not delivery confirmation.
+
+An identical request recovers the byte-identical permit while valid, including
+after restart or at capacity. A changed question, answer, corrupt record or expired
+permit is never replaced. Reconcile through Control before retrying after uncertainty.
+Answer validity uses the configured `-valid-for` limit, including five seconds of
+clock-skew allowance, and is capped by the question's expiry.
+
 The station does not activate a runtime, dispatch work, sign connector effects,
-sign owner answers, or replace Gateway replay enforcement. See the
+or replace Gateway replay enforcement. See the
 [protocol contract](https://github.com/hardrails/steward/blob/main/openapi/steward-task-issuer.v1.yaml)
 and [architecture decision](../decisions/0078-reuse-the-native-task-issuer-in-a-private-signing-station.md)
 for boundaries and alternatives.
