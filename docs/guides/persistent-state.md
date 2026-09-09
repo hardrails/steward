@@ -33,6 +33,25 @@ dataset, then prove the sandbox's runtime UID can write there and exhaust both
 quotas. Do not bypass this failure with world-writable paths, an unquotaed fallback,
 or an unreviewed removal of service isolation.
 
+A separately configured Ubuntu development service has now passed the daemon /
+sandbox boundary using mandatory AppArmor confinement in the host mount namespace.
+Its sandbox received kernel byte and object quota errors, retained a marker across
+container replacement, and could not change root-directory permissions. AppArmor
+denied reading a configuration outside the allowlist and mounting ZFS outside the
+assigned directory. This is evidence for that configured deployment, not a claim
+that the packaged systemd unit or every Linux distribution is qualified. Packaged
+confinement integration and exact-source release qualification remain required.
+
+New and cloned roots are prepared as `root:65532` mode `0770`: the fixed runtime
+group can create state, but the agent cannot chmod the dataset root. Preparation
+requires `CAP_CHOWN` in the separate worker, in addition to ZFS administration.
+Before changing ownership, the worker opens the directory without following a
+final symlink and requires a distinct ZFS mount, not an underlying host directory
+or an ordinary subdirectory on a ZFS-backed host. Inspection rejects changed
+ownership or mode; replay does not silently repair it. The default access verifier
+fails closed on non-Linux platforms. Deterministic tests inject a mount accessor;
+that fake is not evidence of kernel quota enforcement.
+
 You need:
 
 - a Linux node installed from a Steward node package;
