@@ -16,7 +16,9 @@ import (
 	"github.com/hardrails/steward/internal/agentapp"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/controlwitness"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/securefile"
 )
 
 type agentAuthorizeSummary struct {
@@ -147,7 +149,7 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 	if forkPlan != nil {
 		operations = []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"}
 	}
-	controllerPublic, err := readPublicKey(*controllerPublicPath)
+	controllerPublic, err := readControllerPublicKey(*controllerPublicPath)
 	if err != nil {
 		return fmt.Errorf("read Control controller public key: %w", err)
 	}
@@ -216,6 +218,19 @@ func agentAuthorize(arguments []string, stdout io.Writer) error {
 		Generation: *generation, ClaimGeneration: *claimGeneration, Delegation: *outputPath,
 		DelegationDigest: dsse.Digest(raw), ExpiresAt: statement.ExpiresAt,
 	})
+}
+
+// readControllerPublicKey accepts Control's canonical PEM export and the legacy
+// raw-base64 key format, parsing one permission-checked file snapshot in either case.
+func readControllerPublicKey(path string) (ed25519.PublicKey, error) {
+	raw, err := securefile.Read(path, maxArtifactBytes, securefile.TrustFile)
+	if err != nil {
+		return nil, err
+	}
+	if public, err := decodePublicKey(raw); err == nil {
+		return public, nil
+	}
+	return controlwitness.ParsePublic(raw)
 }
 
 func agentDelegationTemplate(intent admission.InstanceIntent, placement agentapp.Placement) *admission.CommandDelegationAdmissionTemplate {

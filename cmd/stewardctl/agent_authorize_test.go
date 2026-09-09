@@ -14,11 +14,15 @@ import (
 	"github.com/hardrails/steward/internal/agentapp"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/controlwitness"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
 func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	archive, manifestDigest, _, _ := writeImageImportArchive(t, directory)
 	siteDirectory := filepath.Join(directory, "site")
 	if err := siteCommand([]string{
@@ -46,12 +50,10 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 	}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	controller, err := newSiteKey()
-	if err != nil {
-		t.Fatal(err)
-	}
 	controllerPath := filepath.Join(directory, "controller.public.pem")
-	if err := os.WriteFile(controllerPath, encodeSitePublicKey(controller.public), 0o644); err != nil {
+	// Use the actual Control key writer; a base64 fixture named .pem hid incompatibility.
+	_, controllerPublic, err := controlwitness.Initialize(filepath.Join(directory, "controller.private.pem"), controllerPath)
+	if err != nil {
 		t.Fatal(err)
 	}
 	delegationPath := filepath.Join(directory, "delegation.dsse.json")
@@ -103,7 +105,7 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 		t.Fatalf("verified delegation = %+v", statement)
 	}
 	decodedController, err := base64PublicKey(statement.ControllerPublicKey)
-	if err != nil || !slices.Equal(decodedController, controller.public) {
+	if err != nil || !slices.Equal(decodedController, controllerPublic) {
 		t.Fatalf("controller binding = %x, %v", decodedController, err)
 	}
 	if summary.DelegationDigest != dsse.Digest(raw) {
@@ -188,6 +190,68 @@ func TestAgentAuthorizeBuildsExactFiniteControllerDelegation(t *testing.T) {
 	forkExpires, _ := time.Parse(time.RFC3339Nano, forkPlan.ExpiresAt)
 	if delegationExpires.Before(forkExpires.Add(controlstore.MinDeploymentForkCleanupWindow)) {
 		t.Fatalf("fork cleanup authority expires too early: %s", forkStatement.ExpiresAt)
+	}
+}
+
+func TestControllerPublicKeyRetainsNativeAndLegacyIdentity(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "controller.public.pem")
+	_, expected, err := controlwitness.Initialize(filepath.Join(directory, "controller.private.pem"), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{
+		"native PEM":    native,
+		"legacy base64": encodeSitePublicKey(expected),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			public, err := readControllerPublicKey(path)
+			if err != nil || !bytes.Equal(public, expected) {
+				t.Fatalf("controller identity differs: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(after, raw) {
+				t.Fatalf("controller key changed: %v", err)
+			}
+		})
+	}
+	for name, raw := range map[string][]byte{
+		"empty":         nil,
+		"invalid":       []byte("not a public key"),
+		"trailing PEM":  append(append([]byte(nil), native...), native...),
+		"trailing data": append(append([]byte(nil), native...), []byte("garbage")...),
+		"leading data":  append([]byte("garbage\n"), native...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readControllerPublicKey(path); err == nil {
+				t.Fatal("invalid controller key accepted")
+			}
+		})
+	}
+	if err := os.WriteFile(path, native, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readControllerPublicKey(path); err == nil {
+		t.Fatal("writable controller trust accepted")
+	}
+	if _, err := readControllerPublicKey(filepath.Join(directory, "missing")); err == nil {
+		t.Fatal("missing controller trust accepted")
 	}
 }
 
