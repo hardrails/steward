@@ -90,16 +90,17 @@ const (
 )
 
 var (
-	ErrAlreadyInitialized  = errors.New("control store is already initialized")
-	ErrNotInitialized      = errors.New("control store is not initialized")
-	ErrCapacityExceeded    = errors.New("control store capacity exceeded")
-	ErrConflict            = errors.New("control store object conflicts with retained state")
-	ErrNotFound            = errors.New("control store object not found")
-	ErrUnavailable         = errors.New("control store requires recovery after a durable write failure")
-	ErrInvalid             = errors.New("control request is invalid")
-	ErrOperationallyFrozen = errors.New("control command delivery is operationally frozen")
-	ErrSnapshotQuarantined = errors.New("control snapshot is quarantined")
-	ErrForbidden           = controlauth.ErrForbidden
+	ErrAlreadyInitialized          = errors.New("control store is already initialized")
+	ErrNotInitialized              = errors.New("control store is not initialized")
+	ErrCapacityExceeded            = errors.New("control store capacity exceeded")
+	ErrConflict                    = errors.New("control store object conflicts with retained state")
+	ErrDeploymentCleanupIneligible = errors.New("deployment cleanup lacks a matching definitive renewal rejection")
+	ErrNotFound                    = errors.New("control store object not found")
+	ErrUnavailable                 = errors.New("control store requires recovery after a durable write failure")
+	ErrInvalid                     = errors.New("control request is invalid")
+	ErrOperationallyFrozen         = errors.New("control command delivery is operationally frozen")
+	ErrSnapshotQuarantined         = errors.New("control snapshot is quarantined")
+	ErrForbidden                   = controlauth.ErrForbidden
 )
 
 // OperationalFreezeError identifies the effective scope that rejected a new

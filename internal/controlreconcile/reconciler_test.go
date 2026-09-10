@@ -25,15 +25,16 @@ import (
 )
 
 type reconcileFixture struct {
-	store      *controlstore.Store
-	auth       *controlauth.Manager
-	admin      controlauth.Identity
-	node       controlauth.NodeIdentity
-	nodeIDs    []string
-	now        time.Time
-	dir        string
-	controller ed25519.PrivateKey
-	limits     controlstore.Limits
+	store               *controlstore.Store
+	auth                *controlauth.Manager
+	admin               controlauth.Identity
+	node                controlauth.NodeIdentity
+	nodeIDs             []string
+	now                 time.Time
+	dir                 string
+	controller          ed25519.PrivateKey
+	limits              controlstore.Limits
+	additionalInstances []admission.CommandDelegationInstance
 }
 
 func TestReconcilerObservesTerminalWorkThenBlocksWhileTenantIsFrozen(t *testing.T) {
@@ -1536,10 +1537,10 @@ func applyControlDeploymentSpec(
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(fixture.controller.Public().(ed25519.PublicKey)),
 		Operations:          operations, NodeIDs: append([]string(nil), fixture.nodeIDs...),
-		Instances: []admission.CommandDelegationInstance{{
+		Instances: append([]admission.CommandDelegationInstance{{
 			InstanceID: instanceID, LineageID: lineageID,
 			MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 4,
-		}},
+		}}, fixture.additionalInstances...),
 		ClaimGeneration: generation,
 		Admission: &admission.CommandDelegationAdmissionTemplate{
 			CapsuleDigest: dsse.Digest(capsuleRaw),

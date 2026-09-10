@@ -257,7 +257,7 @@ func (store *Store) EnqueueDeploymentCommand(
 	}
 	if instance.Phase == DeploymentInstanceFailed &&
 		!store.rejectedRenewalCleanupAllowedLocked(deployment, instance, statement) {
-		return Deployment{}, Command{}, false, ErrConflict
+		return Deployment{}, Command{}, false, ErrDeploymentCleanupIneligible
 	}
 	node, found := store.current.nodes[statement.NodeID]
 	if !found || !node.Active || !tenantMember(node.TenantIDs, input.TenantID) ||

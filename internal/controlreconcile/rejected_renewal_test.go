@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 )
@@ -101,6 +102,53 @@ func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T
 			if err != nil || !found || oldCommand.Terminal == nil ||
 				oldCommand.Terminal.Report.Status != controlprotocol.ExecutorStatusRejected {
 				t.Fatalf("cleanup lost the rejected command history: %+v, %v", oldCommand, err)
+			}
+		})
+	}
+}
+
+func TestFencedRenewalDoesNotStarveSiblingRemoval(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		name := "uncertain renewal"
+		status := controlprotocol.ExecutorStatusOutcomeUnknown
+		if expired {
+			name, status = "expired authority", controlprotocol.ExecutorStatusRejected
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newControlReconcileFixture(t)
+			fixture.additionalInstances = []admission.CommandDelegationInstance{{
+				InstanceID: "research-1", LineageID: "research-lineage-1",
+				MinInstanceGeneration: 1, MaxInstanceGeneration: 5,
+			}}
+			applyControlDeployment(t, fixture, 1)
+			reconciler := fixture.reconciler(t)
+			assertReconcileCount(t, reconciler, "enqueue first admit", 0, 1)
+			completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+			assertReconcileCount(t, reconciler, "observe first admit", 1, 0)
+			assertReconcileCount(t, reconciler, "enqueue first renewal", 0, 1)
+			completeDeploymentCommand(t, fixture, "renew", status)
+			assertReconcileCount(t, reconciler, "observe failed renewal", 1, 0)
+			failed := getControlDeployment(t, fixture)
+			if _, _, err := fixture.store.SetDeploymentDesiredState(
+				fixture.admin, failed.TenantID, failed.ID, failed.Revision,
+				controlstore.DeploymentAbsent, fixture.now,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if expired {
+				fixture.now = fixture.now.Add(24 * time.Hour)
+				heartbeatControlNode(t, fixture)
+			}
+			report, err := reconciler.Reconcile(context.Background())
+			if err != nil || report.Enqueued != 0 || report.Removed != 1 || report.Conflicts != 0 {
+				t.Fatalf("fenced instance starved its sibling: %+v, %v", report, err)
+			}
+			after := getControlDeployment(t, fixture)
+			if after.Instances[0].Phase != controlstore.DeploymentInstanceFailed ||
+				after.Instances[0].CommandID != failed.Instances[0].CommandID ||
+				after.Instances[0].LastError != failed.Instances[0].LastError ||
+				after.Instances[1].Phase != controlstore.DeploymentInstanceRemoved {
+				t.Fatalf("sibling cleanup altered the failed instance: %+v", after)
 			}
 		})
 	}

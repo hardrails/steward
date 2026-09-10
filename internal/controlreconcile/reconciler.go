@@ -409,6 +409,11 @@ func (reconciler *Reconciler) reconcileInstance(
 		CommandDSSE: commandRaw, SchedulingStaleAfter: reconciler.nodeStaleAfter,
 		Placement: placement,
 	}, now)
+	if errors.Is(err, controlstore.ErrDeploymentCleanupIneligible) {
+		// A stable fence is not a stale deployment snapshot. Leave this
+		// instance untouched while allowing its siblings to make progress.
+		return instanceResult{}, nil
+	}
 	if errors.Is(err, controlstore.ErrConflict) {
 		return instanceResult{conflict: true}, nil
 	}
@@ -492,6 +497,11 @@ func (reconciler *Reconciler) recordBlocked(
 	var blocked blockedError
 	if !errors.As(cause, &blocked) {
 		return instanceResult{}, cause
+	}
+	if instance.Phase == controlstore.DeploymentInstanceFailed {
+		// Keep the terminal failure visible. RecordDeploymentBlocked rejects
+		// failed cursors; that stable fence must not starve later siblings.
+		return instanceResult{}, nil
 	}
 	_, changed, err := reconciler.store.RecordDeploymentBlocked(
 		deployment.TenantID, deployment.ID, instance.InstanceID,
