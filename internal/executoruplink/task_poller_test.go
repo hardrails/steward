@@ -139,6 +139,12 @@ func TestAsyncTaskCourierClassifiesSafeReplayAndPermanentRejection(t *testing.T)
 			wantStatus: controlprotocol.ExecutorTaskReportRejected, wantCode: "permit_rejected"},
 		{name: "lost observed identity", err: &gateway.ControlAPIError{Status: http.StatusNotFound, Code: "task_not_found"}, submitting: false,
 			wantStatus: controlprotocol.ExecutorTaskReportUncertain, wantCode: "task_not_found"},
+		{name: "duplicate run after dispatch", err: &gateway.ControlAPIError{Status: http.StatusConflict, Code: "run_id_conflict"}, submitting: true,
+			wantStatus: controlprotocol.ExecutorTaskReportUncertain, wantCode: "run_id_conflict"},
+		{name: "unknown retained outcome", err: &gateway.ControlAPIError{Status: http.StatusConflict, Code: "outcome_unknown"}, submitting: true,
+			wantStatus: controlprotocol.ExecutorTaskReportUncertain, wantCode: "outcome_unknown"},
+		{name: "unknown stop target before dispatch", err: &gateway.ControlAPIError{Status: http.StatusConflict, Code: "stop_target_unavailable"}, submitting: true,
+			wantStatus: controlprotocol.ExecutorTaskReportRejected, wantCode: "stop_target_unavailable"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

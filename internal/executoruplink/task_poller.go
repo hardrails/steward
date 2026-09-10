@@ -168,6 +168,14 @@ func taskDeliveryError(err error, submitting bool) (string, string) {
 	if code == "" || len(code) > controlprotocol.MaxExecutorTaskErrorCodeBytes {
 		code = "gateway_request_failed"
 	}
+	// These conflicts are durable post-dispatch failures, not a busy service.
+	// Replaying the exact request cannot repair them and must not imply no effect.
+	if gatewayError.Status == http.StatusConflict && (code == "run_id_conflict" || code == "outcome_unknown") {
+		return controlprotocol.ExecutorTaskReportUncertain, code
+	}
+	if submitting && gatewayError.Status == http.StatusConflict && code == "stop_target_unavailable" {
+		return controlprotocol.ExecutorTaskReportRejected, code
+	}
 	if gatewayError.Status == http.StatusTooManyRequests || gatewayError.Status >= 500 || gatewayError.Status == http.StatusConflict {
 		return controlprotocol.ExecutorTaskReportRetryable, code
 	}
