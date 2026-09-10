@@ -126,6 +126,26 @@ def validated_workspace_audit(content: str) -> str | None:
     return canonical_json(result).decode("utf-8")
 
 
+def mcp_fixture_function(tools: object) -> dict[str, str] | None:
+    """Use the published direct or deferred tool surface, never invent one."""
+    if not isinstance(tools, list):
+        return None
+    names = {
+        tool["function"].get("name")
+        for tool in tools
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+        and isinstance(tool["function"].get("name"), str)
+    }
+    name = "mcp__fixture_echo__echo"
+    arguments: dict[str, Any] = {"value": NONCE}
+    if name not in names:
+        if "tool_call" not in names:
+            return None
+        arguments = {"name": name, "arguments": arguments}
+        name = "tool_call"
+    return {"name": name, "arguments": json.dumps(arguments, separators=(",", ":"))}
+
+
 def validated_mcp_result(content: str) -> str | None:
     if not content.startswith(MCP_RESULT_PREFIX) or not content.endswith(MCP_RESULT_SUFFIX):
         return None
@@ -367,6 +387,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             }
             finish = "tool_calls"
         elif "STEWARD_MCP_FIXTURE" in last_text:
+            function = mcp_fixture_function(payload.get("tools"))
+            if function is None:
+                self._json(422, {"error": {"code": "mcp_fixture_not_exposed", "message": "MCP fixture tool surface is unavailable"}})
+                return
             message = {
                 "role": "assistant",
                 "content": None,
@@ -374,10 +398,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     {
                         "id": "call_steward_mcp",
                         "type": "function",
-                        "function": {
-                            "name": "mcp__fixture_echo__echo",
-                            "arguments": json.dumps({"value": NONCE}, separators=(",", ":")),
-                        },
+                        "function": function,
                     }
                 ],
             }

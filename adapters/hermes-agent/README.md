@@ -11,11 +11,22 @@ the networkless planner and host fetcher described in the operator guide, then r
 upstream dependency and packaging hooks inside a bounded gVisor container with
 `--network=none`, read-only inputs, no Docker socket, dropped capabilities,
 `no-new-privileges`, fixed resource limits, and bounded artifact output. The final
-Dockerfile only assembles that validated output and runs with build networking
-disabled. The feasibility gate then runs the hostile-runtime checks.
+Dockerfile assembles that validated output and the original verified source,
+with build networking disabled. Its only execution step removes the unused base
+pip installer; no project build hook runs in Docker assembly. The feasibility
+gate then runs the hostile-runtime checks.
 The build never uses the upstream image: that image starts as root, declares a
 volume, and its Dockerfile at the selected revision names two lockfiles that are
 not present in the tree.
+
+The September stable source pin uses upstream's source-backed editable
+installation at `/opt/hermes`. Its source, virtual environment, skills and locale
+assets are root-owned and read-only to the runtime user. Building at that same
+path avoids stale temporary paths in entrypoints and import metadata. The slim
+base retains Python, uv and shell execution, not the full base's incidental
+compiler, Git, curl or image-processing packages. Additional system tooling needs
+an explicit workload test and reviewed image, or a separate worker. See
+[ADR 0083](../../docs/decisions/0083-reuse-hermes-source-installation-and-a-slim-runtime.md).
 
 The adapter replaces upstream's root-only s6 initialization with `entrypoint.py`.
 That shim performs only fixed-path, non-root initialization, verifies the signed
@@ -82,6 +93,19 @@ this revision, the latter is the smallest locked extra that supplies `aiohttp`,
 which the native API-server adapter requires. No Home Assistant integration is
 configured or granted at runtime.
 
+The September upstream lock still pins affected `httpx2` and `httpcore2` 2.7.0.
+The adapter records a two-package security exception in `security_overrides`:
+both use 2.12.0, with exact wheel URLs, byte sizes and hashes. The networkless
+planner refuses a missing, partial or different override inventory and refuses
+the exception if the original upstream versions change. The
+existing bounded fetcher verifies those wheels; uv installs them offline without
+resolving more dependencies and checks the installed environment. This is an
+explicit adapter-maintained patch, not an unchanged upstream dependency set.
+Native qualification also requires the installed distribution versions to match
+these exact declarations; successful MCP behavior alone cannot prove patching.
+Remove the exception and its mandatory-inventory checks together once a reviewed
+upstream lock supplies the fixes.
+
 On `linux/amd64`, qualification exercises two independent paths. The closed-runtime
 gate builds the exact source and runs the basic task, signed workspace-audit skill,
 qualification-only MCP fixture, active-tool stop, and restart under gVisor. The Steward
@@ -92,7 +116,11 @@ authenticated upstream effect, replay and forbidden-operation denial, secret and
 origin absence for the fixed qualification material, changed workspace output after
 a fresh resumed session, state purge, and verified Executor and connector receipt
 chains. Successful records remain limited to the exact pinned inputs and documented
-capability surface. Other platforms require their own qualification run.
+capability surface. After confirming its containers are absent, the feasibility
+harness restores owner access only to its temporary state directories to remove
+read-only skill copies. It neither follows links nor traverses another filesystem,
+and does not grant root cleanup authority over agent-generated content.
+Other platforms require their own qualification run.
 
 Maintainers can retain a non-sensitive integration summary by setting
 `HERMES_INTEGRATION_EVIDENCE_OUT` when running

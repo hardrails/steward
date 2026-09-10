@@ -6,7 +6,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-revision=3ef6bbd201263d354fd83ec55b3c306ded2eb72a
+revision=2237be355906fbe6065ce1815711eee52b2d646e
 evidence_out=${HERMES_EVIDENCE_OUT:-$root/dist/acceptance/hermes/feasibility.json}
 source_dir=${HERMES_SOURCE_DIR:-}
 build_timeout=${HERMES_BUILD_TIMEOUT_SECONDS:-1800}
@@ -77,7 +77,7 @@ harness_sha256=$(sha256sum "$root/scripts/hermes-feasibility.sh" | awk '{print $
 required_checks=(
 	source.inputs image.build image.contract network.internal fixture.services
 	fixture.network
-	runtime.policy agent.readiness adapter.negotiation runtime.identity runtime.filesystem runtime.network
+	runtime.policy agent.readiness adapter.negotiation runtime.identity runtime.filesystem runtime.source runtime.network
 	service.boundary fixture.workspace task.basic task.skill task.mcp task.stop
 	restart.readiness task.restart restart.state feasibility.complete
 )
@@ -281,6 +281,10 @@ remove_state_root() {
 	}
 	timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
 	if [[ -e $state_root || -L $state_root ]]; then
+		# Source-backed skills retain read-only directory modes. Restore owner
+		# access only in this stopped fixture's state, without following links or
+		# crossing filesystems; never widen privileges to remove agent content.
+		state_owner_command timeout 30 find -P "$state_root" -xdev -type d -exec chmod u+rwx -- '{}' + >/dev/null 2>&1 || true
 		state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
 	fi
 	timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
@@ -694,6 +698,45 @@ docker exec -u 65532:65532 "$agent" sh -c 'printf ok > /opt/data/steward/state-w
 state_probe=$(read_state_probe) || stop_gate runtime.state state_write_unreadable
 [[ $state_probe == ok ]] || stop_gate runtime.state state_write_not_observed
 record runtime.filesystem passed fixed_state_only
+
+security_versions=$(python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); print(json.dumps({item["name"]: item["version"] for item in p["security_overrides"]}))' \
+	"$work/context/adapter/adapter.json") || stop_gate runtime.source invalid_security_inventory
+timeout 15 docker exec -i -u 65532:65532 "$agent" /opt/hermes/.venv/bin/python -I - "$security_versions" <<'PY' || stop_gate runtime.source source_installation_contract_failed
+import importlib.metadata
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+# BEGIN HERMES_INSTALLED_SECURITY
+expected = json.loads(sys.argv[1])
+if not isinstance(expected, dict) or set(expected) != {"httpx2", "httpcore2"}:
+    raise SystemExit("mandatory runtime security inventory is missing")
+for name, version in expected.items():
+    if not isinstance(version, str) or importlib.metadata.version(name) != version:
+        raise SystemExit("installed security distribution differs from the reviewed override")
+# END HERMES_INSTALLED_SECURITY
+
+root = pathlib.Path("/opt/hermes")
+for name in ("hermes_cli", "run_agent", "gateway"):
+    spec = importlib.util.find_spec(name)
+    if spec is None or spec.origin is None:
+        raise SystemExit("source module is missing")
+    path = pathlib.Path(spec.origin).resolve()
+    if not path.is_relative_to(root) or path.is_relative_to(root / ".venv"):
+        raise SystemExit("source module is not bound to the immutable checkout")
+    if os.access(path, os.W_OK):
+        raise SystemExit("agent can rewrite source modules")
+for name in ("skills", "locales"):
+    path = root / name
+    if not path.is_dir() or not any(path.iterdir()) or os.access(path, os.W_OK):
+        raise SystemExit("source assets are absent or writable")
+PY
+timeout 15 docker exec -u 65532:65532 "$agent" /usr/local/bin/python3 -I -c \
+	'import importlib.util; assert importlib.util.find_spec("pip") is None' \
+	|| stop_gate runtime.source unused_base_installer_present
+record runtime.source passed immutable_source_assets_without_base_pip_and_exact_security_versions
 
 if docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' >/dev/null 2>&1
 import urllib.request

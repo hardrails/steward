@@ -773,9 +773,15 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	if strings.Contains(dockerfile, "# syntax=") {
 		t.Fatal("Dockerfile unexpectedly delegates parsing to an external frontend")
 	}
+	// Only the base-image installer may execute, to remove itself offline.
+	// Hermes and third-party packaging hooks still run only inside gVisor.
+	const removePip = `RUN ["/usr/local/bin/python3", "-I", "-m", "pip", "uninstall", "--yes", "pip"]`
+	if strings.Count(dockerfile, removePip) != 1 {
+		t.Fatal("Dockerfile must remove the unused base pip exactly once")
+	}
 	for _, line := range strings.Split(dockerfile, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "RUN ") {
-			t.Fatalf("assemble-only Dockerfile contains build command %q", line)
+		if strings.HasPrefix(strings.TrimSpace(line), "RUN ") && line != removePip {
+			t.Fatalf("Dockerfile contains an unexpected build command %q", line)
 		}
 	}
 	for _, required := range []string{
@@ -791,6 +797,10 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 		`hermes_set_input_tree_modes "$work/context/adapter" 0555 0444 0555`,
 		`hermes_set_input_tree_modes "$work/final-context/artifact/venv/.venv" 0555 0444 0555`,
 		`GIT_NO_REPLACE_OBJECTS=1`, `-c core.fsmonitor=false`,
+		`--no-deps --no-build-isolation --python .venv/bin/python --editable .`,
+		`cd /opt/hermes`,
+		`/opt/hermes:rw,nosuid,nodev,size=$sandbox_memory_bytes,uid=65532,gid=65532,mode=0700`,
+		`cp -a "$work/context/upstream"/. "$work/final-context/upstream/"`,
 	} {
 		if !strings.Contains(builder, required) {
 			t.Fatalf("builder does not enforce isolation property %q", required)
@@ -1045,7 +1055,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		"source.inputs", "image.build", "image.contract", "network.internal",
 		"fixture.services", "fixture.network", "runtime.policy", "agent.readiness",
 		"adapter.negotiation", "service.boundary", "runtime.identity", "runtime.filesystem",
-		"runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp", "task.stop",
+		"runtime.source", "runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp", "task.stop",
 		"restart.readiness", "task.restart", "restart.state", "feasibility.complete",
 		"evidence.coverage",
 	}
@@ -1336,8 +1346,9 @@ func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
 		`privileged_command "$setpriv_path" \`:                      true,
 	}
 	allowedStateOwner := map[string]int{
-		`state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'`:                                 2,
-		`state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true`: 1,
+		`state_owner_command timeout 30 find -P "$state_root" -xdev -type d -exec chmod u+rwx -- '{}' + >/dev/null 2>&1 || true`: 1,
+		`state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'`:                                                       2,
+		`state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true`:                       1,
 	}
 	for _, line := range strings.Split(script, "\n") {
 		line = strings.TrimSpace(line)
@@ -1553,6 +1564,14 @@ mcp_result = module.MCP_RESULT_PREFIX + json.dumps({"result": module.NONCE}) + m
 assert module.validated_mcp_result(mcp_result) == module.NONCE
 assert module.validated_mcp_result(mcp_result.replace(module.NONCE, "changed")) is None
 assert module.validated_mcp_result(json.dumps({"result": module.NONCE})) is None
+direct = module.mcp_fixture_function([{"function": {"name": "mcp__fixture_echo__echo"}}])
+assert direct["name"] == "mcp__fixture_echo__echo"
+assert json.loads(direct["arguments"]) == {"value": module.NONCE}
+deferred = module.mcp_fixture_function([{"function": {"name": "tool_call"}}])
+assert deferred["name"] == "tool_call"
+assert json.loads(deferred["arguments"]) == {"name": "mcp__fixture_echo__echo", "arguments": {"value": module.NONCE}}
+for unavailable in (None, {}, [], [None], [{"function": {"name": []}}], [{"function": {"name": "terminal"}}]):
+    assert module.mcp_fixture_function(unavailable) is None
 
 for mode, result in (
     ("perform", module.CONNECTOR_RESULT),

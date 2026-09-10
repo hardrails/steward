@@ -1,29 +1,26 @@
 {
   "schema_version": "steward.adapter-license-review.v1",
-  "upstream_revision": "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
+  "upstream_revision": "2237be355906fbe6065ce1815711eee52b2d646e",
   "source_conclusion": "MIT",
   "source_license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
   "selected_inputs": [
     "LICENSE",
     "pyproject.toml",
-    "uv.lock"
+    "uv.lock",
+    "complete immutable upstream source archive and assets"
   ],
   "selected_optional_inputs": [
     "homeassistant",
     "mcp"
   ],
   "excluded_optional_inputs": [
-    "plugins/hermes-achievements",
-    "plugins/security-guidance",
-    "skills/creative/humanizer",
-    "skills/productivity/powerpoint",
-    "web",
-    "ui-tui",
-    "browser assets",
-    "messaging extras"
+    "web dependency installation",
+    "ui-tui dependency installation",
+    "browser binary downloads",
+    "messaging dependency extras"
   ],
   "redistribution_status": "blocked_pending_transitive_and_base_notice_generation",
-  "note": "This record verifies the pinned upstream source license. It deliberately does not treat the MIT root license as a conclusion for every locked dependency or base-image file.",
-  "upstream_release": "v2026.7.20",
-  "upstream_version": "0.19.0"
+  "note": "This record verifies the pinned upstream source license, not the licenses of every retained optional source asset, locked dependency or base-image file. The source-backed installation retains optional source assets without enabling those integrations. Their notices remain part of the blocked redistribution review.",
+  "upstream_release": "v2026.9.7",
+  "upstream_version": "0.21.1"
 }

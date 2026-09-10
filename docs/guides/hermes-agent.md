@@ -7,7 +7,7 @@ section: Agent compatibility
 # Hermes Agent adapter and qualification status
 
 Steward includes an adapter definition for Hermes Agent commit
-[`3ef6bbd201263d354fd83ec55b3c306ded2eb72a`](https://github.com/NousResearch/hermes-agent/commit/3ef6bbd201263d354fd83ec55b3c306ded2eb72a).
+[`2237be355906fbe6065ce1815711eee52b2d646e`](https://github.com/NousResearch/hermes-agent/commit/2237be355906fbe6065ce1815711eee52b2d646e).
 The adapter builds Hermes from that exact source revision into a hardened image that
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
 upstream image. The v2 bridge provides a fixed, run-specific stop operation,
@@ -19,6 +19,14 @@ compare adapter/harness bytes, runtime source trees, and compiler/embed inputs
 against those records. Changed inputs cannot ship until requalified; records must
 be retained unchanged, never edited to cover another build. This is runtime fixture
 evidence, not a completed end-user workflow.
+
+The retained records cover the September source and base refresh, including its
+source-backed installation, immutable assets, base-installer removal and exact
+installed HTTP security-patch versions. Each separately built image still needs
+its own vulnerability scan before promotion; these records do not certify other
+image bytes or complete the redistribution notice inventory.
+[ADR 0083]({{ '/decisions/0083-reuse-hermes-source-installation-and-a-slim-runtime/' | relative_url }})
+records the installation and tool-environment tradeoffs.
 
 The retained v2 qualification means its pinned source and adapter passed the documented
 runtime qualification under gVisor on `linux/amd64`, including a signed workspace audit, an
@@ -205,8 +213,10 @@ hooks execute in a bounded gVisor container with read-only inputs, no Docker soc
 and `--network=none`. First, a networkless gVisor planner reads the verified
 `uv.lock`. A non-executing host fetcher then downloads only the planned CPython 3.13
 `linux/amd64` wheels from `files.pythonhosted.org`. It refuses redirects and proxies
-and verifies each wheel's locked SHA-256 digest and byte size. The final image is also assembled with build
-networking disabled. Source checkout and a missing digest-pinned base image can still
+and verifies each wheel's locked SHA-256 digest and byte size. The final image
+assembles the original source and validated environment with networking disabled;
+its only execution step uninstalls the unused base pip package. Source checkout
+and a missing digest-pinned base image can still
 require host-side network access. Do not place secrets or production data on the
 build host; use a disposable build machine because gVisor reduces build risk but does
 not make untrusted code harmless. From a Steward source checkout, run the interactive
