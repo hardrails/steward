@@ -59,6 +59,6 @@ transitive/base notice inventory remains a separate redistribution requirement.
 Revisit if a supported workload requires additional system tools: add reviewed,
 pinned tooling with a workload test, rather than restoring an unbounded base.
 
-References: [Hermes stable release](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.9.7),
+References: [pinned Hermes source](https://github.com/NousResearch/hermes-agent/tree/2237be355906fbe6065ce1815711eee52b2d646e),
 [upstream installation guard](https://github.com/NousResearch/hermes-agent/blob/2237be355906fbe6065ce1815711eee52b2d646e/setup.py),
 [uv container guidance](https://docs.astral.sh/uv/guides/integration/docker/).
