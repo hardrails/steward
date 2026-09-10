@@ -96,11 +96,15 @@ configured or granted at runtime.
 The September upstream lock still pins affected `httpx2` and `httpcore2` 2.7.0.
 The adapter records a two-package security exception in `security_overrides`:
 both use 2.12.0, with exact wheel URLs, byte sizes and hashes. The networkless
-planner refuses the exception if the original upstream versions change. The
+planner refuses a missing, partial or different override inventory and refuses
+the exception if the original upstream versions change. The
 existing bounded fetcher verifies those wheels; uv installs them offline without
 resolving more dependencies and checks the installed environment. This is an
 explicit adapter-maintained patch, not an unchanged upstream dependency set.
-Remove the exception once a reviewed upstream lock supplies the fixes.
+Native qualification also requires the installed distribution versions to match
+these exact declarations; successful MCP behavior alone cannot prove patching.
+Remove the exception and its mandatory-inventory checks together once a reviewed
+upstream lock supplies the fixes.
 
 On `linux/amd64`, qualification exercises two independent paths. The closed-runtime
 gate builds the exact source and runs the basic task, signed workspace-audit skill,
@@ -112,7 +116,11 @@ authenticated upstream effect, replay and forbidden-operation denial, secret and
 origin absence for the fixed qualification material, changed workspace output after
 a fresh resumed session, state purge, and verified Executor and connector receipt
 chains. Successful records remain limited to the exact pinned inputs and documented
-capability surface. Other platforms require their own qualification run.
+capability surface. After confirming its containers are absent, the feasibility
+harness restores owner access only to its temporary state directories to remove
+read-only skill copies. It neither follows links nor traverses another filesystem,
+and does not grant root cleanup authority over agent-generated content.
+Other platforms require their own qualification run.
 
 Maintainers can retain a non-sensitive integration summary by setting
 `HERMES_INTEGRATION_EVIDENCE_OUT` when running
