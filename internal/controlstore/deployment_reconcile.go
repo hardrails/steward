@@ -255,6 +255,10 @@ func (store *Store) EnqueueDeploymentCommand(
 		statement.CommandSequence <= instance.CommandSequence {
 		return Deployment{}, Command{}, false, ErrConflict
 	}
+	if instance.Phase == DeploymentInstanceFailed &&
+		!store.rejectedRenewalCleanupAllowedLocked(deployment, instance, statement) {
+		return Deployment{}, Command{}, false, ErrConflict
+	}
 	node, found := store.current.nodes[statement.NodeID]
 	if !found || !node.Active || !tenantMember(node.TenantIDs, input.TenantID) ||
 		!containsCapability(node.Capabilities, controlprotocol.ExecutorCapabilityControllerDelegationV1) {
@@ -765,6 +769,27 @@ func deploymentDelegatedInstance(
 	return instances[index], true
 }
 
+// rejectedRenewalCleanupAllowedLocked permits only a new stop after a proven
+// rejected renewal. Unknown/failed outcomes and missing history remain fenced.
+// Current signed authority is verified by EnqueueDeploymentCommand before this
+// check; stop/destroy still need their own successful Executor observations.
+func (store *Store) rejectedRenewalCleanupAllowedLocked(
+	deployment Deployment, instance DeploymentInstance, statement admission.CommandStatement,
+) bool {
+	if deployment.DesiredState != DeploymentAbsent || instance.CommandOperation != "renew" ||
+		statement.Kind != "stop" || instance.CommandID == "" || instance.Admission == nil ||
+		instance.Admission.RuntimeRef == "" || statement.RuntimeRef == "" ||
+		instance.Admission.Generation != instance.Generation {
+		return false
+	}
+	command, found := store.current.commands[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)]
+	return found && command.CommandKind == "renew" && command.State == CommandTerminal &&
+		command.Terminal != nil && command.Terminal.Report.Status == controlprotocol.ExecutorStatusRejected &&
+		command.SignedRuntimeRef == statement.RuntimeRef &&
+		command.SignedInstanceGeneration == instance.Generation &&
+		command.SignedClaimGeneration == statement.ClaimGeneration
+}
+
 func deploymentTransitionAllowed(deployment Deployment, instance DeploymentInstance, operation string) bool {
 	desired := deployment.DesiredState
 	phase := instance.Phase
@@ -790,6 +815,9 @@ func deploymentTransitionAllowed(deployment Deployment, instance DeploymentInsta
 	}
 	if desired != DeploymentAbsent {
 		return false
+	}
+	if phase == DeploymentInstanceFailed {
+		return instance.CommandOperation == "renew" && operation == "stop"
 	}
 	return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
 		phase == DeploymentInstanceDestroying && operation == "destroy" ||

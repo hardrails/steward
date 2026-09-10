@@ -316,6 +316,13 @@ stewardctl agent deployment remove auditor
 
 Removal is asynchronous. Watch status until the deployment is `removed`. A failed
 or uncertain Executor outcome becomes `degraded` and is not silently retried.
+There is one narrow cleanup path for a definitively rejected lease renewal:
+renew expired controller authority with the same-generation procedure above,
+then request removal. Control retains the rejection and issues a new signed
+`stop`, followed by `destroy` only after a successful stop observation. Removal
+still requires confirmed absence. It never retries renewal or start, changes
+the instance or state lineage, or treats a failed/unknown result as a rejection.
+Missing command history and failed cleanup commands remain fenced for recovery.
 `last_error` also reports retryable controller conditions using stable values:
 `no_eligible_node`, `assigned_node_unavailable`, `awaiting_lease_expiry`,
 `stateful_replacement_unsupported`, `replacement_generation_exhausted`,
@@ -450,10 +457,10 @@ local Docker state is not a portable, quota-enforced snapshot. They report
 and availability constraints.
 
 Keep lifecycle authority valid for any operation Control may still need. After a
-delegation expires, Executor correctly refuses new commands under it. To roll an
-agent forward or remove it later, sign and apply a higher deployment and instance
-generation with a fresh delegation before requesting cleanup. Steward does not
-silently extend or reinterpret an expired tenant signature.
+delegation expires, Executor correctly refuses new commands under it. Renew the
+exact same-generation authority before requesting removal or a higher-generation
+rollout; a rollout additionally requires a ready source deployment. Steward does
+not silently extend or reinterpret an expired tenant signature.
 
 A new generation must retain every instance that has not reached `removed` and
 advance that instance's generation without changing its lineage. Omitting a live,

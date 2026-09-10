@@ -258,7 +258,9 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "removed"}, err
 	}
-	if instance.Phase == controlstore.DeploymentInstanceFailed ||
+	cleanupRejectedRenewal := deployment.DesiredState == controlstore.DeploymentAbsent &&
+		instance.Phase == controlstore.DeploymentInstanceFailed && instance.CommandOperation == "renew"
+	if instance.Phase == controlstore.DeploymentInstanceFailed && !cleanupRejectedRenewal ||
 		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain == nil {
 		return instanceResult{}, nil
 	}
@@ -669,6 +671,13 @@ func nextOperation(
 		return ""
 	}
 	switch instance.Phase {
+	case controlstore.DeploymentInstanceFailed:
+		if desired == controlstore.DeploymentAbsent && instance.CommandOperation == "renew" {
+			// EnqueueDeploymentCommand rechecks the retained terminal rejection
+			// atomically. This is cleanup, never a renewal or start retry.
+			return "stop"
+		}
+		return ""
 	case controlstore.DeploymentInstanceRunning, controlstore.DeploymentInstanceStarting:
 		return "stop"
 	case controlstore.DeploymentInstanceDestroying:
