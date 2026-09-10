@@ -323,6 +323,13 @@ then request removal. Control retains the rejection and issues a new signed
 still requires confirmed absence. It never retries renewal or start, changes
 the instance or state lineage, or treats a failed/unknown result as a rejection.
 Missing command history and failed cleanup commands remain fenced for recovery.
+At a full command-store bound, the consumed rejected renewal may be reclaimed
+atomically with its successor stop, and an observed successful stop with its
+successor destroy. This narrow cleanup exception can precede ordinary terminal
+retention expiry: it preserves the capacity bound without deleting evidence
+before the exact successor and advanced deployment cursor are durably retained.
+With spare capacity the prior command history is retained normally. Unknown or
+failed effects are never reclaimed by this exception.
 `last_error` also reports retryable controller conditions using stable values:
 `no_eligible_node`, `assigned_node_unavailable`, `awaiting_lease_expiry`,
 `stateful_replacement_unsupported`, `replacement_generation_exhausted`,
