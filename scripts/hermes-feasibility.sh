@@ -699,10 +699,24 @@ state_probe=$(read_state_probe) || stop_gate runtime.state state_write_unreadabl
 [[ $state_probe == ok ]] || stop_gate runtime.state state_write_not_observed
 record runtime.filesystem passed fixed_state_only
 
-timeout 15 docker exec -i -u 65532:65532 "$agent" /opt/hermes/.venv/bin/python -I - <<'PY' || stop_gate runtime.source source_installation_contract_failed
+security_versions=$(python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); print(json.dumps({item["name"]: item["version"] for item in p["security_overrides"]}))' \
+	"$work/context/adapter/adapter.json") || stop_gate runtime.source invalid_security_inventory
+timeout 15 docker exec -i -u 65532:65532 "$agent" /opt/hermes/.venv/bin/python -I - "$security_versions" <<'PY' || stop_gate runtime.source source_installation_contract_failed
+import importlib.metadata
 import importlib.util
+import json
 import os
 import pathlib
+import sys
+
+# BEGIN HERMES_INSTALLED_SECURITY
+expected = json.loads(sys.argv[1])
+if not isinstance(expected, dict) or set(expected) != {"httpx2", "httpcore2"}:
+    raise SystemExit("mandatory runtime security inventory is missing")
+for name, version in expected.items():
+    if not isinstance(version, str) or importlib.metadata.version(name) != version:
+        raise SystemExit("installed security distribution differs from the reviewed override")
+# END HERMES_INSTALLED_SECURITY
 
 root = pathlib.Path("/opt/hermes")
 for name in ("hermes_cli", "run_agent", "gateway"):
@@ -722,7 +736,7 @@ PY
 timeout 15 docker exec -u 65532:65532 "$agent" /usr/local/bin/python3 -I -c \
 	'import importlib.util; assert importlib.util.find_spec("pip") is None' \
 	|| stop_gate runtime.source unused_base_installer_present
-record runtime.source passed immutable_source_assets_without_base_pip
+record runtime.source passed immutable_source_assets_without_base_pip_and_exact_security_versions
 
 if docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' >/dev/null 2>&1
 import urllib.request

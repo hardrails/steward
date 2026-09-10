@@ -9,6 +9,55 @@ import (
 	"testing"
 )
 
+func TestHermesNativeQualificationRequiresInstalledSecurityVersions(t *testing.T) {
+	root := hermesAdapterRoot(t)
+	source := string(readBounded(t, filepath.Join(root, "../../scripts/hermes-feasibility.sh"), 2<<20))
+	const begin = "# BEGIN HERMES_INSTALLED_SECURITY\n"
+	const end = "# END HERMES_INSTALLED_SECURITY"
+	if strings.Count(source, begin) != 1 || strings.Count(source, end) != 1 {
+		t.Fatal("installed security qualification must have one extractable block")
+	}
+	block := strings.Split(strings.Split(source, begin)[1], end)[0]
+	code := "import importlib.metadata,json,sys\ninstalled=json.loads(sys.argv[2])\nimportlib.metadata.version=lambda name: installed[name]\n" + block
+	for _, name := range []string{"valid", "old-httpx2", "old-httpcore2", "missing-distribution", "missing-inventory", "partial-inventory", "invalid-inventory", "invalid-version"} {
+		t.Run(name, func(t *testing.T) {
+			expected := map[string]any{"httpx2": "2.12.0", "httpcore2": "2.12.0"}
+			installed := map[string]string{"httpx2": "2.12.0", "httpcore2": "2.12.0"}
+			switch name {
+			case "old-httpx2":
+				installed["httpx2"] = "2.7.0"
+			case "old-httpcore2":
+				installed["httpcore2"] = "2.7.0"
+			case "missing-distribution":
+				delete(installed, "httpcore2")
+			case "missing-inventory":
+				expected = map[string]any{}
+			case "partial-inventory":
+				delete(expected, "httpcore2")
+			case "invalid-inventory":
+				expected = nil
+			case "invalid-version":
+				expected["httpx2"] = 212
+			}
+			expectedJSON, err := json.Marshal(expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installedJSON, err := json.Marshal(installed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command("python3", "-I", "-c", code, string(expectedJSON), string(installedJSON)).CombinedOutput()
+			if name == "valid" && err != nil {
+				t.Fatalf("exact installed security versions rejected: %v\n%s", err, output)
+			}
+			if name != "valid" && err == nil {
+				t.Fatalf("invalid runtime security state qualified: %s", output)
+			}
+		})
+	}
+}
+
 func TestHermesSecurityOverridesBindTheReplacedLockAndWheelIdentity(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	builder := string(readBounded(t, filepath.Join(root, "../../scripts/build-hermes-adapter.sh"), 2<<20))
