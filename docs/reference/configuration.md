@@ -62,7 +62,7 @@ directory is a complete recovery unit. See
 | `-max-deployments` | `1024` | Retained desired deployments across the site |
 | `-max-deployments-per-tenant` | `128` | Retained desired deployments for one tenant |
 | `-max-forks-per-snapshot` | `32` | Live fork descendants allowed from one tenant and node snapshot |
-| `-terminal-retention` | `24h` | Minimum retention before a known terminal outcome may be reclaimed for command capacity |
+| `-terminal-retention` | `24h` | Minimum ordinary terminal retention; observed cleanup predecessors may be atomically replaced by their authorized successor at full command capacity (see the build-agents cleanup guide) |
 
 `strict-sovereign` is a real enforcement mode, not a dashboard label. Control
 refuses to start while either online controller key file exists, does not start the reconciler,
