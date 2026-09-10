@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
 )
@@ -187,5 +188,71 @@ func TestStopResponseCannotSubstituteAnotherRun(t *testing.T) {
 		if record.Receipt.Event.TargetTaskDigest != "" && record.Receipt.Event.RunID != "" {
 			t.Fatal("untrusted stop response claimed another run")
 		}
+	}
+}
+
+func TestStopWaitsForParentDispatchPublication(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"run_id":"` + lifecycleTestRunID + `"}`))
+	}))
+	defer upstream.Close()
+	rig := newLifecycleServiceTaskRig(t, upstream.URL, testStopOperation())
+	taskDigest := dispatchLifecycleTask(t, rig, "work-before-publication", []byte(`{"input":"work","session_id":"publication"}`))
+	s := rig.server
+	s.serviceTaskMutationMu.Lock()
+	s.mu.Lock()
+	parent := s.serviceTasks[taskDigest]
+	unpublished := parent
+	unpublished.Dispatch = connectorledger.Event{}
+	s.serviceTasks[taskDigest] = unpublished
+	s.mu.Unlock()
+	// Model the writer's interval after durable append and before publishing the
+	// in-memory dispatch. Both sides must participate in its existing mutex.
+	locked := true
+	finishPublication := func() {
+		s.mu.Lock()
+		s.serviceTasks[taskDigest] = parent
+		s.mu.Unlock()
+		s.serviceTaskMutationMu.Unlock()
+		locked = false
+	}
+	defer func() {
+		if locked {
+			finishPublication()
+		}
+	}()
+	event := parent.Authorization
+	event.OperationID = "hermes.stop"
+	event.TaskDigest = "sha256:" + strings.Repeat("f", 64)
+	body, err := connectorledger.HermesStopRequest(lifecycleTestRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		event connectorledger.Event
+		err   error
+	}
+	started, completed := make(chan struct{}), make(chan result, 1)
+	go func() {
+		close(started)
+		linked, err := s.linkStopTask(event, testStopOperation(), body)
+		completed <- result{linked, err}
+	}()
+	<-started
+	select {
+	case got := <-completed:
+		t.Fatalf("stop raced an unfinished parent publication: %v", got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	finishPublication()
+	select {
+	case got := <-completed:
+		if got.err != nil || got.event.TargetTaskDigest != taskDigest || got.event.TargetRunID != lifecycleTestRunID {
+			t.Fatalf("stop lost its published parent: %+v err=%v", got.event, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not resume after parent publication")
 	}
 }

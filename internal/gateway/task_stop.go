@@ -29,6 +29,10 @@ func (s *Server) linkStopTask(event connectorledger.Event, operation ServiceOper
 	if err != nil || !bytes.Equal(body, exact) {
 		return connectorledger.Event{}, errors.New("stop request differs from its canonical target")
 	}
+	// A durable parent append and its in-memory publication are one mutation.
+	// Do not permanently reject a valid target between those two writes.
+	s.serviceTaskMutationMu.Lock()
+	defer s.serviceTaskMutationMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, state := range s.serviceTasks {
