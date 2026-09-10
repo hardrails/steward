@@ -1055,7 +1055,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		"source.inputs", "image.build", "image.contract", "network.internal",
 		"fixture.services", "fixture.network", "runtime.policy", "agent.readiness",
 		"adapter.negotiation", "service.boundary", "runtime.identity", "runtime.filesystem",
-		"runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp", "task.stop",
+		"runtime.source", "runtime.network", "fixture.workspace", "task.basic", "task.skill", "task.mcp", "task.stop",
 		"restart.readiness", "task.restart", "restart.state", "feasibility.complete",
 		"evidence.coverage",
 	}

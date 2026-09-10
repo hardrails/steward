@@ -77,7 +77,7 @@ harness_sha256=$(sha256sum "$root/scripts/hermes-feasibility.sh" | awk '{print $
 required_checks=(
 	source.inputs image.build image.contract network.internal fixture.services
 	fixture.network
-	runtime.policy agent.readiness adapter.negotiation runtime.identity runtime.filesystem runtime.network
+	runtime.policy agent.readiness adapter.negotiation runtime.identity runtime.filesystem runtime.source runtime.network
 	service.boundary fixture.workspace task.basic task.skill task.mcp task.stop
 	restart.readiness task.restart restart.state feasibility.complete
 )
@@ -694,6 +694,31 @@ docker exec -u 65532:65532 "$agent" sh -c 'printf ok > /opt/data/steward/state-w
 state_probe=$(read_state_probe) || stop_gate runtime.state state_write_unreadable
 [[ $state_probe == ok ]] || stop_gate runtime.state state_write_not_observed
 record runtime.filesystem passed fixed_state_only
+
+timeout 15 docker exec -i -u 65532:65532 "$agent" /opt/hermes/.venv/bin/python -I - <<'PY' || stop_gate runtime.source source_installation_contract_failed
+import importlib.util
+import os
+import pathlib
+
+root = pathlib.Path("/opt/hermes")
+for name in ("hermes_cli", "run_agent", "gateway"):
+    spec = importlib.util.find_spec(name)
+    if spec is None or spec.origin is None:
+        raise SystemExit("source module is missing")
+    path = pathlib.Path(spec.origin).resolve()
+    if not path.is_relative_to(root) or path.is_relative_to(root / ".venv"):
+        raise SystemExit("source module is not bound to the immutable checkout")
+    if os.access(path, os.W_OK):
+        raise SystemExit("agent can rewrite source modules")
+for name in ("skills", "locales"):
+    path = root / name
+    if not path.is_dir() or not any(path.iterdir()) or os.access(path, os.W_OK):
+        raise SystemExit("source assets are absent or writable")
+PY
+timeout 15 docker exec -u 65532:65532 "$agent" /usr/local/bin/python3 -I -c \
+	'import importlib.util; assert importlib.util.find_spec("pip") is None' \
+	|| stop_gate runtime.source unused_base_installer_present
+record runtime.source passed immutable_source_assets_without_base_pip
 
 if docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' >/dev/null 2>&1
 import urllib.request
