@@ -359,6 +359,10 @@ func (s *Server) exportControlTaskEvidence(w http.ResponseWriter, taskDigest, pe
 		writeGatewayError(w, http.StatusConflict, "task_evidence_incomplete", "task evidence is not complete")
 		return
 	}
+	if state.Authorization.TargetTaskDigest != "" {
+		writeGatewayError(w, http.StatusUnprocessableEntity, "task_evidence_requires_parent", "linked stop evidence requires the full ledger audit; use the original work task for portable terminal evidence")
+		return
+	}
 
 	selected := make([]connectorledger.VerifiedReceipt, 0, 3)
 	_, err := connectorledger.VerifyRecords(

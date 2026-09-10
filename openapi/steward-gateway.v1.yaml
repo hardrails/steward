@@ -25,6 +25,17 @@ info:
     evidence. A later observation, including after Gateway restart, may recover
     the same bytes from an active exact grant and must pass the same comparison.
     Passive inspection never contacts the agent or returns response bytes.
+
+    The closed hermes.stop operation references a previously dispatched task in
+    the same admitted runtime and authority. Version 8 signed receipts retain
+    target_run_id and target_task_digest; stop dispatch does not transfer run
+    ownership or prove that the original run is terminal. Ordinary work retains
+    unique run ownership. Full-ledger verification is required to audit a stop's
+    parent relationship; single-task portable evidence does not prove that link.
+    The private Control evidence export returns 422
+    `task_evidence_requires_parent` for terminal linked stop tasks; this is not a
+    transient ledger failure. The original work task's portable export remains
+    available and proves its observed terminal result.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

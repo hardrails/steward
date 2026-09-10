@@ -513,6 +513,44 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 		t.Fatalf("trusted lifecycle=%#v", trustedLifecycle)
 	}
 
+	stopArguments := []string{
+		"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
+		"-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=/v1/runs/",
+		"-operation", "hermes.stop=POST:/steward/v1/run-stop", "-lifecycle", "hermes.stop=/v1/runs/",
+		"-max-request-bytes", "65536",
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := run(stopArguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		loaded, _, _, _, err = gateway.LoadConfig(path)
+		if err != nil || len(loaded.ServiceOperations) != 2 {
+			t.Fatalf("work/stop services=%#v err=%v", loaded.ServiceOperations, err)
+		}
+		for _, operation := range loaded.ServiceOperations {
+			want := int64(65536)
+			if operation.ID == "hermes.stop" {
+				want = 49
+			}
+			if operation.MaxRequestBytes != want {
+				t.Fatalf("attempt %d: operation %s request limit=%d want=%d", attempt, operation.ID, operation.MaxRequestBytes, want)
+			}
+		}
+	}
+	before, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooSmall := append([]string(nil), stopArguments...)
+	tooSmall[len(tooSmall)-1] = "48"
+	if err := run(tooSmall, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("stop silently widened an insufficient request ceiling")
+	}
+	after, err = os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("rejected stop ceiling mutated config: %v", err)
+	}
+
 	output.Reset()
 	if err := run([]string{
 		"gateway", "service", "set", "-config", path, "-agent", agentservice.RuntimeEngine,

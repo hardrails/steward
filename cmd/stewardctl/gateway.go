@@ -417,6 +417,11 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 			TaskProtocol: gateway.TaskProtocolLifecycleV1, StatusPathPrefix: statusPath,
 			StatusMaxSeconds: *statusMaxSeconds, PollIntervalSeconds: int(*pollInterval / time.Second),
 		}
+		// The reserved stop contract can only narrow the shared request ceiling.
+		// Its fixed body is independent of the larger work-submission limit.
+		if operation.ID == "hermes.stop" && parsedOperation.MaxRequestBytes > 49 {
+			parsedOperation.MaxRequestBytes = 49
+		}
 		delete(lifecyclePaths, operation.ID)
 		parsed = append(parsed, parsedOperation)
 	}

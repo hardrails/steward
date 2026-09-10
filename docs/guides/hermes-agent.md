@@ -453,6 +453,32 @@ sudo stewardctl gateway service set \
   -tenant-budget tenant-a=4194304
 ```
 
+To also permit signed cancellation, add both of these flags to the same command
+(keep the `hermes.run` flags; `service set` replaces that service's operations):
+
+```console
+  -operation hermes.stop=POST:/steward/v1/run-stop \
+  -lifecycle hermes.stop=/v1/runs/
+```
+
+The CLI narrows only `hermes.stop` to a 49-byte request ceiling. Its signed body
+must be exactly `{"run_id":"run_<32 lowercase hexadecimal characters>"}` without
+whitespace or extra fields. A smaller shared request ceiling is rejected, not
+widened. Export the updated trust inventory before issuing stop permits.
+
+Stop references a previously dispatched task under the same tenant, runtime,
+generation, grant, and signing authority. It does not allocate or take ownership
+of a run. Its format-8 receipts retain `target_run_id` and `target_task_digest`;
+all receipt readers must support format 8 before enabling the operation. The
+full ledger verifier checks the original dispatch. Single-task portable evidence
+does not yet prove this cross-task relationship and rejects linked stop receipts.
+The private Control export returns `422 task_evidence_requires_parent` for those
+receipts, not a retryable storage failure. The original work task's portable
+terminal evidence remains available.
+An accepted stop is only an acknowledgment: observe the original run's terminal
+status before reporting it as cancelled. Never replace an uncertain stop with a
+fresh task ID merely to retry a potentially completed effect.
+
 Run the exact activation command printed by `gateway service set`. It prints
 `systemctl restart steward-gateway.service` when it adds or changes a receipt
 identity or tenant budget and `systemctl reload steward-gateway.service` otherwise.

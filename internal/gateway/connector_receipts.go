@@ -60,8 +60,13 @@ func InspectConnectorReceiptFormat(config Config, states ...StateSummary) (Conne
 	if config.hasTaskLifecycle() {
 		requiredFormat = 4
 	}
+	for _, operation := range config.ServiceOperations {
+		if hermesStopOperation(operation) {
+			requiredFormat = 8
+		}
+	}
 	for _, state := range states {
-		if state.contextLocked {
+		if state.contextLocked && requiredFormat < 7 {
 			requiredFormat = 7
 		}
 	}
@@ -86,8 +91,12 @@ func InspectConnectorReceiptFormat(config Config, states ...StateSummary) (Conne
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV8:
+				formatVersion = 8
 			case connectorledger.SchemaV7:
-				formatVersion = 7
+				if formatVersion < 7 {
+					formatVersion = 7
+				}
 			case connectorledger.SchemaV6:
 				if formatVersion < 6 {
 					formatVersion = 6

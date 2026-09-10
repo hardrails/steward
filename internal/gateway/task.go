@@ -88,6 +88,13 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 	}
 	taskDigest := taskpermit.TaskDigest(grant.TenantID, grant.InstanceID, verified.Statement.TaskID)
 	event := serviceTaskReceiptEvent(grant, routePolicyDigest, operation, taskDigest, verified, body)
+	if operation.ID == "hermes.stop" {
+		event, err = s.linkStopTask(event, operation, body)
+		if err != nil {
+			writeGatewayError(w, http.StatusConflict, "stop_target_unavailable", "stop request has no matching admitted original task")
+			return
+		}
+	}
 	state, existed, err := s.beginServiceTask(taskDigest, event)
 	if existed {
 		s.writeExistingServiceTask(w, state, verified.EnvelopeDigest)

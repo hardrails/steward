@@ -398,6 +398,9 @@ func (c Config) validateServiceOperations() (map[string]map[string]ServiceOperat
 // service operation. Offline bundle verification uses the same validator so
 // its accepted policy cannot drift from Gateway configuration validation.
 func ValidateServiceOperation(operation ServiceOperation) error {
+	if operation.ID == "hermes.stop" && !hermesStopOperation(operation) {
+		return errors.New("hermes.stop requires the closed 49-byte native stop operation")
+	}
 	if !routeID(operation.ServiceID) || !routeID(operation.ID) || operation.Method != http.MethodPost ||
 		!canonicalConnectorPath(operation.Path) || operation.ContentType != "application/json" ||
 		operation.MaxRequestBytes < 1 || operation.MaxRequestBytes > maxServiceTaskRequestBytes ||
