@@ -434,7 +434,7 @@ func auditTask(arguments []string, stdout io.Writer) error {
 				return fmt.Errorf("service-task receipt sequence %d: %w", record.Receipt.Sequence, err)
 			}
 			matchedTaskSequence++
-			if record.Receipt.SchemaVersion != connectorledger.SchemaV4 ||
+			if (record.Receipt.SchemaVersion != connectorledger.SchemaV4 && record.Receipt.SchemaVersion != connectorledger.SchemaV8) ||
 				record.Receipt.TaskSequence != matchedTaskSequence || record.Receipt.PreviousTaskHash != previousTaskHash {
 				return fmt.Errorf("service-task receipt sequence %d has an invalid task-local chain coordinate", record.Receipt.Sequence)
 			}

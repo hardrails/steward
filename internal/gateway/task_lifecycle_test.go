@@ -60,7 +60,7 @@ func (log *ambiguousLifecycleDispatchLog) Failed() bool {
 	return log.failed.Load() || log.connectorReceiptLog.Failed()
 }
 
-func newLifecycleServiceTaskRig(t *testing.T, upstream string) *serviceTaskRig {
+func newLifecycleServiceTaskRig(t *testing.T, upstream string, additional ...ServiceOperation) *serviceTaskRig {
 	t.Helper()
 	directory := t.TempDir()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -81,7 +81,7 @@ func newLifecycleServiceTaskRig(t *testing.T, upstream string) *serviceTaskRig {
 		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:0",
 		ServiceTokenFile: filepath.Join(directory, "service.token"), StateFile: filepath.Join(directory, "state.json"),
 		GrantRoot: filepath.Join(directory, "grants"), ExecutorGID: os.Getgid(), RelayGID: os.Getgid(),
-		ServiceOperations:      []ServiceOperation{operation},
+		ServiceOperations:      append([]ServiceOperation{operation}, additional...),
 		ConnectorReceiptFile:   filepath.Join(directory, "effect-receipts.ndjson"),
 		ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
 		ConnectorReceiptTenantBudgets: []ConnectorReceiptTenantBudget{{

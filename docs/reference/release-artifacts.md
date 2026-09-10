@@ -176,8 +176,8 @@ the committed route-policy digest. Format 3 adds the durable node maintenance
 cordon. Entering or exiting maintenance rewrites the atomic snapshot as format 3;
 a release limited to format 1 or 2 is then ineligible even after the cordon exits.
 
-Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 7`,
-and `write: 7`. Ordinary connector records retain schema 1. Action-permit records use
+Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 8`,
+and `write: 8`. Ordinary connector records retain schema 1. Action-permit records use
 schema 2 and add the action-authority key ID, exact permit digest, and exact request
 digest. Schema 3 is the historical two-record service-task format. Current lifecycle
 tasks use schema 4, which adds task-local sequence and hash links across
@@ -187,7 +187,10 @@ stable pre-effect denial marker binds the first observed attacker-selectable req
 digest but claims no verified permit or authority key and does not enumerate later
 denials. Schema 6 records a multi-party authorized call's canonical signer set and
 signed approval threshold. Schema 7 binds a context-locked call's response-history
-head and terminal response digest. All seven schemas may appear in one signed chain. Format inspection
+head and terminal response digest. Schema 8 links a native stop request to its
+original task and target run without transferring run ownership. All eight schemas
+may appear in one signed chain. Configuring the closed stop operation requires
+reader 8 prospectively. Format inspection
 requires reader 2 whenever action authorities are configured, reader 4 whenever
 service-task operations are configured, reader 5 after the first authorized
 denial, authorization, or terminal record. Before that event, action-authority

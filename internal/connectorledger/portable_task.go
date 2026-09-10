@@ -136,7 +136,8 @@ func validatePortableTaskReceipt(
 		receipt.ObservedAt != observed.UTC().Format(time.RFC3339Nano) {
 		return errors.New("receipt has an invalid observation time")
 	}
-	if receipt.Event.Kind != ServiceTask ||
+	if receipt.Event.TargetTaskDigest != "" || receipt.Event.TargetRunID != "" ||
+		receipt.Event.Kind != ServiceTask ||
 		receipt.Event.TaskProtocol != TaskProtocolLifecycleV1 ||
 		receipt.Event.TaskDigest != taskDigest ||
 		receipt.Event.PermitDigest != permitDigest {
