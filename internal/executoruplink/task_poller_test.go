@@ -143,6 +143,10 @@ func TestAsyncTaskCourierClassifiesSafeReplayAndPermanentRejection(t *testing.T)
 			wantStatus: controlprotocol.ExecutorTaskReportUncertain, wantCode: "run_id_conflict"},
 		{name: "unknown retained outcome", err: &gateway.ControlAPIError{Status: http.StatusConflict, Code: "outcome_unknown"}, submitting: true,
 			wantStatus: controlprotocol.ExecutorTaskReportUncertain, wantCode: "outcome_unknown"},
+		{name: "first unknown dispatch outcome", err: &gateway.ControlAPIError{Status: http.StatusBadGateway, Code: "outcome_unknown"}, submitting: true,
+			wantStatus: controlprotocol.ExecutorTaskReportUncertain, wantCode: "outcome_unknown"},
+		{name: "temporary bad gateway", err: &gateway.ControlAPIError{Status: http.StatusBadGateway, Code: "gateway_unavailable"}, submitting: true,
+			wantStatus: controlprotocol.ExecutorTaskReportRetryable, wantCode: "gateway_unavailable"},
 		{name: "unknown stop target before dispatch", err: &gateway.ControlAPIError{Status: http.StatusConflict, Code: "stop_target_unavailable"}, submitting: true,
 			wantStatus: controlprotocol.ExecutorTaskReportRejected, wantCode: "stop_target_unavailable"},
 	}
