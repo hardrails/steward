@@ -851,6 +851,7 @@ docker run --rm --runtime runsc --network=none --read-only --cap-drop ALL \
 	--memory 268435456 --memory-swap 268435456 --cpus 1 \
 	--user 65532:65532 --workdir /input/upstream --log-driver none \
 	--mount "type=bind,source=$work/context/upstream,target=/input/upstream,readonly" \
+	--mount "type=bind,source=$work/context/adapter,target=/input/adapter,readonly" \
 	--entrypoint python3 "$base_image_reference" -I -c '
 import json
 import pathlib
@@ -861,6 +862,35 @@ import tomllib
 lock = tomllib.loads(pathlib.Path("uv.lock").read_text(encoding="utf-8"))
 if lock.get("version") != 1 or not isinstance(lock.get("package"), list):
     raise SystemExit("unsupported Hermes uv.lock schema")
+
+# BEGIN HERMES_SECURITY_OVERRIDES
+overrides = json.loads(pathlib.Path("/input/adapter/adapter.json").read_text()).get("security_overrides", [])
+if not isinstance(overrides, list) or len(overrides) > 8:
+    raise SystemExit("invalid Hermes security override inventory")
+names = set()
+additional_packages = []
+for override in overrides:
+    if not isinstance(override, dict) or set(override) != {"name", "replaces", "version", "wheel"}:
+        raise SystemExit("invalid Hermes security override")
+    name, version, replaces = (override[key] for key in ("name", "version", "replaces"))
+    if (
+        not isinstance(name, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name) is None
+        or any(not isinstance(value, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value) is None for value in (version, replaces))
+        or name in names or version == replaces
+    ):
+        raise SystemExit("invalid or duplicate Hermes security override identity")
+    names.add(name)
+    original = [package for package in lock["package"] if isinstance(package, dict) and package.get("name") == name]
+    if len(original) != 1 or original[0].get("version") != replaces:
+        raise SystemExit("Hermes security override no longer matches the upstream lock")
+    wheel = override["wheel"]
+    if not isinstance(wheel, dict) or set(wheel) != {"url", "hash", "size"}:
+        raise SystemExit("invalid Hermes security override wheel")
+    filename = name.replace("-", "_") + "-" + version + "-py3-none-any.whl"
+    if not isinstance(wheel["url"], str) or wheel["url"].rsplit("/", 1)[-1] != filename:
+        raise SystemExit("Hermes security override wheel identity differs from its package")
+    additional_packages.append({"name": name, "version": version, "source": {"registry": "https://pypi.org/simple"}, "wheels": [wheel]})
+# END HERMES_SECURITY_OVERRIDES
 
 def compatible(filename):
     if not filename.endswith(".whl") or len(filename) > 256:
@@ -892,7 +922,7 @@ def compatible(filename):
     return python_ok and abi_ok and platform_ok
 
 artifacts = {}
-for package in lock["package"]:
+for package in lock["package"] + additional_packages:
     if not isinstance(package, dict):
         raise SystemExit("uv.lock contains an invalid package entry")
     source = package.get("source")
@@ -1079,6 +1109,15 @@ uv pip install --offline --no-index --find-links /input/wheelhouse \
     --no-build --python .venv/bin/python "setuptools==83.0.0" >&2
 uv pip install --offline --no-index --find-links /input/wheelhouse \
     --no-deps --no-build-isolation --python .venv/bin/python --editable . >&2
+# These reviewed wheel overrides are part of the adapter identity, not an
+# unbounded re-resolution or a modification of upstream source inputs.
+python3 -I -c '\''import json,pathlib
+overrides=json.loads(pathlib.Path("/input/adapter/adapter.json").read_text()).get("security_overrides", [])
+pathlib.Path("/tmp/security-requirements.txt").write_text("".join(item["name"]+"=="+item["version"]+" --hash="+item["wheel"]["hash"]+"\n" for item in overrides))'\''
+uv pip install --offline --no-index --find-links /input/wheelhouse \
+    --no-build --no-deps --require-hashes --python .venv/bin/python \
+    --requirements /tmp/security-requirements.txt >&2
+uv pip check --python .venv/bin/python >&2
 # Build at the final immutable source path: editable metadata and console
 # scripts must not retain paths to an ephemeral source checkout.
 if grep -RIl "^#!/tmp/build/.venv/bin/python" .venv/bin >/dev/null; then
