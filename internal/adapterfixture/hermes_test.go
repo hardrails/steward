@@ -1346,8 +1346,9 @@ func TestHermesFeasibilityBoundsHostPrivilege(t *testing.T) {
 		`privileged_command "$setpriv_path" \`:                      true,
 	}
 	allowedStateOwner := map[string]int{
-		`state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'`:                                 2,
-		`state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true`: 1,
+		`state_owner_command timeout 30 find -P "$state_root" -xdev -type d -exec chmod u+rwx -- '{}' + >/dev/null 2>&1 || true`: 1,
+		`state_owner_command timeout 15 python3 -I - "$state_root" <<'PY'`:                                                       2,
+		`state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true`:                       1,
 	}
 	for _, line := range strings.Split(script, "\n") {
 		line = strings.TrimSpace(line)

@@ -281,6 +281,10 @@ remove_state_root() {
 	}
 	timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
 	if [[ -e $state_root || -L $state_root ]]; then
+		# Source-backed skills retain read-only directory modes. Restore owner
+		# access only in this stopped fixture's state, without following links or
+		# crossing filesystems; never widen privileges to remove agent content.
+		state_owner_command timeout 30 find -P "$state_root" -xdev -type d -exec chmod u+rwx -- '{}' + >/dev/null 2>&1 || true
 		state_owner_command timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
 	fi
 	timeout 30 rm -rf --one-file-system -- "$state_root" >/dev/null 2>&1 || true
