@@ -37,6 +37,18 @@ this refresh as qualification of every possible tool or dependency installation.
 ongoing patch ownership. Retaining the full base retains unused vulnerable
 packages. Adopting upstream's root-starting image violates native admission.
 
+The September lock still needs one bounded exception: `httpx2` and `httpcore2`
+2.7.0 carry CVE-2026-84381/84382 findings. Both are updated to 2.12.0 using
+reviewed pure-Python wheels recorded in existing adapter metadata. Their BSD-3
+licenses and dependency metadata come from PyPI; the required anyio, h11, idna
+and truststore versions already exist in the locked environment. The same
+host fetcher verifies sizes and hashes, and native uv installs them offline
+without dependency resolution and runs its compatibility check. This owns a
+two-package exception, not a fork of Hermes source or its full lock. Remove it
+when a reviewed upstream pin includes these fixes. Native MCP and signed-task
+tests plus a complete image scan remain required; package metadata alone does
+not prove compatibility or complete license clearance.
+
 ## Consequences
 
 The runtime qualification now checks source import paths, immutable assets and

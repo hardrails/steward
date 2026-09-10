@@ -93,6 +93,15 @@ this revision, the latter is the smallest locked extra that supplies `aiohttp`,
 which the native API-server adapter requires. No Home Assistant integration is
 configured or granted at runtime.
 
+The September upstream lock still pins affected `httpx2` and `httpcore2` 2.7.0.
+The adapter records a two-package security exception in `security_overrides`:
+both use 2.12.0, with exact wheel URLs, byte sizes and hashes. The networkless
+planner refuses the exception if the original upstream versions change. The
+existing bounded fetcher verifies those wheels; uv installs them offline without
+resolving more dependencies and checks the installed environment. This is an
+explicit adapter-maintained patch, not an unchanged upstream dependency set.
+Remove the exception once a reviewed upstream lock supplies the fixes.
+
 On `linux/amd64`, qualification exercises two independent paths. The closed-runtime
 gate builds the exact source and runs the basic task, signed workspace-audit skill,
 qualification-only MCP fixture, active-tool stop, and restart under gVisor. The Steward
