@@ -1273,15 +1273,17 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 }
 
 // deploymentCommandPruningCursors retains every command whose terminal
-// result has not yet been incorporated into its deployment cursor. Without
+// result has not yet been incorporated into its deployment cursor, and the
+// failed renewal cursor still needed to authorize cleanup. Without
 // this protection, capacity-driven pruning could erase the only durable
 // evidence needed to decide whether a workload effect succeeded.
 func deploymentCommandPruningCursors(deployments map[string]Deployment) map[string]struct{} {
 	protected := make(map[string]struct{})
 	for _, deployment := range deployments {
 		for _, instance := range deployment.Instances {
+			needsRenewalCleanup := instance.Phase == DeploymentInstanceFailed && instance.CommandOperation == "renew"
 			if instance.CommandID == "" || instance.NodeID == "" || instance.CommandOperation == "" ||
-				!deploymentCommandInFlight(instance) {
+				!deploymentCommandInFlight(instance) && !needsRenewalCleanup {
 				continue
 			}
 			protected[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)] = struct{}{}

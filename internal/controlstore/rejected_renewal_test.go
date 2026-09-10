@@ -3,6 +3,7 @@ package controlstore
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlprotocol"
@@ -81,5 +82,47 @@ func TestRejectedRenewalCleanupChecksRetainedIdentityAndOutcome(t *testing.T) {
 				t.Fatalf("cleanup allowed = %v", allowed)
 			}
 		})
+	}
+}
+
+func TestRejectedRenewalPruningProtectionEndsOnlyWhenCleanupCursorAdvances(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	instance := DeploymentInstance{
+		InstanceID: "instance-a", NodeID: "node-1", Phase: DeploymentInstanceFailed,
+		CommandID: "renew-rejected", CommandOperation: "renew", CommandSequence: 1,
+	}
+	deployment := Deployment{
+		TenantID: "tenant-a", ID: "deployment-a", DesiredState: DeploymentRunning,
+		Instances: []DeploymentInstance{instance},
+	}
+	command := Command{
+		TenantID: "tenant-a", NodeID: "node-1", ID: instance.CommandID,
+		CommandKind: "renew", State: CommandTerminal,
+		Terminal: &TerminalReport{
+			Report:      controlprotocol.ExecutorReportV3{Status: controlprotocol.ExecutorStatusRejected},
+			CompletedAt: canonicalTimestamp(fixture.now.Add(-48 * time.Hour)),
+		},
+	}
+	fixture.store.mu.Lock()
+	defer fixture.store.mu.Unlock()
+	key := deploymentKey(deployment.TenantID, deployment.ID)
+	fixture.store.current.commands[commandKey(command.TenantID, command.NodeID, command.ID)] = command
+	for _, desired := range []DeploymentDesiredState{DeploymentRunning, DeploymentAbsent} {
+		deployment.DesiredState = desired
+		fixture.store.current.deployments[key] = deployment
+		if prunable := fixture.store.prunableCommandsLocked("tenant-a", "node-1", fixture.now); len(prunable) != 0 {
+			t.Fatalf("aged failed-renewal cursor was reclaimed before cleanup (%s): %+v", desired, prunable)
+		}
+	}
+	// A new stop replaces the active cursor without permanently pinning the
+	// rejected renewal. Normal settled-command retention can reclaim it then.
+	deployment.Instances[0].CommandID = "cleanup-stop"
+	deployment.Instances[0].CommandOperation = "stop"
+	deployment.Instances[0].Phase = DeploymentInstanceStopping
+	deployment.Instances[0].CommandSequence++
+	fixture.store.current.deployments[key] = deployment
+	prunable := fixture.store.prunableCommandsLocked("tenant-a", "node-1", fixture.now)
+	if len(prunable) != 1 || prunable[0].ID != command.ID {
+		t.Fatalf("advanced cleanup cursor retained stale renewal indefinitely: %+v", prunable)
 	}
 }
