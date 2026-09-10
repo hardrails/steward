@@ -224,6 +224,8 @@ func (store *Store) EnqueueDeploymentCommand(
 	if !exists {
 		return Deployment{}, Command{}, false, ErrNotFound
 	}
+	// A rejected transaction must not advance the retained slice-backed cursor.
+	deployment = cloneDeployment(deployment)
 	if deployment.Revision != input.ExpectedRevision {
 		return Deployment{}, Command{}, false, ErrConflict
 	}
@@ -235,6 +237,7 @@ func (store *Store) EnqueueDeploymentCommand(
 		return Deployment{}, Command{}, false, ErrNotFound
 	}
 	instance := deployment.Instances[instanceIndex]
+	previousInstance := instance
 	capsuleRaw, delegationRaw, err := DeploymentAuthorityForInstance(deployment, instance)
 	if err != nil {
 		return Deployment{}, Command{}, false, invalidError("select deployment instance authority", err)
@@ -380,8 +383,22 @@ func (store *Store) EnqueueDeploymentCommand(
 	deployment.Revision++
 	deployment.UpdatedAt = canonicalTimestamp(now)
 	deployment.Phase = deploymentAggregatePhase(deployment)
-	if err := store.applyMutationsLocked(deploymentMutation(deployment), commandMutation(command)); err != nil {
-		return Deployment{}, Command{}, false, err
+	mutations := []mutation{deploymentMutation(deployment), commandMutation(command)}
+	if err := store.applyMutationsLocked(mutations...); err != nil {
+		if !errors.Is(err, ErrCapacityExceeded) {
+			return Deployment{}, Command{}, false, err
+		}
+		previous := store.cleanupPredecessorToReplaceLocked(deployment, previousInstance, statement)
+		if previous == nil {
+			return Deployment{}, Command{}, false, err
+		}
+		// The old result has authorized this exact successor. Reclaim its slot
+		// only in the same WAL transaction that advances the cursor and retains
+		// the successor; never delete evidence ahead of successful advancement.
+		mutations = append([]mutation{{Kind: mutationCommandDelete, CommandRef: previous}}, mutations...)
+		if err := store.applyMutationsLocked(mutations...); err != nil {
+			return Deployment{}, Command{}, false, err
+		}
 	}
 	return cloneDeployment(deployment), cloneCommand(command), true, nil
 }
@@ -790,6 +807,31 @@ func (store *Store) rejectedRenewalCleanupAllowedLocked(
 		command.SignedRuntimeRef == statement.RuntimeRef &&
 		command.SignedInstanceGeneration == instance.Generation &&
 		command.SignedClaimGeneration == statement.ClaimGeneration
+}
+
+// Cleanup must be able to advance even when its predecessor occupies the last
+// command slot. This is not general pruning: only a proven rejected renewal or
+// an observed successful stop can be replaced by its authorized cleanup step.
+func (store *Store) cleanupPredecessorToReplaceLocked(
+	deployment Deployment, instance DeploymentInstance, statement admission.CommandStatement,
+) *commandReference {
+	allowed := instance.Phase == DeploymentInstanceFailed &&
+		store.rejectedRenewalCleanupAllowedLocked(deployment, instance, statement)
+	if !allowed && deployment.DesiredState == DeploymentAbsent &&
+		instance.Phase == DeploymentInstanceDestroying && instance.CommandOperation == "stop" &&
+		statement.Kind == "destroy" && instance.Admission != nil {
+		command := store.current.commands[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)]
+		physical, err := commandExecutorRuntimeRef(command)
+		allowed = command.CommandKind == "stop" && command.State == CommandTerminal && command.Terminal != nil &&
+			command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone && err == nil &&
+			physical == instance.Admission.RuntimeRef && instance.Admission.Generation == instance.Generation &&
+			command.SignedRuntimeRef == statement.RuntimeRef && command.SignedInstanceGeneration == instance.Generation &&
+			command.SignedClaimGeneration == statement.ClaimGeneration
+	}
+	if !allowed {
+		return nil
+	}
+	return &commandReference{TenantID: deployment.TenantID, NodeID: instance.NodeID, ID: instance.CommandID}
 }
 
 func deploymentTransitionAllowed(deployment Deployment, instance DeploymentInstance, operation string) bool {

@@ -1230,7 +1230,7 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 	cutoff := now.Add(-store.limits.TerminalRetention)
 	workloadLeaseCutoff := now.Add(-admission.MaxWorkloadLeaseDuration - admission.CommandClockSkew)
 	protectedCanaryCursors := activationCanaryPruningCursors(store.current.commands)
-	protectedDeploymentCursors := deploymentCommandPruningCursors(store.current.deployments)
+	protectedDeploymentCursors := deploymentCommandPruningCursors(store.current.deployments, store.current.commands)
 	protectedCaptureCanaries := evidenceCapturePruningCanaries(
 		store.current.captures,
 		store.current.commands,
@@ -1277,16 +1277,20 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 // failed renewal cursor still needed to authorize cleanup. Without
 // this protection, capacity-driven pruning could erase the only durable
 // evidence needed to decide whether a workload effect succeeded.
-func deploymentCommandPruningCursors(deployments map[string]Deployment) map[string]struct{} {
+func deploymentCommandPruningCursors(deployments map[string]Deployment, commands map[string]Command) map[string]struct{} {
 	protected := make(map[string]struct{})
 	for _, deployment := range deployments {
 		for _, instance := range deployment.Instances {
-			needsRenewalCleanup := instance.Phase == DeploymentInstanceFailed && instance.CommandOperation == "renew"
+			key := commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)
+			command := commands[key]
+			needsRenewalCleanup := instance.Phase == DeploymentInstanceFailed && instance.CommandOperation == "renew" &&
+				command.CommandKind == "renew" && command.State == CommandTerminal && command.Terminal != nil &&
+				command.Terminal.Report.Status == controlprotocol.ExecutorStatusRejected
 			if instance.CommandID == "" || instance.NodeID == "" || instance.CommandOperation == "" ||
 				!deploymentCommandInFlight(instance) && !needsRenewalCleanup {
 				continue
 			}
-			protected[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)] = struct{}{}
+			protected[key] = struct{}{}
 		}
 	}
 	return protected

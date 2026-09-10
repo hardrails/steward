@@ -126,3 +126,73 @@ func TestRejectedRenewalPruningProtectionEndsOnlyWhenCleanupCursorAdvances(t *te
 		t.Fatalf("advanced cleanup cursor retained stale renewal indefinitely: %+v", prunable)
 	}
 }
+
+func TestFailedRenewalExtraRetentionIsOnlyForRejectedEvidence(t *testing.T) {
+	for _, status := range []string{controlprotocol.ExecutorStatusRejected, controlprotocol.ExecutorStatusFailed,
+		controlprotocol.ExecutorStatusOutcomeUnknown, controlprotocol.ExecutorStatusDone, "missing"} {
+		t.Run(status, func(t *testing.T) {
+			instance := DeploymentInstance{NodeID: "node-1", CommandID: "renew-a",
+				CommandOperation: "renew", Phase: DeploymentInstanceFailed}
+			deployment := Deployment{TenantID: "tenant-a", Instances: []DeploymentInstance{instance}}
+			key := commandKey("tenant-a", "node-1", "renew-a")
+			commands := map[string]Command{}
+			if status != "missing" {
+				commands[key] = Command{CommandKind: "renew", State: CommandTerminal,
+					Terminal: &TerminalReport{Report: controlprotocol.ExecutorReportV3{Status: status}}}
+			}
+			protected := deploymentCommandPruningCursors(map[string]Deployment{"deployment-a": deployment}, commands)
+			if _, retained := protected[key]; retained != (status == controlprotocol.ExecutorStatusRejected) {
+				t.Fatalf("unexpected extra failed-renewal retention: %v", protected)
+			}
+			// Uncertain effects already have independent, deliberate retention.
+			// Narrowing this cursor rule must not make them safe to discard.
+			if status == controlprotocol.ExecutorStatusFailed || status == controlprotocol.ExecutorStatusOutcomeUnknown {
+				if terminalCommandSafeToPrune(commands[key]) {
+					t.Fatal("uncertain effect became prunable")
+				}
+			}
+		})
+	}
+}
+
+func TestCleanupCapacityReplacementRequiresObservedMatchingStop(t *testing.T) {
+	for _, name := range []string{"valid", "pending", "rejected", "unknown", "unobserved", "running intent", "wrong runtime", "wrong generation", "wrong claim"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newRecordsFixture(t, DefaultLimits())
+			ref := "executor-" + strings.Repeat("a", 64)
+			deployment := Deployment{TenantID: "tenant-a", DesiredState: DeploymentAbsent}
+			instance := DeploymentInstance{NodeID: "node-1", Generation: 2,
+				CommandID: "stop-a", CommandOperation: "stop", Phase: DeploymentInstanceDestroying,
+				Admission: &controlprotocol.ExecutorAdmissionProjectionV1{RuntimeRef: ref, Generation: 2}}
+			statement := admission.CommandStatement{Kind: "destroy", RuntimeRef: ref, ClaimGeneration: 3}
+			command := Command{CommandKind: "stop", State: CommandTerminal, SignedRuntimeRef: ref,
+				SignedInstanceGeneration: 2, SignedClaimGeneration: 3,
+				Terminal: &TerminalReport{Report: controlprotocol.ExecutorReportV3{Status: controlprotocol.ExecutorStatusDone}}}
+			switch name {
+			case "pending":
+				command.State = CommandPending
+			case "rejected":
+				command.Terminal.Report.Status = controlprotocol.ExecutorStatusRejected
+			case "unknown":
+				command.Terminal.Report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
+			case "unobserved":
+				instance.Phase = DeploymentInstanceStopping
+			case "running intent":
+				deployment.DesiredState = DeploymentRunning
+			case "wrong runtime":
+				instance.Admission.RuntimeRef = "executor-" + strings.Repeat("b", 64)
+			case "wrong generation":
+				command.SignedInstanceGeneration++
+			case "wrong claim":
+				command.SignedClaimGeneration++
+			}
+			fixture.store.mu.Lock()
+			fixture.store.current.commands[commandKey("tenant-a", "node-1", "stop-a")] = command
+			previous := fixture.store.cleanupPredecessorToReplaceLocked(deployment, instance, statement)
+			fixture.store.mu.Unlock()
+			if (previous != nil) != (name == "valid") {
+				t.Fatalf("unexpected capacity replacement: %+v", previous)
+			}
+		})
+	}
+}

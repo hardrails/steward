@@ -2,6 +2,8 @@ package controlreconcile
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -10,15 +12,45 @@ import (
 	"github.com/hardrails/steward/internal/controlstore"
 )
 
+func TestCapacityFailureDoesNotAdvanceDeploymentCursor(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe admit", 1, 0)
+	before := getControlDeployment(t, fixture)
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.limits.MaxCommands, fixture.limits.MaxCommandsPerTenant, fixture.limits.MaxCommandsPerNode = 1, 1, 1
+	reopened, err := controlstore.Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store = reopened
+	t.Cleanup(func() { _ = reopened.Close() })
+	report, err := fixture.reconciler(t).Reconcile(context.Background())
+	if !errors.Is(err, controlstore.ErrCapacityExceeded) || report.Enqueued != 0 {
+		t.Fatalf("ordinary renewal bypassed the full bound: %+v, %v", report, err)
+	}
+	if after := getControlDeployment(t, fixture); !reflect.DeepEqual(before, after) {
+		t.Fatalf("failed transaction changed retained cursor: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T) {
 	for _, test := range []struct {
-		name, status          string
+		name, status, limit   string
 		expired, stopRejected bool
 	}{
 		{name: "confirmed cleanup", status: controlprotocol.ExecutorStatusRejected},
 		{name: "uncertain renewal", status: controlprotocol.ExecutorStatusOutcomeUnknown},
 		{name: "expired authority", status: controlprotocol.ExecutorStatusRejected, expired: true},
 		{name: "rejected stop", status: controlprotocol.ExecutorStatusRejected, stopRejected: true},
+		{name: "full global capacity", status: controlprotocol.ExecutorStatusRejected, limit: "global"},
+		{name: "full tenant capacity", status: controlprotocol.ExecutorStatusRejected, limit: "tenant"},
+		{name: "full node capacity", status: controlprotocol.ExecutorStatusRejected, limit: "node"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newControlReconcileFixture(t)
@@ -44,6 +76,31 @@ func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T
 			}
 			// A rejected renewal must not become permission to restart or retry.
 			assertReconcileCount(t, reconciler, "running intent remains failed", 0, 0)
+			if test.limit != "" {
+				// Four real courier commands fill the chosen bound. Reopen with
+				// that bound so cleanup cannot rely on spare capacity or history
+				// aging. Stop and destroy must each atomically reuse one slot.
+				switch test.limit {
+				case "global":
+					fixture.limits.MaxCommands = 4
+					fixture.limits.MaxCommandsPerTenant = 4
+					fixture.limits.MaxCommandsPerNode = 4
+				case "tenant":
+					fixture.limits.MaxCommandsPerTenant = 4
+				case "node":
+					fixture.limits.MaxCommandsPerNode = 4
+				}
+				if err := fixture.store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := controlstore.Open(fixture.dir, fixture.limits)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture.store = reopened
+				t.Cleanup(func() { _ = reopened.Close() })
+				reconciler = fixture.reconciler(t)
+			}
 			if _, _, err := fixture.store.SetDeploymentDesiredState(
 				fixture.admin, failed.TenantID, failed.ID, failed.Revision,
 				controlstore.DeploymentAbsent, fixture.now,
@@ -99,6 +156,12 @@ func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T
 			}
 			oldCommand, found, err := fixture.store.GetCommand(fixture.admin, failed.TenantID,
 				failed.Instances[0].NodeID, failed.Instances[0].CommandID)
+			if test.limit != "" {
+				if err != nil || found {
+					t.Fatalf("capacity-neutral cleanup did not reclaim its consumed predecessor: %+v, %v", oldCommand, err)
+				}
+				return
+			}
 			if err != nil || !found || oldCommand.Terminal == nil ||
 				oldCommand.Terminal.Report.Status != controlprotocol.ExecutorStatusRejected {
 				t.Fatalf("cleanup lost the rejected command history: %+v, %v", oldCommand, err)
