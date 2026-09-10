@@ -35,9 +35,13 @@ task sequence, and prior-task hash bindings. Format 5 records authorized connect
 calls with the explicit effect mode and exact operation-policy digest. Format 6
 adds the canonical signer set and threshold for a multi-party authorized call.
 Format 7 binds a context-locked call's response-history head and terminal response
-digest. A single ledger may contain all seven schemas in one signed hash chain.
-Current release manifests declare `connector_receipt_log` readers 1 through 7 and
-writer 7. The inspector reports the
+digest. Format 8 links a native stop to its original task and target run. It does
+not weaken unique run ownership for ordinary work. A single ledger may contain
+all eight schemas in one signed hash chain.
+Current release manifests declare `connector_receipt_log` readers 1 through 8 and
+writer 8. Configuring `hermes.stop` requires reader 8 before its first receipt.
+Older releases cannot read linked-stop evidence; never delete or rewrite it to
+make a downgrade pass. The inspector reports the
 highest format present. It reports format 2 when action authorities are configured
 and format 4 when service-task operations are configured, even before the receipt
 file exists or contains that schema, because the running configuration can write the
