@@ -773,9 +773,15 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	if strings.Contains(dockerfile, "# syntax=") {
 		t.Fatal("Dockerfile unexpectedly delegates parsing to an external frontend")
 	}
+	// Only the base-image installer may execute, to remove itself offline.
+	// Hermes and third-party packaging hooks still run only inside gVisor.
+	const removePip = `RUN ["/usr/local/bin/python3", "-I", "-m", "pip", "uninstall", "--yes", "pip"]`
+	if strings.Count(dockerfile, removePip) != 1 {
+		t.Fatal("Dockerfile must remove the unused base pip exactly once")
+	}
 	for _, line := range strings.Split(dockerfile, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "RUN ") {
-			t.Fatalf("assemble-only Dockerfile contains build command %q", line)
+		if strings.HasPrefix(strings.TrimSpace(line), "RUN ") && line != removePip {
+			t.Fatalf("Dockerfile contains an unexpected build command %q", line)
 		}
 	}
 	for _, required := range []string{
@@ -791,6 +797,10 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 		`hermes_set_input_tree_modes "$work/context/adapter" 0555 0444 0555`,
 		`hermes_set_input_tree_modes "$work/final-context/artifact/venv/.venv" 0555 0444 0555`,
 		`GIT_NO_REPLACE_OBJECTS=1`, `-c core.fsmonitor=false`,
+		`--no-deps --no-build-isolation --python .venv/bin/python --editable .`,
+		`cd /opt/hermes`,
+		`/opt/hermes:rw,nosuid,nodev,size=$sandbox_memory_bytes,uid=65532,gid=65532,mode=0700`,
+		`cp -a "$work/context/upstream"/. "$work/final-context/upstream/"`,
 	} {
 		if !strings.Contains(builder, required) {
 			t.Fatalf("builder does not enforce isolation property %q", required)

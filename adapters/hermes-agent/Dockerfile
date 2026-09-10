@@ -1,5 +1,9 @@
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.12-python3.13-trixie-slim@sha256:2ab87c099cd28eeacc2d1122e8e2e020651fdf92c68d277caa003c3bba0627cc
 FROM ${UV_IMAGE}
+
+# Remove the unused base-image installer and its vendored dependencies. This
+# fixed offline removal never executes Hermes source or dependency build hooks.
+RUN ["/usr/local/bin/python3", "-I", "-m", "pip", "uninstall", "--yes", "pip"]
 
 ARG HERMES_SOURCE_REVISION
 LABEL io.hardrails.steward.hermes.source-revision=${HERMES_SOURCE_REVISION}
@@ -14,6 +18,7 @@ ENV PYTHONUNBUFFERED=1 \
     PATH=/opt/hermes/.venv/bin:/usr/local/bin:/usr/bin:/bin
 
 WORKDIR /opt/hermes
+COPY --chown=0:0 upstream/ /opt/hermes/
 COPY --chown=0:0 artifact/venv/.venv /opt/hermes/.venv
 COPY --chown=65532:65532 artifact/state/ /opt/data/
 COPY --chown=0:0 --chmod=0444 artifact/install_method /opt/hermes/.install_method

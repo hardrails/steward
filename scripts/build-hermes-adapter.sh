@@ -1065,10 +1065,10 @@ progress "Building Hermes dependencies without network inside bounded gVisor san
 sandbox_name=steward-hermes-build-sandbox-${expected_revision:0:12}-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 # shellcheck disable=SC2016 # Expanded by the sandbox shell, not this builder.
 sandbox_command='set -eu
-mkdir -p /tmp/build /tmp/home
-cp -R /input/upstream/. /tmp/build/
-chmod -R u+rwX /tmp/build
-cd /tmp/build
+mkdir -p /tmp/home
+cp -R /input/upstream/. /opt/hermes/
+chmod -R u+rwX /opt/hermes
+cd /opt/hermes
 sha256sum -c /input/adapter/source-inputs.sha256 >&2
 uv export --frozen --offline --no-dev --extra mcp --extra homeassistant \
     --no-emit-project --format requirements-txt --output-file /tmp/requirements.txt >/dev/null
@@ -1076,18 +1076,11 @@ uv venv --offline --python /usr/local/bin/python3 .venv >&2
 uv pip sync --offline --no-index --find-links /input/wheelhouse \
     --no-build --require-hashes --python .venv/bin/python /tmp/requirements.txt >&2
 uv pip install --offline --no-index --find-links /input/wheelhouse \
-    --no-build --python .venv/bin/python "setuptools==81.0.0" >&2
+    --no-build --python .venv/bin/python "setuptools==83.0.0" >&2
 uv pip install --offline --no-index --find-links /input/wheelhouse \
-    --no-deps --no-build-isolation --python .venv/bin/python . >&2
-for script in .venv/bin/*; do
-    if [ -f "$script" ] && IFS= read -r first_line <"$script"; then
-        case "$first_line" in
-            \#\!/tmp/build/.venv/bin/python*)
-                sed -i "1s|^#!/tmp/build/.venv/bin/python|#!/opt/hermes/.venv/bin/python|" "$script"
-                ;;
-        esac
-    fi
-done
+    --no-deps --no-build-isolation --python .venv/bin/python --editable . >&2
+# Build at the final immutable source path: editable metadata and console
+# scripts must not retain paths to an ephemeral source checkout.
 if grep -RIl "^#!/tmp/build/.venv/bin/python" .venv/bin >/dev/null; then
     exit 1
 fi
@@ -1098,6 +1091,7 @@ docker create --name "$sandbox_name" \
 	--security-opt no-new-privileges:true --pids-limit "$sandbox_pids" \
 	--memory "$sandbox_memory_bytes" --memory-swap "$sandbox_memory_bytes" --cpus "$sandbox_cpus" \
 	--tmpfs "/tmp:rw,nosuid,nodev,size=$sandbox_memory_bytes" \
+	--tmpfs "/opt/hermes:rw,nosuid,nodev,size=$sandbox_memory_bytes,uid=65532,gid=65532,mode=0700" \
 	--user 65532:65532 --workdir /tmp \
 	--env HOME=/tmp/home --env UV_CACHE_DIR=/tmp/uv-cache --env UV_LINK_MODE=copy \
 	--log-driver none \
@@ -1146,7 +1140,9 @@ PY
 
 mkdir -p "$work/final-context/adapter" "$work/final-context/upstream" "$work/final-context/artifact/venv"
 cp -a "$work/context/adapter"/. "$work/final-context/adapter/"
-install -m 0444 "$work/context/upstream/LICENSE" "$work/final-context/upstream/LICENSE"
+# Retain the exact source and assets for upstreams supported source-backed
+# installation. Never copy the sandbox-mutated source tree into the image.
+cp -a "$work/context/upstream"/. "$work/final-context/upstream/"
 python3 -I - "$work/venv.tar" "$sandbox_output_bytes" <<'PY'
 import pathlib
 import sys
