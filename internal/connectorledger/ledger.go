@@ -33,6 +33,7 @@ const (
 	PayloadTypeV5 = "application/vnd.steward.connector-receipt.v5+json"
 	PayloadTypeV6 = "application/vnd.steward.connector-receipt.v6+json"
 	PayloadTypeV7 = "application/vnd.steward.connector-receipt.v7+json"
+	PayloadTypeV8 = "application/vnd.steward.connector-receipt.v8+json"
 	SchemaV1      = "steward.connector-receipt.v1"
 	SchemaV2      = "steward.connector-receipt.v2"
 	SchemaV3      = "steward.connector-receipt.v3"
@@ -40,6 +41,7 @@ const (
 	SchemaV5      = "steward.connector-receipt.v5"
 	SchemaV6      = "steward.connector-receipt.v6"
 	SchemaV7      = "steward.connector-receipt.v7"
+	SchemaV8      = "steward.connector-receipt.v8"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -228,6 +230,8 @@ type Event struct {
 	InfluenceSequence     uint64     `json:"influence_sequence,omitempty"`
 	InfluenceHash         string     `json:"influence_hash,omitempty"`
 	ResponseDigest        string     `json:"response_digest,omitempty"`
+	TargetRunID           string     `json:"target_run_id,omitempty"`
+	TargetTaskDigest      string     `json:"target_task_digest,omitempty"`
 }
 
 // Receipt contains one signed chain coordinate and one mediated-effect event.
@@ -289,7 +293,7 @@ type Log struct {
 	pending   map[string]Event
 	spent     map[string]struct{}
 	taskHeads map[string]taskCoordinate
-	runOwners map[runOwnership]string
+	runOwners map[runOwnership]Event
 	limits    Limits
 	// tenantBytes includes durable line bytes and pending record reserves.
 	// Map membership is also the permanent historical tenant identity set.
@@ -365,7 +369,7 @@ func OpenWithLimits(path string, private ed25519.PrivateKey, nodeID string, epoc
 	pending := make(map[string]Event)
 	spent := make(map[string]struct{})
 	taskHeads := make(map[string]taskCoordinate)
-	runOwners := make(map[runOwnership]string)
+	runOwners := make(map[runOwnership]Event)
 	tenantBytes := make(map[string]int64)
 	head, err := verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
 		if err := updateHistory(pending, spent, taskHeads, runOwners, record); err != nil {
@@ -434,6 +438,9 @@ func (l *Log) Begin(event Event) (Head, error) {
 	if _, exists := l.spent[key]; exists {
 		return Head{}, errors.New("connector authorization task is already spent")
 	}
+	if err := validateRunControlOwner(event, l.runOwners); err != nil {
+		return Head{}, err
+	}
 	reservation := pendingReservation(event)
 	head, err := l.appendLocked(event, reservation)
 	if err != nil {
@@ -460,7 +467,10 @@ func (l *Log) Dispatch(event Event) (Head, error) {
 		return Head{}, errors.New("connector dispatch event has no matching lifecycle authorization")
 	}
 	ownership := runOwnershipFor(event)
-	if owner, exists := l.runOwners[ownership]; exists && owner != event.TaskDigest {
+	if err := validateRunControlOwner(event, l.runOwners); err != nil {
+		return Head{}, err
+	}
+	if owner, exists := l.runOwners[ownership]; exists && owner.TaskDigest != event.TaskDigest && event.TargetTaskDigest == "" {
 		return Head{}, ErrRunIDConflict
 	}
 	head, err := l.appendLocked(event, -terminalReserveBytes)
@@ -468,7 +478,9 @@ func (l *Log) Dispatch(event Event) (Head, error) {
 		return Head{}, err
 	}
 	l.pending[event.TaskDigest] = event
-	l.runOwners[ownership] = event.TaskDigest
+	if event.TargetTaskDigest == "" {
+		l.runOwners[ownership] = event
+	}
 	return head, nil
 }
 
@@ -514,7 +526,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
-	if event.InfluenceHash != "" || event.ResponseDigest != "" {
+	if event.TargetTaskDigest != "" {
+		payloadType, schemaVersion = PayloadTypeV8, SchemaV8
+	} else if event.InfluenceHash != "" || event.ResponseDigest != "" {
 		payloadType, schemaVersion = PayloadTypeV7, SchemaV7
 	} else if event.ApprovalThreshold > 1 || event.AuthorityKeySet != "" {
 		payloadType, schemaVersion = PayloadTypeV6, SchemaV6
@@ -674,7 +688,7 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 	pending := make(map[string]Event)
 	spent := make(map[string]struct{})
 	taskHeads := make(map[string]taskCoordinate)
-	runOwners := make(map[runOwnership]string)
+	runOwners := make(map[runOwnership]Event)
 	return verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
 		if err := updateHistory(pending, spent, taskHeads, runOwners, record); err != nil {
 			return err
@@ -712,7 +726,7 @@ func ValidateWithLimits(path string, private ed25519.PrivateKey, nodeID string, 
 	pending := make(map[string]Event)
 	spent := make(map[string]struct{})
 	taskHeads := make(map[string]taskCoordinate)
-	runOwners := make(map[runOwnership]string)
+	runOwners := make(map[runOwnership]Event)
 	tenantBytes := make(map[string]int64)
 	head, err := VerifyRecords(path, public, nodeID, epoch, func(record VerifiedReceipt) error {
 		if err := updateHistory(pending, spent, taskHeads, runOwners, record); err != nil {
@@ -763,7 +777,7 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		envelope, err := dsse.Parse(raw)
 		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
 			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 &&
-			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 && envelope.PayloadType != PayloadTypeV7 {
+			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 && envelope.PayloadType != PayloadTypeV7 && envelope.PayloadType != PayloadTypeV8 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -809,6 +823,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		expectedSchema = SchemaV6
 	case PayloadTypeV7:
 		expectedSchema = SchemaV7
+	case PayloadTypeV8:
+		expectedSchema = SchemaV8
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -831,10 +847,12 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 			receipt.Event.AuthorityKeyID != "") ||
 		payloadType == PayloadTypeV7 && (receipt.Event.Kind != ConnectorCall || receipt.Event.EffectMode != EffectModeAuthorized ||
 			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "" || !digest(receipt.Event.InfluenceHash)) ||
-		payloadType != PayloadTypeV7 && (receipt.Event.InfluenceSequence != 0 || receipt.Event.InfluenceHash != "" || receipt.Event.ResponseDigest != "") {
+		payloadType != PayloadTypeV7 && (receipt.Event.InfluenceSequence != 0 || receipt.Event.InfluenceHash != "" || receipt.Event.ResponseDigest != "") ||
+		payloadType == PayloadTypeV8 && receipt.Event.TargetTaskDigest == "" ||
+		payloadType != PayloadTypeV8 && (receipt.Event.TargetTaskDigest != "" || receipt.Event.TargetRunID != "") {
 		return errors.New("connector receipt schema does not match its permit fields")
 	}
-	if payloadType == PayloadTypeV4 {
+	if payloadType == PayloadTypeV4 || payloadType == PayloadTypeV8 {
 		if receipt.TaskSequence == 0 || !digest(receipt.PreviousTaskHash) {
 			return errors.New("connector lifecycle receipt has invalid task-chain coordinates")
 		}
@@ -845,7 +863,7 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 }
 
 func updateHistory(pending map[string]Event, spent map[string]struct{}, taskHeads map[string]taskCoordinate,
-	runOwners map[runOwnership]string, record VerifiedReceipt) error {
+	runOwners map[runOwnership]Event, record VerifiedReceipt) error {
 	event := record.Receipt.Event
 	switch event.Phase {
 	case Authorize:
@@ -853,6 +871,9 @@ func updateHistory(pending map[string]Event, spent map[string]struct{}, taskHead
 			return errors.New("connector ledger contains a duplicate spent authorization")
 		}
 		if err := validateTaskCoordinate(record, taskHeads[event.TaskDigest], true); err != nil {
+			return err
+		}
+		if err := validateRunControlOwner(event, runOwners); err != nil {
 			return err
 		}
 		spent[event.TaskDigest] = struct{}{}
@@ -866,11 +887,16 @@ func updateHistory(pending map[string]Event, spent map[string]struct{}, taskHead
 			return err
 		}
 		ownership := runOwnershipFor(event)
-		if owner, exists := runOwners[ownership]; exists && owner != event.TaskDigest {
+		if err := validateRunControlOwner(event, runOwners); err != nil {
+			return err
+		}
+		if owner, exists := runOwners[ownership]; exists && owner.TaskDigest != event.TaskDigest && event.TargetTaskDigest == "" {
 			return ErrRunIDConflict
 		}
 		pending[event.TaskDigest] = event
-		runOwners[ownership] = event.TaskDigest
+		if event.TargetTaskDigest == "" {
+			runOwners[ownership] = event
+		}
 	case Terminal:
 		previous, exists := pending[event.TaskDigest]
 		if !exists || validateTransition(previous, event) != nil {
@@ -948,10 +974,14 @@ func sameCall(left, right Event) bool {
 		left.ApprovalThreshold == right.ApprovalThreshold &&
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
 		left.RequestBytes == right.RequestBytes && left.TaskProtocol == right.TaskProtocol &&
-		left.InfluenceSequence == right.InfluenceSequence && left.InfluenceHash == right.InfluenceHash
+		left.InfluenceSequence == right.InfluenceSequence && left.InfluenceHash == right.InfluenceHash &&
+		left.TargetRunID == right.TargetRunID && left.TargetTaskDigest == right.TargetTaskDigest
 }
 
 func validateEvent(event Event) error {
+	if err := validateRunControl(event); err != nil {
+		return err
+	}
 	if !publicIdentity(event.TenantID, 128) || !runtimeRef(event.RuntimeRef) ||
 		!digest(event.CapsuleDigest) || !digest(event.PolicyDigest) || !digest(event.RoutePolicyDigest) || event.Generation == 0 ||
 		!grantID(event.GrantID) || !identifier(event.OperationID) ||

@@ -248,8 +248,8 @@ func TestLifecycleRunIDCannotAliasTasksLiveOrOnRestart(t *testing.T) {
 	}
 	defer reopened.Close()
 	ownership := runOwnershipFor(firstDispatch)
-	if owner := reopened.runOwners[ownership]; owner != first.TaskDigest {
-		t.Fatalf("reconstructed run owner=%q want=%q", owner, first.TaskDigest)
+	if owner := reopened.runOwners[ownership]; owner.TaskDigest != first.TaskDigest {
+		t.Fatalf("reconstructed run owner=%q want=%q", owner.TaskDigest, first.TaskDigest)
 	}
 	if _, err := reopened.Dispatch(secondDispatch); !errors.Is(err, ErrRunIDConflict) {
 		t.Fatalf("duplicate run ID after restart err=%v", err)
