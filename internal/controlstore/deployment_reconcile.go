@@ -783,8 +783,10 @@ func (store *Store) rejectedRenewalCleanupAllowedLocked(
 		return false
 	}
 	command, found := store.current.commands[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)]
+	physicalRuntime, runtimeErr := commandExecutorRuntimeRef(command)
 	return found && command.CommandKind == "renew" && command.State == CommandTerminal &&
 		command.Terminal != nil && command.Terminal.Report.Status == controlprotocol.ExecutorStatusRejected &&
+		runtimeErr == nil && physicalRuntime == instance.Admission.RuntimeRef &&
 		command.SignedRuntimeRef == statement.RuntimeRef &&
 		command.SignedInstanceGeneration == instance.Generation &&
 		command.SignedClaimGeneration == statement.ClaimGeneration

@@ -1,6 +1,7 @@
 package controlstore
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
@@ -12,18 +13,20 @@ func TestRejectedRenewalCleanupChecksRetainedIdentityAndOutcome(t *testing.T) {
 		"valid", "running", "start failure", "destroy requested", "missing cursor", "missing admission",
 		"empty runtime", "wrong target", "admission generation", "missing command", "wrong operation",
 		"pending", "missing terminal", "failed", "unknown", "done", "wrong runtime", "wrong generation", "wrong claim",
+		"inconsistent physical projection", "malformed signed reference",
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newRecordsFixture(t, DefaultLimits())
+			runtimeRef := "executor-" + strings.Repeat("a", 64)
 			deployment := Deployment{TenantID: "tenant-a", DesiredState: DeploymentAbsent}
 			instance := DeploymentInstance{
 				NodeID: "node-1", InstanceID: "instance-a", Generation: 2,
 				CommandID: "renew-a", CommandOperation: "renew", Phase: DeploymentInstanceFailed,
-				Admission: &controlprotocol.ExecutorAdmissionProjectionV1{RuntimeRef: "runtime-a", Generation: 2},
+				Admission: &controlprotocol.ExecutorAdmissionProjectionV1{RuntimeRef: runtimeRef, Generation: 2},
 			}
-			statement := admission.CommandStatement{Kind: "stop", RuntimeRef: "runtime-a", ClaimGeneration: 3}
+			statement := admission.CommandStatement{Kind: "stop", RuntimeRef: runtimeRef, ClaimGeneration: 3}
 			command := Command{
-				CommandKind: "renew", State: CommandTerminal, SignedRuntimeRef: "runtime-a",
+				CommandKind: "renew", State: CommandTerminal, SignedRuntimeRef: runtimeRef,
 				SignedInstanceGeneration: 2, SignedClaimGeneration: 3,
 			}
 			command.Terminal = &TerminalReport{}
@@ -63,6 +66,10 @@ func TestRejectedRenewalCleanupChecksRetainedIdentityAndOutcome(t *testing.T) {
 				command.SignedInstanceGeneration++
 			case "wrong claim":
 				command.SignedClaimGeneration++
+			case "inconsistent physical projection":
+				instance.Admission.RuntimeRef = "executor-" + strings.Repeat("b", 64)
+			case "malformed signed reference":
+				command.SignedRuntimeRef, statement.RuntimeRef = "uplink:invalid", "uplink:invalid"
 			}
 			fixture.store.mu.Lock()
 			if name != "missing command" {
