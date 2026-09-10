@@ -864,8 +864,8 @@ if lock.get("version") != 1 or not isinstance(lock.get("package"), list):
     raise SystemExit("unsupported Hermes uv.lock schema")
 
 # BEGIN HERMES_SECURITY_OVERRIDES
-overrides = json.loads(pathlib.Path("/input/adapter/adapter.json").read_text()).get("security_overrides", [])
-if not isinstance(overrides, list) or len(overrides) > 8:
+overrides = json.loads(pathlib.Path("/input/adapter/adapter.json").read_text()).get("security_overrides")
+if not isinstance(overrides, list) or len(overrides) != 2:
     raise SystemExit("invalid Hermes security override inventory")
 names = set()
 additional_packages = []
@@ -890,6 +890,8 @@ for override in overrides:
     if not isinstance(wheel["url"], str) or wheel["url"].rsplit("/", 1)[-1] != filename:
         raise SystemExit("Hermes security override wheel identity differs from its package")
     additional_packages.append({"name": name, "version": version, "source": {"registry": "https://pypi.org/simple"}, "wheels": [wheel]})
+if names != {"httpx2", "httpcore2"}:
+    raise SystemExit("mandatory Hermes HTTP security overrides are missing")
 # END HERMES_SECURITY_OVERRIDES
 
 def compatible(filename):

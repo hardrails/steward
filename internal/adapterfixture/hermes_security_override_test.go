@@ -26,7 +26,7 @@ func TestHermesSecurityOverridesBindTheReplacedLockAndWheelIdentity(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"valid", "upstream-drift", "missing-package", "duplicate", "wrong-wheel", "unknown-field", "too-many", "unbounded-name"} {
+	for _, name := range []string{"valid", "upstream-drift", "missing-package", "duplicate", "wrong-wheel", "unknown-field", "too-many", "unbounded-name", "omitted", "empty", "partial", "wrong-inventory"} {
 		t.Run(name, func(t *testing.T) {
 			var document map[string]any
 			if err := json.Unmarshal(encoded, &document); err != nil {
@@ -56,6 +56,16 @@ func TestHermesSecurityOverridesBindTheReplacedLockAndWheelIdentity(t *testing.T
 				document["security_overrides"] = make([]any, 9)
 			case "unbounded-name":
 				first["name"] = "httpcore2\n--index-url=unexpected"
+			case "omitted":
+				delete(document, "security_overrides")
+			case "empty":
+				document["security_overrides"] = []any{}
+			case "partial":
+				document["security_overrides"] = overrides[:1]
+			case "wrong-inventory":
+				first["name"] = "other"
+				first["wheel"].(map[string]any)["url"] = "https://files.pythonhosted.org/packages/other-2.12.0-py3-none-any.whl"
+				lock["package"].([]any)[0].(map[string]any)["name"] = "other"
 			}
 			content, err := json.Marshal(document)
 			if err != nil {
