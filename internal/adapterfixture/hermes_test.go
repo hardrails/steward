@@ -1563,6 +1563,14 @@ mcp_result = module.MCP_RESULT_PREFIX + json.dumps({"result": module.NONCE}) + m
 assert module.validated_mcp_result(mcp_result) == module.NONCE
 assert module.validated_mcp_result(mcp_result.replace(module.NONCE, "changed")) is None
 assert module.validated_mcp_result(json.dumps({"result": module.NONCE})) is None
+direct = module.mcp_fixture_function([{"function": {"name": "mcp__fixture_echo__echo"}}])
+assert direct["name"] == "mcp__fixture_echo__echo"
+assert json.loads(direct["arguments"]) == {"value": module.NONCE}
+deferred = module.mcp_fixture_function([{"function": {"name": "tool_call"}}])
+assert deferred["name"] == "tool_call"
+assert json.loads(deferred["arguments"]) == {"name": "mcp__fixture_echo__echo", "arguments": {"value": module.NONCE}}
+for unavailable in (None, {}, [], [None], [{"function": {"name": []}}], [{"function": {"name": "terminal"}}]):
+    assert module.mcp_fixture_function(unavailable) is None
 
 for mode, result in (
     ("perform", module.CONNECTOR_RESULT),
