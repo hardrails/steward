@@ -6,24 +6,21 @@
   "selected_inputs": [
     "LICENSE",
     "pyproject.toml",
-    "uv.lock"
+    "uv.lock",
+    "complete immutable upstream source archive and assets"
   ],
   "selected_optional_inputs": [
     "homeassistant",
     "mcp"
   ],
   "excluded_optional_inputs": [
-    "plugins/hermes-achievements",
-    "plugins/security-guidance",
-    "skills/creative/humanizer",
-    "skills/productivity/powerpoint",
-    "web",
-    "ui-tui",
-    "browser assets",
-    "messaging extras"
+    "web dependency installation",
+    "ui-tui dependency installation",
+    "browser binary downloads",
+    "messaging dependency extras"
   ],
   "redistribution_status": "blocked_pending_transitive_and_base_notice_generation",
-  "note": "This record verifies the pinned upstream source license. It deliberately does not treat the MIT root license as a conclusion for every locked dependency or base-image file.",
+  "note": "This record verifies the pinned upstream source license, not the licenses of every retained optional source asset, locked dependency or base-image file. The source-backed installation retains optional source assets without enabling those integrations. Their notices remain part of the blocked redistribution review.",
   "upstream_release": "v2026.9.7",
   "upstream_version": "0.21.1"
 }

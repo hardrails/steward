@@ -20,6 +20,12 @@ against those records. Changed inputs cannot ship until requalified; records mus
 be retained unchanged, never edited to cover another build. This is runtime fixture
 evidence, not a completed end-user workflow.
 
+The September source and base refresh is not yet covered by the historical
+evidence linked above. Its source-backed installation, immutable assets and
+base-installer removal require fresh native qualification and image scans before
+promotion. [ADR 0083]({{ '/decisions/0083-reuse-hermes-source-installation-and-a-slim-runtime/' | relative_url }})
+records the installation and tool-environment tradeoffs.
+
 The retained v2 qualification means its pinned source and adapter passed the documented
 runtime qualification under gVisor on `linux/amd64`, including a signed workspace audit, an
 authenticated connector effect through a signed custom skill, and the
@@ -205,8 +211,10 @@ hooks execute in a bounded gVisor container with read-only inputs, no Docker soc
 and `--network=none`. First, a networkless gVisor planner reads the verified
 `uv.lock`. A non-executing host fetcher then downloads only the planned CPython 3.13
 `linux/amd64` wheels from `files.pythonhosted.org`. It refuses redirects and proxies
-and verifies each wheel's locked SHA-256 digest and byte size. The final image is also assembled with build
-networking disabled. Source checkout and a missing digest-pinned base image can still
+and verifies each wheel's locked SHA-256 digest and byte size. The final image
+assembles the original source and validated environment with networking disabled;
+its only execution step uninstalls the unused base pip package. Source checkout
+and a missing digest-pinned base image can still
 require host-side network access. Do not place secrets or production data on the
 build host; use a disposable build machine because gVisor reduces build risk but does
 not make untrusted code harmless. From a Steward source checkout, run the interactive

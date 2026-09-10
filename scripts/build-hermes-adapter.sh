@@ -1140,7 +1140,7 @@ PY
 
 mkdir -p "$work/final-context/adapter" "$work/final-context/upstream" "$work/final-context/artifact/venv"
 cp -a "$work/context/adapter"/. "$work/final-context/adapter/"
-# Retain the exact source and assets for upstreams supported source-backed
+# Retain the exact source and assets for upstream's supported source-backed
 # installation. Never copy the sandbox-mutated source tree into the image.
 cp -a "$work/context/upstream"/. "$work/final-context/upstream/"
 python3 -I - "$work/venv.tar" "$sandbox_output_bytes" <<'PY'

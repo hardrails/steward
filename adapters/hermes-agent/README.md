@@ -11,11 +11,22 @@ the networkless planner and host fetcher described in the operator guide, then r
 upstream dependency and packaging hooks inside a bounded gVisor container with
 `--network=none`, read-only inputs, no Docker socket, dropped capabilities,
 `no-new-privileges`, fixed resource limits, and bounded artifact output. The final
-Dockerfile only assembles that validated output and runs with build networking
-disabled. The feasibility gate then runs the hostile-runtime checks.
+Dockerfile assembles that validated output and the original verified source,
+with build networking disabled. Its only execution step removes the unused base
+pip installer; no project build hook runs in Docker assembly. The feasibility
+gate then runs the hostile-runtime checks.
 The build never uses the upstream image: that image starts as root, declares a
 volume, and its Dockerfile at the selected revision names two lockfiles that are
 not present in the tree.
+
+The September stable source pin uses upstream's source-backed editable
+installation at `/opt/hermes`. Its source, virtual environment, skills and locale
+assets are root-owned and read-only to the runtime user. Building at that same
+path avoids stale temporary paths in entrypoints and import metadata. The slim
+base retains Python, uv and shell execution, not the full base's incidental
+compiler, Git, curl or image-processing packages. Additional system tooling needs
+an explicit workload test and reviewed image, or a separate worker. See
+[ADR 0083](../../docs/decisions/0083-reuse-hermes-source-installation-and-a-slim-runtime.md).
 
 The adapter replaces upstream's root-only s6 initialization with `entrypoint.py`.
 That shim performs only fixed-path, non-root initialization, verifies the signed
