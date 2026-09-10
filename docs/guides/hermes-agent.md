@@ -20,10 +20,12 @@ against those records. Changed inputs cannot ship until requalified; records mus
 be retained unchanged, never edited to cover another build. This is runtime fixture
 evidence, not a completed end-user workflow.
 
-The September source and base refresh is not yet covered by the historical
-evidence linked above. Its source-backed installation, immutable assets and
-base-installer removal require fresh native qualification and image scans before
-promotion. [ADR 0083]({{ '/decisions/0083-reuse-hermes-source-installation-and-a-slim-runtime/' | relative_url }})
+The retained records cover the September source and base refresh, including its
+source-backed installation, immutable assets, base-installer removal and exact
+installed HTTP security-patch versions. Each separately built image still needs
+its own vulnerability scan before promotion; these records do not certify other
+image bytes or complete the redistribution notice inventory.
+[ADR 0083]({{ '/decisions/0083-reuse-hermes-source-installation-and-a-slim-runtime/' | relative_url }})
 records the installation and tool-environment tradeoffs.
 
 The retained v2 qualification means its pinned source and adapter passed the documented
