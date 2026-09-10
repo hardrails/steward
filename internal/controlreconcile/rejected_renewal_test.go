@@ -41,8 +41,8 @@ func TestCapacityFailureDoesNotAdvanceDeploymentCursor(t *testing.T) {
 
 func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T) {
 	for _, test := range []struct {
-		name, status, limit   string
-		expired, stopRejected bool
+		name, status, limit         string
+		expired, stopRejected, fork bool
 	}{
 		{name: "confirmed cleanup", status: controlprotocol.ExecutorStatusRejected},
 		{name: "uncertain renewal", status: controlprotocol.ExecutorStatusOutcomeUnknown},
@@ -51,11 +51,25 @@ func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T
 		{name: "full global capacity", status: controlprotocol.ExecutorStatusRejected, limit: "global"},
 		{name: "full tenant capacity", status: controlprotocol.ExecutorStatusRejected, limit: "tenant"},
 		{name: "full node capacity", status: controlprotocol.ExecutorStatusRejected, limit: "node"},
+		{name: "full global fork capacity", status: controlprotocol.ExecutorStatusRejected, limit: "global", fork: true},
+		{name: "full tenant fork capacity", status: controlprotocol.ExecutorStatusRejected, limit: "tenant", fork: true},
+		{name: "full node fork capacity", status: controlprotocol.ExecutorStatusRejected, limit: "node", fork: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newControlReconcileFixture(t)
-			applyControlDeployment(t, fixture, 1)
+			if test.fork {
+				applyControlDeploymentSpec(t, fixture, "research", "research-0", "research-lineage-0", 1, &controlstore.DeploymentFork{
+					SnapshotID: "checkpoint-a", SourceLineageID: "source-lineage-0", SourceNodeID: "node-1",
+				})
+			} else {
+				applyControlDeployment(t, fixture, 1)
+			}
 			reconciler := fixture.reconciler(t)
+			if test.fork {
+				assertReconcileCount(t, reconciler, "enqueue clone", 0, 1)
+				completeDeploymentCommand(t, fixture, "clone-state", controlprotocol.ExecutorStatusDone)
+				assertReconcileCount(t, reconciler, "observe clone", 1, 0)
+			}
 			assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
 			completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
 			assertReconcileCount(t, reconciler, "observe admit", 1, 0)
@@ -77,18 +91,22 @@ func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T
 			// A rejected renewal must not become permission to restart or retry.
 			assertReconcileCount(t, reconciler, "running intent remains failed", 0, 0)
 			if test.limit != "" {
-				// Four real courier commands fill the chosen bound. Reopen with
+				// Real courier commands fill the chosen bound. Reopen with
 				// that bound so cleanup cannot rely on spare capacity or history
-				// aging. Stop and destroy must each atomically reuse one slot.
+				// aging. Every cleanup successor must atomically reuse one slot.
+				status, err := fixture.store.Status()
+				if err != nil {
+					t.Fatal(err)
+				}
 				switch test.limit {
 				case "global":
-					fixture.limits.MaxCommands = 4
-					fixture.limits.MaxCommandsPerTenant = 4
-					fixture.limits.MaxCommandsPerNode = 4
+					fixture.limits.MaxCommands = status.Commands
+					fixture.limits.MaxCommandsPerTenant = status.Commands
+					fixture.limits.MaxCommandsPerNode = status.Commands
 				case "tenant":
-					fixture.limits.MaxCommandsPerTenant = 4
+					fixture.limits.MaxCommandsPerTenant = status.Commands
 				case "node":
-					fixture.limits.MaxCommandsPerNode = 4
+					fixture.limits.MaxCommandsPerNode = status.Commands
 				}
 				if err := fixture.store.Close(); err != nil {
 					t.Fatal(err)
@@ -150,6 +168,15 @@ func TestRejectedRenewalCleanupRequiresRemovalAndConfirmedLifecycle(t *testing.T
 			assertReconcileCount(t, reconciler, "unconfirmed destroy", 0, 0)
 			completeDeploymentCommand(t, fixture, "destroy", controlprotocol.ExecutorStatusDone)
 			assertReconcileCount(t, reconciler, "observe absence", 1, 0)
+			if test.fork {
+				if getControlDeployment(t, fixture).Phase == controlstore.DeploymentRemoved {
+					t.Fatal("fork reported removed before state purge")
+				}
+				assertReconcileCount(t, reconciler, "enqueue purge", 0, 1)
+				assertReconcileCount(t, reconciler, "unconfirmed purge", 0, 0)
+				completeDeploymentCommand(t, fixture, "purge", controlprotocol.ExecutorStatusDone)
+				assertReconcileCount(t, reconciler, "observe purge", 1, 0)
+			}
 			removed := getControlDeployment(t, fixture)
 			if removed.Phase != controlstore.DeploymentRemoved {
 				t.Fatalf("confirmed cleanup did not finish: %+v", removed)

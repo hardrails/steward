@@ -325,7 +325,9 @@ the instance or state lineage, or treats a failed/unknown result as a rejection.
 Missing command history and failed cleanup commands remain fenced for recovery.
 At a full command-store bound, the consumed rejected renewal may be reclaimed
 atomically with its successor stop, and an observed successful stop with its
-successor destroy. This narrow cleanup exception can precede ordinary terminal
+successor destroy. A snapshot fork's observed successful destroy can likewise be
+replaced by its authorized state purge; removal is not complete before that purge
+succeeds. This narrow cleanup exception can precede ordinary terminal
 retention expiry: it preserves the capacity bound without deleting evidence
 before the exact successor and advanced deployment cursor are durably retained.
 With spare capacity the prior command history is retained normally. Unknown or

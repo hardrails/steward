@@ -155,44 +155,60 @@ func TestFailedRenewalExtraRetentionIsOnlyForRejectedEvidence(t *testing.T) {
 	}
 }
 
-func TestCleanupCapacityReplacementRequiresObservedMatchingStop(t *testing.T) {
-	for _, name := range []string{"valid", "pending", "rejected", "unknown", "unobserved", "running intent", "wrong runtime", "wrong generation", "wrong claim"} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newRecordsFixture(t, DefaultLimits())
-			ref := "executor-" + strings.Repeat("a", 64)
-			deployment := Deployment{TenantID: "tenant-a", DesiredState: DeploymentAbsent}
-			instance := DeploymentInstance{NodeID: "node-1", Generation: 2,
-				CommandID: "stop-a", CommandOperation: "stop", Phase: DeploymentInstanceDestroying,
-				Admission: &controlprotocol.ExecutorAdmissionProjectionV1{RuntimeRef: ref, Generation: 2}}
-			statement := admission.CommandStatement{Kind: "destroy", RuntimeRef: ref, ClaimGeneration: 3}
-			command := Command{CommandKind: "stop", State: CommandTerminal, SignedRuntimeRef: ref,
-				SignedInstanceGeneration: 2, SignedClaimGeneration: 3,
-				Terminal: &TerminalReport{Report: controlprotocol.ExecutorReportV3{Status: controlprotocol.ExecutorStatusDone}}}
-			switch name {
-			case "pending":
-				command.State = CommandPending
-			case "rejected":
-				command.Terminal.Report.Status = controlprotocol.ExecutorStatusRejected
-			case "unknown":
-				command.Terminal.Report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
-			case "unobserved":
-				instance.Phase = DeploymentInstanceStopping
-			case "running intent":
-				deployment.DesiredState = DeploymentRunning
-			case "wrong runtime":
-				instance.Admission.RuntimeRef = "executor-" + strings.Repeat("b", 64)
-			case "wrong generation":
-				command.SignedInstanceGeneration++
-			case "wrong claim":
-				command.SignedClaimGeneration++
-			}
-			fixture.store.mu.Lock()
-			fixture.store.current.commands[commandKey("tenant-a", "node-1", "stop-a")] = command
-			previous := fixture.store.cleanupPredecessorToReplaceLocked(deployment, instance, statement)
-			fixture.store.mu.Unlock()
-			if (previous != nil) != (name == "valid") {
-				t.Fatalf("unexpected capacity replacement: %+v", previous)
-			}
-		})
+func TestCleanupCapacityReplacementRequiresObservedMatchingPredecessor(t *testing.T) {
+	for _, operation := range []string{"stop", "destroy"} {
+		names := []string{"valid", "pending", "rejected", "unknown", "unobserved", "running intent", "wrong runtime", "wrong generation", "wrong claim", "wrong successor runtime"}
+		if operation == "destroy" {
+			names = append(names, "missing fork")
+		}
+		for _, name := range names {
+			t.Run(operation+"/"+name, func(t *testing.T) {
+				fixture := newRecordsFixture(t, DefaultLimits())
+				ref := "executor-" + strings.Repeat("a", 64)
+				deployment := Deployment{TenantID: "tenant-a", DesiredState: DeploymentAbsent}
+				instance := DeploymentInstance{NodeID: "node-1", Generation: 2,
+					CommandID: "stop-a", CommandOperation: "stop", Phase: DeploymentInstanceDestroying,
+					Admission: &controlprotocol.ExecutorAdmissionProjectionV1{RuntimeRef: ref, Generation: 2}}
+				statement := admission.CommandStatement{Kind: "destroy", RuntimeRef: ref, ClaimGeneration: 3}
+				command := Command{CommandKind: "stop", State: CommandTerminal, SignedRuntimeRef: ref,
+					SignedInstanceGeneration: 2, SignedClaimGeneration: 3,
+					Terminal: &TerminalReport{Report: controlprotocol.ExecutorReportV3{Status: controlprotocol.ExecutorStatusDone}}}
+				if operation == "destroy" {
+					deployment.Fork = &DeploymentFork{SourceNodeID: "node-1"}
+					instance.Phase, instance.CommandOperation = DeploymentInstancePurging, "destroy"
+					command.CommandKind = "destroy"
+					statement.Kind = "purge"
+				}
+				switch name {
+				case "pending":
+					command.State = CommandPending
+				case "rejected":
+					command.Terminal.Report.Status = controlprotocol.ExecutorStatusRejected
+				case "unknown":
+					command.Terminal.Report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
+				case "unobserved":
+					instance.Phase = deploymentOperationPhase(operation)
+				case "running intent":
+					deployment.DesiredState = DeploymentRunning
+				case "wrong runtime":
+					instance.Admission.RuntimeRef = "executor-" + strings.Repeat("b", 64)
+				case "wrong generation":
+					command.SignedInstanceGeneration++
+				case "wrong claim":
+					command.SignedClaimGeneration++
+				case "wrong successor runtime":
+					statement.RuntimeRef = "unrelated-runtime"
+				case "missing fork":
+					deployment.Fork = nil
+				}
+				fixture.store.mu.Lock()
+				fixture.store.current.commands[commandKey("tenant-a", "node-1", "stop-a")] = command
+				previous := fixture.store.cleanupPredecessorToReplaceLocked(deployment, instance, statement)
+				fixture.store.mu.Unlock()
+				if (previous != nil) != (name == "valid") {
+					t.Fatalf("unexpected capacity replacement: %+v", previous)
+				}
+			})
+		}
 	}
 }

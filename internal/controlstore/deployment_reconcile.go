@@ -811,18 +811,21 @@ func (store *Store) rejectedRenewalCleanupAllowedLocked(
 
 // Cleanup must be able to advance even when its predecessor occupies the last
 // command slot. This is not general pruning: only a proven rejected renewal or
-// an observed successful stop can be replaced by its authorized cleanup step.
+// an observed successful stop/destroy can be replaced by its authorized cleanup step.
 func (store *Store) cleanupPredecessorToReplaceLocked(
 	deployment Deployment, instance DeploymentInstance, statement admission.CommandStatement,
 ) *commandReference {
 	allowed := instance.Phase == DeploymentInstanceFailed &&
 		store.rejectedRenewalCleanupAllowedLocked(deployment, instance, statement)
+	stopToDestroy := instance.Phase == DeploymentInstanceDestroying &&
+		instance.CommandOperation == "stop" && statement.Kind == "destroy"
+	destroyToPurge := deployment.Fork != nil && instance.Phase == DeploymentInstancePurging &&
+		instance.CommandOperation == "destroy" && statement.Kind == "purge"
 	if !allowed && deployment.DesiredState == DeploymentAbsent &&
-		instance.Phase == DeploymentInstanceDestroying && instance.CommandOperation == "stop" &&
-		statement.Kind == "destroy" && instance.Admission != nil {
+		(stopToDestroy || destroyToPurge) && instance.Admission != nil {
 		command := store.current.commands[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)]
 		physical, err := commandExecutorRuntimeRef(command)
-		allowed = command.CommandKind == "stop" && command.State == CommandTerminal && command.Terminal != nil &&
+		allowed = command.CommandKind == instance.CommandOperation && command.State == CommandTerminal && command.Terminal != nil &&
 			command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone && err == nil &&
 			physical == instance.Admission.RuntimeRef && instance.Admission.Generation == instance.Generation &&
 			command.SignedRuntimeRef == statement.RuntimeRef && command.SignedInstanceGeneration == instance.Generation &&
