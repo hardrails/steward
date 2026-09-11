@@ -658,6 +658,40 @@ The existing `evidence verify -kind connector` command verifies these records an
 externally retained final chain coordinates; service-task evidence alone does not
 cover inference attempts.
 
+### Durable inference attempt allowance
+
+An inference route may set `max_calls_per_grant` from 1 through 1,000,000.
+It requires `require_attempt_receipts: true`; zero or omission leaves the route
+without an attempt cap. Route policy version 14 binds the allowance. Existing
+grants prevent changing it on reload, including removal or an increase.
+
+The existing signed ledger reserves each attempt under the same lock as its
+authorization append, before provider transport. Every task, continuation and
+explicit retry for the same tenant and grant shares the allowance. All previously
+authorized inference attempts count, including legacy unscoped receipts, provider
+rejections, uncertain outcomes and successful responses. Finishing an attempt
+does not refund it. Gateway restart reconstructs the count from verified history;
+it does not restore spent allowance. A distinct authorized grant has its own count.
+Do not discard that history while relying on its allowance enforcement.
+
+Exhaustion returns HTTP 429 `inference_allowance_exhausted` with
+`X-Should-Retry: false`, without a provider call or another authorization receipt.
+Callers must review the original job before requesting additional authority, not
+retry automatically. A missing bounded ledger fails closed with
+`inference_accounting_unavailable` instead of falling back to unbounded calls.
+
+`gateway inference set -max-calls-per-grant N` sets a positive allowance; omission
+preserves the installed setting. Removing it requires `-disallow-call-limit`.
+An explicit zero, an invalid limit, a false disable flag or conflicting options
+is rejected without rewriting configuration. Accounting cannot be disabled while
+a positive allowance remains. Configuration writes do not bypass retained-grant
+reload restrictions.
+
+This is a count limit, not a price quote or monetary ceiling. Token ceilings,
+provider tariff validation, per-customer monetary reservations and billing
+reconciliation belong to the consuming application's admission and cost policy.
+No token usage or invoice amount is inferred from an attempt receipt.
+
 ### Task-bound inference authorization
 
 An inference route can additionally set `require_task_scope: true`. This requires
