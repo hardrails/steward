@@ -26,6 +26,7 @@ import tempfile
 
 source = pathlib.Path(sys.argv[1]).read_text()
 check = source.split("# BEGIN INFERENCE_ACCOUNTING_CHECK\n", 1)[1].split("# END INFERENCE_ACCOUNTING_CHECK", 1)[0]
+summary_check = source.split("# BEGIN INFERENCE_SUMMARY_CHECK\n", 1)[1].split("# END INFERENCE_SUMMARY_CHECK", 1)[0]
 admissions = {
     "grant-1": (1, {"runtime_ref": "runtime-1", "policy_digest": "policy-1", "route_policy_digest": "route-1"}),
     "grant-2": (2, {"runtime_ref": "runtime-2", "policy_digest": "policy-2", "route_policy_digest": "route-2"}),
@@ -71,6 +72,18 @@ def run_case(name, mutate=None, provider_log=b"1\n" * 18, title_log=b"1\n" * 5):
             result = work / "inference-accounting.json"
             assert result.stat().st_mode & 0o777 == 0o600
             assert json.loads(result.read_text()) == {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5, "task_scoped": True, "task_count": 5}
+            summary_scope = dict(steps_path=work / "steps", read_small_json=lambda path: json.loads(path.read_text()))
+            exec(compile(summary_check, sys.argv[1], "exec"), summary_scope)
+            for field in ("task_scoped", "task_count", "authorized_attempts", "provider_requests", "title_requests"):
+                invalid_summary = json.loads(result.read_text())
+                del invalid_summary[field]
+                summary_scope["read_small_json"] = lambda path: invalid_summary
+                try:
+                    exec(compile(summary_check, sys.argv[1], "exec"), summary_scope)
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(f"summary accepted missing {field}")
 
 
 run_case("valid")

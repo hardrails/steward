@@ -381,9 +381,12 @@ steps = steps_path.read_text(encoding="ascii").splitlines()
 if steps != expected_steps:
     raise SystemExit("hermes-steward-acceptance: completed acceptance step set is invalid")
 provenance = read_small_json(provenance_path)
+# BEGIN INFERENCE_SUMMARY_CHECK
 accounting = read_small_json(steps_path.parent / "inference-accounting.json")
-if accounting != {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5}:
+if accounting != {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5,
+                  "task_scoped": True, "task_count": 5}:
     raise SystemExit("hermes-steward-acceptance: inference accounting summary is invalid")
+# END INFERENCE_SUMMARY_CHECK
 verification = read_small_json(head_path)
 if not isinstance(provenance, dict) or not isinstance(verification, dict) or verification.get("valid") is not True:
     raise SystemExit("hermes-steward-acceptance: success evidence metadata is invalid")
