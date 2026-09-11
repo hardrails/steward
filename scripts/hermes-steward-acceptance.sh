@@ -659,6 +659,8 @@ fi
 	exit 1
 }
 mkdir -p "$work/gateway" "$work/grants"
+# Two overlapping main calls plus their independently scheduled title calls.
+# Keep the route bounded, but do not starve the auxiliary work under test.
 printf '%s\n' "{
   \"version\":1,
   \"control_socket\":\"$work/gateway/control.sock\",
@@ -668,7 +670,7 @@ printf '%s\n' "{
   \"grant_root\":\"$work/grants\",
   \"executor_gid\":$gid,
   \"relay_gid\":$gid,
-  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":2,\"require_attempt_receipts\":true,\"require_task_scope\":true}],
+  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":4,\"require_attempt_receipts\":true,\"require_task_scope\":true}],
   \"connector_receipt_file\":\"$work/connector-receipts.ndjson\",
   \"connector_receipt_key_file\":\"$work/connectors.private\",
   \"connector_receipt_node_id\":\"$node_id/gateway\",

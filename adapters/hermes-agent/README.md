@@ -68,6 +68,9 @@ unfinished inference request from each task, allowing earlier titles to finish.
 Each fixture answer also waits for its own background
 title request so fast completion cannot close authority before that auxiliary
 call starts. Missing titles fail explicitly, without changing the expected count.
+The fixture route has four concurrent slots for the two main calls and their
+two background titles. Production route limits are unchanged. Gateway HTTP tests
+verify that excess calls are rejected before reaching the provider or ledger.
 The full fixture expects seven tasks, seven session titles,
 22 inference calls and 67 signed gateway records. Fresh qualification of this
 expanded fixture is pending. The workspace profile disables native delegation;
