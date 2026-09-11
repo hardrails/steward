@@ -119,6 +119,7 @@ type Route struct {
 	MaxConcurrent          int               `json:"max_concurrent"`
 	RequireAttemptReceipts bool              `json:"require_attempt_receipts,omitempty"`
 	RequireTaskScope       bool              `json:"require_task_scope,omitempty"`
+	MaxCallsPerGrant       int               `json:"max_calls_per_grant,omitempty"`
 }
 
 type loadedRoute struct {
@@ -767,6 +768,10 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 		}
 		if route.RequireTaskScope && !route.RequireAttemptReceipts {
 			return nil, errors.New("task-scoped inference requires signed attempt receipts; enable require_attempt_receipts")
+		}
+		if route.MaxCallsPerGrant < 0 || route.MaxCallsPerGrant > 1_000_000 ||
+			(route.MaxCallsPerGrant > 0 && !route.RequireAttemptReceipts) {
+			return nil, errors.New("inference max_calls_per_grant must be zero or from 1 to 1000000 with required signed attempt receipts")
 		}
 		if route.UpstreamModel != "" &&
 			(!bounded(route.UpstreamModel, 256) || strings.TrimSpace(route.UpstreamModel) != route.UpstreamModel) {

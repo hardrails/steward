@@ -65,6 +65,7 @@ type inferenceRoutePolicy struct {
 	MaxConcurrent          int    `json:"max_concurrent"`
 	RequireAttemptReceipts bool   `json:"require_attempt_receipts,omitempty"`
 	RequireTaskScope       bool   `json:"require_task_scope,omitempty"`
+	MaxCallsPerGrant       int    `json:"max_calls_per_grant,omitempty"`
 }
 
 type egressRoutePolicy struct {
@@ -264,6 +265,10 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		if route.RequireTaskScope {
 			document.Version = 13
 			document.Inference.RequireTaskScope = true
+		}
+		if route.MaxCallsPerGrant > 0 {
+			document.Version = 14
+			document.Inference.MaxCallsPerGrant = route.MaxCallsPerGrant
 		}
 		if route.Protocol != "" || route.CredentialMode != "" || route.AnthropicVersion != "" {
 			if document.Version < 10 {

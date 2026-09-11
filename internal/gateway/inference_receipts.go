@@ -46,6 +46,7 @@ type inferenceAttemptTransport struct {
 	routePolicy string
 	operation   string
 	scope       connectorledger.Event
+	maximum     int
 }
 
 func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -72,8 +73,8 @@ func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*ht
 		InferenceTaskDigest: transport.scope.TaskDigest, InferencePermitDigest: transport.scope.PermitDigest,
 		InferenceRequestDigest: transport.scope.RequestDigest,
 	}
-	if _, err := transport.ledger.Begin(event); err != nil {
-		if errors.Is(err, connectorledger.ErrInferenceScopeDenied) {
+	if _, err := transport.begin(event); err != nil {
+		if errors.Is(err, connectorledger.ErrInferenceScopeDenied) || errors.Is(err, connectorledger.ErrInferenceQuotaExceeded) {
 			return nil, err
 		}
 		return nil, errInferenceAccountingUnavailable
@@ -117,4 +118,19 @@ func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*ht
 		return nil, &inferenceAttemptUnknownError{status: observedStatus, attempt: event.TaskDigest}
 	}
 	return response, err
+}
+
+func (transport inferenceAttemptTransport) begin(event connectorledger.Event) (connectorledger.Head, error) {
+	if transport.maximum == 0 {
+		return transport.ledger.Begin(event)
+	}
+	// A transport cannot fall back to unbounded accounting when its installed
+	// route requires a cap. Production uses the existing fsync-backed ledger.
+	bounded, ok := transport.ledger.(interface {
+		BeginInference(connectorledger.Event, int) (connectorledger.Head, error)
+	})
+	if !ok {
+		return connectorledger.Head{}, errInferenceAccountingUnavailable
+	}
+	return bounded.BeginInference(event, transport.maximum)
 }

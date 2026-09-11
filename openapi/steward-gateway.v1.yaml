@@ -54,6 +54,13 @@ info:
     original attempt and provider state before authorizing another request.
     Full-ledger verification and retained chain coordinates are required for
     attempt accounting; portable task evidence is not a substitute.
+    Routes may additionally set max_calls_per_grant, requiring attempt accounting.
+    This allowance counts all authorized attempts for a tenant and grant across
+    requests and restarts, including uncertain outcomes and provider rejections.
+    Exhaustion returns HTTP 429 inference_allowance_exhausted with
+    X-Should-Retry: false before contacting the provider. This is an attempt cap,
+    not a token or dollar-denominated spending guarantee. Route policy version 14
+    binds the allowance so retained grants cannot silently acquire a larger cap.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

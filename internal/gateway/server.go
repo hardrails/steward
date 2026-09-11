@@ -1433,7 +1433,7 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 			base: client.Transport, ledger: s.connectorLedger, grant: grant,
 			routePolicy: s.policyDigestFor(grant.GrantID),
 			operation:   strings.ReplaceAll(strings.TrimPrefix(incoming.URL.Path, "/v1/"), "/", "-"),
-			scope:       scope,
+			scope:       scope, maximum: route.MaxCallsPerGrant,
 		}
 		accounted.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &accounted
@@ -1613,6 +1613,11 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 				}
 			}
 			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_attempt_unknown", boundary+"; do not retry automatically; inspect the original attempt and provider state before authorizing another request")
+			return
+		}
+		if errors.Is(err, connectorledger.ErrInferenceQuotaExceeded) {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusTooManyRequests, "inference_allowance_exhausted", "the admitted inference attempt allowance is exhausted; no provider call was made; review the job before requesting more work")
 			return
 		}
 		if errors.Is(err, connectorledger.ErrInferenceScopeDenied) {
