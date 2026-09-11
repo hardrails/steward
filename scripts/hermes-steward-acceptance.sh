@@ -362,6 +362,7 @@ expected_steps = [
     "evidence_chain_verified",
     "connector_evidence_chain_verified",
     "service_task_audit_verified",
+    "inference_attempt_accounting_verified",
     "acceptance_complete",
 ]
 
@@ -380,6 +381,9 @@ steps = steps_path.read_text(encoding="ascii").splitlines()
 if steps != expected_steps:
     raise SystemExit("hermes-steward-acceptance: completed acceptance step set is invalid")
 provenance = read_small_json(provenance_path)
+accounting = read_small_json(steps_path.parent / "inference-accounting.json")
+if accounting != {"authorized_attempts": 13, "provider_requests": 13}:
+    raise SystemExit("hermes-steward-acceptance: inference accounting summary is invalid")
 verification = read_small_json(head_path)
 if not isinstance(provenance, dict) or not isinstance(verification, dict) or verification.get("valid") is not True:
     raise SystemExit("hermes-steward-acceptance: success evidence metadata is invalid")
@@ -406,7 +410,7 @@ if (
     or connector_head.get("node_id") != connector_node_id
     or connector_head.get("epoch") != 1
     or not isinstance(connector_head.get("sequence"), int)
-    or connector_head["sequence"] < 4
+    or connector_head["sequence"] != 43
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("chain_hash", ""))) is None
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("key_id", ""))) is None
 ):
@@ -427,6 +431,7 @@ payload = {
     },
     "completed_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "contains_agent_content": False,
+    "inference_attempt_accounting": accounting,
     "overall": "passed",
     "provenance": provenance,
     "receipt_chain": {
@@ -573,16 +578,39 @@ relay_tag=steward-hermes-relay-acceptance:$run_id
 docker build --network=none --pull=false --provenance=false -q -f "$work/Relayfile" -t "$relay_tag" "$work" >/dev/null
 relay_image=$(docker image inspect --format '{{.Id}}' "$relay_tag")
 
-python3 -I - "$root/adapters/hermes-agent/fixture_model.py" <<'PY' >"$work/model.log" 2>&1 &
+python3 -I - "$root/adapters/hermes-agent/fixture_model.py" "$work/inference-requests.log" <<'PY' >"$work/model.log" 2>&1 &
 import http.server
 import importlib.util
+import os
 import sys
+import threading
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fixture_model", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
-http.server.ThreadingHTTPServer(("127.0.0.1", 18080), module.Handler).serve_forever()
+descriptor = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+lock = threading.Lock()
+attempts = 0
+
+
+class CountedHandler(module.Handler):
+    def do_POST(self):
+        global attempts
+        # Count received HTTP attempts, never model-reported tokens or task IDs.
+        # The owned fixture retains no prompt, header, credential or response.
+        with lock:
+            if attempts >= 512:
+                self.send_error(503)
+                return
+            if os.write(descriptor, b"1\n") != 2:
+                raise RuntimeError("fixture inference counter write failed")
+            os.fsync(descriptor)
+            attempts += 1
+        super().do_POST()
+
+
+http.server.ThreadingHTTPServer(("127.0.0.1", 18080), CountedHandler).serve_forever()
 PY
 model_pid=$!
 for _ in $(seq 1 30); do
@@ -626,7 +654,7 @@ printf '%s\n' "{
   \"grant_root\":\"$work/grants\",
   \"executor_gid\":$gid,
   \"relay_gid\":$gid,
-  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":2}],
+  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":2,\"require_attempt_receipts\":true}],
   \"connector_receipt_file\":\"$work/connector-receipts.ndjson\",
   \"connector_receipt_key_file\":\"$work/connectors.private\",
   \"connector_receipt_node_id\":\"$node_id/gateway\",
@@ -1578,7 +1606,12 @@ if (
 ):
     raise SystemExit("hermes-steward-acceptance: Gateway receipt ledger contains task bodies, task IDs, prompts, or secrets")
 lines = raw.splitlines()
-if len(lines) != 2 + 3 * len(issue_by_permit):
+provider_log = read_owner_file(work / "inference-requests.log", 1024)
+# Two workspace turns use two calls each; three connector turns use three
+# calls each (load skill, execute tool, return result). Native task replay must
+# not add another call. This is a deterministic model fixture, not live billing.
+expected_inference_attempts = 2 * 2 + 3 * 3
+if len(lines) != 2 + 3 * len(issue_by_permit) + 2 * expected_inference_attempts:
     raise SystemExit("hermes-steward-acceptance: mixed Gateway receipt ledger has an unexpected record count")
 receipts = []
 previous = "sha256:" + "0" * 64
@@ -1590,6 +1623,7 @@ for index, line in enumerate(lines, 1):
     schemas = {
         "application/vnd.steward.connector-receipt.v1+json": "steward.connector-receipt.v1",
         "application/vnd.steward.connector-receipt.v4+json": "steward.connector-receipt.v4",
+        "application/vnd.steward.connector-receipt.v9+json": "steward.connector-receipt.v9",
     }
     if set(envelope) != {"payload", "payloadType", "signatures"} or payload_type not in schemas:
         raise SystemExit("hermes-steward-acceptance: connector receipt envelope is invalid")
@@ -1675,6 +1709,62 @@ admissions = {}
 for generation in (1, 2):
     admission = json.loads((work / f"admission-g{generation}.json").read_text(encoding="utf-8"))
     admissions[admission["grant_id"]] = (generation, admission)
+# BEGIN INFERENCE_ACCOUNTING_CHECK
+if provider_log != b"1\n" * expected_inference_attempts:
+    raise SystemExit("hermes-steward-acceptance: provider attempts differ from the fixed five-task fixture")
+inference_by_attempt = {}
+for payload_type, receipt, _ in receipts:
+    if not payload_type.endswith(".v9+json"):
+        continue
+    event = receipt["event"]
+    admitted = admissions.get(event.get("grant_id"))
+    if admitted is None:
+        raise SystemExit("hermes-steward-acceptance: inference attempt has no exact admitted runtime")
+    generation, admission = admitted
+    if (
+        event.get("kind") != "inference_attempt"
+        or event.get("tenant_id") != tenant_id
+        or event.get("runtime_ref") != admission.get("runtime_ref")
+        or event.get("capsule_digest") != capsule_digest
+        or event.get("policy_digest") != admission.get("policy_digest")
+        or event.get("route_policy_digest") != admission.get("route_policy_digest")
+        or event.get("generation") != generation
+        or event.get("operation_id") != "chat-completions"
+        or event.get("connector_id") != ""
+        or type(event.get("request_bytes")) is not int
+        or not 0 < event["request_bytes"] <= 1 << 20
+        or event.get("response_bytes") != 0
+        or event.get("error_code", "") != ""
+        or re.fullmatch(r"sha256:[a-f0-9]{64}", str(event.get("task_digest", ""))) is None
+    ):
+        raise SystemExit("hermes-steward-acceptance: inference attempt differs from its admitted boundary")
+    inference_by_attempt.setdefault(event["task_digest"], []).append(event)
+if len(inference_by_attempt) != expected_inference_attempts:
+    raise SystemExit("hermes-steward-acceptance: signed inference attempts do not match received provider requests")
+generation_attempts = {1: 0, 2: 0}
+for events in inference_by_attempt.values():
+    if len(events) != 2:
+        raise SystemExit("hermes-steward-acceptance: inference attempt is incomplete or duplicated")
+    authorized, responded = events
+    if (
+        authorized.get("phase") != "authorize"
+        or authorized.get("outcome") != "allowed"
+        or "http_status" in authorized
+        or responded.get("phase") != "terminal"
+        or responded.get("outcome") != "responded"
+        or responded.get("http_status") != 200
+        or {k: v for k, v in authorized.items() if k not in {"phase", "outcome"}}
+        != {k: v for k, v in responded.items() if k not in {"phase", "outcome", "http_status"}}
+    ):
+        raise SystemExit("hermes-steward-acceptance: inference attempt changed between authorization and response")
+    generation_attempts[authorized["generation"]] += 1
+if generation_attempts != {1: 11, 2: 2}:
+    raise SystemExit("hermes-steward-acceptance: inference attempts differ from the original and resumed task sets")
+accounting = {"authorized_attempts": len(inference_by_attempt), "provider_requests": len(provider_log) // 2}
+accounting_descriptor = os.open(work / "inference-accounting.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(accounting_descriptor, "w", encoding="utf-8") as output:
+    json.dump(accounting, output, separators=(",", ":"), sort_keys=True)
+# END INFERENCE_ACCOUNTING_CHECK
 service_receipts = [(receipt, receipt_hash) for payload_type, receipt, receipt_hash in receipts if payload_type.endswith(".v4+json")]
 if len(service_receipts) != 3 * len(issue_by_permit):
     raise SystemExit("hermes-steward-acceptance: mixed ledger omits a service-task lifecycle phase")
@@ -1781,6 +1871,7 @@ if (
 PY
 mark connector_evidence_chain_verified
 mark service_task_audit_verified
+mark inference_attempt_accounting_verified
 mark acceptance_complete
 write_success_evidence
 echo "Hermes Steward acceptance passed: signed import, gVisor, tenant-signed service work, connector work, exact replay, resume, purge, and mixed receipts verified."

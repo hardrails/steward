@@ -976,6 +976,9 @@ func TestHermesQualificationContracts(t *testing.T) {
 		"task wait -bundle",
 		"task audit -in",
 		"application/vnd.steward.connector-receipt.v4+json",
+		"application/vnd.steward.connector-receipt.v9+json",
+		`\"require_attempt_receipts\":true`,
+		"inference_attempt_accounting_verified",
 		"tenant_task_private_key_agent_absence_verified",
 		`base64.b64encode(value).rstrip(b"=")`,
 		"base64.urlsafe_b64encode",
@@ -1132,6 +1135,10 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 				Sequence uint64 `json:"sequence"`
 			} `json:"head"`
 		} `json:"connector_receipt_chain"`
+		InferenceAttemptAccounting struct {
+			AuthorizedAttempts int `json:"authorized_attempts"`
+			ProviderRequests   int `json:"provider_requests"`
+		} `json:"inference_attempt_accounting"`
 	}
 	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-integration.json"), &integration)
 	expectedSteps := []string{
@@ -1143,7 +1150,8 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		"tenant_task_private_key_agent_absence_verified",
 		"generation_1_destroyed", "generation_2_admitted", "generation_2_started", "generation_2_ready",
 		"generation_2_skill_passed", "generation_2_destroyed", "state_purged", "evidence_chain_verified",
-		"connector_evidence_chain_verified", "service_task_audit_verified", "acceptance_complete",
+		"connector_evidence_chain_verified", "service_task_audit_verified",
+		"inference_attempt_accounting_verified", "acceptance_complete",
 	}
 	if integration.SchemaVersion != "steward.hermes-integration-evidence.v1" || integration.Overall != "passed" ||
 		integration.ContainsContent || integration.Acceptance.Runtime != "runsc" || !integration.Acceptance.SignedAdmission ||
@@ -1151,7 +1159,9 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		!integration.Acceptance.TaskPrivateKeyAgentAbsenceVerified ||
 		integration.Provenance.Archive.Platform != "linux/amd64" ||
 		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
-		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 17 ||
+		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 43 ||
+		integration.InferenceAttemptAccounting.AuthorizedAttempts != 13 ||
+		integration.InferenceAttemptAccounting.ProviderRequests != 13 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}
