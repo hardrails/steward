@@ -1604,7 +1604,15 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 			// OpenAI-compatible clients retry 409 and 5xx by default. Use a
 			// non-retry status as well as the SDK's explicit suppression header.
 			w.Header().Set("X-Should-Retry", "false")
-			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_attempt_unknown", "the provider attempt may have incurred usage; do not retry automatically; inspect the original attempt and provider state before authorizing another request")
+			boundary := "the provider attempt may have incurred usage"
+			var failure *inferenceAttemptUnknownError
+			if errors.As(err, &failure) {
+				boundary = fmt.Sprintf("no provider response headers were observed for attempt %s; usage may have occurred", failure.attempt)
+				if failure.status >= 100 && failure.status <= 999 {
+					boundary = fmt.Sprintf("the provider returned HTTP %d for attempt %s; usage may have occurred", failure.status, failure.attempt)
+				}
+			}
+			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_attempt_unknown", boundary+"; do not retry automatically; inspect the original attempt and provider state before authorizing another request")
 			return
 		}
 		if errors.Is(err, errInferenceAccountingUnavailable) {

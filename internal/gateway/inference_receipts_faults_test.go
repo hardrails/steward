@@ -32,6 +32,11 @@ func TestInferenceExtensionStatusRetainsTerminalWithoutAutomaticRetry(t *testing
 				t.Fatalf("response=%d %s calls=%d", response.Code, response.Body.String(), calls.Load())
 			}
 			records := rig.records(t)
+			if len(records) != 2 || !strings.Contains(response.Body.String(), records[0].Receipt.Event.TaskDigest) ||
+				!strings.Contains(response.Body.String(), fmt.Sprintf("provider returned HTTP %d", status)) ||
+				strings.Contains(response.Body.String(), "no provider response headers") {
+				t.Fatalf("response lost the observed attempt boundary: %s", response.Body.String())
+			}
 			if len(records) != 2 || len(rig.ledger.Pending()) != 0 || rig.ledger.Failed() {
 				t.Fatal("extension status orphaned a healthy ledger authorization")
 			}

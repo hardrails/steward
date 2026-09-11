@@ -37,7 +37,7 @@ explicit budget for the tenant. See the
 [Gateway configuration reference]({{ '/reference/configuration/' | relative_url }})
 for accounting prerequisites and failure semantics. Repeating `inference set`
 without this flag preserves its existing value. Disabling it requires
-`-require-attempt-receipts=false`; retained grants still prevent an incompatible
+`-disallow-attempt-receipts`; retained grants still prevent an incompatible
 reload. The records count potentially paid attempts, not provider invoices.
 
 | Provider | Default Gateway target | Protocol sent upstream | Credential header |
