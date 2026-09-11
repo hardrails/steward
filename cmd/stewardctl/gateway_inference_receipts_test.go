@@ -46,20 +46,34 @@ func TestInferenceReconfigurationPreservesAccountingUnlessExplicitlyDisabled(t *
 	for _, test := range []struct {
 		flags []string
 		want  bool
+		scope bool
 	}{
-		{[]string{"-require-attempt-receipts"}, true},
-		{nil, true},
-		{[]string{"-require-attempt-receipts=false"}, false},
-		{nil, false},
+		{[]string{"-require-attempt-receipts", "-require-task-scope"}, true, true},
+		{nil, true, true},
+		{[]string{"-require-task-scope=false"}, true, false},
+		{nil, true, false},
+		{[]string{"-require-attempt-receipts=false"}, false, false},
+		{nil, false, false},
 	} {
 		arguments := append([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm"}, test.flags...)
 		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
 		}
 		loaded, _, _, _, err := gateway.LoadConfig(path)
-		if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].RequireAttemptReceipts != test.want {
+		if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].RequireAttemptReceipts != test.want || loaded.Routes[0].RequireTaskScope != test.scope {
 			t.Fatalf("flags=%v routes=%+v err=%v", test.flags, loaded.Routes, err)
 		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm", "-require-task-scope"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("task scope without attempt accounting was accepted")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("invalid task scope replaced the original configuration")
 	}
 	config.ConnectorReceiptTenantBudgets = nil
 	raw, err = json.Marshal(config)

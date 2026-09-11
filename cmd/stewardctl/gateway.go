@@ -184,6 +184,7 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	anthropicVersion := flags.String("anthropic-version", "", "fixed Anthropic API version")
 	maxConcurrent := flags.Int("max-concurrent", 8, "maximum concurrent requests")
 	requireAttemptReceipts := flags.Bool("require-attempt-receipts", false, "require signed inference attempt accounting; omission preserves the existing route setting")
+	requireTaskScope := flags.Bool("require-task-scope", false, "require the original admitted task permit on inference; omission preserves the existing route setting")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -241,12 +242,16 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 		UpstreamModel: *upstreamModel, MaxTokensCap: *maxTokensCap, CredentialMode: gateway.CredentialMode(*credentialMode),
 		AnthropicVersion: *anthropicVersion, MaxConcurrent: *maxConcurrent,
 		RequireAttemptReceipts: *requireAttemptReceipts,
+		RequireTaskScope:       *requireTaskScope,
 	}
 	replaced := false
 	for index := range config.Routes {
 		if config.Routes[index].ID == route.ID {
 			if !flagWasVisited(flags, "require-attempt-receipts") {
 				route.RequireAttemptReceipts = config.Routes[index].RequireAttemptReceipts
+			}
+			if !flagWasVisited(flags, "require-task-scope") {
+				route.RequireTaskScope = config.Routes[index].RequireTaskScope
 			}
 			config.Routes[index], replaced = route, true
 			break

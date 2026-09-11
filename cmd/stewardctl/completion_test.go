@@ -127,7 +127,7 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	}
 	for _, prefix := range []string{"-", "-require"} {
 		candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", prefix})
-		if !slices.Contains(candidates, "-require-attempt-receipts") {
+		if !slices.Contains(candidates, "-require-attempt-receipts") || !slices.Contains(candidates, "-require-task-scope") {
 			t.Fatalf("inference accounting flag missing from %q candidates: %v", prefix, candidates)
 		}
 	}
