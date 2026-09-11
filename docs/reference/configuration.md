@@ -621,16 +621,23 @@ generation, output contents, tokens or billing. An unfinished attempt becomes
 `outcome_unknown` on restart rather than disappearing from the count.
 
 The inference proxy returns HTTP 503 `inference_accounting_unavailable` when
-required accounting cannot be retained. This includes failure after a provider
-call, so the response is not a guarantee that retrying is free. A missing ledger,
+required accounting prevents a new outbound attempt. A missing ledger,
 exhausted tenant capacity or failed writer prevents another outbound attempt.
+If terminal accounting fails after dispatch, HTTP 422
+`inference_terminal_accounting_failed` preserves the minted attempt identity and
+observed provider HTTP status, or explicitly reports that no response headers
+were observed. It exposes no provider body. Do not retry automatically: restore
+the ledger and reconcile the original attempt with provider state. The retained
+authorization still counts as potentially paid; a later blocked request does not
+erase it or prove that the earlier request was free.
 If the provider connection fails with accounting retained, HTTP 422
 `inference_attempt_unknown` tells callers not to retry automatically: the provider
 may have incurred usage even without a response. Inspect the original attempt and
 provider state before authorizing another request. A new request is another
 accounted attempt, not an idempotent replay of the first.
-Both errors set `X-Should-Retry: false` for SDKs that honor that header. The unknown
-outcome uses 422 because OpenAI-compatible clients can retry 409 by default.
+All three errors set `X-Should-Retry: false` for SDKs that honor that header.
+Post-dispatch failures use 422 because OpenAI-compatible clients can retry 409
+and 5xx responses by default.
 The existing `evidence verify -kind connector` command verifies these records and
 externally retained final chain coordinates; service-task evidence alone does not
 cover inference attempts.
