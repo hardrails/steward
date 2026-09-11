@@ -13,6 +13,16 @@ import (
 var errInferenceAccountingUnavailable = errors.New("inference attempt accounting is unavailable")
 var errInferenceAttemptUnknown = errors.New("inference attempt outcome is unknown")
 
+type inferenceAttemptUnknownError struct {
+	status  int
+	attempt string
+}
+
+func (failure *inferenceAttemptUnknownError) Error() string {
+	return errInferenceAttemptUnknown.Error()
+}
+func (failure *inferenceAttemptUnknownError) Unwrap() error { return errInferenceAttemptUnknown }
+
 // A missing terminal receipt must not erase an observed provider response.
 // Only the bounded status and locally minted attempt identity cross this error.
 type inferenceTerminalAccountingError struct {
@@ -95,10 +105,10 @@ func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*ht
 		if response.Body != nil {
 			_ = response.Body.Close()
 		}
-		return nil, errInferenceAttemptUnknown
+		return nil, &inferenceAttemptUnknownError{status: observedStatus, attempt: event.TaskDigest}
 	}
 	if err != nil {
-		return nil, errInferenceAttemptUnknown
+		return nil, &inferenceAttemptUnknownError{status: observedStatus, attempt: event.TaskDigest}
 	}
 	return response, err
 }
