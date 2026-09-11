@@ -1611,8 +1611,13 @@ provider_log = read_owner_file(work / "inference-requests.log", 1024)
 # calls each (load skill, execute tool, return result). Native task replay must
 # not add another call. This is a deterministic model fixture, not live billing.
 expected_inference_attempts = 2 * 2 + 3 * 3
-if len(lines) != 2 + 3 * len(issue_by_permit) + 2 * expected_inference_attempts:
-    raise SystemExit("hermes-steward-acceptance: mixed Gateway receipt ledger has an unexpected record count")
+expected_receipt_count = 2 + 3 * len(issue_by_permit) + 2 * expected_inference_attempts
+if len(lines) != expected_receipt_count:
+    raise SystemExit(
+        f"hermes-steward-acceptance: mixed Gateway receipt ledger has {len(lines)} records; "
+        f"expected {expected_receipt_count}; owned provider counter has {len(provider_log.splitlines())} requests. "
+        "Inspect the fixture call sequence before changing its required accounting count."
+    )
 receipts = []
 previous = "sha256:" + "0" * 64
 for index, line in enumerate(lines, 1):
