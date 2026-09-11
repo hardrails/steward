@@ -118,6 +118,7 @@ type Route struct {
 	AnthropicVersion       string            `json:"anthropic_version,omitempty"`
 	MaxConcurrent          int               `json:"max_concurrent"`
 	RequireAttemptReceipts bool              `json:"require_attempt_receipts,omitempty"`
+	RequireTaskScope       bool              `json:"require_task_scope,omitempty"`
 }
 
 type loadedRoute struct {
@@ -763,6 +764,9 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 	for _, route := range c.Routes {
 		if !bounded(route.ID, 128) || route.MaxConcurrent < 1 || route.MaxConcurrent > 256 {
 			return nil, errors.New("gateway route requires bounded id and max_concurrent from 1 to 256")
+		}
+		if route.RequireTaskScope && !route.RequireAttemptReceipts {
+			return nil, errors.New("task-scoped inference requires signed attempt receipts; enable require_attempt_receipts")
 		}
 		if route.UpstreamModel != "" &&
 			(!bounded(route.UpstreamModel, 256) || strings.TrimSpace(route.UpstreamModel) != route.UpstreamModel) {

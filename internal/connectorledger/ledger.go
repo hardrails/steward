@@ -26,24 +26,26 @@ import (
 )
 
 const (
-	PayloadTypeV1 = "application/vnd.steward.connector-receipt.v1+json"
-	PayloadTypeV2 = "application/vnd.steward.connector-receipt.v2+json"
-	PayloadTypeV3 = "application/vnd.steward.connector-receipt.v3+json"
-	PayloadTypeV4 = "application/vnd.steward.connector-receipt.v4+json"
-	PayloadTypeV5 = "application/vnd.steward.connector-receipt.v5+json"
-	PayloadTypeV6 = "application/vnd.steward.connector-receipt.v6+json"
-	PayloadTypeV7 = "application/vnd.steward.connector-receipt.v7+json"
-	PayloadTypeV8 = "application/vnd.steward.connector-receipt.v8+json"
-	PayloadTypeV9 = "application/vnd.steward.connector-receipt.v9+json"
-	SchemaV1      = "steward.connector-receipt.v1"
-	SchemaV2      = "steward.connector-receipt.v2"
-	SchemaV3      = "steward.connector-receipt.v3"
-	SchemaV4      = "steward.connector-receipt.v4"
-	SchemaV5      = "steward.connector-receipt.v5"
-	SchemaV6      = "steward.connector-receipt.v6"
-	SchemaV7      = "steward.connector-receipt.v7"
-	SchemaV8      = "steward.connector-receipt.v8"
-	SchemaV9      = "steward.connector-receipt.v9"
+	PayloadTypeV1  = "application/vnd.steward.connector-receipt.v1+json"
+	PayloadTypeV2  = "application/vnd.steward.connector-receipt.v2+json"
+	PayloadTypeV3  = "application/vnd.steward.connector-receipt.v3+json"
+	PayloadTypeV4  = "application/vnd.steward.connector-receipt.v4+json"
+	PayloadTypeV5  = "application/vnd.steward.connector-receipt.v5+json"
+	PayloadTypeV6  = "application/vnd.steward.connector-receipt.v6+json"
+	PayloadTypeV7  = "application/vnd.steward.connector-receipt.v7+json"
+	PayloadTypeV8  = "application/vnd.steward.connector-receipt.v8+json"
+	PayloadTypeV9  = "application/vnd.steward.connector-receipt.v9+json"
+	PayloadTypeV10 = "application/vnd.steward.connector-receipt.v10+json"
+	SchemaV1       = "steward.connector-receipt.v1"
+	SchemaV2       = "steward.connector-receipt.v2"
+	SchemaV3       = "steward.connector-receipt.v3"
+	SchemaV4       = "steward.connector-receipt.v4"
+	SchemaV5       = "steward.connector-receipt.v5"
+	SchemaV6       = "steward.connector-receipt.v6"
+	SchemaV7       = "steward.connector-receipt.v7"
+	SchemaV8       = "steward.connector-receipt.v8"
+	SchemaV9       = "steward.connector-receipt.v9"
+	SchemaV10      = "steward.connector-receipt.v10"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -64,6 +66,10 @@ const (
 )
 
 var (
+	// ErrInferenceScopeDenied means no matching live parent authorized this
+	// inference attempt. It does not indicate a ledger availability failure.
+	ErrInferenceScopeDenied = errors.New("inference scope has no matching live service-task authorization")
+
 	chainDomain = []byte("steward-connector-ledger-v1\x00")
 
 	// ErrTenantQuotaExceeded means a tenant has consumed its durable receipt
@@ -203,40 +209,43 @@ const (
 // enforcement identity and transfer metadata, never headers, credentials,
 // origins, paths, queries, or bodies.
 type Event struct {
-	Phase                 Phase      `json:"phase"`
-	Outcome               Outcome    `json:"outcome"`
-	Kind                  EventKind  `json:"kind,omitempty"`
-	EffectMode            string     `json:"effect_mode,omitempty"`
-	TenantID              string     `json:"tenant_id"`
-	RuntimeRef            string     `json:"runtime_ref"`
-	CapsuleDigest         string     `json:"capsule_digest"`
-	PolicyDigest          string     `json:"policy_digest"`
-	RoutePolicyDigest     string     `json:"route_policy_digest"`
-	Generation            uint64     `json:"generation"`
-	GrantID               string     `json:"grant_id"`
-	ConnectorID           string     `json:"connector_id"`
-	ServiceID             string     `json:"service_id,omitempty"`
-	OperationID           string     `json:"operation_id"`
-	OperationPolicyDigest string     `json:"operation_policy_digest,omitempty"`
-	TaskDigest            string     `json:"task_digest"`
-	AuthorityKeyID        string     `json:"authority_key_id,omitempty"`
-	AuthorityKeySet       string     `json:"authority_key_set,omitempty"`
-	ApprovalThreshold     int        `json:"approval_threshold,omitempty"`
-	PermitDigest          string     `json:"permit_digest,omitempty"`
-	RequestDigest         string     `json:"request_digest,omitempty"`
-	HTTPStatus            int        `json:"http_status,omitempty"`
-	RequestBytes          int64      `json:"request_bytes"`
-	ResponseBytes         int64      `json:"response_bytes"`
-	ErrorCode             string     `json:"error_code,omitempty"`
-	RunID                 string     `json:"run_id,omitempty"`
-	TaskProtocol          string     `json:"task_protocol,omitempty"`
-	TaskStatus            TaskStatus `json:"task_status,omitempty"`
-	ResultDigest          string     `json:"result_digest,omitempty"`
-	InfluenceSequence     uint64     `json:"influence_sequence,omitempty"`
-	InfluenceHash         string     `json:"influence_hash,omitempty"`
-	ResponseDigest        string     `json:"response_digest,omitempty"`
-	TargetRunID           string     `json:"target_run_id,omitempty"`
-	TargetTaskDigest      string     `json:"target_task_digest,omitempty"`
+	Phase                  Phase      `json:"phase"`
+	Outcome                Outcome    `json:"outcome"`
+	Kind                   EventKind  `json:"kind,omitempty"`
+	EffectMode             string     `json:"effect_mode,omitempty"`
+	TenantID               string     `json:"tenant_id"`
+	RuntimeRef             string     `json:"runtime_ref"`
+	CapsuleDigest          string     `json:"capsule_digest"`
+	PolicyDigest           string     `json:"policy_digest"`
+	RoutePolicyDigest      string     `json:"route_policy_digest"`
+	Generation             uint64     `json:"generation"`
+	GrantID                string     `json:"grant_id"`
+	ConnectorID            string     `json:"connector_id"`
+	ServiceID              string     `json:"service_id,omitempty"`
+	OperationID            string     `json:"operation_id"`
+	OperationPolicyDigest  string     `json:"operation_policy_digest,omitempty"`
+	TaskDigest             string     `json:"task_digest"`
+	AuthorityKeyID         string     `json:"authority_key_id,omitempty"`
+	AuthorityKeySet        string     `json:"authority_key_set,omitempty"`
+	ApprovalThreshold      int        `json:"approval_threshold,omitempty"`
+	PermitDigest           string     `json:"permit_digest,omitempty"`
+	RequestDigest          string     `json:"request_digest,omitempty"`
+	HTTPStatus             int        `json:"http_status,omitempty"`
+	RequestBytes           int64      `json:"request_bytes"`
+	ResponseBytes          int64      `json:"response_bytes"`
+	ErrorCode              string     `json:"error_code,omitempty"`
+	RunID                  string     `json:"run_id,omitempty"`
+	TaskProtocol           string     `json:"task_protocol,omitempty"`
+	TaskStatus             TaskStatus `json:"task_status,omitempty"`
+	ResultDigest           string     `json:"result_digest,omitempty"`
+	InfluenceSequence      uint64     `json:"influence_sequence,omitempty"`
+	InfluenceHash          string     `json:"influence_hash,omitempty"`
+	ResponseDigest         string     `json:"response_digest,omitempty"`
+	TargetRunID            string     `json:"target_run_id,omitempty"`
+	TargetTaskDigest       string     `json:"target_task_digest,omitempty"`
+	InferenceTaskDigest    string     `json:"inference_task_digest,omitempty"`
+	InferencePermitDigest  string     `json:"inference_permit_digest,omitempty"`
+	InferenceRequestDigest string     `json:"inference_request_digest,omitempty"`
 }
 
 // Receipt contains one signed chain coordinate and one mediated-effect event.
@@ -446,6 +455,9 @@ func (l *Log) Begin(event Event) (Head, error) {
 	if err := validateRunControlOwner(event, l.runOwners); err != nil {
 		return Head{}, err
 	}
+	if err := validateInferenceScopeOwner(event, l.pending); err != nil {
+		return Head{}, err
+	}
 	reservation := pendingReservation(event)
 	head, err := l.appendLocked(event, reservation)
 	if err != nil {
@@ -533,6 +545,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
 	if event.Kind == InferenceAttempt {
 		payloadType, schemaVersion = PayloadTypeV9, SchemaV9
+		if event.InferenceTaskDigest != "" {
+			payloadType, schemaVersion = PayloadTypeV10, SchemaV10
+		}
 	} else if event.TargetTaskDigest != "" {
 		payloadType, schemaVersion = PayloadTypeV8, SchemaV8
 	} else if event.InfluenceHash != "" || event.ResponseDigest != "" {
@@ -784,7 +799,7 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		envelope, err := dsse.Parse(raw)
 		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
 			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 &&
-			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 && envelope.PayloadType != PayloadTypeV7 && envelope.PayloadType != PayloadTypeV8 && envelope.PayloadType != PayloadTypeV9 {
+			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 && envelope.PayloadType != PayloadTypeV7 && envelope.PayloadType != PayloadTypeV8 && envelope.PayloadType != PayloadTypeV9 && envelope.PayloadType != PayloadTypeV10 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -834,6 +849,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		expectedSchema = SchemaV8
 	case PayloadTypeV9:
 		expectedSchema = SchemaV9
+	case PayloadTypeV10:
+		expectedSchema = SchemaV10
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -859,7 +876,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		payloadType != PayloadTypeV7 && (receipt.Event.InfluenceSequence != 0 || receipt.Event.InfluenceHash != "" || receipt.Event.ResponseDigest != "") ||
 		payloadType == PayloadTypeV8 && receipt.Event.TargetTaskDigest == "" ||
 		payloadType != PayloadTypeV8 && (receipt.Event.TargetTaskDigest != "" || receipt.Event.TargetRunID != "") ||
-		(payloadType == PayloadTypeV9) != (receipt.Event.Kind == InferenceAttempt) {
+		(payloadType == PayloadTypeV9 || payloadType == PayloadTypeV10) != (receipt.Event.Kind == InferenceAttempt) ||
+		(payloadType == PayloadTypeV10) != (receipt.Event.InferenceTaskDigest != "") {
 		return errors.New("connector receipt schema does not match its permit fields")
 	}
 	if payloadType == PayloadTypeV4 || payloadType == PayloadTypeV8 {
@@ -884,6 +902,9 @@ func updateHistory(pending map[string]Event, spent map[string]struct{}, taskHead
 			return err
 		}
 		if err := validateRunControlOwner(event, runOwners); err != nil {
+			return err
+		}
+		if err := validateInferenceScopeOwner(event, pending); err != nil {
 			return err
 		}
 		spent[event.TaskDigest] = struct{}{}
@@ -985,10 +1006,19 @@ func sameCall(left, right Event) bool {
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
 		left.RequestBytes == right.RequestBytes && left.TaskProtocol == right.TaskProtocol &&
 		left.InfluenceSequence == right.InfluenceSequence && left.InfluenceHash == right.InfluenceHash &&
-		left.TargetRunID == right.TargetRunID && left.TargetTaskDigest == right.TargetTaskDigest
+		left.TargetRunID == right.TargetRunID && left.TargetTaskDigest == right.TargetTaskDigest &&
+		left.InferenceTaskDigest == right.InferenceTaskDigest && left.InferencePermitDigest == right.InferencePermitDigest &&
+		left.InferenceRequestDigest == right.InferenceRequestDigest
 }
 
 func validateEvent(event Event) error {
+	if event.InferenceTaskDigest != "" || event.InferencePermitDigest != "" || event.InferenceRequestDigest != "" {
+		if event.Kind != InferenceAttempt || !digest(event.InferenceTaskDigest) ||
+			!digest(event.InferencePermitDigest) || !digest(event.InferenceRequestDigest) ||
+			event.InferenceTaskDigest == event.TaskDigest {
+			return errors.New("inference scope requires a distinct task and its exact permit and request digests")
+		}
+	}
 	if err := validateRunControl(event); err != nil {
 		return err
 	}
@@ -1148,6 +1178,25 @@ func validateEvent(event Event) error {
 		}
 	default:
 		return errors.New("invalid connector phase")
+	}
+	return nil
+}
+
+// validateInferenceScopeOwner joins an attempt to a live, durable service
+// authorization. Both live appends and offline replay use this check. A terminal
+// attempt may finish after its parent closes, but a new attempt may not begin.
+func validateInferenceScopeOwner(event Event, pending map[string]Event) error {
+	if event.InferenceTaskDigest == "" {
+		return nil
+	}
+	parent, exists := pending[event.InferenceTaskDigest]
+	if !exists || parent.Kind != ServiceTask || parent.TaskProtocol != TaskProtocolLifecycleV1 ||
+		parent.TargetTaskDigest != "" || parent.TenantID != event.TenantID ||
+		parent.RuntimeRef != event.RuntimeRef || parent.CapsuleDigest != event.CapsuleDigest ||
+		parent.PolicyDigest != event.PolicyDigest || parent.RoutePolicyDigest != event.RoutePolicyDigest ||
+		parent.GrantID != event.GrantID || parent.Generation != event.Generation ||
+		parent.PermitDigest != event.InferencePermitDigest || parent.RequestDigest != event.InferenceRequestDigest {
+		return ErrInferenceScopeDenied
 	}
 	return nil
 }

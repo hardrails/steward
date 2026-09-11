@@ -658,6 +658,50 @@ The existing `evidence verify -kind connector` command verifies these records an
 externally retained final chain coordinates; service-task evidence alone does not
 cover inference attempts.
 
+### Task-bound inference authorization
+
+An inference route can additionally set `require_task_scope: true`. This requires
+attempt accounting and a service grant with task authorities. Route policy version
+13 binds the additional restriction. CLI configuration enables it with
+`-require-task-scope`, preserves it when omitted, and disables it only with
+`-disallow-task-scope`. False values and conflicting options are rejected without
+rewriting configuration. Accounting cannot be disabled while task scope remains
+required.
+
+The gateway forwards the original admitted task permit to the root service
+operation in `X-Steward-Inference-Permit`. It does not forward that header to
+`hermes.stop`. A compatible runtime carries the same canonical base64url envelope
+as its task-specific inference Bearer credential, including child and background
+clients. It must not replace process-global credentials. The bundled Hermes patch
+carries this header into each run's model client, accepts only the configured
+Steward relay route, and removes task credentials from legacy global mirrors.
+The transport has successful native seven-task qualification in the retained
+[integration evidence](evidence/hermes-integration.json), including overlapping
+tasks and background titles. Qualification applies only to its exact source and
+runtime inputs; independent release review remains required. The research
+profile's delegated model paths need separate runtime proof. These records do
+not qualify an installed runtime with different inputs.
+
+The inference gateway accepts only a previously admitted, live lifecycle task
+whose permit and identity match the active runtime grant and route policy.
+Caller-supplied task names provide no authority. Unknown, ambiguous, completed or
+revoked scope returns HTTP 403 `inference_task_scope_required`, with
+`X-Should-Retry: false`, before contacting the provider. The gateway strips the
+scope and substitutes the configured provider credential on outbound transport.
+If the parent closes between scope lookup and durable attempt authorization, the
+same non-retryable 403 identifies the task boundary. No provider attempt was
+recorded or sent; this is not a ledger outage and does not call for storage repair.
+
+Schema-10 attempt records retain `inference_task_digest`,
+`inference_permit_digest` and `inference_request_digest`, separate from the minted
+attempt identity. Both the writer and offline verifier join them to a pending
+service-task authorization with matching runtime and policy identity. No new
+attempt can begin after that task closes; an already-authorized attempt may retain
+its terminal receipt afterward. Ongoing task admission can outlive its permit's
+initial dispatch validity window. This binding proves authorization scope, not
+semantic intent, output correctness, token usage or billing. Retained format-9
+attempts remain runtime-wide evidence and do not acquire task attribution.
+
 `egress_routes` contains at most 128 HTTP(S) proxy policies. Each has 1–128
 destinations (`host`, `ports`, optional canonical `allowed_cidrs`) and four limits:
 `max_concurrent`, `max_request_bytes`, `max_response_bytes`, and

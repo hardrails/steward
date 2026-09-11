@@ -893,6 +893,7 @@ release_files=(
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
 	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/task-scope.patch
 	integration/adapters/hermes-agent/fixture_connector.py
 	integration/adapters/hermes-agent/fixture_mcp.py
 	integration/adapters/hermes-agent/fixture_model.py
@@ -994,7 +995,7 @@ write_canonical_manifest() {
 		printf '  "arch": "%s",\n' "$goarch"
 		printf '  "state_formats": {\n'
 		printf '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},\n'
-		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 9, "write": 9},\n'
+		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 10, "write": 10},\n'
 		printf '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},\n'
 		printf '    "gateway_state": {"read_min": 1, "read_max": 9, "write": 9},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
@@ -1227,7 +1228,7 @@ for file in agents/hermes/agent.json agents/developer/agent.json agents/research
 	install -o root -g root -m 0644 "$root/examples/$file" "$incoming/integration/examples/$file"
 done
 install -o root -g root -m 0644 "$root/schemas/agent.cue" "$incoming/integration/schemas/agent.cue"
-for file in Dockerfile README.md adapter.json entrypoint.py fixture_connector.py fixture_mcp.py \
+for file in Dockerfile README.md adapter.json entrypoint.py task-scope.patch fixture_connector.py fixture_mcp.py \
 	fixture_model.py fixture_secret_scan.py license-inventory.json source-inputs.sha256; do
 	install -o root -g root -m 0644 "$root/adapters/hermes-agent/$file" \
 		"$incoming/integration/adapters/hermes-agent/$file"

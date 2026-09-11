@@ -173,7 +173,7 @@ jobs:
           manifest=$(tar -xOf "$archive" release.json)
           grep -Fxq '  "schema": "steward.release.v2",' <<<"$manifest"
           grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},' <<<"$manifest"
-          grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 9, "write": 9},' <<<"$manifest"
+          grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 10, "write": 10},' <<<"$manifest"
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 9, "write": 9},' <<<"$manifest"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' <<<"$manifest"
@@ -181,7 +181,7 @@ jobs:
           grep -Fxq '  "os": "linux",' <<<"$manifest"
           grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
           grep -Fq '    "steward-control": "' <<<"$manifest"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 83
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 85
           grep -Fq '    "integration/adapters/hermes-agent/profiles/research/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/workers/coding/package-lock.json": "' <<<"$manifest"
           grep -Fq '    "integration/workers/research/research_worker.py": "' <<<"$manifest"

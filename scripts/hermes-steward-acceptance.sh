@@ -346,6 +346,7 @@ expected_steps = [
     "workspace_seeded",
     "generation_1_skill_passed",
     "service_task_replay_verified",
+    "concurrent_task_scopes_verified",
     "generation_1_connector_skill_passed",
     "connector_replay_denied",
     "connector_forbidden_denied",
@@ -381,9 +382,12 @@ steps = steps_path.read_text(encoding="ascii").splitlines()
 if steps != expected_steps:
     raise SystemExit("hermes-steward-acceptance: completed acceptance step set is invalid")
 provenance = read_small_json(provenance_path)
+# BEGIN INFERENCE_SUMMARY_CHECK
 accounting = read_small_json(steps_path.parent / "inference-accounting.json")
-if accounting != {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5}:
+if accounting != {"authorized_attempts": 22, "provider_requests": 22, "title_requests": 7,
+                  "task_scoped": True, "task_count": 7, "concurrent_tasks": 2}:
     raise SystemExit("hermes-steward-acceptance: inference accounting summary is invalid")
+# END INFERENCE_SUMMARY_CHECK
 verification = read_small_json(head_path)
 if not isinstance(provenance, dict) or not isinstance(verification, dict) or verification.get("valid") is not True:
     raise SystemExit("hermes-steward-acceptance: success evidence metadata is invalid")
@@ -410,7 +414,7 @@ if (
     or connector_head.get("node_id") != connector_node_id
     or connector_head.get("epoch") != 1
     or not isinstance(connector_head.get("sequence"), int)
-    or connector_head["sequence"] != 53
+    or connector_head["sequence"] != 67
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("chain_hash", ""))) is None
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("key_id", ""))) is None
 ):
@@ -655,6 +659,8 @@ fi
 	exit 1
 }
 mkdir -p "$work/gateway" "$work/grants"
+# Two overlapping main calls plus their independently scheduled title calls.
+# Keep the route bounded, but do not starve the auxiliary work under test.
 printf '%s\n' "{
   \"version\":1,
   \"control_socket\":\"$work/gateway/control.sock\",
@@ -664,7 +670,7 @@ printf '%s\n' "{
   \"grant_root\":\"$work/grants\",
   \"executor_gid\":$gid,
   \"relay_gid\":$gid,
-  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":2,\"require_attempt_receipts\":true}],
+  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":4,\"require_attempt_receipts\":true,\"require_task_scope\":true}],
   \"connector_receipt_file\":\"$work/connector-receipts.ndjson\",
   \"connector_receipt_key_file\":\"$work/connectors.private\",
   \"connector_receipt_node_id\":\"$node_id/gateway\",
@@ -1283,6 +1289,23 @@ run_workspace_audit 1 "$generation_1_workspace_digest" "steward-integration-$run
 mark generation_1_skill_passed
 [[ -f $work/service-task-replay.verified ]]
 mark service_task_replay_verified
+run_signed_hermes 1 overlap-a "STEWARD_SCOPE_OVERLAP a" "steward-overlap-$run_id-a" >"$work/overlap-a.json" &
+overlap_a_pid=$!
+run_signed_hermes 1 overlap-b "STEWARD_SCOPE_OVERLAP b" "steward-overlap-$run_id-b" >"$work/overlap-b.json" &
+overlap_b_pid=$!
+overlap_failed=0
+wait "$overlap_a_pid" || overlap_failed=1
+wait "$overlap_b_pid" || overlap_failed=1
+[[ $overlap_failed == 0 ]] || { echo "hermes-steward-acceptance: concurrent tasks failed" >&2; exit 1; }
+python3 -I - "$work" <<'PY'
+import json, pathlib, sys
+work = pathlib.Path(sys.argv[1])
+for label in ("a", "b"):
+    terminal = json.loads((work / f"overlap-{label}.json").read_text())
+    if terminal.get("status") != "completed" or terminal.get("output") != f"scope-overlap-{label}":
+        raise SystemExit("hermes-steward-acceptance: overlapping tasks did not retain their own results")
+PY
+mark concurrent_task_scopes_verified
 run_connector_assertion 1 connector-perform "STEWARD_CONNECTOR_WORK task=$connector_task_id" perform
 mark generation_1_connector_skill_passed
 run_connector_assertion 1 connector-replay "STEWARD_CONNECTOR_REPLAY task=$connector_task_id" replay
@@ -1604,8 +1627,12 @@ for issue_path in sorted(work.glob("task-*.issue.json")):
         len(terminal_raw),
         "sha256:" + hashlib.sha256(terminal_raw).hexdigest(),
     )
-if len(issue_by_permit) != 5:
-    raise SystemExit("hermes-steward-acceptance: expected five independently signed Hermes task bundles")
+if len(issue_by_permit) != 7:
+    raise SystemExit("hermes-steward-acceptance: expected seven independently signed Hermes task bundles")
+overlap_tasks = {
+    service_task_digest(json.loads(read_owner_file(work / f"task-overlap-{label}.issue.json", 65536))["task_id"])
+    for label in ("a", "b")
+}
 if (
     not secret
     or not service_token
@@ -1619,15 +1646,17 @@ lines = raw.splitlines()
 provider_log = read_owner_file(work / "inference-requests.log", 1024)
 title_log = read_owner_file(work / "inference-title-requests.log", 1024)
 # Two workspace turns use two calls each; three connector turns use three
-# calls each (load skill, execute tool, return result). Each of the five fresh
+# calls each (load skill, execute tool, return result), plus two overlapping
+# tool-free turns use one call each. Each of the seven fresh
 # sessions also generates a title through the provider. Native task replay must
 # not add another call. This is a deterministic model fixture, not live billing.
-expected_inference_attempts = 2 * 2 + 3 * 3 + 5
+expected_inference_attempts = 2 * 2 + 3 * 3 + 2 + 7
 expected_receipt_count = 2 + 3 * len(issue_by_permit) + 2 * expected_inference_attempts
 if len(lines) != expected_receipt_count:
     raise SystemExit(
         f"hermes-steward-acceptance: mixed Gateway receipt ledger has {len(lines)} records; "
-        f"expected {expected_receipt_count}; owned provider counter has {len(provider_log.splitlines())} requests. "
+        f"expected {expected_receipt_count}; owned provider counter has {len(provider_log.splitlines())} requests "
+        f"including {len(title_log.splitlines())} titles. "
         "Inspect the fixture call sequence before changing its required accounting count."
     )
 receipts = []
@@ -1640,7 +1669,7 @@ for index, line in enumerate(lines, 1):
     schemas = {
         "application/vnd.steward.connector-receipt.v1+json": "steward.connector-receipt.v1",
         "application/vnd.steward.connector-receipt.v4+json": "steward.connector-receipt.v4",
-        "application/vnd.steward.connector-receipt.v9+json": "steward.connector-receipt.v9",
+        "application/vnd.steward.connector-receipt.v10+json": "steward.connector-receipt.v10",
     }
     if set(envelope) != {"payload", "payloadType", "signatures"} or payload_type not in schemas:
         raise SystemExit("hermes-steward-acceptance: connector receipt envelope is invalid")
@@ -1727,19 +1756,28 @@ for generation in (1, 2):
     admission = json.loads((work / f"admission-g{generation}.json").read_text(encoding="utf-8"))
     admissions[admission["grant_id"]] = (generation, admission)
 # BEGIN INFERENCE_ACCOUNTING_CHECK
-if title_log != b"1\n" * 5:
+if title_log != b"1\n" * 7:
     raise SystemExit("hermes-steward-acceptance: expected one provider title request per fresh session")
 if provider_log != b"1\n" * expected_inference_attempts:
-    raise SystemExit("hermes-steward-acceptance: provider attempts differ from the fixed five-task fixture")
+    raise SystemExit("hermes-steward-acceptance: provider attempts differ from the fixed seven-task fixture")
 inference_by_attempt = {}
+scoped_tasks = set()
+overlap_active = {task: set() for task in overlap_tasks}
+overlap_observed = False
 for payload_type, receipt, _ in receipts:
-    if not payload_type.endswith(".v9+json"):
+    if payload_type.endswith(".v9+json"):
+        raise SystemExit("hermes-steward-acceptance: runtime-wide accounting cannot prove task scope")
+    if not payload_type.endswith(".v10+json"):
         continue
     event = receipt["event"]
     admitted = admissions.get(event.get("grant_id"))
     if admitted is None:
         raise SystemExit("hermes-steward-acceptance: inference attempt has no exact admitted runtime")
     generation, admission = admitted
+    binding = issue_by_permit.get(event.get("inference_permit_digest"))
+    if binding is None:
+        raise SystemExit("hermes-steward-acceptance: inference has no independently issued task permit")
+    issue, _, expected_task_digest, _, _, _ = binding
     if (
         event.get("kind") != "inference_attempt"
         or event.get("tenant_id") != tenant_id
@@ -1749,6 +1787,8 @@ for payload_type, receipt, _ in receipts:
         or event.get("route_policy_digest") != admission.get("route_policy_digest")
         or event.get("generation") != generation
         or event.get("operation_id") != "chat-completions"
+        or event.get("inference_task_digest") != expected_task_digest
+        or event.get("inference_request_digest") != issue["request_digest"]
         or event.get("connector_id") != ""
         or type(event.get("request_bytes")) is not int
         or not 0 < event["request_bytes"] <= 1 << 20
@@ -1758,6 +1798,17 @@ for payload_type, receipt, _ in receipts:
     ):
         raise SystemExit("hermes-steward-acceptance: inference attempt differs from its admitted boundary")
     inference_by_attempt.setdefault(event["task_digest"], []).append(event)
+    scoped_tasks.add(event["inference_permit_digest"])
+    if expected_task_digest in overlap_tasks:
+        if event.get("phase") == "authorize":
+            overlap_active[expected_task_digest].add(event["task_digest"])
+        elif event.get("phase") == "terminal":
+            overlap_active[expected_task_digest].discard(event["task_digest"])
+        overlap_observed = overlap_observed or all(overlap_active.values())
+if len(overlap_tasks) != 2 or not overlap_observed or any(overlap_active.values()):
+    raise SystemExit("hermes-steward-acceptance: independent task inference did not overlap")
+if scoped_tasks != set(issue_by_permit):
+    raise SystemExit("hermes-steward-acceptance: task-scoped inference does not cover every issued task")
 if len(inference_by_attempt) != expected_inference_attempts:
     raise SystemExit("hermes-steward-acceptance: signed inference attempts do not match received provider requests")
 generation_attempts = {1: 0, 2: 0}
@@ -1777,10 +1828,11 @@ for events in inference_by_attempt.values():
     ):
         raise SystemExit("hermes-steward-acceptance: inference attempt changed between authorization and response")
     generation_attempts[authorized["generation"]] += 1
-if generation_attempts != {1: 15, 2: 3}:
+if generation_attempts != {1: 19, 2: 3}:
     raise SystemExit("hermes-steward-acceptance: inference attempts differ from the original and resumed task sets")
 accounting = {"authorized_attempts": len(inference_by_attempt), "provider_requests": len(provider_log) // 2,
-              "title_requests": len(title_log) // 2}
+              "title_requests": len(title_log) // 2, "task_scoped": True, "task_count": len(scoped_tasks),
+              "concurrent_tasks": len(overlap_tasks)}
 accounting_descriptor = os.open(work / "inference-accounting.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(accounting_descriptor, "w", encoding="utf-8") as output:
     json.dump(accounting, output, separators=(",", ":"), sort_keys=True)

@@ -64,6 +64,7 @@ type inferenceRoutePolicy struct {
 	CredentialConfigured   bool   `json:"credential_configured"`
 	MaxConcurrent          int    `json:"max_concurrent"`
 	RequireAttemptReceipts bool   `json:"require_attempt_receipts,omitempty"`
+	RequireTaskScope       bool   `json:"require_task_scope,omitempty"`
 }
 
 type egressRoutePolicy struct {
@@ -259,6 +260,10 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 			document.Version = 12
 			document.Inference.RequireAttemptReceipts = true
 			document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
+		}
+		if route.RequireTaskScope {
+			document.Version = 13
+			document.Inference.RequireTaskScope = true
 		}
 		if route.Protocol != "" || route.CredentialMode != "" || route.AnthropicVersion != "" {
 			if document.Version < 10 {

@@ -35,6 +35,8 @@ INTERNAL_API_HOST = "127.0.0.1"
 INTERNAL_API_PORT = 8642
 INTERNAL_API_TOKEN = "steward-feasibility"
 MAX_REQUEST_BODY = 64 << 10
+INFERENCE_PERMIT_HEADER = "X-Steward-Inference-Permit"
+MAX_INFERENCE_PERMIT_BYTES = 32 << 10
 MAX_STOP_REQUEST_BODY = 49
 MAX_RESPONSE_BODY = 1 << 20
 SERVICE_TIMEOUT_SECONDS = 30
@@ -753,6 +755,22 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
             "Accept-Encoding": "identity",
             "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
         }
+        if method == "POST" and self.path == "/v1/runs":
+            permits = self.headers.get_all(INFERENCE_PERMIT_HEADER, [])
+            if permits:
+                permit = permits[0]
+                try:
+                    if len(permits) != 1 or not 0 < len(permit) <= (MAX_INFERENCE_PERMIT_BYTES * 4 + 2) // 3:
+                        raise ValueError("invalid permit header")
+                    raw = base64.b64decode(permit + "=" * (-len(permit) % 4), altchars=b"-_", validate=True)
+                    if not raw or len(raw) > MAX_INFERENCE_PERMIT_BYTES or base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != permit:
+                        raise ValueError("noncanonical permit header")
+                except (ValueError, UnicodeError):
+                    self._send_error(400, "invalid_inference_permit")
+                    return
+                # Only native admission authenticates these bytes. This bridge
+                # bounds transport; it cannot create or widen task authority.
+                headers[INFERENCE_PERMIT_HEADER] = permit
         if body is not None:
             headers["Content-Length"] = str(len(body))
             headers["Content-Type"] = "application/json"

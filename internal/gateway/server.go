@@ -1045,6 +1045,9 @@ func (s *Server) validGrant(grant Grant) bool {
 				return false
 			}
 		}
+		if s.routes[grant.RouteID].RequireTaskScope && (!s.routes[grant.RouteID].RequireAttemptReceipts || len(grant.TaskAuthorities) == 0 || !grant.Service) {
+			return false
+		}
 	}
 	if len(grant.EgressRouteIDs) > 32 {
 		return false
@@ -1414,12 +1417,23 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 	}
 	credentialMode := effectiveInferenceCredentialMode(route.Route)
 	client := s.client
+	var scope connectorledger.Event
+	if route.RequireTaskScope {
+		var ok bool
+		scope, ok = s.inferenceTaskScope(incoming, grant)
+		if !ok || !route.RequireAttemptReceipts {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusForbidden, "inference_task_scope_required", "inference requires the original permit for a live admitted task; use that task's scoped model client")
+			return
+		}
+	}
 	if route.RequireAttemptReceipts {
 		accounted := *client
 		accounted.Transport = inferenceAttemptTransport{
 			base: client.Transport, ledger: s.connectorLedger, grant: grant,
 			routePolicy: s.policyDigestFor(grant.GrantID),
 			operation:   strings.ReplaceAll(strings.TrimPrefix(incoming.URL.Path, "/v1/"), "/", "-"),
+			scope:       scope,
 		}
 		accounted.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &accounted
@@ -1544,6 +1558,7 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 	copyHeaders(request.Header, incoming.Header)
 	request.Header.Del("Authorization")
 	request.Header.Del("Proxy-Authorization")
+	request.Header.Del(inferencePermitHeader)
 	request.Header.Del("Cookie")
 	if !service {
 		request.Header.Del("X-Api-Key")
@@ -1598,6 +1613,11 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 				}
 			}
 			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_attempt_unknown", boundary+"; do not retry automatically; inspect the original attempt and provider state before authorizing another request")
+			return
+		}
+		if errors.Is(err, connectorledger.ErrInferenceScopeDenied) {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusForbidden, "inference_task_scope_required", "the task no longer authorizes inference; no provider call was made; do not retry with this task permit")
 			return
 		}
 		if errors.Is(err, errInferenceAccountingUnavailable) {

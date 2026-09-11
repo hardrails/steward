@@ -823,6 +823,12 @@ dockerfile_base=$(awk -F= '/^ARG UV_IMAGE=/{print substr($0, index($0, "=") + 1)
 
 (cd "$work/context/upstream" && sha256sum -c "$work/context/adapter/source-inputs.sha256") >/dev/null \
 	|| die "pinned Hermes source inputs failed verification"
+# Apply the reviewed adapter delta to the exported pinned tree, never the
+# operator's checkout. The adapter file-set digest binds the patch itself.
+safe_git "$work/context/upstream" apply --check "$work/context/adapter/task-scope.patch" \
+	|| die "pinned Hermes task-scope patch does not apply"
+safe_git "$work/context/upstream" apply "$work/context/adapter/task-scope.patch" \
+	|| die "could not apply pinned Hermes task-scope patch"
 build_recipe_sha256=$(sha256_file "$work/context/adapter/Dockerfile")
 source_inputs_sha256=$(sha256_file "$work/context/adapter/source-inputs.sha256")
 builder_sha256=$publication_builder_sha256

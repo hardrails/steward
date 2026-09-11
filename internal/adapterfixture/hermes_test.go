@@ -976,8 +976,9 @@ func TestHermesQualificationContracts(t *testing.T) {
 		"task wait -bundle",
 		"task audit -in",
 		"application/vnd.steward.connector-receipt.v4+json",
-		"application/vnd.steward.connector-receipt.v9+json",
+		"application/vnd.steward.connector-receipt.v10+json",
 		`\"require_attempt_receipts\":true`,
+		`\"require_task_scope\":true`,
 		"inference_attempt_accounting_verified",
 		"tenant_task_private_key_agent_absence_verified",
 		`base64.b64encode(value).rstrip(b"=")`,
@@ -1136,9 +1137,12 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 			} `json:"head"`
 		} `json:"connector_receipt_chain"`
 		InferenceAttemptAccounting struct {
-			AuthorizedAttempts int `json:"authorized_attempts"`
-			ProviderRequests   int `json:"provider_requests"`
-			TitleRequests      int `json:"title_requests"`
+			AuthorizedAttempts int  `json:"authorized_attempts"`
+			ProviderRequests   int  `json:"provider_requests"`
+			TitleRequests      int  `json:"title_requests"`
+			TaskScoped         bool `json:"task_scoped"`
+			TaskCount          int  `json:"task_count"`
+			ConcurrentTasks    int  `json:"concurrent_tasks"`
 		} `json:"inference_attempt_accounting"`
 	}
 	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-integration.json"), &integration)
@@ -1146,6 +1150,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		"image_imported", "executor_ready", "generation_1_admitted", "generation_1_started",
 		"generation_1_ready", "state_volume_observed", "workspace_seeded", "generation_1_skill_passed",
 		"service_task_replay_verified",
+		"concurrent_task_scopes_verified",
 		"generation_1_connector_skill_passed", "connector_replay_denied", "connector_forbidden_denied",
 		"connector_fixture_effect_verified", "connector_secret_absence_verified",
 		"tenant_task_private_key_agent_absence_verified",
@@ -1160,10 +1165,12 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		!integration.Acceptance.TaskPrivateKeyAgentAbsenceVerified ||
 		integration.Provenance.Archive.Platform != "linux/amd64" ||
 		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
-		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 53 ||
-		integration.InferenceAttemptAccounting.AuthorizedAttempts != 18 ||
-		integration.InferenceAttemptAccounting.ProviderRequests != 18 ||
-		integration.InferenceAttemptAccounting.TitleRequests != 5 ||
+		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 67 ||
+		integration.InferenceAttemptAccounting.AuthorizedAttempts != 22 ||
+		integration.InferenceAttemptAccounting.ProviderRequests != 22 ||
+		integration.InferenceAttemptAccounting.TitleRequests != 7 ||
+		!integration.InferenceAttemptAccounting.TaskScoped || integration.InferenceAttemptAccounting.TaskCount != 7 ||
+		integration.InferenceAttemptAccounting.ConcurrentTasks != 2 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}
@@ -1622,6 +1629,45 @@ try:
         message = title["choices"][0]["message"]
         assert "tool_calls" not in message
         assert json.loads(message["content"]) == {"title": "Steward acceptance fixture"}
+
+    from concurrent.futures import ThreadPoolExecutor
+    overlapped = threading.Event()
+    module.SCOPE_OVERLAP = threading.Barrier(2, timeout=1, action=overlapped.set)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(complete, user("STEWARD_SCOPE_OVERLAP a"), False)
+        second = pool.submit(complete, user("STEWARD_SCOPE_OVERLAP b"), False)
+        assert overlapped.wait(1)
+        assert not first.done() and not second.done()
+        complete(user("STEWARD_SCOPE_OVERLAP a"), False, response_format={
+            "type": "json_schema", "json_schema": {"name": "session_title"},
+        })
+        assert json.loads(first.result()[1])["choices"][0]["message"]["content"] == "scope-overlap-a"
+        assert not second.done(), "another task's title released this task"
+        complete(user("STEWARD_SCOPE_OVERLAP b"), False, response_format={
+            "type": "json_schema", "json_schema": {"name": "session_title"},
+        })
+        assert json.loads(second.result()[1])["choices"][0]["message"]["content"] == "scope-overlap-b"
+    module.SCOPE_OVERLAP = threading.Barrier(2, timeout=1)
+    module.SCOPE_TITLES = {label: threading.Event() for label in ("a", "b")}
+    module.SCOPE_TITLE_TIMEOUT = 0.1
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = [pool.submit(complete, user("STEWARD_SCOPE_OVERLAP " + label), False) for label in ("a", "b")]
+        for result in pending:
+            try:
+                result.result()
+            except urllib.error.HTTPError as error:
+                assert error.code == 422
+                assert json.loads(error.read())["error"]["code"] == "scope_title_missing"
+            else:
+                raise AssertionError("overlap fixture completed without its title")
+    module.SCOPE_OVERLAP = threading.Barrier(2, timeout=0.1)
+    try:
+        complete(user("STEWARD_SCOPE_OVERLAP a"), False)
+    except urllib.error.HTTPError as error:
+        assert error.code == 422
+        assert json.loads(error.read())["error"]["code"] == "scope_overlap_missing"
+    else:
+        raise AssertionError("serialized overlap fixture passed")
 
     content_type, wire = complete(user("STEWARD_TASK_FIXTURE"), True)
     assert content_type == "text/event-stream"

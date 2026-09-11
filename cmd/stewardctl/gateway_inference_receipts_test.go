@@ -46,20 +46,30 @@ func TestInferenceReconfigurationPreservesAccountingUnlessExplicitlyDisabled(t *
 	for _, test := range []struct {
 		flags  []string
 		want   bool
+		scope  bool
 		reject bool
 	}{
-		{[]string{"-require-attempt-receipts"}, true, false},
-		{nil, true, false},
-		{[]string{"-require-attempt-receipts=false"}, true, true},
-		{[]string{"-disallow-attempt-receipts=false"}, true, true},
-		{[]string{"-require-attempt-receipts", "-disallow-attempt-receipts"}, true, true},
-		{[]string{"-require-attempt-receipts=false", "-disallow-attempt-receipts"}, true, true},
-		{[]string{"-require-attempt-receipts", "-disallow-attempt-receipts=false"}, true, true},
-		{[]string{"-disallow-attempt-receipts"}, false, false},
-		{nil, false, false},
-		{[]string{"-require-attempt-receipts=false"}, false, true},
-		{[]string{"-require-attempt-receipts"}, true, false},
-		{nil, true, false},
+		{[]string{"-require-attempt-receipts", "-require-task-scope"}, true, true, false},
+		{nil, true, true, false},
+		{[]string{"-disallow-attempt-receipts"}, true, true, true},
+		{[]string{"-require-task-scope=false"}, true, true, true},
+		{[]string{"-disallow-task-scope=false"}, true, true, true},
+		{[]string{"-require-task-scope", "-disallow-task-scope"}, true, true, true},
+		{[]string{"-require-task-scope=false", "-disallow-task-scope"}, true, true, true},
+		{[]string{"-require-task-scope", "-disallow-task-scope=false"}, true, true, true},
+		{[]string{"-disallow-task-scope"}, true, false, false},
+		{nil, true, false, false},
+		{[]string{"-require-attempt-receipts=false"}, true, false, true},
+		{[]string{"-disallow-attempt-receipts=false"}, true, false, true},
+		{[]string{"-require-attempt-receipts", "-disallow-attempt-receipts"}, true, false, true},
+		{[]string{"-require-attempt-receipts=false", "-disallow-attempt-receipts"}, true, false, true},
+		{[]string{"-require-attempt-receipts", "-disallow-attempt-receipts=false"}, true, false, true},
+		{[]string{"-disallow-attempt-receipts"}, false, false, false},
+		{nil, false, false, false},
+		{[]string{"-require-attempt-receipts=false"}, false, false, true},
+		{[]string{"-require-attempt-receipts"}, true, false, false},
+		{nil, true, false, false},
+		{[]string{"-disallow-attempt-receipts"}, false, false, false},
 	} {
 		before, err := os.ReadFile(path)
 		if err != nil {
@@ -77,9 +87,20 @@ func TestInferenceReconfigurationPreservesAccountingUnlessExplicitlyDisabled(t *
 			}
 		}
 		loaded, _, _, _, err := gateway.LoadConfig(path)
-		if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].RequireAttemptReceipts != test.want {
+		if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].RequireAttemptReceipts != test.want || loaded.Routes[0].RequireTaskScope != test.scope {
 			t.Fatalf("flags=%v routes=%+v err=%v", test.flags, loaded.Routes, err)
 		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm", "-require-task-scope"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("task scope without attempt accounting was accepted")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("invalid task scope replaced the original configuration")
 	}
 	config.ConnectorReceiptTenantBudgets = nil
 	raw, err = json.Marshal(config)
