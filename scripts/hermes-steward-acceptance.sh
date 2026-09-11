@@ -382,7 +382,7 @@ if steps != expected_steps:
     raise SystemExit("hermes-steward-acceptance: completed acceptance step set is invalid")
 provenance = read_small_json(provenance_path)
 accounting = read_small_json(steps_path.parent / "inference-accounting.json")
-if accounting != {"authorized_attempts": 13, "provider_requests": 13}:
+if accounting != {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5}:
     raise SystemExit("hermes-steward-acceptance: inference accounting summary is invalid")
 verification = read_small_json(head_path)
 if not isinstance(provenance, dict) or not isinstance(verification, dict) or verification.get("valid") is not True:
@@ -410,7 +410,7 @@ if (
     or connector_head.get("node_id") != connector_node_id
     or connector_head.get("epoch") != 1
     or not isinstance(connector_head.get("sequence"), int)
-    or connector_head["sequence"] != 43
+    or connector_head["sequence"] != 53
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("chain_hash", ""))) is None
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("key_id", ""))) is None
 ):
@@ -578,7 +578,7 @@ relay_tag=steward-hermes-relay-acceptance:$run_id
 docker build --network=none --pull=false --provenance=false -q -f "$work/Relayfile" -t "$relay_tag" "$work" >/dev/null
 relay_image=$(docker image inspect --format '{{.Id}}' "$relay_tag")
 
-python3 -I - "$root/adapters/hermes-agent/fixture_model.py" "$work/inference-requests.log" <<'PY' >"$work/model.log" 2>&1 &
+python3 -I - "$root/adapters/hermes-agent/fixture_model.py" "$work/inference-requests.log" "$work/inference-title-requests.log" <<'PY' >"$work/model.log" 2>&1 &
 import http.server
 import importlib.util
 import os
@@ -590,6 +590,7 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 descriptor = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+title_descriptor = os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
 lock = threading.Lock()
 attempts = 0
 
@@ -608,6 +609,15 @@ class CountedHandler(module.Handler):
             os.fsync(descriptor)
             attempts += 1
         super().do_POST()
+
+    def _json(self, status, payload):
+        # Classify only the fixture's own response marker. Retain no content.
+        if status == 200 and isinstance(payload, dict) and payload.get("id") == "chatcmpl-steward-title-fixture":
+            with lock:
+                if os.write(title_descriptor, b"1\n") != 2:
+                    raise RuntimeError("fixture title counter write failed")
+                os.fsync(title_descriptor)
+        super()._json(status, payload)
 
 
 http.server.ThreadingHTTPServer(("127.0.0.1", 18080), CountedHandler).serve_forever()
@@ -1607,10 +1617,12 @@ if (
     raise SystemExit("hermes-steward-acceptance: Gateway receipt ledger contains task bodies, task IDs, prompts, or secrets")
 lines = raw.splitlines()
 provider_log = read_owner_file(work / "inference-requests.log", 1024)
+title_log = read_owner_file(work / "inference-title-requests.log", 1024)
 # Two workspace turns use two calls each; three connector turns use three
-# calls each (load skill, execute tool, return result). Native task replay must
+# calls each (load skill, execute tool, return result). Each of the five fresh
+# sessions also generates a title through the provider. Native task replay must
 # not add another call. This is a deterministic model fixture, not live billing.
-expected_inference_attempts = 2 * 2 + 3 * 3
+expected_inference_attempts = 2 * 2 + 3 * 3 + 5
 expected_receipt_count = 2 + 3 * len(issue_by_permit) + 2 * expected_inference_attempts
 if len(lines) != expected_receipt_count:
     raise SystemExit(
@@ -1715,6 +1727,8 @@ for generation in (1, 2):
     admission = json.loads((work / f"admission-g{generation}.json").read_text(encoding="utf-8"))
     admissions[admission["grant_id"]] = (generation, admission)
 # BEGIN INFERENCE_ACCOUNTING_CHECK
+if title_log != b"1\n" * 5:
+    raise SystemExit("hermes-steward-acceptance: expected one provider title request per fresh session")
 if provider_log != b"1\n" * expected_inference_attempts:
     raise SystemExit("hermes-steward-acceptance: provider attempts differ from the fixed five-task fixture")
 inference_by_attempt = {}
@@ -1763,9 +1777,10 @@ for events in inference_by_attempt.values():
     ):
         raise SystemExit("hermes-steward-acceptance: inference attempt changed between authorization and response")
     generation_attempts[authorized["generation"]] += 1
-if generation_attempts != {1: 11, 2: 2}:
+if generation_attempts != {1: 15, 2: 3}:
     raise SystemExit("hermes-steward-acceptance: inference attempts differ from the original and resumed task sets")
-accounting = {"authorized_attempts": len(inference_by_attempt), "provider_requests": len(provider_log) // 2}
+accounting = {"authorized_attempts": len(inference_by_attempt), "provider_requests": len(provider_log) // 2,
+              "title_requests": len(title_log) // 2}
 accounting_descriptor = os.open(work / "inference-accounting.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(accounting_descriptor, "w", encoding="utf-8") as output:
     json.dump(accounting, output, separators=(",", ":"), sort_keys=True)

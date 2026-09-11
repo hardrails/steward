@@ -278,6 +278,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(messages, list):
             self.send_error(400)
             return
+        response_format = payload.get("response_format")
+        if (
+            isinstance(response_format, dict)
+            and response_format.get("type") == "json_schema"
+            and isinstance(response_format.get("json_schema"), dict)
+            and response_format["json_schema"].get("name") == "session_title"
+        ):
+            # Hermes titles each new session through the same provider. Do not
+            # interpret the quoted opening task as a request to execute tools.
+            self._json(200, {
+                "id": "chatcmpl-steward-title-fixture",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "steward-fixture-model",
+                "choices": [{"index": 0, "message": {
+                    "role": "assistant", "content": '{"title":"Steward acceptance fixture"}',
+                }, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })
+            return
         turn = current_turn(messages)
         last = turn[-1] if turn else {}
         last_text = str(last.get("content", ""))

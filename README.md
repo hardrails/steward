@@ -197,9 +197,11 @@ CI and release packaging reject changed adapter, harness, or runtime inputs unti
 fresh successful qualification is retained. Runtime fixture evidence is not proof
 that an arbitrary customer workflow or external effect is safe.
 The native acceptance gate also requires signed inference-attempt accounting:
-its five deterministic tasks must match thirteen independently observed provider
-requests across task replay and restart. This is a network-call check, not live
-provider billing or customer-workflow qualification.
+its five deterministic tasks must match eighteen independently observed provider
+requests across task replay and restart, including five background session-title
+requests. Title requests are counted separately at the owned fixture and included
+in the signed ledger; replay must not execute another turn. This is a network-call
+check, not live provider billing or customer-workflow qualification.
 
 - [Run Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/)
 - [Run a web research agent](https://hardrails.github.io/steward/guides/research-agents/)

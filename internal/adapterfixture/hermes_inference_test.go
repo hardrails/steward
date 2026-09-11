@@ -31,8 +31,8 @@ admissions = {
     "grant-2": (2, {"runtime_ref": "runtime-2", "policy_digest": "policy-2", "route_policy_digest": "route-2"}),
 }
 receipts = []
-for index in range(13):
-    generation = 1 if index < 11 else 2
+for index in range(18):
+    generation = 1 if index < 15 else 2
     event = {
         "kind": "inference_attempt", "tenant_id": "tenant", "runtime_ref": f"runtime-{generation}",
         "capsule_digest": "capsule", "policy_digest": f"policy-{generation}",
@@ -46,14 +46,15 @@ for index in range(13):
         receipts.append(("application/vnd.steward.connector-receipt.v9+json", {"event": value}, "unused"))
 
 
-def run_case(name, mutate=None, provider_log=b"1\n" * 13):
+def run_case(name, mutate=None, provider_log=b"1\n" * 18, title_log=b"1\n" * 5):
     candidate = copy.deepcopy(receipts)
     if mutate:
         mutate(candidate)
     with tempfile.TemporaryDirectory() as directory:
         work = pathlib.Path(directory)
         scope = dict(os=os, json=json, re=re, work=work, receipts=candidate, admissions=admissions,
-                     expected_inference_attempts=13, provider_log=provider_log, tenant_id="tenant", capsule_digest="capsule")
+                     expected_inference_attempts=18, provider_log=provider_log, title_log=title_log,
+                     tenant_id="tenant", capsule_digest="capsule")
         try:
             exec(compile(check, sys.argv[1], "exec"), scope)
         except SystemExit:
@@ -64,13 +65,16 @@ def run_case(name, mutate=None, provider_log=b"1\n" * 13):
             assert name == "valid", f"accepted invalid accounting: {name}"
             result = work / "inference-accounting.json"
             assert result.stat().st_mode & 0o777 == 0o600
-            assert json.loads(result.read_text()) == {"authorized_attempts": 13, "provider_requests": 13}
+            assert json.loads(result.read_text()) == {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5}
 
 
 run_case("valid")
-run_case("missing provider request", provider_log=b"1\n" * 12)
-run_case("unexpected provider retry", provider_log=b"1\n" * 14)
-run_case("malformed provider counter", provider_log=b"2\n" * 13)
+run_case("missing provider request", provider_log=b"1\n" * 17)
+run_case("unexpected provider retry", provider_log=b"1\n" * 19)
+run_case("malformed provider counter", provider_log=b"2\n" * 18)
+run_case("missing title request", title_log=b"1\n" * 4)
+run_case("repeated title request", title_log=b"1\n" * 6)
+run_case("malformed title counter", title_log=b"2\n" * 5)
 run_case("missing terminal", lambda items: items.pop())
 run_case("duplicated terminal", lambda items: items.append(copy.deepcopy(items[-1])))
 run_case("missing attempt pair", lambda items: items.__delitem__(slice(-2, None)))
