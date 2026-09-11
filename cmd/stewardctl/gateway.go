@@ -183,6 +183,7 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	credentialMode := flags.String("credential-mode", "", "bearer, x-api-key, or api-key")
 	anthropicVersion := flags.String("anthropic-version", "", "fixed Anthropic API version")
 	maxConcurrent := flags.Int("max-concurrent", 8, "maximum concurrent requests")
+	requireAttemptReceipts := flags.Bool("require-attempt-receipts", false, "require signed inference attempt accounting; omission preserves the existing route setting")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -239,10 +240,14 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 		ID: *id, BaseURL: *baseURL, Protocol: gateway.InferenceProtocol(*protocol), CredentialFile: *credentialFile,
 		UpstreamModel: *upstreamModel, MaxTokensCap: *maxTokensCap, CredentialMode: gateway.CredentialMode(*credentialMode),
 		AnthropicVersion: *anthropicVersion, MaxConcurrent: *maxConcurrent,
+		RequireAttemptReceipts: *requireAttemptReceipts,
 	}
 	replaced := false
 	for index := range config.Routes {
 		if config.Routes[index].ID == route.ID {
+			if !flagWasVisited(flags, "require-attempt-receipts") {
+				route.RequireAttemptReceipts = config.Routes[index].RequireAttemptReceipts
+			}
 			config.Routes[index], replaced = route, true
 			break
 		}
