@@ -647,6 +647,10 @@ error. Their terminal receipt records `failed` and the bounded code
 to the ledger's standard-status field. The authorization does not remain pending
 on a healthy writer. If that terminal append fails, the error still reports the
 observed nonstandard status and original attempt identity.
+When the terminal is retained, the response also identifies the original attempt
+and observed nonstandard status. A dropped connection reports the attempt identity
+and absence of response headers. These recovery messages never include provider
+response bodies.
 All three errors set `X-Should-Retry: false` for SDKs that honor that header.
 Post-dispatch failures use 422 because OpenAI-compatible clients can retry 409
 and 5xx responses by default.
