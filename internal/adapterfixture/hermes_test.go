@@ -1627,6 +1627,21 @@ try:
         assert "tool_calls" not in message
         assert json.loads(message["content"]) == {"title": "Steward acceptance fixture"}
 
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(complete, user("STEWARD_SCOPE_OVERLAP a"), False)
+        second = pool.submit(complete, user("STEWARD_SCOPE_OVERLAP b"), False)
+        assert json.loads(first.result()[1])["choices"][0]["message"]["content"] == "scope-overlap-a"
+        assert json.loads(second.result()[1])["choices"][0]["message"]["content"] == "scope-overlap-b"
+    module.SCOPE_OVERLAP = threading.Barrier(2, timeout=0.1)
+    try:
+        complete(user("STEWARD_SCOPE_OVERLAP a"), False)
+    except urllib.error.HTTPError as error:
+        assert error.code == 422
+        assert json.loads(error.read())["error"]["code"] == "scope_overlap_missing"
+    else:
+        raise AssertionError("serialized overlap fixture passed")
+
     content_type, wire = complete(user("STEWARD_TASK_FIXTURE"), True)
     assert content_type == "text/event-stream"
     events = [event for event in wire.decode().split("\n\n") if event]

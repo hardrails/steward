@@ -10,10 +10,12 @@ import os
 import pathlib
 import re
 import sys
+import threading
 import time
 from typing import Any
 
 MAX_BODY = 1 << 20
+SCOPE_OVERLAP = threading.Barrier(2, timeout=30)
 NONCE = "steward-hermes-phase1"
 DIGEST = hashlib.sha256(NONCE.encode()).hexdigest()
 STOP_FIXTURE_COMMAND = "python3 /opt/steward/fixture_model.py --stop-fixture"
@@ -373,6 +375,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif tool_message is not None:
             self._json(422, {"error": {"code": "unexpected_tool_result", "message": "unexpected tool result"}})
             return
+        elif re.fullmatch(r"STEWARD_SCOPE_OVERLAP [ab]", last_text):
+            # Both independently admitted runs must reach the provider before
+            # either can finish. A serialized runtime fails instead of passing
+            # an apparent concurrency test by executing two fast calls in order.
+            try:
+                SCOPE_OVERLAP.wait()
+            except threading.BrokenBarrierError:
+                self._json(422, {"error": {"code": "scope_overlap_missing", "message": "both scoped tasks must overlap"}})
+                return
+            message = {"role": "assistant", "content": "scope-overlap-" + last_text[-1]}
+            finish = "stop"
         elif "STEWARD_STOP_ACTIVE_TOOL" in last_text:
             message = {
                 "role": "assistant", "content": None,
