@@ -1577,7 +1577,7 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 		var terminalFailure *inferenceTerminalAccountingError
 		if errors.As(err, &terminalFailure) {
 			boundary := "no provider response headers were observed"
-			if terminalFailure.status >= 100 && terminalFailure.status <= 599 {
+			if terminalFailure.status >= 100 && terminalFailure.status <= 999 {
 				boundary = fmt.Sprintf("provider HTTP status %d was observed", terminalFailure.status)
 			}
 			w.Header().Set("X-Should-Retry", "false")

@@ -50,7 +50,7 @@ func (log closingInferenceReceiptLog) Finish(event connectorledger.Event) (conne
 }
 
 func TestInferenceTerminalWriteFailureRetainsAttemptAndRefusesAnotherCall(t *testing.T) {
-	for _, status := range []int{0, 200, 429, 503} {
+	for _, status := range []int{0, 200, 429, 503, 600, 700, 999} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			testInferenceTerminalWriteFailure(t, status)
 		})
