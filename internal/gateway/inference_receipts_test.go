@@ -180,13 +180,20 @@ func TestInferenceAttemptSurvivesLostProviderResponseWithoutHiddenRetry(t *testi
 	}))
 	defer upstream.Close()
 	rig := newInferenceReceiptRig(t, upstream)
-	response := rig.call("/v1/responses", `{"model":"default","input":"hello"}`)
-	if response.Code != 502 || calls.Load() != 1 {
-		t.Fatalf("status=%d attempts=%d", response.Code, calls.Load())
-	}
-	records := rig.records(t)
-	if len(records) != 2 || records[1].Receipt.Event.ErrorCode != "outcome_unknown" {
-		t.Fatal("lost response was not accounted conservatively")
+	for attempt := int64(1); attempt <= 2; attempt++ {
+		// A caller can explicitly make another request, but gets no generic 5xx
+		// retry signal and no claim that its earlier attempt was free or replayed.
+		response := rig.call("/v1/responses", `{"model":"default","input":"hello"}`)
+		if response.Code != http.StatusConflict || calls.Load() != attempt ||
+			!strings.Contains(response.Body.String(), `"error":"inference_attempt_unknown"`) ||
+			!strings.Contains(response.Body.String(), "do not retry automatically") ||
+			response.Header().Get("Retry-After") != "" {
+			t.Fatalf("status=%d attempts=%d body=%s", response.Code, calls.Load(), response.Body.String())
+		}
+		records := rig.records(t)
+		if int64(len(records)) != 2*attempt || records[len(records)-1].Receipt.Event.ErrorCode != "outcome_unknown" {
+			t.Fatal("lost response was not accounted conservatively")
+		}
 	}
 }
 

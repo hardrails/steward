@@ -624,6 +624,11 @@ The inference proxy returns HTTP 503 `inference_accounting_unavailable` when
 required accounting cannot be retained. This includes failure after a provider
 call, so the response is not a guarantee that retrying is free. A missing ledger,
 exhausted tenant capacity or failed writer prevents another outbound attempt.
+If the provider connection fails with accounting retained, HTTP 409
+`inference_attempt_unknown` tells callers not to retry automatically: the provider
+may have incurred usage even without a response. Inspect the original attempt and
+provider state before authorizing another request. A new request is another
+accounted attempt, not an idempotent replay of the first.
 The existing `evidence verify -kind connector` command verifies these records and
 externally retained final chain coordinates; service-task evidence alone does not
 cover inference attempts.

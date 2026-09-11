@@ -10,6 +10,7 @@ import (
 )
 
 var errInferenceAccountingUnavailable = errors.New("inference attempt accounting is unavailable")
+var errInferenceAttemptUnknown = errors.New("inference attempt outcome is unknown")
 
 // inferenceAttemptTransport journals before the provider transport can write.
 // Authorization is a conservative upper bound on potentially paid attempts:
@@ -65,6 +66,9 @@ func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*ht
 			_ = response.Body.Close()
 		}
 		return nil, errInferenceAccountingUnavailable
+	}
+	if err != nil {
+		return nil, errInferenceAttemptUnknown
 	}
 	return response, err
 }
