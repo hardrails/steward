@@ -108,15 +108,16 @@ type ConnectorReceiptTenantBudget struct {
 }
 
 type Route struct {
-	ID               string            `json:"id"`
-	BaseURL          string            `json:"base_url"`
-	Protocol         InferenceProtocol `json:"protocol,omitempty"`
-	UpstreamModel    string            `json:"upstream_model,omitempty"`
-	MaxTokensCap     int               `json:"max_tokens_cap,omitempty"`
-	CredentialFile   string            `json:"credential_file,omitempty"`
-	CredentialMode   CredentialMode    `json:"credential_mode,omitempty"`
-	AnthropicVersion string            `json:"anthropic_version,omitempty"`
-	MaxConcurrent    int               `json:"max_concurrent"`
+	ID                     string            `json:"id"`
+	BaseURL                string            `json:"base_url"`
+	Protocol               InferenceProtocol `json:"protocol,omitempty"`
+	UpstreamModel          string            `json:"upstream_model,omitempty"`
+	MaxTokensCap           int               `json:"max_tokens_cap,omitempty"`
+	CredentialFile         string            `json:"credential_file,omitempty"`
+	CredentialMode         CredentialMode    `json:"credential_mode,omitempty"`
+	AnthropicVersion       string            `json:"anthropic_version,omitempty"`
+	MaxConcurrent          int               `json:"max_concurrent"`
+	RequireAttemptReceipts bool              `json:"require_attempt_receipts,omitempty"`
 }
 
 type loadedRoute struct {
@@ -301,6 +302,9 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 		}
 	}
 	if configured == 0 {
+		if c.hasInferenceAttemptReceipts() {
+			return nil, errors.New("inference attempt accounting requires a signed connector receipt ledger")
+		}
 		if len(c.ConnectorReceiptTenantBudgets) != 0 {
 			return nil, errors.New("connector receipt tenant budgets require a connector receipt identity")
 		}
@@ -315,6 +319,9 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 	limits, err := c.connectorReceiptLimits()
 	if err != nil {
 		return nil, err
+	}
+	if c.hasInferenceAttemptReceipts() && len(c.ConnectorReceiptTenantBudgets) == 0 {
+		return nil, errors.New("inference attempt accounting requires explicit receipt tenant budgets")
 	}
 	if (len(c.Connectors) > 0 || len(c.ServiceOperations) > 0) && len(c.ConnectorReceiptTenantBudgets) == 0 {
 		return nil, errors.New("connectors and authorized service tasks require at least one explicit connector receipt tenant budget")
@@ -349,6 +356,15 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 		return nil, fmt.Errorf("validate connector receipt ledger: %w", err)
 	}
 	return key, nil
+}
+
+func (c Config) hasInferenceAttemptReceipts() bool {
+	for _, route := range c.Routes {
+		if route.RequireAttemptReceipts {
+			return true
+		}
+	}
+	return false
 }
 
 func pathWithin(path, root string) bool {

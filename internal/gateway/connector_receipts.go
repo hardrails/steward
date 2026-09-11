@@ -70,6 +70,9 @@ func InspectConnectorReceiptFormat(config Config, states ...StateSummary) (Conne
 			requiredFormat = 7
 		}
 	}
+	if config.hasInferenceAttemptReceipts() {
+		requiredFormat = 9
+	}
 	key, err := config.connectorReceiptPrivateKey()
 	if err != nil {
 		return ConnectorReceiptFormatSummary{}, err
@@ -91,8 +94,12 @@ func InspectConnectorReceiptFormat(config Config, states ...StateSummary) (Conne
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV9:
+				formatVersion = 9
 			case connectorledger.SchemaV8:
-				formatVersion = 8
+				if formatVersion < 8 {
+					formatVersion = 8
+				}
 			case connectorledger.SchemaV7:
 				if formatVersion < 7 {
 					formatVersion = 7
@@ -166,6 +173,11 @@ func (index *connectorReceiptIndex) advanceContext(event connectorledger.Event, 
 
 func (index *connectorReceiptIndex) visit(record connectorledger.VerifiedReceipt) error {
 	event := record.Receipt.Event
+	if event.Kind == connectorledger.InferenceAttempt {
+		// The shared ledger retains accounting and unfinished-call reservations.
+		// Inference attempts do not consume connector permits or service-task IDs.
+		return nil
+	}
 	if event.Kind == connectorledger.ConnectorCall && event.InfluenceHash != "" {
 		if event.Phase == connectorledger.Authorize {
 			if _, err := index.contextFor(event); err != nil {
