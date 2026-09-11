@@ -1142,6 +1142,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 			TitleRequests      int  `json:"title_requests"`
 			TaskScoped         bool `json:"task_scoped"`
 			TaskCount          int  `json:"task_count"`
+			ConcurrentTasks    int  `json:"concurrent_tasks"`
 		} `json:"inference_attempt_accounting"`
 	}
 	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-integration.json"), &integration)
@@ -1149,6 +1150,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		"image_imported", "executor_ready", "generation_1_admitted", "generation_1_started",
 		"generation_1_ready", "state_volume_observed", "workspace_seeded", "generation_1_skill_passed",
 		"service_task_replay_verified",
+		"concurrent_task_scopes_verified",
 		"generation_1_connector_skill_passed", "connector_replay_denied", "connector_forbidden_denied",
 		"connector_fixture_effect_verified", "connector_secret_absence_verified",
 		"tenant_task_private_key_agent_absence_verified",
@@ -1163,11 +1165,12 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		!integration.Acceptance.TaskPrivateKeyAgentAbsenceVerified ||
 		integration.Provenance.Archive.Platform != "linux/amd64" ||
 		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
-		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 53 ||
-		integration.InferenceAttemptAccounting.AuthorizedAttempts != 18 ||
-		integration.InferenceAttemptAccounting.ProviderRequests != 18 ||
-		integration.InferenceAttemptAccounting.TitleRequests != 5 ||
-		!integration.InferenceAttemptAccounting.TaskScoped || integration.InferenceAttemptAccounting.TaskCount != 5 ||
+		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 67 ||
+		integration.InferenceAttemptAccounting.AuthorizedAttempts != 22 ||
+		integration.InferenceAttemptAccounting.ProviderRequests != 22 ||
+		integration.InferenceAttemptAccounting.TitleRequests != 7 ||
+		!integration.InferenceAttemptAccounting.TaskScoped || integration.InferenceAttemptAccounting.TaskCount != 7 ||
+		integration.InferenceAttemptAccounting.ConcurrentTasks != 2 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}
