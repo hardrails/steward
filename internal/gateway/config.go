@@ -120,6 +120,7 @@ type Route struct {
 	RequireAttemptReceipts bool              `json:"require_attempt_receipts,omitempty"`
 	RequireTaskScope       bool              `json:"require_task_scope,omitempty"`
 	MaxCallsPerGrant       int               `json:"max_calls_per_grant,omitempty"`
+	RequestProfile         string            `json:"request_profile,omitempty"`
 }
 
 type loadedRoute struct {
@@ -763,6 +764,11 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 	loaded := make(map[string]loadedRoute, len(c.Routes))
 	routeCredentials := make([]os.FileInfo, 0, len(c.Routes))
 	for _, route := range c.Routes {
+		if route.RequestProfile != "" && (route.RequestProfile != boundedTextChatProfile ||
+			effectiveInferenceProtocol(route) != InferenceProtocolOpenAI || route.UpstreamModel == "" ||
+			route.MaxTokensCap < 1 || route.MaxCallsPerGrant < 1 || !route.RequireAttemptReceipts) {
+			return nil, errors.New("bounded text-chat profile requires OpenAI protocol, an exact upstream model, token cap and accounted attempt allowance")
+		}
 		if !bounded(route.ID, 128) || route.MaxConcurrent < 1 || route.MaxConcurrent > 256 {
 			return nil, errors.New("gateway route requires bounded id and max_concurrent from 1 to 256")
 		}

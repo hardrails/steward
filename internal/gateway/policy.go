@@ -52,6 +52,7 @@ type serviceOperationPolicy struct {
 }
 
 type inferenceRoutePolicy struct {
+	RequestProfile         string `json:"request_profile,omitempty"`
 	ID                     string `json:"id"`
 	ModelAlias             string `json:"model_alias"`
 	UpstreamModel          string `json:"upstream_model,omitempty"`
@@ -187,9 +188,18 @@ func routeBaseURL(value *url.URL) string {
 // are deliberately excluded so the inspection API cannot become an offline
 // oracle for weak operator-provided bearer tokens.
 func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectors map[string]loadedConnector, serviceOperations map[string]map[string]ServiceOperation, connectorReceiptBudget int64) string {
+	raw := routePolicyStatement(grant, routes, egressRoutes, connectors, serviceOperations, connectorReceiptBudget)
+	if len(raw) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(raw)
+	return "sha256:" + fmt.Sprintf("%x", digest[:])
+}
+
+func routePolicyStatement(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectors map[string]loadedConnector, serviceOperations map[string]map[string]ServiceOperation, connectorReceiptBudget int64) []byte {
 	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 &&
 		len(grant.TaskAuthorities) == 0 && grant.EffectMode == "" && !grant.ControllerEvents {
-		return ""
+		return nil
 	}
 	document := routePolicyDocument{Version: 1}
 	if grant.ControllerEvents {
@@ -270,6 +280,10 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 			document.Version = 14
 			document.Inference.MaxCallsPerGrant = route.MaxCallsPerGrant
 		}
+		if route.RequestProfile != "" {
+			document.Version = 15
+			document.Inference.RequestProfile = route.RequestProfile
+		}
 		if route.Protocol != "" || route.CredentialMode != "" || route.AnthropicVersion != "" {
 			if document.Version < 10 {
 				document.Version = 10
@@ -340,10 +354,9 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 	}
 	raw, err := json.Marshal(document)
 	if err != nil {
-		return ""
+		return nil
 	}
-	digest := sha256.Sum256(raw)
-	return "sha256:" + fmt.Sprintf("%x", digest[:])
+	return raw
 }
 
 func (s *Server) routePolicyDigestLocked(grant Grant) string {

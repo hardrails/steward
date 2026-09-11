@@ -107,7 +107,8 @@ type grantResponse struct {
 // serve the grant when current route semantics do not match this commitment.
 type GrantInspection struct {
 	Grant
-	RoutePolicyDigest string `json:"route_policy_digest,omitempty"`
+	RoutePolicyDigest    string `json:"route_policy_digest,omitempty"`
+	RoutePolicyStatement []byte `json:"route_policy_statement_base64,omitempty"`
 }
 
 type retainedGrant struct {
@@ -670,12 +671,14 @@ func (s *Server) getGrant(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	grant, ok := s.grants[r.PathValue("id")]
 	digest := s.policyDigests[r.PathValue("id")]
+	budget, _ := s.config.connectorReceiptBudget(grant.TenantID)
+	statement := routePolicyStatement(grant, s.routes, s.egressRoutes, s.connectors, s.serviceOperations, budget)
 	s.mu.Unlock()
 	if !ok {
 		writeGatewayError(w, http.StatusNotFound, "grant_not_found", "gateway grant not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, GrantInspection{Grant: grant, RoutePolicyDigest: digest})
+	writeJSON(w, http.StatusOK, GrantInspection{Grant: grant, RoutePolicyDigest: digest, RoutePolicyStatement: statement})
 }
 
 func (s *Server) ServiceHandler() http.Handler {
@@ -1403,6 +1406,18 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 	if model != grant.ModelAlias {
 		writeGatewayError(w, http.StatusForbidden, "model_denied", "request model does not match the active inference grant")
 		return
+	}
+	if route.RequestProfile != "" {
+		if route.RequestProfile != boundedTextChatProfile {
+			err = errInferenceEnvelope
+		} else {
+			raw, err = boundedChatRequest(raw, incoming.URL.Path, route.MaxTokensCap)
+		}
+		if err != nil {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusBadRequest, "inference_request_outside_envelope", "this route accepts one bounded text-chat completion at the default tier; use its supported model client")
+			return
+		}
 	}
 	raw, err = rewriteInferenceRequest(raw, route.UpstreamModel, route.MaxTokensCap)
 	if err != nil {
