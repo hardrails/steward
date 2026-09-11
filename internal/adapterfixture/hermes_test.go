@@ -976,8 +976,9 @@ func TestHermesQualificationContracts(t *testing.T) {
 		"task wait -bundle",
 		"task audit -in",
 		"application/vnd.steward.connector-receipt.v4+json",
-		"application/vnd.steward.connector-receipt.v9+json",
+		"application/vnd.steward.connector-receipt.v10+json",
 		`\"require_attempt_receipts\":true`,
+		`\"require_task_scope\":true`,
 		"inference_attempt_accounting_verified",
 		"tenant_task_private_key_agent_absence_verified",
 		`base64.b64encode(value).rstrip(b"=")`,
@@ -1136,9 +1137,11 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 			} `json:"head"`
 		} `json:"connector_receipt_chain"`
 		InferenceAttemptAccounting struct {
-			AuthorizedAttempts int `json:"authorized_attempts"`
-			ProviderRequests   int `json:"provider_requests"`
-			TitleRequests      int `json:"title_requests"`
+			AuthorizedAttempts int  `json:"authorized_attempts"`
+			ProviderRequests   int  `json:"provider_requests"`
+			TitleRequests      int  `json:"title_requests"`
+			TaskScoped         bool `json:"task_scoped"`
+			TaskCount          int  `json:"task_count"`
 		} `json:"inference_attempt_accounting"`
 	}
 	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-integration.json"), &integration)
@@ -1164,6 +1167,7 @@ func verifyHermesQualificationEvidence(t *testing.T) {
 		integration.InferenceAttemptAccounting.AuthorizedAttempts != 18 ||
 		integration.InferenceAttemptAccounting.ProviderRequests != 18 ||
 		integration.InferenceAttemptAccounting.TitleRequests != 5 ||
+		!integration.InferenceAttemptAccounting.TaskScoped || integration.InferenceAttemptAccounting.TaskCount != 5 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}

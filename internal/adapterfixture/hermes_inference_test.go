@@ -31,8 +31,10 @@ admissions = {
     "grant-2": (2, {"runtime_ref": "runtime-2", "policy_digest": "policy-2", "route_policy_digest": "route-2"}),
 }
 receipts = []
+issue_by_permit = {f"permit-{i}": ({"request_digest": f"request-{i}"}, 1, f"task-{i}", "run", 1, "result") for i in range(5)}
 for index in range(18):
     generation = 1 if index < 15 else 2
+    task = index % 4 if generation == 1 else 4
     event = {
         "kind": "inference_attempt", "tenant_id": "tenant", "runtime_ref": f"runtime-{generation}",
         "capsule_digest": "capsule", "policy_digest": f"policy-{generation}",
@@ -40,10 +42,12 @@ for index in range(18):
         "grant_id": f"grant-{generation}", "operation_id": "chat-completions", "connector_id": "",
         "request_bytes": 64, "response_bytes": 0, "task_digest": f"sha256:{index:064x}",
         "phase": "authorize", "outcome": "allowed",
+        "inference_task_digest": f"task-{task}", "inference_permit_digest": f"permit-{task}",
+        "inference_request_digest": f"request-{task}",
     }
     terminal = dict(event, phase="terminal", outcome="responded", http_status=200)
     for value in (event, terminal):
-        receipts.append(("application/vnd.steward.connector-receipt.v9+json", {"event": value}, "unused"))
+        receipts.append(("application/vnd.steward.connector-receipt.v10+json", {"event": value}, "unused"))
 
 
 def run_case(name, mutate=None, provider_log=b"1\n" * 18, title_log=b"1\n" * 5):
@@ -53,6 +57,7 @@ def run_case(name, mutate=None, provider_log=b"1\n" * 18, title_log=b"1\n" * 5):
     with tempfile.TemporaryDirectory() as directory:
         work = pathlib.Path(directory)
         scope = dict(os=os, json=json, re=re, work=work, receipts=candidate, admissions=admissions,
+                     issue_by_permit=issue_by_permit,
                      expected_inference_attempts=18, provider_log=provider_log, title_log=title_log,
                      tenant_id="tenant", capsule_digest="capsule")
         try:
@@ -65,7 +70,7 @@ def run_case(name, mutate=None, provider_log=b"1\n" * 18, title_log=b"1\n" * 5):
             assert name == "valid", f"accepted invalid accounting: {name}"
             result = work / "inference-accounting.json"
             assert result.stat().st_mode & 0o777 == 0o600
-            assert json.loads(result.read_text()) == {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5}
+            assert json.loads(result.read_text()) == {"authorized_attempts": 18, "provider_requests": 18, "title_requests": 5, "task_scoped": True, "task_count": 5}
 
 
 run_case("valid")
@@ -84,6 +89,10 @@ run_case("unknown grant", lambda items: items[0][1]["event"].update(grant_id="ot
 run_case("wrong policy", lambda items: items[0][1]["event"].update(route_policy_digest="other"))
 run_case("wrong tenant", lambda items: items[0][1]["event"].update(tenant_id="other"))
 run_case("wrong operation", lambda items: items[0][1]["event"].update(operation_id="embeddings"))
+run_case("wrong task scope", lambda items: items[0][1]["event"].update(inference_task_digest="other"))
+run_case("wrong permit scope", lambda items: items[0][1]["event"].update(inference_permit_digest="other"))
+run_case("wrong request scope", lambda items: items[0][1]["event"].update(inference_request_digest="other"))
+run_case("runtime-wide receipt", lambda items: items.__setitem__(0, ("application/vnd.steward.connector-receipt.v9+json", items[0][1], "unused")))
 run_case("unknown outcome", lambda items: items[1][1]["event"].update(outcome="failed", error_code="outcome_unknown"))
 run_case("provider rejection", lambda items: items[1][1]["event"].update(http_status=429))
 run_case("response changed size", lambda items: items[1][1]["event"].update(request_bytes=65))

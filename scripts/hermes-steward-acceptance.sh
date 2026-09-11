@@ -664,7 +664,7 @@ printf '%s\n' "{
   \"grant_root\":\"$work/grants\",
   \"executor_gid\":$gid,
   \"relay_gid\":$gid,
-  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":2,\"require_attempt_receipts\":true}],
+  \"routes\":[{\"id\":\"local-openai\",\"base_url\":\"http://127.0.0.1:18080/v1\",\"max_concurrent\":2,\"require_attempt_receipts\":true,\"require_task_scope\":true}],
   \"connector_receipt_file\":\"$work/connector-receipts.ndjson\",
   \"connector_receipt_key_file\":\"$work/connectors.private\",
   \"connector_receipt_node_id\":\"$node_id/gateway\",
@@ -1640,7 +1640,7 @@ for index, line in enumerate(lines, 1):
     schemas = {
         "application/vnd.steward.connector-receipt.v1+json": "steward.connector-receipt.v1",
         "application/vnd.steward.connector-receipt.v4+json": "steward.connector-receipt.v4",
-        "application/vnd.steward.connector-receipt.v9+json": "steward.connector-receipt.v9",
+        "application/vnd.steward.connector-receipt.v10+json": "steward.connector-receipt.v10",
     }
     if set(envelope) != {"payload", "payloadType", "signatures"} or payload_type not in schemas:
         raise SystemExit("hermes-steward-acceptance: connector receipt envelope is invalid")
@@ -1732,14 +1732,21 @@ if title_log != b"1\n" * 5:
 if provider_log != b"1\n" * expected_inference_attempts:
     raise SystemExit("hermes-steward-acceptance: provider attempts differ from the fixed five-task fixture")
 inference_by_attempt = {}
+scoped_tasks = set()
 for payload_type, receipt, _ in receipts:
-    if not payload_type.endswith(".v9+json"):
+    if payload_type.endswith(".v9+json"):
+        raise SystemExit("hermes-steward-acceptance: runtime-wide accounting cannot prove task scope")
+    if not payload_type.endswith(".v10+json"):
         continue
     event = receipt["event"]
     admitted = admissions.get(event.get("grant_id"))
     if admitted is None:
         raise SystemExit("hermes-steward-acceptance: inference attempt has no exact admitted runtime")
     generation, admission = admitted
+    binding = issue_by_permit.get(event.get("inference_permit_digest"))
+    if binding is None:
+        raise SystemExit("hermes-steward-acceptance: inference has no independently issued task permit")
+    issue, _, expected_task_digest, _, _, _ = binding
     if (
         event.get("kind") != "inference_attempt"
         or event.get("tenant_id") != tenant_id
@@ -1749,6 +1756,8 @@ for payload_type, receipt, _ in receipts:
         or event.get("route_policy_digest") != admission.get("route_policy_digest")
         or event.get("generation") != generation
         or event.get("operation_id") != "chat-completions"
+        or event.get("inference_task_digest") != expected_task_digest
+        or event.get("inference_request_digest") != issue["request_digest"]
         or event.get("connector_id") != ""
         or type(event.get("request_bytes")) is not int
         or not 0 < event["request_bytes"] <= 1 << 20
@@ -1758,6 +1767,9 @@ for payload_type, receipt, _ in receipts:
     ):
         raise SystemExit("hermes-steward-acceptance: inference attempt differs from its admitted boundary")
     inference_by_attempt.setdefault(event["task_digest"], []).append(event)
+    scoped_tasks.add(event["inference_permit_digest"])
+if scoped_tasks != set(issue_by_permit):
+    raise SystemExit("hermes-steward-acceptance: task-scoped inference does not cover every issued task")
 if len(inference_by_attempt) != expected_inference_attempts:
     raise SystemExit("hermes-steward-acceptance: signed inference attempts do not match received provider requests")
 generation_attempts = {1: 0, 2: 0}
@@ -1780,7 +1792,7 @@ for events in inference_by_attempt.values():
 if generation_attempts != {1: 15, 2: 3}:
     raise SystemExit("hermes-steward-acceptance: inference attempts differ from the original and resumed task sets")
 accounting = {"authorized_attempts": len(inference_by_attempt), "provider_requests": len(provider_log) // 2,
-              "title_requests": len(title_log) // 2}
+              "title_requests": len(title_log) // 2, "task_scoped": True, "task_count": len(scoped_tasks)}
 accounting_descriptor = os.open(work / "inference-accounting.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(accounting_descriptor, "w", encoding="utf-8") as output:
     json.dump(accounting, output, separators=(",", ":"), sort_keys=True)
