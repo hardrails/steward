@@ -125,6 +125,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-max-t"}); !slices.Equal(candidates, []string{"-max-tokens-cap"}) {
 		t.Fatalf("inference token cap candidates=%v", candidates)
 	}
+	for _, prefix := range []string{"-", "-require"} {
+		candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", prefix})
+		if !slices.Contains(candidates, "-require-attempt-receipts") {
+			t.Fatalf("inference accounting flag missing from %q candidates: %v", prefix, candidates)
+		}
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"site", "init", "new-site", "-authorized-effects", "r"}); !slices.Equal(candidates, []string{"required"}) {
 		t.Fatalf("site effects candidates=%v", candidates)
 	}
