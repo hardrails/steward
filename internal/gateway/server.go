@@ -1453,6 +1453,12 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 		accounted.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &accounted
 	}
+	if route.RequestProfile != "" {
+		// Task authority was consumed above. Provider-specific client headers
+		// must not create an override channel outside the closed JSON profile.
+		incoming = incoming.Clone(incoming.Context())
+		incoming.Header = http.Header{"Content-Type": {"application/json"}}
+	}
 	s.proxy(w, incoming, route.base, inferenceUpstreamPath(route.base, incoming.URL.Path), route.credential, credentialMode, fixedHeaders, false, client)
 }
 

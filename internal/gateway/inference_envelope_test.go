@@ -159,3 +159,30 @@ func TestBoundedChatProfileRequiresItsEnforcedLimitsAndBindsPolicy(t *testing.T)
 		t.Fatal("request profile not bound to route authority")
 	}
 }
+
+func TestBoundedChatProfileDoesNotForwardClientProviderOverrides(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, name := range []string{"X-Service-Tier", "X-Provider-Override", "Idempotency-Key", "Cookie", inferencePermitHeader} {
+			if r.Header.Get(name) != "" {
+				t.Errorf("forwarded client header %s", name)
+			}
+		}
+		if r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Authorization") != "Bearer private-inference-key" {
+			t.Error("lost trusted request framing or provider credential")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	rig := newInferenceReceiptRig(t, upstream)
+	rig.route.RequestProfile, rig.route.UpstreamModel = boundedTextChatProfile, "pinned-model"
+	rig.route.MaxTokensCap, rig.route.MaxCallsPerGrant = 64, 1
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"default","messages":[{"role":"user","content":"hello"}]}`))
+	for _, name := range []string{"X-Service-Tier", "X-Provider-Override", "Idempotency-Key", "Cookie", inferencePermitHeader, "Authorization", "Content-Type"} {
+		request.Header.Set(name, "untrusted")
+	}
+	response := httptest.NewRecorder()
+	rig.server.proxyInference(response, request, rig.grant, rig.route)
+	if response.Code != http.StatusOK || len(rig.records(t)) != 2 {
+		t.Fatalf("bounded request did not complete with accounting: %d %s", response.Code, response.Body.String())
+	}
+}
