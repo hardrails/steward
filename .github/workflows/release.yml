@@ -181,7 +181,7 @@ jobs:
           grep -Fxq '  "os": "linux",' <<<"$manifest"
           grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
           grep -Fq '    "steward-control": "' <<<"$manifest"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 83
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 85
           grep -Fq '    "integration/adapters/hermes-agent/profiles/research/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/workers/coding/package-lock.json": "' <<<"$manifest"
           grep -Fq '    "integration/workers/research/research_worker.py": "' <<<"$manifest"
