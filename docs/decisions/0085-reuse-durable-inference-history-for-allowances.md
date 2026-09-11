@@ -21,6 +21,14 @@ made before the cap was enabled. Bind the cap into route policy and preserve it
 during CLI reconfiguration unless an explicit removal is requested. Retained
 grants continue to fence policy changes.
 
+For consumers needing a priceable request, add an opt-in closed text-chat profile
+at the same native boundary. Standard-library JSON validation supplies a missing
+output cap, limits completion multiplicity and tier, preserves text/function
+tools/reasoning, and rejects unsupported inputs before consuming allowance.
+Discard client provider headers after task-scope validation. Export the exact
+non-secret native policy bytes through existing private grant inspection so
+consumers can verify limits against the retained policy commitment.
+
 **Tradeoff:** A small index adds no database, daemon, dependency, receipt format
 or billing ownership. Conservatively consumed attempts can include calls that
 never reached the provider; callers must not infer provider charges from counts.
@@ -28,6 +36,9 @@ never reached the provider; callers must not infer provider charges from counts.
 **Rejected:** An in-memory rate limiter forgets allowance after restart. A new
 accounting service duplicates the ledger's lock and durable history. Prompt-only
 limits and counters after network dispatch cannot prevent oversubscription.
+A tokenizer or provider billing SDK would add model-specific dependencies without
+enforcing multiplicity, tier or unknown request extensions. Consumers can instead
+reserve against the model's full context ceiling and their reviewed tariff.
 
 ## Consequences
 
