@@ -12,6 +12,17 @@ import (
 var errInferenceAccountingUnavailable = errors.New("inference attempt accounting is unavailable")
 var errInferenceAttemptUnknown = errors.New("inference attempt outcome is unknown")
 
+// A missing terminal receipt must not erase an observed provider response.
+// Only the bounded status and locally minted attempt identity cross this error.
+type inferenceTerminalAccountingError struct {
+	status  int
+	attempt string
+}
+
+func (failure *inferenceTerminalAccountingError) Error() string {
+	return "inference terminal accounting failed"
+}
+
 // inferenceAttemptTransport journals before the provider transport can write.
 // Authorization is a conservative upper bound on potentially paid attempts:
 // a crash after fsync but before the network write must not be called zero usage.
@@ -65,7 +76,7 @@ func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*ht
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
-		return nil, errInferenceAccountingUnavailable
+		return nil, &inferenceTerminalAccountingError{status: event.HTTPStatus, attempt: event.TaskDigest}
 	}
 	if err != nil {
 		return nil, errInferenceAttemptUnknown

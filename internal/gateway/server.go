@@ -1574,6 +1574,17 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 	}
 	response, err := client.Do(request)
 	if err != nil {
+		var terminalFailure *inferenceTerminalAccountingError
+		if errors.As(err, &terminalFailure) {
+			boundary := "no provider response headers were observed"
+			if terminalFailure.status >= 100 && terminalFailure.status <= 599 {
+				boundary = fmt.Sprintf("provider HTTP status %d was observed", terminalFailure.status)
+			}
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_terminal_accounting_failed",
+				fmt.Sprintf("%s but terminal accounting failed for attempt %s; usage may have occurred; do not retry automatically; restore the ledger and reconcile this original attempt with provider state before authorizing another request", boundary, terminalFailure.attempt))
+			return
+		}
 		if errors.Is(err, errInferenceAttemptUnknown) {
 			// OpenAI-compatible clients retry 409 and 5xx by default. Use a
 			// non-retry status as well as the SDK's explicit suppression header.

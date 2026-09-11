@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,17 +20,50 @@ func (log closingInferenceReceiptLog) Finish(event connectorledger.Event) (conne
 }
 
 func TestInferenceTerminalWriteFailureRetainsAttemptAndRefusesAnotherCall(t *testing.T) {
+	for _, status := range []int{0, 200, 429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			testInferenceTerminalWriteFailure(t, status)
+		})
+	}
+}
+
+func testInferenceTerminalWriteFailure(t *testing.T, status int) {
+	t.Helper()
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		if status == 0 {
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		w.WriteHeader(status)
 		_, _ = w.Write([]byte("provider-output-must-not-look-confirmed"))
 	}))
 	defer upstream.Close()
 	rig := newInferenceReceiptRig(t, upstream)
 	rig.server.connectorLedger = closingInferenceReceiptLog{rig.ledger}
-	for range 2 {
+	for attempt := range 2 {
 		response := rig.call("/v1/chat/completions", `{"model":"default"}`)
-		if response.Code != 503 || !strings.Contains(response.Body.String(), "inference_accounting_unavailable") ||
+		code, boundary := 503, "inference_accounting_unavailable"
+		if attempt == 0 {
+			code, boundary = 422, "inference_terminal_accounting_failed"
+			observed := fmt.Sprintf("provider HTTP status %d was observed", status)
+			if status == 0 {
+				observed = "no provider response headers were observed"
+			}
+			records := rig.records(t)
+			if len(records) != 1 || !strings.Contains(response.Body.String(), observed) ||
+				!strings.Contains(response.Body.String(), records[0].Receipt.Event.TaskDigest) ||
+				!strings.Contains(response.Body.String(), "do not retry automatically") {
+				t.Fatalf("lost original provider boundary: %d %s", response.Code, response.Body.String())
+			}
+		}
+		if response.Code != code || !strings.Contains(response.Body.String(), boundary) ||
 			response.Header().Get("X-Should-Retry") != "false" ||
 			strings.Contains(response.Body.String(), "provider-output") {
 			t.Fatalf("response=%d %s", response.Code, response.Body.String())
