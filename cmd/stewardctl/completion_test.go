@@ -131,6 +131,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 			t.Fatalf("inference accounting flag missing from %q candidates: %v", prefix, candidates)
 		}
 	}
+	for _, prefix := range []string{"-", "-disallow"} {
+		candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", prefix})
+		if !slices.Contains(candidates, "-disallow-attempt-receipts") {
+			t.Fatalf("explicit accounting downgrade missing from %q candidates: %v", prefix, candidates)
+		}
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"site", "init", "new-site", "-authorized-effects", "r"}); !slices.Equal(candidates, []string{"required"}) {
 		t.Fatalf("site effects candidates=%v", candidates)
 	}
