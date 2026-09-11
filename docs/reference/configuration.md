@@ -605,6 +605,29 @@ LocalAI, LiteLLM, LM Studio, SGLang, and TGI presets. Gateway and relay HTTP
 listeners cap request headers at 64 KiB, and their outbound transports cap response
 headers at 64 KiB.
 
+An inference route can set `require_attempt_receipts: true`. Its default is false
+for compatibility and provides no attempt-accounting guarantee. Required
+accounting uses the signed connector receipt ledger and an explicit tenant byte
+budget. The grant must include runtime evidence identity. Route policy version
+12 binds the requirement and receipt capacity, so retained grants cannot silently
+lose accounting on reload.
+
+Version-9 `inference_attempt` receipts retain a gateway-minted attempt identity,
+tenant/runtime/grant/generation, route policy, bounded operation name and request
+byte length. They contain no credential, request body or agent-supplied task ID.
+Authorization is fsynced before outbound HTTP transport. Terminal records describe
+response headers or an uncertain transport failure; they do not claim completed
+generation, output contents, tokens or billing. An unfinished attempt becomes
+`outcome_unknown` on restart rather than disappearing from the count.
+
+The inference proxy returns HTTP 503 `inference_accounting_unavailable` when
+required accounting cannot be retained. This includes failure after a provider
+call, so the response is not a guarantee that retrying is free. A missing ledger,
+exhausted tenant capacity or failed writer prevents another outbound attempt.
+The existing `evidence verify -kind connector` command verifies these records and
+externally retained final chain coordinates; service-task evidence alone does not
+cover inference attempts.
+
 `egress_routes` contains at most 128 HTTP(S) proxy policies. Each has 1–128
 destinations (`host`, `ports`, optional canonical `allowed_cidrs`) and four limits:
 `max_concurrent`, `max_request_bytes`, `max_response_bytes`, and

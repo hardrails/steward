@@ -32,6 +32,7 @@ they can verify without a vendor service.
 | Prompt injection reaching a powerful tool | Keeps reusable connector credentials outside the workload. A protected action can require a tenant signature over the exact operation and request bytes. |
 | Replayed or stale authority | Spends one-use permits before network dispatch and rejects old instance generations and command sequences. |
 | Inference and service credentials | Gateway injects credentials only at the trusted outbound boundary. Agents receive a scoped route, not the upstream secret. |
+| Inference attempt accounting | An opt-in route requires a signed, durable record before each potentially paid provider attempt. It reuses the bounded network ledger and preserves uncertainty across restart; task counts and response headers are not billing or generation-completion proof. |
 | Web research over hostile content | A bounded Hermes profile reaches static extraction or credential-free JavaScript rendering through finite connectors, then reports source-linked findings over a durable event channel and can organize signed tasks and external evidence in Workrooms. |
 | Repository work with coding agents | Hermes delegates to Codex or Claude Code in a separate isolated worker with its own clean Git worktree and authentication store. |
 | Signed collaboration requests | An optional, tenant-specific Buzz bridge durably queues allowed signed mentions, runs bounded concurrent Hermes tasks, and verifies correctly threaded replies without putting either signing key inside the agent. |

@@ -36,6 +36,16 @@ info:
     `task_evidence_requires_parent` for terminal linked stop tasks; this is not a
     transient ledger failure. The original work task's portable export remains
     available and proves its observed terminal result.
+
+    These task lifecycle states do not measure provider inference attempts.
+    The separate inference proxy can require version 9 signed network-call
+    receipts through its require_attempt_receipts route setting. Authorization
+    records a potentially paid outbound attempt; terminal records describe
+    response headers or uncertainty, not generation completion or provider
+    billing. That proxy returns HTTP 503 inference_accounting_unavailable when
+    required accounting fails, including after an attempted provider call.
+    Full-ledger verification and retained chain coordinates are required for
+    attempt accounting; portable task evidence is not a substitute.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
