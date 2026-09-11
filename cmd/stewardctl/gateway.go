@@ -184,6 +184,7 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	anthropicVersion := flags.String("anthropic-version", "", "fixed Anthropic API version")
 	maxConcurrent := flags.Int("max-concurrent", 8, "maximum concurrent requests")
 	requireAttemptReceipts := flags.Bool("require-attempt-receipts", false, "require signed inference attempt accounting; omission preserves the existing route setting")
+	disallowAttemptReceipts := flags.Bool("disallow-attempt-receipts", false, "explicitly disable signed inference attempt accounting")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -204,6 +205,15 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	}
 	if action != "set" {
 		return fmt.Errorf("unsupported gateway inference action %q", action)
+	}
+	if flagWasVisited(flags, "require-attempt-receipts") && flagWasVisited(flags, "disallow-attempt-receipts") {
+		return errors.New("-require-attempt-receipts and -disallow-attempt-receipts conflict")
+	}
+	if flagWasVisited(flags, "require-attempt-receipts") && !*requireAttemptReceipts {
+		return errors.New("use -disallow-attempt-receipts to disable inference accounting")
+	}
+	if flagWasVisited(flags, "disallow-attempt-receipts") && !*disallowAttemptReceipts {
+		return errors.New("-disallow-attempt-receipts must be true when supplied; omit it to preserve inference accounting")
 	}
 	if *provider != "" && *provider != "compatible" {
 		preset, ok := inferenceProviderPresets[*provider]
@@ -245,7 +255,7 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	replaced := false
 	for index := range config.Routes {
 		if config.Routes[index].ID == route.ID {
-			if !flagWasVisited(flags, "require-attempt-receipts") {
+			if !*requireAttemptReceipts && !*disallowAttemptReceipts {
 				route.RequireAttemptReceipts = config.Routes[index].RequireAttemptReceipts
 			}
 			config.Routes[index], replaced = route, true

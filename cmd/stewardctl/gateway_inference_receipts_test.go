@@ -44,17 +44,37 @@ func TestInferenceReconfigurationPreservesAccountingUnlessExplicitlyDisabled(t *
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		flags []string
-		want  bool
+		flags  []string
+		want   bool
+		reject bool
 	}{
-		{[]string{"-require-attempt-receipts"}, true},
-		{nil, true},
-		{[]string{"-require-attempt-receipts=false"}, false},
-		{nil, false},
+		{[]string{"-require-attempt-receipts"}, true, false},
+		{nil, true, false},
+		{[]string{"-require-attempt-receipts=false"}, true, true},
+		{[]string{"-disallow-attempt-receipts=false"}, true, true},
+		{[]string{"-require-attempt-receipts", "-disallow-attempt-receipts"}, true, true},
+		{[]string{"-require-attempt-receipts=false", "-disallow-attempt-receipts"}, true, true},
+		{[]string{"-require-attempt-receipts", "-disallow-attempt-receipts=false"}, true, true},
+		{[]string{"-disallow-attempt-receipts"}, false, false},
+		{nil, false, false},
+		{[]string{"-require-attempt-receipts=false"}, false, true},
+		{[]string{"-require-attempt-receipts"}, true, false},
+		{nil, true, false},
 	} {
-		arguments := append([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm"}, test.flags...)
-		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		before, err := os.ReadFile(path)
+		if err != nil {
 			t.Fatal(err)
+		}
+		arguments := append([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm"}, test.flags...)
+		err = run(arguments, &bytes.Buffer{}, &bytes.Buffer{})
+		if (err != nil) != test.reject {
+			t.Fatalf("flags=%v rejected=%v err=%v", test.flags, test.reject, err)
+		}
+		if test.reject {
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("rejected flags %v changed configuration", test.flags)
+			}
 		}
 		loaded, _, _, _, err := gateway.LoadConfig(path)
 		if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].RequireAttemptReceipts != test.want {
