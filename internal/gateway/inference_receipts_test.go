@@ -195,6 +195,10 @@ func TestInferenceAttemptSurvivesLostProviderResponseWithoutHiddenRetry(t *testi
 		if int64(len(records)) != 2*attempt || records[len(records)-1].Receipt.Event.ErrorCode != "outcome_unknown" {
 			t.Fatal("lost response was not accounted conservatively")
 		}
+		if !strings.Contains(response.Body.String(), records[len(records)-1].Receipt.Event.TaskDigest) ||
+			!strings.Contains(response.Body.String(), "no provider response headers were observed") {
+			t.Fatal("lost-response recovery omitted the original attempt or observation boundary")
+		}
 	}
 }
 
