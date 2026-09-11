@@ -181,6 +181,8 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	maxTokensCap := flags.Int("max-tokens-cap", 0, "optional upper bound for an agent's top-level max_tokens")
 	maxCallsPerGrant := flags.Int("max-calls-per-grant", 0, "maximum durable inference attempts per grant; omission preserves the installed allowance")
 	disallowCallLimit := flags.Bool("disallow-call-limit", false, "explicitly remove the inference attempt allowance")
+	requestProfile := flags.String("request-profile", "", "closed request profile; omission preserves the installed profile")
+	disallowRequestProfile := flags.Bool("disallow-request-profile", false, "explicitly remove the closed inference request profile")
 	credentialFile := flags.String("credential-file", "", "owner-only provider credential file")
 	credentialMode := flags.String("credential-mode", "", "bearer, x-api-key, or api-key")
 	anthropicVersion := flags.String("anthropic-version", "", "fixed Anthropic API version")
@@ -209,6 +211,12 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	}
 	if action != "set" {
 		return fmt.Errorf("unsupported gateway inference action %q", action)
+	}
+	if flagWasVisited(flags, "request-profile") && (flagWasVisited(flags, "disallow-request-profile") || *requestProfile == "") {
+		return errors.New("use a nonempty -request-profile or explicit -disallow-request-profile, not both")
+	}
+	if flagWasVisited(flags, "disallow-request-profile") && !*disallowRequestProfile {
+		return errors.New("-disallow-request-profile must be true; omit it to preserve the profile")
 	}
 	if flagWasVisited(flags, "max-calls-per-grant") && flagWasVisited(flags, "disallow-call-limit") {
 		return errors.New("-max-calls-per-grant and -disallow-call-limit conflict")
@@ -275,10 +283,22 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 		RequireAttemptReceipts: *requireAttemptReceipts,
 		RequireTaskScope:       *requireTaskScope,
 		MaxCallsPerGrant:       *maxCallsPerGrant,
+		RequestProfile:         *requestProfile,
 	}
 	replaced := false
 	for index := range config.Routes {
 		if config.Routes[index].ID == route.ID {
+			if !flagWasVisited(flags, "request-profile") && !*disallowRequestProfile {
+				route.RequestProfile = config.Routes[index].RequestProfile
+			}
+			if route.RequestProfile != "" {
+				if !flagWasVisited(flags, "upstream-model") {
+					route.UpstreamModel = config.Routes[index].UpstreamModel
+				}
+				if !flagWasVisited(flags, "max-tokens-cap") {
+					route.MaxTokensCap = config.Routes[index].MaxTokensCap
+				}
+			}
 			if !flagWasVisited(flags, "max-calls-per-grant") && !*disallowCallLimit {
 				route.MaxCallsPerGrant = config.Routes[index].MaxCallsPerGrant
 			}
