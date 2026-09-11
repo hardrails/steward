@@ -658,6 +658,74 @@ The existing `evidence verify -kind connector` command verifies these records an
 externally retained final chain coordinates; service-task evidence alone does not
 cover inference attempts.
 
+### Durable inference attempt allowance
+
+An inference route may set `max_calls_per_grant` from 1 through 1,000,000.
+It requires `require_attempt_receipts: true`; zero or omission leaves the route
+without an attempt cap. Route policy version 14 binds the allowance. Existing
+grants prevent changing it on reload, including removal or an increase.
+
+The existing signed ledger reserves each attempt under the same lock as its
+authorization append, before provider transport. Every task, continuation and
+explicit retry for the same tenant and grant shares the allowance. All previously
+authorized inference attempts count, including legacy unscoped receipts, provider
+rejections, uncertain outcomes and successful responses. Finishing an attempt
+does not refund it. Gateway restart reconstructs the count from verified history;
+it does not restore spent allowance. A distinct authorized grant has its own count.
+Do not discard that history while relying on its allowance enforcement.
+
+Exhaustion returns HTTP 429 `inference_allowance_exhausted` with
+`X-Should-Retry: false`, without a provider call or another authorization receipt.
+Callers must review the original job before requesting additional authority, not
+retry automatically. A missing bounded ledger fails closed with
+`inference_accounting_unavailable` instead of falling back to unbounded calls.
+
+`gateway inference set -max-calls-per-grant N` sets a positive allowance; omission
+preserves the installed setting. Removing it requires `-disallow-call-limit`.
+An explicit zero, an invalid limit, a false disable flag or conflicting options
+is rejected without rewriting configuration. Accounting cannot be disabled while
+a positive allowance remains. Configuration writes do not bypass retained-grant
+reload restrictions.
+
+This is a count limit, not a price quote or monetary ceiling. Token ceilings,
+provider tariff validation, per-customer monetary reservations and billing
+reconciliation belong to the consuming application's admission and cost policy.
+No token usage or invoice amount is inferred from an attempt receipt.
+
+### Closed text-chat request profile
+
+`request_profile: openai-text-chat.v1` restricts a route to one OpenAI-compatible
+text-chat completion at the default service tier. It requires an exact
+`upstream_model`, positive `max_tokens_cap` and `max_calls_per_grant`, and required
+attempt receipts. Route policy version 15 binds the profile and its limits.
+
+The gateway supplies an omitted output cap, clamps a larger requested cap, and
+normalizes `max_completion_tokens` to `max_tokens`. Supplying both is rejected.
+Text, reasoning and function tool calls remain available without prompt
+truncation. Images, audio, provider-hosted tools, extra completions, premium tiers,
+alternate generation endpoints and unknown top-level request fields are rejected
+before provider I/O or allowance consumption. Client headers are not forwarded;
+the trusted boundary supplies JSON framing and provider authentication after
+validating any required task permit. Streaming is selected in the request body.
+
+Rejected bodies return HTTP 400 `inference_request_outside_envelope` and
+`X-Should-Retry: false`. Use a compatible client instead of retrying the same body.
+The gateway does not tokenize inputs: a consuming application's conservative
+reservation must cover the selected provider model's full context ceiling and
+current tariff, including its output-token accounting semantics.
+
+`gateway inference set -request-profile openai-text-chat.v1` enables the profile.
+Omission preserves it and its installed model/output cap. Removal requires
+`-disallow-request-profile`; this does not remove the separately configured
+attempt allowance. Invalid or conflicting flags do not rewrite configuration.
+Existing grants continue to prevent policy-changing reloads.
+
+Private grant inspection includes `route_policy_statement_base64`: the exact
+policy bytes whose SHA-256 must equal `route_policy_digest`. Consumers can verify
+the commitment and derive the actual model, profile and limits. This operator
+metadata contains configuration paths but no provider secret or agent content;
+do not expose it as a customer-facing policy document.
+
 ### Task-bound inference authorization
 
 An inference route can additionally set `require_task_scope: true`. This requires

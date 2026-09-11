@@ -107,7 +107,8 @@ type grantResponse struct {
 // serve the grant when current route semantics do not match this commitment.
 type GrantInspection struct {
 	Grant
-	RoutePolicyDigest string `json:"route_policy_digest,omitempty"`
+	RoutePolicyDigest    string `json:"route_policy_digest,omitempty"`
+	RoutePolicyStatement []byte `json:"route_policy_statement_base64,omitempty"`
 }
 
 type retainedGrant struct {
@@ -670,12 +671,14 @@ func (s *Server) getGrant(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	grant, ok := s.grants[r.PathValue("id")]
 	digest := s.policyDigests[r.PathValue("id")]
+	budget, _ := s.config.connectorReceiptBudget(grant.TenantID)
+	statement := routePolicyStatement(grant, s.routes, s.egressRoutes, s.connectors, s.serviceOperations, budget)
 	s.mu.Unlock()
 	if !ok {
 		writeGatewayError(w, http.StatusNotFound, "grant_not_found", "gateway grant not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, GrantInspection{Grant: grant, RoutePolicyDigest: digest})
+	writeJSON(w, http.StatusOK, GrantInspection{Grant: grant, RoutePolicyDigest: digest, RoutePolicyStatement: statement})
 }
 
 func (s *Server) ServiceHandler() http.Handler {
@@ -1404,6 +1407,18 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 		writeGatewayError(w, http.StatusForbidden, "model_denied", "request model does not match the active inference grant")
 		return
 	}
+	if route.RequestProfile != "" {
+		if route.RequestProfile != boundedTextChatProfile {
+			err = errInferenceEnvelope
+		} else {
+			raw, err = boundedChatRequest(raw, incoming.URL.Path, route.MaxTokensCap)
+		}
+		if err != nil {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusBadRequest, "inference_request_outside_envelope", "this route accepts one bounded text-chat completion at the default tier; use its supported model client")
+			return
+		}
+	}
 	raw, err = rewriteInferenceRequest(raw, route.UpstreamModel, route.MaxTokensCap)
 	if err != nil {
 		writeGatewayError(w, http.StatusBadRequest, "invalid_request", "inference request model mapping failed")
@@ -1433,10 +1448,16 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 			base: client.Transport, ledger: s.connectorLedger, grant: grant,
 			routePolicy: s.policyDigestFor(grant.GrantID),
 			operation:   strings.ReplaceAll(strings.TrimPrefix(incoming.URL.Path, "/v1/"), "/", "-"),
-			scope:       scope,
+			scope:       scope, maximum: route.MaxCallsPerGrant,
 		}
 		accounted.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &accounted
+	}
+	if route.RequestProfile != "" {
+		// Task authority was consumed above. Provider-specific client headers
+		// must not create an override channel outside the closed JSON profile.
+		incoming = incoming.Clone(incoming.Context())
+		incoming.Header = http.Header{"Content-Type": {"application/json"}}
 	}
 	s.proxy(w, incoming, route.base, inferenceUpstreamPath(route.base, incoming.URL.Path), route.credential, credentialMode, fixedHeaders, false, client)
 }
@@ -1613,6 +1634,11 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 				}
 			}
 			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_attempt_unknown", boundary+"; do not retry automatically; inspect the original attempt and provider state before authorizing another request")
+			return
+		}
+		if errors.Is(err, connectorledger.ErrInferenceQuotaExceeded) {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusTooManyRequests, "inference_allowance_exhausted", "the admitted inference attempt allowance is exhausted; no provider call was made; review the job before requesting more work")
 			return
 		}
 		if errors.Is(err, connectorledger.ErrInferenceScopeDenied) {

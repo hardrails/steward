@@ -102,7 +102,85 @@ func TestInferenceReconfigurationPreservesAccountingUnlessExplicitlyDisabled(t *
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("invalid task scope replaced the original configuration")
 	}
+	for _, test := range []struct {
+		flags   []string
+		maximum int
+		reject  bool
+	}{
+		{[]string{"-max-calls-per-grant", "2"}, 0, true},
+		{[]string{"-require-attempt-receipts", "-max-calls-per-grant", "2"}, 2, false},
+		{nil, 2, false},
+		{[]string{"-max-calls-per-grant", "0"}, 2, true},
+		{[]string{"-max-calls-per-grant", "-1"}, 2, true},
+		{[]string{"-max-calls-per-grant", "1000001"}, 2, true},
+		{[]string{"-disallow-attempt-receipts"}, 2, true},
+		{[]string{"-disallow-call-limit=false"}, 2, true},
+		{[]string{"-disallow-call-limit", "-max-calls-per-grant", "3"}, 2, true},
+		{[]string{"-disallow-call-limit=false", "-max-calls-per-grant", "3"}, 2, true},
+		{[]string{"-max-calls-per-grant", "3"}, 3, false},
+		{nil, 3, false},
+		{[]string{"-disallow-call-limit"}, 0, false},
+		{nil, 0, false},
+	} {
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		arguments := append([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm"}, test.flags...)
+		err = run(arguments, &bytes.Buffer{}, &bytes.Buffer{})
+		if (err != nil) != test.reject {
+			t.Fatalf("flags=%v rejected=%v err=%v", test.flags, test.reject, err)
+		}
+		if test.reject {
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("rejected flags %v changed configuration", test.flags)
+			}
+		}
+		loaded, _, _, _, err := gateway.LoadConfig(path)
+		if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].MaxCallsPerGrant != test.maximum {
+			t.Fatalf("flags=%v routes=%+v err=%v", test.flags, loaded.Routes, err)
+		}
+	}
 	config.ConnectorReceiptTenantBudgets = nil
+	for _, test := range []struct {
+		flags   []string
+		profile string
+		reject  bool
+	}{
+		{[]string{"-request-profile", "openai-text-chat.v1", "-upstream-model", "pinned-model", "-max-tokens-cap", "64", "-max-calls-per-grant", "3"}, "openai-text-chat.v1", false},
+		{nil, "openai-text-chat.v1", false},
+		{[]string{"-disallow-call-limit"}, "openai-text-chat.v1", true},
+		{[]string{"-max-tokens-cap", "0"}, "openai-text-chat.v1", true},
+		{[]string{"-request-profile", ""}, "openai-text-chat.v1", true},
+		{[]string{"-request-profile", "unknown"}, "openai-text-chat.v1", true},
+		{[]string{"-disallow-request-profile=false"}, "openai-text-chat.v1", true},
+		{[]string{"-request-profile", "openai-text-chat.v1", "-disallow-request-profile"}, "openai-text-chat.v1", true},
+		{[]string{"-disallow-request-profile"}, "", false},
+	} {
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		arguments := append([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm"}, test.flags...)
+		err = run(arguments, &bytes.Buffer{}, &bytes.Buffer{})
+		if (err != nil) != test.reject {
+			t.Fatalf("flags=%v err=%v", test.flags, err)
+		}
+		loaded, _, _, _, err := gateway.LoadConfig(path)
+		if err != nil || loaded.Routes[0].RequestProfile != test.profile {
+			t.Fatalf("flags=%v err=%v", test.flags, err)
+		}
+		if test.reject {
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("invalid profile changed configuration")
+			}
+		}
+		if test.profile != "" && (loaded.Routes[0].MaxTokensCap != 64 || loaded.Routes[0].UpstreamModel != "pinned-model") {
+			t.Fatal("rerun lost bound model or token ceiling")
+		}
+	}
 	raw, err = json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)

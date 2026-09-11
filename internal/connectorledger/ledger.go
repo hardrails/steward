@@ -66,6 +66,9 @@ const (
 )
 
 var (
+	// ErrInferenceQuotaExceeded refuses a new provider attempt before transport.
+	// Authorization consumes allowance even if its outcome later stays unknown.
+	ErrInferenceQuotaExceeded = errors.New("inference attempt allowance exhausted")
 	// ErrInferenceScopeDenied means no matching live parent authorized this
 	// inference attempt. It does not indicate a ledger availability failure.
 	ErrInferenceScopeDenied = errors.New("inference scope has no matching live service-task authorization")
@@ -289,6 +292,11 @@ type runOwnership struct {
 	runID     string
 }
 
+type inferenceOwner struct {
+	tenantID string
+	grantID  string
+}
+
 // Log serializes append and fsync. A failed write or sync poisons the open
 // handle: callers must reopen and verify the file before attempting more work.
 type Log struct {
@@ -312,6 +320,9 @@ type Log struct {
 	// tenantBytes includes durable line bytes and pending record reserves.
 	// Map membership is also the permanent historical tenant identity set.
 	tenantBytes map[string]int64
+	// Counts all durable inference authorizations, including closed and uncertain
+	// attempts. The signed ledger, not a process lifetime, owns this allowance.
+	inferenceCounts map[inferenceOwner]int
 }
 
 func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) (*Log, error) {
@@ -385,12 +396,17 @@ func OpenWithLimits(path string, private ed25519.PrivateKey, nodeID string, epoc
 	taskHeads := make(map[string]taskCoordinate)
 	runOwners := make(map[runOwnership]Event)
 	tenantBytes := make(map[string]int64)
+	inferenceCounts := make(map[inferenceOwner]int)
 	head, err := verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
 		if err := updateHistory(pending, spent, taskHeads, runOwners, record); err != nil {
 			return err
 		}
 		if err := addTenantUsage(tenantBytes, record.Receipt.Event.TenantID, int64(len(record.Raw)+1), limits); err != nil {
 			return err
+		}
+		event := record.Receipt.Event
+		if event.Kind == InferenceAttempt && event.Phase == Authorize {
+			inferenceCounts[inferenceOwner{event.TenantID, event.GrantID}]++
 		}
 		if visit != nil {
 			return visit(record)
@@ -418,7 +434,7 @@ func OpenWithLimits(path string, private ed25519.PrivateKey, nodeID string, epoc
 		public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: head.Sequence + 1, last: head.ChainHash,
 		reserved: reserved, pending: pending, spent: spent, taskHeads: taskHeads, runOwners: runOwners,
-		limits: limits, tenantBytes: tenantBytes,
+		limits: limits, tenantBytes: tenantBytes, inferenceCounts: inferenceCounts,
 	}, nil
 }
 
@@ -440,6 +456,21 @@ func (l *Log) Append(event Event) (Head, error) {
 // Begin durably records an authorization and reserves worst-case space for all
 // remaining receipts. No external effect should start until Begin succeeds.
 func (l *Log) Begin(event Event) (Head, error) {
+	return l.begin(event, 0)
+}
+
+// BeginInference atomically checks a trusted per-grant allowance and appends its
+// authorization. The caller must bind maximum to its admitted route policy.
+// Different tasks, continuations and retries under that grant share the limit.
+// Finish never refunds it; previous Begin calls count after enabling this limit.
+func (l *Log) BeginInference(event Event, maximum int) (Head, error) {
+	if event.Kind != InferenceAttempt || maximum < 1 || maximum > 1_000_000 {
+		return Head{}, errors.New("inference allowance requires an inference event and maximum from 1 to 1000000")
+	}
+	return l.begin(event, maximum)
+}
+
+func (l *Log) begin(event Event, maximum int) (Head, error) {
 	if err := validateEvent(event); err != nil {
 		return Head{}, err
 	}
@@ -458,6 +489,13 @@ func (l *Log) Begin(event Event) (Head, error) {
 	if err := validateInferenceScopeOwner(event, l.pending); err != nil {
 		return Head{}, err
 	}
+	if l.failed || l.file == nil {
+		return Head{}, errors.New("connector ledger is closed or requires reopen after an ambiguous write")
+	}
+	owner := inferenceOwner{event.TenantID, event.GrantID}
+	if maximum > 0 && l.inferenceCounts[owner] >= maximum {
+		return Head{}, ErrInferenceQuotaExceeded
+	}
 	reservation := pendingReservation(event)
 	head, err := l.appendLocked(event, reservation)
 	if err != nil {
@@ -465,6 +503,9 @@ func (l *Log) Begin(event Event) (Head, error) {
 	}
 	l.pending[key] = event
 	l.spent[key] = struct{}{}
+	if event.Kind == InferenceAttempt {
+		l.inferenceCounts[owner]++
+	}
 	return head, nil
 }
 

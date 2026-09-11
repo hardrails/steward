@@ -54,6 +54,27 @@ info:
     original attempt and provider state before authorizing another request.
     Full-ledger verification and retained chain coordinates are required for
     attempt accounting; portable task evidence is not a substitute.
+    Routes may additionally set max_calls_per_grant, requiring attempt accounting.
+    This allowance counts all authorized attempts for a tenant and grant across
+    requests and restarts, including uncertain outcomes and provider rejections.
+    Exhaustion returns HTTP 429 inference_allowance_exhausted with
+    X-Should-Retry: false before contacting the provider. This is an attempt cap,
+    not a token or dollar-denominated spending guarantee. Route policy version 14
+    binds the allowance so retained grants cannot silently acquire a larger cap.
+    A route may set request_profile to openai-text-chat.v1 with an exact model,
+    output-token cap and accounted attempt allowance. The profile permits only
+    chat completions with text and function tools, one completion, the default
+    service tier and a mandatory output bound. It rejects unknown top-level
+    fields, non-text content and conflicting output-token aliases before provider
+    I/O with HTTP 400 inference_request_outside_envelope and X-Should-Retry: false.
+    Route policy version 15 binds the profile. This request envelope does not
+    implement tokenization, provider pricing or monetary budget admission.
+    Operator control-socket GET /v1/grants/{id} additionally returns
+    route_policy_statement_base64, the exact non-secret JSON bytes committed by
+    route_policy_digest. Consumers can hash those bytes before interpreting its
+    request profile and limits. The statement includes operator configuration
+    paths and must remain on the private operator surface; it contains no keys,
+    provider credentials or request/response bodies. It is not a price attestation.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

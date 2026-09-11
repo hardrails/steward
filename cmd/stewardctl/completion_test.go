@@ -125,6 +125,14 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-max-t"}); !slices.Equal(candidates, []string{"-max-tokens-cap"}) {
 		t.Fatalf("inference token cap candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-max-ca"}); !slices.Equal(candidates, []string{"-max-calls-per-grant"}) {
+		t.Fatalf("inference allowance candidates=%v", candidates)
+	}
+	for _, field := range []string{"-request-profile", "-disallow-request-profile"} {
+		if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", field}); !slices.Contains(candidates, field) {
+			t.Fatalf("request profile option missing: %v", candidates)
+		}
+	}
 	for _, prefix := range []string{"-", "-require"} {
 		candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", prefix})
 		if !slices.Contains(candidates, "-require-attempt-receipts") || !slices.Contains(candidates, "-require-task-scope") {
@@ -133,7 +141,7 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	}
 	for _, prefix := range []string{"-", "-disallow"} {
 		candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", prefix})
-		if !slices.Contains(candidates, "-disallow-attempt-receipts") || !slices.Contains(candidates, "-disallow-task-scope") {
+		if !slices.Contains(candidates, "-disallow-attempt-receipts") || !slices.Contains(candidates, "-disallow-task-scope") || !slices.Contains(candidates, "-disallow-call-limit") {
 			t.Fatalf("explicit accounting downgrade missing from %q candidates: %v", prefix, candidates)
 		}
 	}
