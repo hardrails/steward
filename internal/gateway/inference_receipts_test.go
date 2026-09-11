@@ -232,6 +232,12 @@ func TestInferenceRequiredAccountingBindsPolicyAndConfiguration(t *testing.T) {
 	if !rig.server.validGrant(rig.grant) {
 		t.Fatal("complete grant rejected")
 	}
+	// Read-only state inspection deliberately has no append handle. Validate
+	// installed policy here; actual HTTP dispatch independently requires the log.
+	inspector := &Server{config: rig.config, routes: rig.server.routes}
+	if !inspector.validGrant(rig.grant) {
+		t.Fatal("read-only inspection incorrectly required a live receipt writer")
+	}
 	grant := rig.grant
 	grant.RuntimeRef, grant.CapsuleDigest, grant.PolicyDigest = "", "", ""
 	if rig.server.validGrant(grant) {

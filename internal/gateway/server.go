@@ -1041,7 +1041,7 @@ func (s *Server) validGrant(grant Grant) bool {
 		}
 		if s.routes[grant.RouteID].RequireAttemptReceipts {
 			if _, budgeted := s.config.connectorReceiptBudget(grant.TenantID); !budgeted ||
-				s.connectorLedger == nil || grant.RuntimeRef == "" {
+				s.config.ConnectorReceiptFile == "" || grant.RuntimeRef == "" {
 				return false
 			}
 		}
