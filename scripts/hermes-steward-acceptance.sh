@@ -1653,7 +1653,8 @@ expected_receipt_count = 2 + 3 * len(issue_by_permit) + 2 * expected_inference_a
 if len(lines) != expected_receipt_count:
     raise SystemExit(
         f"hermes-steward-acceptance: mixed Gateway receipt ledger has {len(lines)} records; "
-        f"expected {expected_receipt_count}; owned provider counter has {len(provider_log.splitlines())} requests. "
+        f"expected {expected_receipt_count}; owned provider counter has {len(provider_log.splitlines())} requests "
+        f"including {len(title_log.splitlines())} titles. "
         "Inspect the fixture call sequence before changing its required accounting count."
     )
 receipts = []

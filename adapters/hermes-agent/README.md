@@ -64,7 +64,10 @@ The signed acceptance harness also requires two independent workspace tasks to
 overlap at the fixture provider, return their own distinct results and retain
 their original task-scoped receipts. A bounded two-party barrier rejects serial
 execution; ledger ordering independently requires both authorizations before
-either first response. The full fixture expects seven tasks, seven session titles,
+either first response. Each fixture answer also waits for its own background
+title request so fast completion cannot close authority before that auxiliary
+call starts. Missing titles fail explicitly, without changing the expected count.
+The full fixture expects seven tasks, seven session titles,
 22 inference calls and 67 signed gateway records. Fresh qualification of this
 expanded fixture is pending. The workspace profile disables native delegation;
 the research profile's delegated model paths still need separate runtime proof.
