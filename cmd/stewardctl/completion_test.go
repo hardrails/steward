@@ -128,6 +128,11 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", "-max-ca"}); !slices.Equal(candidates, []string{"-max-calls-per-grant"}) {
 		t.Fatalf("inference allowance candidates=%v", candidates)
 	}
+	for _, field := range []string{"-request-profile", "-disallow-request-profile"} {
+		if candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", field}); !slices.Contains(candidates, field) {
+			t.Fatalf("request profile option missing: %v", candidates)
+		}
+	}
 	for _, prefix := range []string{"-", "-require"} {
 		candidates := stewardctlCompletionCandidates([]string{"gateway", "inference", "set", prefix})
 		if !slices.Contains(candidates, "-require-attempt-receipts") || !slices.Contains(candidates, "-require-task-scope") {
