@@ -605,6 +605,59 @@ LocalAI, LiteLLM, LM Studio, SGLang, and TGI presets. Gateway and relay HTTP
 listeners cap request headers at 64 KiB, and their outbound transports cap response
 headers at 64 KiB.
 
+An inference route can set `require_attempt_receipts: true`. Its default is false
+for compatibility and provides no attempt-accounting guarantee. Required
+accounting uses the signed connector receipt ledger and an explicit tenant byte
+budget. The grant must include runtime evidence identity. Route policy version
+12 binds the requirement and receipt capacity, so retained grants cannot silently
+lose accounting on reload.
+
+For CLI reconfiguration, `gateway inference set -require-attempt-receipts`
+enables accounting. Omission preserves the installed value; disabling it requires
+`-disallow-attempt-receipts`. Supplying both options or setting either option to
+`false` is rejected without rewriting the configuration. To keep the current
+setting, omit both options. Shell completion exposes both choices.
+
+Version-9 `inference_attempt` receipts retain a gateway-minted attempt identity,
+tenant/runtime/grant/generation, route policy, bounded operation name and request
+byte length. They contain no credential, request body or agent-supplied task ID.
+Authorization is fsynced before outbound HTTP transport. Terminal records describe
+response headers or an uncertain transport failure; they do not claim completed
+generation, output contents, tokens or billing. An unfinished attempt becomes
+`outcome_unknown` on restart rather than disappearing from the count.
+
+The inference proxy returns HTTP 503 `inference_accounting_unavailable` when
+required accounting prevents a new outbound attempt. A missing ledger,
+exhausted tenant capacity or failed writer prevents another outbound attempt.
+If terminal accounting fails after dispatch, HTTP 422
+`inference_terminal_accounting_failed` preserves the minted attempt identity and
+observed provider HTTP status, or explicitly reports that no response headers
+were observed. It exposes no provider body. Do not retry automatically: restore
+the ledger and reconcile the original attempt with provider state. The retained
+authorization still counts as potentially paid; a later blocked request does not
+erase it or prove that the earlier request was free.
+If the provider connection fails with accounting retained, HTTP 422
+`inference_attempt_unknown` tells callers not to retry automatically: the provider
+may have incurred usage even without a response. Inspect the original attempt and
+provider state before authorizing another request. A new request is another
+accounted attempt, not an idempotent replay of the first.
+Nonstandard provider statuses from 600 through 999 also return this non-retry
+error. Their terminal receipt records `failed` and the bounded code
+`upstream_http_status_NNN`, preserving the observed status without assigning it
+to the ledger's standard-status field. The authorization does not remain pending
+on a healthy writer. If that terminal append fails, the error still reports the
+observed nonstandard status and original attempt identity.
+When the terminal is retained, the response also identifies the original attempt
+and observed nonstandard status. A dropped connection reports the attempt identity
+and absence of response headers. These recovery messages never include provider
+response bodies.
+All three errors set `X-Should-Retry: false` for SDKs that honor that header.
+Post-dispatch failures use 422 because OpenAI-compatible clients can retry 409
+and 5xx responses by default.
+The existing `evidence verify -kind connector` command verifies these records and
+externally retained final chain coordinates; service-task evidence alone does not
+cover inference attempts.
+
 `egress_routes` contains at most 128 HTTP(S) proxy policies. Each has 1–128
 destinations (`host`, `ports`, optional canonical `allowed_cidrs`) and four limits:
 `max_concurrent`, `max_request_bytes`, `max_response_bytes`, and

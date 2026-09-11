@@ -32,6 +32,7 @@ they can verify without a vendor service.
 | Prompt injection reaching a powerful tool | Keeps reusable connector credentials outside the workload. A protected action can require a tenant signature over the exact operation and request bytes. |
 | Replayed or stale authority | Spends one-use permits before network dispatch and rejects old instance generations and command sequences. |
 | Inference and service credentials | Gateway injects credentials only at the trusted outbound boundary. Agents receive a scoped route, not the upstream secret. |
+| Inference attempt accounting | An opt-in route requires a signed, durable record before each potentially paid provider attempt. It reuses the bounded network ledger and preserves uncertainty across restart; task counts and response headers are not billing or generation-completion proof. |
 | Web research over hostile content | A bounded Hermes profile reaches static extraction or credential-free JavaScript rendering through finite connectors, then reports source-linked findings over a durable event channel and can organize signed tasks and external evidence in Workrooms. |
 | Repository work with coding agents | Hermes delegates to Codex or Claude Code in a separate isolated worker with its own clean Git worktree and authentication store. |
 | Signed collaboration requests | An optional, tenant-specific Buzz bridge durably queues allowed signed mentions, runs bounded concurrent Hermes tasks, and verifies correctly threaded replies without putting either signing key inside the agent. |
@@ -195,6 +196,12 @@ A stop acknowledgement is not proof that the agent or an external effect halted.
 CI and release packaging reject changed adapter, harness, or runtime inputs until
 fresh successful qualification is retained. Runtime fixture evidence is not proof
 that an arbitrary customer workflow or external effect is safe.
+The native acceptance gate also requires signed inference-attempt accounting:
+its five deterministic tasks must match eighteen independently observed provider
+requests across task replay and restart, including five background session-title
+requests. Title requests are counted separately at the owned fixture and included
+in the signed ledger; replay must not execute another turn. This is a network-call
+check, not live provider billing or customer-workflow qualification.
 
 - [Run Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/)
 - [Run a web research agent](https://hardrails.github.io/steward/guides/research-agents/)

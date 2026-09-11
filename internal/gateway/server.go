@@ -1039,6 +1039,12 @@ func (s *Server) validGrant(grant Grant) bool {
 		if _, ok := s.routes[grant.RouteID]; !ok || !bounded(grant.ModelAlias, 256) {
 			return false
 		}
+		if s.routes[grant.RouteID].RequireAttemptReceipts {
+			if _, budgeted := s.config.connectorReceiptBudget(grant.TenantID); !budgeted ||
+				s.config.ConnectorReceiptFile == "" || grant.RuntimeRef == "" {
+				return false
+			}
+		}
 	}
 	if len(grant.EgressRouteIDs) > 32 {
 		return false
@@ -1407,7 +1413,18 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 		fixedHeaders.Set("Anthropic-Version", effectiveAnthropicVersion(route.Route))
 	}
 	credentialMode := effectiveInferenceCredentialMode(route.Route)
-	s.proxy(w, incoming, route.base, inferenceUpstreamPath(route.base, incoming.URL.Path), route.credential, credentialMode, fixedHeaders, false, s.client)
+	client := s.client
+	if route.RequireAttemptReceipts {
+		accounted := *client
+		accounted.Transport = inferenceAttemptTransport{
+			base: client.Transport, ledger: s.connectorLedger, grant: grant,
+			routePolicy: s.policyDigestFor(grant.GrantID),
+			operation:   strings.ReplaceAll(strings.TrimPrefix(incoming.URL.Path, "/v1/"), "/", "-"),
+		}
+		accounted.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &accounted
+	}
+	s.proxy(w, incoming, route.base, inferenceUpstreamPath(route.base, incoming.URL.Path), route.credential, credentialMode, fixedHeaders, false, client)
 }
 
 func writeInferenceModels(w http.ResponseWriter, protocol InferenceProtocol, modelAlias string) {
@@ -1557,6 +1574,37 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 	}
 	response, err := client.Do(request)
 	if err != nil {
+		var terminalFailure *inferenceTerminalAccountingError
+		if errors.As(err, &terminalFailure) {
+			boundary := "no provider response headers were observed"
+			if terminalFailure.status >= 100 && terminalFailure.status <= 999 {
+				boundary = fmt.Sprintf("provider HTTP status %d was observed", terminalFailure.status)
+			}
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_terminal_accounting_failed",
+				fmt.Sprintf("%s but terminal accounting failed for attempt %s; usage may have occurred; do not retry automatically; restore the ledger and reconcile this original attempt with provider state before authorizing another request", boundary, terminalFailure.attempt))
+			return
+		}
+		if errors.Is(err, errInferenceAttemptUnknown) {
+			// OpenAI-compatible clients retry 409 and 5xx by default. Use a
+			// non-retry status as well as the SDK's explicit suppression header.
+			w.Header().Set("X-Should-Retry", "false")
+			boundary := "the provider attempt may have incurred usage"
+			var failure *inferenceAttemptUnknownError
+			if errors.As(err, &failure) {
+				boundary = fmt.Sprintf("no provider response headers were observed for attempt %s; usage may have occurred", failure.attempt)
+				if failure.status >= 100 && failure.status <= 999 {
+					boundary = fmt.Sprintf("the provider returned HTTP %d for attempt %s; usage may have occurred", failure.status, failure.attempt)
+				}
+			}
+			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_attempt_unknown", boundary+"; do not retry automatically; inspect the original attempt and provider state before authorizing another request")
+			return
+		}
+		if errors.Is(err, errInferenceAccountingUnavailable) {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusServiceUnavailable, "inference_accounting_unavailable", "inference attempt accounting failed; restore the ledger and inspect the original attempt before retrying")
+			return
+		}
 		writeGatewayError(w, http.StatusBadGateway, "upstream_unavailable", "configured upstream request failed")
 		return
 	}

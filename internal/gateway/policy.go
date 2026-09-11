@@ -52,17 +52,18 @@ type serviceOperationPolicy struct {
 }
 
 type inferenceRoutePolicy struct {
-	ID                   string `json:"id"`
-	ModelAlias           string `json:"model_alias"`
-	UpstreamModel        string `json:"upstream_model,omitempty"`
-	MaxTokensCap         int    `json:"max_tokens_cap,omitempty"`
-	BaseURL              string `json:"base_url"`
-	Protocol             string `json:"protocol,omitempty"`
-	CredentialFile       string `json:"credential_file,omitempty"`
-	CredentialMode       string `json:"credential_mode,omitempty"`
-	AnthropicVersion     string `json:"anthropic_version,omitempty"`
-	CredentialConfigured bool   `json:"credential_configured"`
-	MaxConcurrent        int    `json:"max_concurrent"`
+	ID                     string `json:"id"`
+	ModelAlias             string `json:"model_alias"`
+	UpstreamModel          string `json:"upstream_model,omitempty"`
+	MaxTokensCap           int    `json:"max_tokens_cap,omitempty"`
+	BaseURL                string `json:"base_url"`
+	Protocol               string `json:"protocol,omitempty"`
+	CredentialFile         string `json:"credential_file,omitempty"`
+	CredentialMode         string `json:"credential_mode,omitempty"`
+	AnthropicVersion       string `json:"anthropic_version,omitempty"`
+	CredentialConfigured   bool   `json:"credential_configured"`
+	MaxConcurrent          int    `json:"max_concurrent"`
+	RequireAttemptReceipts bool   `json:"require_attempt_receipts,omitempty"`
 }
 
 type egressRoutePolicy struct {
@@ -253,6 +254,11 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		}
 		if (route.UpstreamModel != "" || route.MaxTokensCap != 0) && document.Version < 11 {
 			document.Version = 11
+		}
+		if route.RequireAttemptReceipts {
+			document.Version = 12
+			document.Inference.RequireAttemptReceipts = true
+			document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
 		}
 		if route.Protocol != "" || route.CredentialMode != "" || route.AnthropicVersion != "" {
 			if document.Version < 10 {

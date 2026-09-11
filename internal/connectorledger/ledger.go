@@ -34,6 +34,7 @@ const (
 	PayloadTypeV6 = "application/vnd.steward.connector-receipt.v6+json"
 	PayloadTypeV7 = "application/vnd.steward.connector-receipt.v7+json"
 	PayloadTypeV8 = "application/vnd.steward.connector-receipt.v8+json"
+	PayloadTypeV9 = "application/vnd.steward.connector-receipt.v9+json"
 	SchemaV1      = "steward.connector-receipt.v1"
 	SchemaV2      = "steward.connector-receipt.v2"
 	SchemaV3      = "steward.connector-receipt.v3"
@@ -42,6 +43,7 @@ const (
 	SchemaV6      = "steward.connector-receipt.v6"
 	SchemaV7      = "steward.connector-receipt.v7"
 	SchemaV8      = "steward.connector-receipt.v8"
+	SchemaV9      = "steward.connector-receipt.v9"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -182,6 +184,9 @@ type EventKind string
 const (
 	ConnectorCall EventKind = "connector_call"
 	ServiceTask   EventKind = "service_task"
+	// InferenceAttempt counts an upstream transport attempt, not an agent task,
+	// completed generation, token usage, or a provider invoice.
+	InferenceAttempt EventKind = "inference_attempt"
 )
 
 // TaskStatus is an agent-reported terminal state. It is evidence of what
@@ -526,7 +531,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
-	if event.TargetTaskDigest != "" {
+	if event.Kind == InferenceAttempt {
+		payloadType, schemaVersion = PayloadTypeV9, SchemaV9
+	} else if event.TargetTaskDigest != "" {
 		payloadType, schemaVersion = PayloadTypeV8, SchemaV8
 	} else if event.InfluenceHash != "" || event.ResponseDigest != "" {
 		payloadType, schemaVersion = PayloadTypeV7, SchemaV7
@@ -777,7 +784,7 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		envelope, err := dsse.Parse(raw)
 		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
 			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 &&
-			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 && envelope.PayloadType != PayloadTypeV7 && envelope.PayloadType != PayloadTypeV8 {
+			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 && envelope.PayloadType != PayloadTypeV7 && envelope.PayloadType != PayloadTypeV8 && envelope.PayloadType != PayloadTypeV9 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -825,6 +832,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		expectedSchema = SchemaV7
 	case PayloadTypeV8:
 		expectedSchema = SchemaV8
+	case PayloadTypeV9:
+		expectedSchema = SchemaV9
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -849,7 +858,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "" || !digest(receipt.Event.InfluenceHash)) ||
 		payloadType != PayloadTypeV7 && (receipt.Event.InfluenceSequence != 0 || receipt.Event.InfluenceHash != "" || receipt.Event.ResponseDigest != "") ||
 		payloadType == PayloadTypeV8 && receipt.Event.TargetTaskDigest == "" ||
-		payloadType != PayloadTypeV8 && (receipt.Event.TargetTaskDigest != "" || receipt.Event.TargetRunID != "") {
+		payloadType != PayloadTypeV8 && (receipt.Event.TargetTaskDigest != "" || receipt.Event.TargetRunID != "") ||
+		(payloadType == PayloadTypeV9) != (receipt.Event.Kind == InferenceAttempt) {
 		return errors.New("connector receipt schema does not match its permit fields")
 	}
 	if payloadType == PayloadTypeV4 || payloadType == PayloadTypeV8 {
@@ -1023,6 +1033,15 @@ func validateEvent(event Event) error {
 		return errors.New("connector approval threshold has no authority set")
 	}
 	switch event.Kind {
+	case InferenceAttempt:
+		if event.Phase != Authorize && event.Phase != Terminal || event.RequestBytes == 0 ||
+			event.EffectMode != "" || event.ConnectorID != "" || event.ServiceID != "" ||
+			event.OperationPolicyDigest != "" || event.AuthorityKeyID != "" || event.AuthorityKeySet != "" ||
+			event.ApprovalThreshold != 0 || event.PermitDigest != "" || event.RequestDigest != "" ||
+			event.RunID != "" || event.TaskProtocol != "" || event.TaskStatus != "" || event.ResultDigest != "" ||
+			event.InfluenceHash != "" || event.ResponseDigest != "" || event.ResponseBytes != 0 {
+			return errors.New("inference attempt contains task authority or output claims")
+		}
 	case "":
 		if event.EffectMode != "" || !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" ||
 			event.TaskProtocol != "" || event.TaskStatus != "" || event.ResultDigest != "" {

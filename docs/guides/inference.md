@@ -31,6 +31,15 @@ subscription login without exposing it to Hermes. See
 authentication mode, and API base URL. Override `-base-url` when the service uses a
 different address.
 
+To require durable inference-attempt records, add `-require-attempt-receipts`
+to `gateway inference set` after configuring the signed receipt ledger and an
+explicit budget for the tenant. See the
+[Gateway configuration reference]({{ '/reference/configuration/' | relative_url }})
+for accounting prerequisites and failure semantics. Repeating `inference set`
+without this flag preserves its existing value. Disabling it requires
+`-disallow-attempt-receipts`; retained grants still prevent an incompatible
+reload. The records count potentially paid attempts, not provider invoices.
+
 | Provider | Default Gateway target | Protocol sent upstream | Credential header |
 | --- | --- | --- | --- |
 | `openai` | `https://api.openai.com/v1` | OpenAI | `Authorization: Bearer …` |
