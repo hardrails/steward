@@ -73,6 +73,9 @@ func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*ht
 		InferenceRequestDigest: transport.scope.RequestDigest,
 	}
 	if _, err := transport.ledger.Begin(event); err != nil {
+		if errors.Is(err, connectorledger.ErrInferenceScopeDenied) {
+			return nil, err
+		}
 		return nil, errInferenceAccountingUnavailable
 	}
 	base := transport.base

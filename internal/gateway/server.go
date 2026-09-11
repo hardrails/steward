@@ -1615,6 +1615,11 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 			writeGatewayError(w, http.StatusUnprocessableEntity, "inference_attempt_unknown", boundary+"; do not retry automatically; inspect the original attempt and provider state before authorizing another request")
 			return
 		}
+		if errors.Is(err, connectorledger.ErrInferenceScopeDenied) {
+			w.Header().Set("X-Should-Retry", "false")
+			writeGatewayError(w, http.StatusForbidden, "inference_task_scope_required", "the task no longer authorizes inference; no provider call was made; do not retry with this task permit")
+			return
+		}
 		if errors.Is(err, errInferenceAccountingUnavailable) {
 			w.Header().Set("X-Should-Retry", "false")
 			writeGatewayError(w, http.StatusServiceUnavailable, "inference_accounting_unavailable", "inference attempt accounting failed; restore the ledger and inspect the original attempt before retrying")

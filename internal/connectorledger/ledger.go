@@ -66,6 +66,10 @@ const (
 )
 
 var (
+	// ErrInferenceScopeDenied means no matching live parent authorized this
+	// inference attempt. It does not indicate a ledger availability failure.
+	ErrInferenceScopeDenied = errors.New("inference scope has no matching live service-task authorization")
+
 	chainDomain = []byte("steward-connector-ledger-v1\x00")
 
 	// ErrTenantQuotaExceeded means a tenant has consumed its durable receipt
@@ -1192,7 +1196,7 @@ func validateInferenceScopeOwner(event Event, pending map[string]Event) error {
 		parent.PolicyDigest != event.PolicyDigest || parent.RoutePolicyDigest != event.RoutePolicyDigest ||
 		parent.GrantID != event.GrantID || parent.Generation != event.Generation ||
 		parent.PermitDigest != event.InferencePermitDigest || parent.RequestDigest != event.InferenceRequestDigest {
-		return errors.New("inference scope has no matching live service-task authorization")
+		return ErrInferenceScopeDenied
 	}
 	return nil
 }

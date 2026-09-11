@@ -684,6 +684,9 @@ Caller-supplied task names provide no authority. Unknown, ambiguous, completed o
 revoked scope returns HTTP 403 `inference_task_scope_required`, with
 `X-Should-Retry: false`, before contacting the provider. The gateway strips the
 scope and substitutes the configured provider credential on outbound transport.
+If the parent closes between scope lookup and durable attempt authorization, the
+same non-retryable 403 identifies the task boundary. No provider attempt was
+recorded or sent; this is not a ledger outage and does not call for storage repair.
 
 Schema-10 attempt records retain `inference_task_digest`,
 `inference_permit_digest` and `inference_request_digest`, separate from the minted

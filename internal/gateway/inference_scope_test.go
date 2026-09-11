@@ -163,3 +163,67 @@ func TestTaskScopeChangesPolicyAndRequiresTaskAuthority(t *testing.T) {
 		t.Fatal("task scope was not an authority-bearing policy restriction")
 	}
 }
+
+type closeParentBeforeInferenceBegin struct {
+	connectorReceiptLog
+	closeParent func()
+}
+
+func (log closeParentBeforeInferenceBegin) Begin(event connectorledger.Event) (connectorledger.Head, error) {
+	log.closeParent()
+	return log.connectorReceiptLog.Begin(event)
+}
+
+func TestParentClosingBeforeInferenceBeginReturnsScopeDenial(t *testing.T) {
+	var calls atomic.Int64
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer provider.Close()
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(202)
+		_, _ = w.Write([]byte(`{"run_id":"closing-run"}`))
+	}))
+	defer service.Close()
+	rig, route := taskScopedInferenceRig(t, service.URL, provider)
+	body := []byte(`{"input":"closing task"}`)
+	permit := taskPermitFor(t, rig, "closing", body, nil)
+	if result := invokeServiceTask(rig, body, permit); result.Code != 202 {
+		t.Fatalf("admission=%d %s", result.Code, result.Body.String())
+	}
+	raw, _ := decodeServiceTaskPermitHeader(permit)
+	task := rig.server.serviceTaskPermits[dsse.Digest(raw)]
+	ledger := rig.server.connectorLedger
+	rig.server.connectorLedger = closeParentBeforeInferenceBegin{ledger, func() {
+		terminal := rig.server.serviceTasks[task].Dispatch
+		terminal.Phase, terminal.Outcome = connectorledger.Terminal, connectorledger.Responded
+		terminal.TaskStatus, terminal.HTTPStatus = connectorledger.TaskStatusAgentReportedCompleted, 200
+		terminal.ResultDigest = "sha256:" + strings.Repeat("1", 64)
+		if err := rig.server.finishServiceTask(task, terminal); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	for range 2 { // First failure and replay both identify task authority, not storage.
+		result := scopedInferenceCall(rig, route, permit)
+		if result.Code != 403 || result.Header().Get("X-Should-Retry") != "false" ||
+			!strings.Contains(result.Body.String(), "inference_task_scope_required") ||
+			strings.Contains(result.Body.String(), "restore the ledger") {
+			t.Fatalf("wrong closing-task boundary: %d %s", result.Code, result.Body.String())
+		}
+	}
+	if calls.Load() != 0 || ledger.Failed() {
+		t.Fatal("scope rejection contacted the provider or poisoned the ledger")
+	}
+	public := rig.config.connectorReceiptKey.Public().(ed25519.PublicKey)
+	if _, err := connectorledger.VerifyRecords(rig.config.ConnectorReceiptFile, public, rig.config.ConnectorReceiptNodeID, 1,
+		func(record connectorledger.VerifiedReceipt) error {
+			if record.Receipt.Event.Kind == connectorledger.InferenceAttempt {
+				t.Error("denied scope retained an inference attempt")
+			}
+			return nil
+		}); err != nil {
+		t.Fatal(err)
+	}
+}

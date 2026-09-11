@@ -3,6 +3,7 @@ package connectorledger
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -51,8 +52,8 @@ func TestInferenceScopeBindsLiveTaskAcrossRestartAndParentCompletion(t *testing.
 	}
 	late := attempt
 	late.TaskDigest = "sha256:" + strings.Repeat("8", 64)
-	if _, err := log.Begin(late); err == nil {
-		t.Fatal("completed task authorized another provider attempt")
+	if _, err := log.Begin(late); !errors.Is(err, ErrInferenceScopeDenied) {
+		t.Fatalf("completed task did not retain scope-denial boundary: %v", err)
 	}
 	terminal := attempt
 	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Responded, 200
