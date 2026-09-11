@@ -1,0 +1,64 @@
+diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
+index 9f77e63..464c916 100644
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -2560,7 +2560,9 @@ def set_runtime_main(
+     }
+     # Publish authoritative context before updating the locked mirrors.
+     token = _RUNTIME_MAIN_CONTEXT.set(runtime)
+-    _publish_runtime_main_mirrors(tuple(runtime[field] for field in _MAIN_RUNTIME_FIELDS))
++    # Steward task permits belong only to a client or context. A thread without
++    # that context must not recover another task's credential from legacy globals.
++    _publish_runtime_main_mirrors(tuple("" if field == "api_key" else runtime[field] for field in _MAIN_RUNTIME_FIELDS))
+     return token
+ 
+ 
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index 8bd6ed5..7064bf8 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -2092,6 +2092,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+         model_options: Optional[Dict[str, Any]] = None, route: Optional[Dict[str, Any]] = None,
+         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
+         room_dispatch: Optional[Dict[str, Any]] = None,
++        _steward_inference_permit: Optional[str] = None,
+         room_execution_policy: Optional[Dict[str, Any]] = None) -> Any:
+         """Create an AIAgent from the gateway runtime config + platform toolsets.
+         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
+@@ -2147,6 +2148,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+             "gateway_session_key": gateway_session_key}
+         if request_service_tier is not _REQUEST_OPTION_MISSING:
+             agent_kwargs["service_tier"] = request_service_tier
++        if _steward_inference_permit is not None:
++            # The bridge supplies native task authority, never a provider secret.
++            # Keep it per client and never send it to a configured external route.
++            if (runtime_kwargs.get("provider") != "custom"
++                    or str(runtime_kwargs.get("base_url", "")).rstrip("/") != "http://steward-relay:8080/v1"):
++                raise ValueError("Task-scoped inference requires the Steward relay route")
++            agent_kwargs["api_key"] = _steward_inference_permit
++            agent_kwargs["credential_pool"] = None
++            agent_kwargs["fallback_model"] = None
+         agent = AIAgent(**agent_kwargs)
+         route_source = (
+             "session_model_lock" if confirmed_runtime_lock
+@@ -3869,7 +3879,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
+ 
+             # Plugin-registered native handlers, wired before AppRunner.setup() freezes the router.
+             self._wire_plugin_handlers(self._app)
+-            self._runner = web.AppRunner(self._app)
++            self._runner = web.AppRunner(self._app, max_field_size=65536)
+             await self._runner.setup()
+             # Bind directly (a pre-probe raced the bind, misreporting TIME_WAIT as "in use").
+             # SO_REUSEADDR off on macOS (BSD can split traffic between two listeners).
+diff --git a/gateway/platforms/api_server_runs.py b/gateway/platforms/api_server_runs.py
+index a72a000..ffe917f 100644
+--- a/gateway/platforms/api_server_runs.py
++++ b/gateway/platforms/api_server_runs.py
+@@ -445,6 +445,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
+         self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
+         conversation_history,
+         agent_kwargs=dict(
++            _steward_inference_permit=request.headers.get("X-Steward-Inference-Permit"),
+             ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
+             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
+             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
