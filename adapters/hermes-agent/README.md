@@ -63,8 +63,9 @@ tests and source-patch checks alone do not qualify an image.
 The signed acceptance harness also requires two independent workspace tasks to
 overlap at the fixture provider, return their own distinct results and retain
 their original task-scoped receipts. A bounded two-party barrier rejects serial
-execution; ledger ordering independently requires both authorizations before
-either first response. Each fixture answer also waits for its own background
+execution; ledger ordering independently requires an interval with an authorized,
+unfinished inference request from each task, allowing earlier titles to finish.
+Each fixture answer also waits for its own background
 title request so fast completion cannot close authority before that auxiliary
 call starts. Missing titles fail explicitly, without changing the expected count.
 The full fixture expects seven tasks, seven session titles,

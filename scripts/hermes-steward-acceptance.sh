@@ -1760,8 +1760,9 @@ if provider_log != b"1\n" * expected_inference_attempts:
     raise SystemExit("hermes-steward-acceptance: provider attempts differ from the fixed seven-task fixture")
 inference_by_attempt = {}
 scoped_tasks = set()
-overlap_authorizations, overlap_terminals = {}, {}
-for sequence, (payload_type, receipt, _) in enumerate(receipts):
+overlap_active = {task: set() for task in overlap_tasks}
+overlap_observed = False
+for payload_type, receipt, _ in receipts:
     if payload_type.endswith(".v9+json"):
         raise SystemExit("hermes-steward-acceptance: runtime-wide accounting cannot prove task scope")
     if not payload_type.endswith(".v10+json"):
@@ -1798,12 +1799,11 @@ for sequence, (payload_type, receipt, _) in enumerate(receipts):
     scoped_tasks.add(event["inference_permit_digest"])
     if expected_task_digest in overlap_tasks:
         if event.get("phase") == "authorize":
-            overlap_authorizations.setdefault(expected_task_digest, sequence)
+            overlap_active[expected_task_digest].add(event["task_digest"])
         elif event.get("phase") == "terminal":
-            overlap_terminals.setdefault(expected_task_digest, sequence)
-if (len(overlap_tasks) != 2 or set(overlap_authorizations) != overlap_tasks
-    or set(overlap_terminals) != overlap_tasks
-    or max(overlap_authorizations.values()) >= min(overlap_terminals.values())):
+            overlap_active[expected_task_digest].discard(event["task_digest"])
+        overlap_observed = overlap_observed or all(overlap_active.values())
+if len(overlap_tasks) != 2 or not overlap_observed or any(overlap_active.values()):
     raise SystemExit("hermes-steward-acceptance: independent task inference did not overlap")
 if scoped_tasks != set(issue_by_permit):
     raise SystemExit("hermes-steward-acceptance: task-scoped inference does not cover every issued task")

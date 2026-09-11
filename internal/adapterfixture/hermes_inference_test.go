@@ -88,6 +88,14 @@ def run_case(name, mutate=None, provider_log=b"1\n" * 22, title_log=b"1\n" * 7):
 
 
 run_case("valid")
+
+def early_titles_then_overlap(items):
+    # Both titles can finish before later main calls overlap. Validate actual
+    # active intervals, not just the first request from each independent task.
+    items[31], items[32] = items[32], items[31]
+    items[35], items[36] = items[36], items[35]
+
+run_case("valid", early_titles_then_overlap)
 run_case("missing provider request", provider_log=b"1\n" * 21)
 run_case("unexpected provider retry", provider_log=b"1\n" * 23)
 run_case("malformed provider counter", provider_log=b"2\n" * 22)
