@@ -102,6 +102,46 @@ func TestInferenceReconfigurationPreservesAccountingUnlessExplicitlyDisabled(t *
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("invalid task scope replaced the original configuration")
 	}
+	for _, test := range []struct {
+		flags   []string
+		maximum int
+		reject  bool
+	}{
+		{[]string{"-max-calls-per-grant", "2"}, 0, true},
+		{[]string{"-require-attempt-receipts", "-max-calls-per-grant", "2"}, 2, false},
+		{nil, 2, false},
+		{[]string{"-max-calls-per-grant", "0"}, 2, true},
+		{[]string{"-max-calls-per-grant", "-1"}, 2, true},
+		{[]string{"-max-calls-per-grant", "1000001"}, 2, true},
+		{[]string{"-disallow-attempt-receipts"}, 2, true},
+		{[]string{"-disallow-call-limit=false"}, 2, true},
+		{[]string{"-disallow-call-limit", "-max-calls-per-grant", "3"}, 2, true},
+		{[]string{"-disallow-call-limit=false", "-max-calls-per-grant", "3"}, 2, true},
+		{[]string{"-max-calls-per-grant", "3"}, 3, false},
+		{nil, 3, false},
+		{[]string{"-disallow-call-limit"}, 0, false},
+		{nil, 0, false},
+	} {
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		arguments := append([]string{"gateway", "inference", "set", "-config", path, "-provider", "vllm"}, test.flags...)
+		err = run(arguments, &bytes.Buffer{}, &bytes.Buffer{})
+		if (err != nil) != test.reject {
+			t.Fatalf("flags=%v rejected=%v err=%v", test.flags, test.reject, err)
+		}
+		if test.reject {
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("rejected flags %v changed configuration", test.flags)
+			}
+		}
+		loaded, _, _, _, err := gateway.LoadConfig(path)
+		if err != nil || len(loaded.Routes) != 1 || loaded.Routes[0].MaxCallsPerGrant != test.maximum {
+			t.Fatalf("flags=%v routes=%+v err=%v", test.flags, loaded.Routes, err)
+		}
+	}
 	config.ConnectorReceiptTenantBudgets = nil
 	raw, err = json.Marshal(config)
 	if err != nil {

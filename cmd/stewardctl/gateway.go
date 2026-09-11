@@ -179,6 +179,8 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	protocol := flags.String("protocol", "", "openai or anthropic request protocol")
 	upstreamModel := flags.String("upstream-model", "", "exact provider model ID used for the signed agent alias")
 	maxTokensCap := flags.Int("max-tokens-cap", 0, "optional upper bound for an agent's top-level max_tokens")
+	maxCallsPerGrant := flags.Int("max-calls-per-grant", 0, "maximum durable inference attempts per grant; omission preserves the installed allowance")
+	disallowCallLimit := flags.Bool("disallow-call-limit", false, "explicitly remove the inference attempt allowance")
 	credentialFile := flags.String("credential-file", "", "owner-only provider credential file")
 	credentialMode := flags.String("credential-mode", "", "bearer, x-api-key, or api-key")
 	anthropicVersion := flags.String("anthropic-version", "", "fixed Anthropic API version")
@@ -207,6 +209,15 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	}
 	if action != "set" {
 		return fmt.Errorf("unsupported gateway inference action %q", action)
+	}
+	if flagWasVisited(flags, "max-calls-per-grant") && flagWasVisited(flags, "disallow-call-limit") {
+		return errors.New("-max-calls-per-grant and -disallow-call-limit conflict")
+	}
+	if flagWasVisited(flags, "max-calls-per-grant") && (*maxCallsPerGrant < 1 || *maxCallsPerGrant > 1_000_000) {
+		return errors.New("-max-calls-per-grant must be from 1 to 1000000; use -disallow-call-limit to remove the allowance")
+	}
+	if flagWasVisited(flags, "disallow-call-limit") && !*disallowCallLimit {
+		return errors.New("-disallow-call-limit must be true when supplied; omit it to preserve the allowance")
 	}
 	if flagWasVisited(flags, "require-attempt-receipts") && flagWasVisited(flags, "disallow-attempt-receipts") {
 		return errors.New("-require-attempt-receipts and -disallow-attempt-receipts conflict")
@@ -263,10 +274,14 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 		AnthropicVersion: *anthropicVersion, MaxConcurrent: *maxConcurrent,
 		RequireAttemptReceipts: *requireAttemptReceipts,
 		RequireTaskScope:       *requireTaskScope,
+		MaxCallsPerGrant:       *maxCallsPerGrant,
 	}
 	replaced := false
 	for index := range config.Routes {
 		if config.Routes[index].ID == route.ID {
+			if !flagWasVisited(flags, "max-calls-per-grant") && !*disallowCallLimit {
+				route.MaxCallsPerGrant = config.Routes[index].MaxCallsPerGrant
+			}
 			if !*requireAttemptReceipts && !*disallowAttemptReceipts {
 				route.RequireAttemptReceipts = config.Routes[index].RequireAttemptReceipts
 			}
