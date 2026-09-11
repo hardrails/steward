@@ -72,8 +72,11 @@ The fixture route has four concurrent slots for the two main calls and their
 two background titles. Production route limits are unchanged. Gateway HTTP tests
 verify that excess calls are rejected before reaching the provider or ledger.
 The full fixture expects seven tasks, seven session titles,
-22 inference calls and 67 signed gateway records. Fresh qualification of this
-expanded fixture is pending. The workspace profile disables native delegation;
+22 inference calls and 67 signed gateway records. The retained
+[integration evidence](../../docs/reference/evidence/hermes-integration.json)
+records successful execution of that expanded fixture; release checks bind it
+to the exact adapter inputs. Independent release review remains required.
+The workspace profile disables native delegation;
 the research profile's delegated model paths still need separate runtime proof.
 
 As container PID 1, the entrypoint reaps orphaned tool processes while preserving

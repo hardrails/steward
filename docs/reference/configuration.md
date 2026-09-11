@@ -675,8 +675,12 @@ as its task-specific inference Bearer credential, including child and background
 clients. It must not replace process-global credentials. The bundled Hermes patch
 carries this header into each run's model client, accepts only the configured
 Steward relay route, and removes task credentials from legacy global mirrors.
-The transport is implemented; fresh native qualification and independent review
-remain pending. This implementation status does not qualify an installed runtime.
+The transport has successful native seven-task qualification in the retained
+[integration evidence](evidence/hermes-integration.json), including overlapping
+tasks and background titles. Qualification applies only to its exact source and
+runtime inputs; independent release review remains required. The research
+profile's delegated model paths need separate runtime proof. These records do
+not qualify an installed runtime with different inputs.
 
 The inference gateway accepts only a previously admitted, live lifecycle task
 whose permit and identity match the active runtime grant and route policy.
