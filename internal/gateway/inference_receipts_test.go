@@ -184,9 +184,10 @@ func TestInferenceAttemptSurvivesLostProviderResponseWithoutHiddenRetry(t *testi
 		// A caller can explicitly make another request, but gets no generic 5xx
 		// retry signal and no claim that its earlier attempt was free or replayed.
 		response := rig.call("/v1/responses", `{"model":"default","input":"hello"}`)
-		if response.Code != http.StatusConflict || calls.Load() != attempt ||
+		if response.Code != http.StatusUnprocessableEntity || calls.Load() != attempt ||
 			!strings.Contains(response.Body.String(), `"error":"inference_attempt_unknown"`) ||
 			!strings.Contains(response.Body.String(), "do not retry automatically") ||
+			response.Header().Get("X-Should-Retry") != "false" ||
 			response.Header().Get("Retry-After") != "" {
 			t.Fatalf("status=%d attempts=%d body=%s", response.Code, calls.Load(), response.Body.String())
 		}

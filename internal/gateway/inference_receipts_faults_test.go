@@ -30,6 +30,7 @@ func TestInferenceTerminalWriteFailureRetainsAttemptAndRefusesAnotherCall(t *tes
 	for range 2 {
 		response := rig.call("/v1/chat/completions", `{"model":"default"}`)
 		if response.Code != 503 || !strings.Contains(response.Body.String(), "inference_accounting_unavailable") ||
+			response.Header().Get("X-Should-Retry") != "false" ||
 			strings.Contains(response.Body.String(), "provider-output") {
 			t.Fatalf("response=%d %s", response.Code, response.Body.String())
 		}

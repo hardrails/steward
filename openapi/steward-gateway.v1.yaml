@@ -44,7 +44,8 @@ info:
     response headers or uncertainty, not generation completion or provider
     billing. That proxy returns HTTP 503 inference_accounting_unavailable when
     required accounting fails, including after an attempted provider call.
-    A transport failure with retained accounting returns HTTP 409
+    Both accounting errors set X-Should-Retry to false for SDKs that honor it.
+    A transport failure with retained accounting returns HTTP 422
     inference_attempt_unknown, not a generic retryable upstream error: the
     provider may have incurred usage. Do not retry automatically; inspect the
     original attempt and provider state before authorizing another request.
