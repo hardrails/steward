@@ -668,9 +668,11 @@ The gateway forwards the original admitted task permit to the root service
 operation in `X-Steward-Inference-Permit`. It does not forward that header to
 `hermes.stop`. A compatible runtime carries the same canonical base64url envelope
 as its task-specific inference Bearer credential, including child and background
-clients. It must not replace process-global credentials. This source implements
-the native gateway contract; the bundled Hermes adapter does not yet implement
-that transport, so enabling the setting there currently refuses inference.
+clients. It must not replace process-global credentials. The bundled Hermes patch
+carries this header into each run's model client, accepts only the configured
+Steward relay route, and removes task credentials from legacy global mirrors.
+The transport is implemented; fresh native qualification and independent review
+remain pending. This implementation status does not qualify an installed runtime.
 
 The inference gateway accepts only a previously admitted, live lifecycle task
 whose permit and identity match the active runtime grant and route policy.

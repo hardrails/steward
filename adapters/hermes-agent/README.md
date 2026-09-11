@@ -40,8 +40,25 @@ explicit tool profiles. `research` exposes fixed search, extraction, and finding
 commands. `developer` exposes a fixed client for separately isolated Codex and
 Claude Code workers. Both profile skills are signed and verified at startup. They
 know only logical Steward connector names; provider credentials and upstream
-origins never enter Hermes state. The adapter does not change Hermes core source
-or seed workspace content into the image.
+origins never enter Hermes state. The adapter does not seed workspace content
+into the image.
+
+`task-scope.patch` is an explicit delta to the pinned Hermes source. The builder
+verifies the upstream inputs, applies the patch only to its exported source tree,
+and binds the patch through the adapter file-set digest. The original upstream
+revision and archive remain provenance inputs; the resulting image is a patched
+adapter, not an unchanged upstream build. Package and activation inventories
+include the patch.
+
+The run bridge carries one bounded canonical `X-Steward-Inference-Permit` header
+to the private Hermes API. The patched API passes it to the run's model client
+after checking that the selected route is the Steward relay. It disables the
+client's credential pool and fallback chain for that run. Main-runtime snapshots
+and default child credential inheritance remain Hermes-owned; legacy global
+mirrors no longer retain API keys. Requests without scope retain compatibility
+behavior, but cannot pass a gateway route that requires task scope. Native
+qualification must prove the patched model paths before deployment; local bridge
+tests and source-patch checks alone do not qualify an image.
 
 As container PID 1, the entrypoint reaps orphaned tool processes while preserving
 the gateway's exit status. Container SIGTERM/SIGINT starts one ten-second gateway
