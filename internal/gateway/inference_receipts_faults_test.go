@@ -14,13 +14,43 @@ import (
 
 type closingInferenceReceiptLog struct{ connectorReceiptLog }
 
+func TestInferenceExtensionStatusRetainsTerminalWithoutAutomaticRetry(t *testing.T) {
+	for _, status := range []int{600, 700, 999} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var calls atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("provider-secret-response"))
+			}))
+			defer upstream.Close()
+			rig := newInferenceReceiptRig(t, upstream)
+			response := rig.call("/v1/chat/completions", `{"model":"default"}`)
+			if response.Code != 422 || response.Header().Get("X-Should-Retry") != "false" ||
+				!strings.Contains(response.Body.String(), "inference_attempt_unknown") ||
+				strings.Contains(response.Body.String(), "provider-secret-response") || calls.Load() != 1 {
+				t.Fatalf("response=%d %s calls=%d", response.Code, response.Body.String(), calls.Load())
+			}
+			records := rig.records(t)
+			if len(records) != 2 || len(rig.ledger.Pending()) != 0 || rig.ledger.Failed() {
+				t.Fatal("extension status orphaned a healthy ledger authorization")
+			}
+			terminal := records[1].Receipt.Event
+			if terminal.Phase != connectorledger.Terminal || terminal.Outcome != connectorledger.Failed ||
+				terminal.HTTPStatus != 0 || terminal.ErrorCode != fmt.Sprintf("upstream_http_status_%d", status) {
+				t.Fatalf("provider response boundary lost: %#v", terminal)
+			}
+		})
+	}
+}
+
 func (log closingInferenceReceiptLog) Finish(event connectorledger.Event) (connectorledger.Head, error) {
 	_ = log.connectorReceiptLog.Close()
 	return log.connectorReceiptLog.Finish(event)
 }
 
 func TestInferenceTerminalWriteFailureRetainsAttemptAndRefusesAnotherCall(t *testing.T) {
-	for _, status := range []int{0, 200, 429, 503} {
+	for _, status := range []int{0, 200, 429, 503, 600, 700, 999} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			testInferenceTerminalWriteFailure(t, status)
 		})

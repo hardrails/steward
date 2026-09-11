@@ -635,6 +635,12 @@ If the provider connection fails with accounting retained, HTTP 422
 may have incurred usage even without a response. Inspect the original attempt and
 provider state before authorizing another request. A new request is another
 accounted attempt, not an idempotent replay of the first.
+Nonstandard provider statuses from 600 through 999 also return this non-retry
+error. Their terminal receipt records `failed` and the bounded code
+`upstream_http_status_NNN`, preserving the observed status without assigning it
+to the ledger's standard-status field. The authorization does not remain pending
+on a healthy writer. If that terminal append fails, the error still reports the
+observed nonstandard status and original attempt identity.
 All three errors set `X-Should-Retry: false` for SDKs that honor that header.
 Post-dispatch failures use 422 because OpenAI-compatible clients can retry 409
 and 5xx responses by default.
