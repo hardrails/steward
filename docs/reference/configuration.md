@@ -612,6 +612,12 @@ budget. The grant must include runtime evidence identity. Route policy version
 12 binds the requirement and receipt capacity, so retained grants cannot silently
 lose accounting on reload.
 
+For CLI reconfiguration, `gateway inference set -require-attempt-receipts`
+enables accounting. Omission preserves the installed value; disabling it requires
+`-disallow-attempt-receipts`. Supplying both options or setting either option to
+`false` is rejected without rewriting the configuration. To keep the current
+setting, omit both options. Shell completion exposes both choices.
+
 Version-9 `inference_attempt` receipts retain a gateway-minted attempt identity,
 tenant/runtime/grant/generation, route policy, bounded operation name and request
 byte length. They contain no credential, request body or agent-supplied task ID.
