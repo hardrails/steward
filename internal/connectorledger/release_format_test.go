@@ -9,7 +9,7 @@ import (
 
 func TestReleaseChecksMatchConnectorReceiptWriters(t *testing.T) {
 	declaration := regexp.MustCompile(`"connector_receipt_log": \{"read_min": [0-9]+, "read_max": [0-9]+, "write": [0-9]+\}`)
-	want := `"connector_receipt_log": {"read_min": 1, "read_max": 8, "write": 8}`
+	want := `"connector_receipt_log": {"read_min": 1, "read_max": 9, "write": 9}`
 	for _, path := range []string{
 		"scripts/write-release-manifest.sh",
 		"scripts/install-node.sh",
