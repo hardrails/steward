@@ -185,6 +185,7 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	maxConcurrent := flags.Int("max-concurrent", 8, "maximum concurrent requests")
 	requireAttemptReceipts := flags.Bool("require-attempt-receipts", false, "require signed inference attempt accounting; omission preserves the existing route setting")
 	requireTaskScope := flags.Bool("require-task-scope", false, "require the original admitted task permit on inference; omission preserves the existing route setting")
+	disallowTaskScope := flags.Bool("disallow-task-scope", false, "explicitly disable task-bound inference authorization")
 	disallowAttemptReceipts := flags.Bool("disallow-attempt-receipts", false, "explicitly disable signed inference attempt accounting")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
@@ -215,6 +216,15 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 	}
 	if flagWasVisited(flags, "disallow-attempt-receipts") && !*disallowAttemptReceipts {
 		return errors.New("-disallow-attempt-receipts must be true when supplied; omit it to preserve inference accounting")
+	}
+	if flagWasVisited(flags, "require-task-scope") && flagWasVisited(flags, "disallow-task-scope") {
+		return errors.New("-require-task-scope and -disallow-task-scope conflict")
+	}
+	if flagWasVisited(flags, "require-task-scope") && !*requireTaskScope {
+		return errors.New("use -disallow-task-scope to disable task-bound inference authorization")
+	}
+	if flagWasVisited(flags, "disallow-task-scope") && !*disallowTaskScope {
+		return errors.New("-disallow-task-scope must be true when supplied; omit it to preserve task-bound inference authorization")
 	}
 	if *provider != "" && *provider != "compatible" {
 		preset, ok := inferenceProviderPresets[*provider]
@@ -260,7 +270,7 @@ func gatewayInferenceCommand(arguments []string, stdout io.Writer) error {
 			if !*requireAttemptReceipts && !*disallowAttemptReceipts {
 				route.RequireAttemptReceipts = config.Routes[index].RequireAttemptReceipts
 			}
-			if !flagWasVisited(flags, "require-task-scope") {
+			if !*requireTaskScope && !*disallowTaskScope {
 				route.RequireTaskScope = config.Routes[index].RequireTaskScope
 			}
 			config.Routes[index], replaced = route, true
