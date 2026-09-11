@@ -36,10 +36,17 @@ calls with the explicit effect mode and exact operation-policy digest. Format 6
 adds the canonical signer set and threshold for a multi-party authorized call.
 Format 7 binds a context-locked call's response-history head and terminal response
 digest. Format 8 links a native stop to its original task and target run. It does
-not weaken unique run ownership for ordinary work. A single ledger may contain
-all eight schemas in one signed hash chain.
-Current release manifests declare `connector_receipt_log` readers 1 through 8 and
-writer 8. Configuring `hermes.stop` requires reader 8 before its first receipt.
+not weaken unique run ownership for ordinary work. Format 9 records inference
+attempts separately from connector effects and task dispatch: authorization is
+retained before the provider call, followed by response or uncertain-outcome
+metadata. It is not token usage, billing or completion evidence. A single ledger
+may contain all nine schemas in one signed hash chain.
+Current release manifests declare `connector_receipt_log` readers 1 through 9 and
+writer 9. Configuring `hermes.stop` requires reader 8 before its first receipt.
+Enabling `require_attempt_receipts` on an inference route requires reader 9
+prospectively, even before a provider call. Disabling the setting does not make
+existing format-9 records readable by an older release. Never delete or rewrite
+those records to bypass the rollback check.
 Older releases cannot read linked-stop evidence; never delete or rewrite it to
 make a downgrade pass. The inspector reports the
 highest format present. It reports format 2 when action authorities are configured
