@@ -73,6 +73,11 @@ func InspectConnectorReceiptFormat(config Config, states ...StateSummary) (Conne
 	if config.hasInferenceAttemptReceipts() {
 		requiredFormat = 9
 	}
+	for _, route := range config.Routes {
+		if route.RequireTaskScope {
+			requiredFormat = 10
+		}
+	}
 	key, err := config.connectorReceiptPrivateKey()
 	if err != nil {
 		return ConnectorReceiptFormatSummary{}, err
@@ -94,8 +99,12 @@ func InspectConnectorReceiptFormat(config Config, states ...StateSummary) (Conne
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV10:
+				formatVersion = 10
 			case connectorledger.SchemaV9:
-				formatVersion = 9
+				if formatVersion < 9 {
+					formatVersion = 9
+				}
 			case connectorledger.SchemaV8:
 				if formatVersion < 8 {
 					formatVersion = 8

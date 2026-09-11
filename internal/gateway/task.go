@@ -122,7 +122,7 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 		return
 	}
 
-	response, responseBody, errorCode := s.dispatchServiceTask(incoming.Context(), grant, operation, body)
+	response, responseBody, errorCode := s.dispatchServiceTask(incoming.Context(), grant, operation, body, permitValues[0])
 	if errorCode != "" {
 		terminal := event
 		terminal.Phase, terminal.Outcome, terminal.ErrorCode = connectorledger.Terminal, connectorledger.Failed, errorCode
@@ -521,7 +521,7 @@ func (s *Server) recordServiceTaskDispatch(taskDigest string, dispatch connector
 	return false, nil
 }
 
-func (s *Server) dispatchServiceTask(ctx context.Context, grant Grant, operation ServiceOperation, body []byte) (*http.Response, []byte, string) {
+func (s *Server) dispatchServiceTask(ctx context.Context, grant Grant, operation ServiceOperation, body []byte, permit string) (*http.Response, []byte, string) {
 	base, client, transport, err := s.serviceUpstream(grant.ServiceURL)
 	if err != nil {
 		return nil, nil, "outcome_unknown"
@@ -541,6 +541,12 @@ func (s *Server) dispatchServiceTask(ctx context.Context, grant Grant, operation
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("User-Agent", "")
+	s.mu.Lock()
+	scoped := s.routes[grant.RouteID].RequireTaskScope
+	s.mu.Unlock()
+	if scoped && operation.ID != "hermes.stop" {
+		request.Header.Set(inferencePermitHeader, permit)
+	}
 	request.ContentLength = int64(len(body))
 	response, err := client.Do(request)
 	if err != nil {

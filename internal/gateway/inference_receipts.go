@@ -34,6 +34,7 @@ type inferenceAttemptTransport struct {
 	grant       Grant
 	routePolicy string
 	operation   string
+	scope       connectorledger.Event
 }
 
 func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -57,6 +58,8 @@ func (transport inferenceAttemptTransport) RoundTrip(request *http.Request) (*ht
 		PolicyDigest: grant.PolicyDigest, RoutePolicyDigest: transport.routePolicy, Generation: grant.Generation,
 		GrantID: grant.GrantID, OperationID: transport.operation,
 		TaskDigest: "sha256:" + hex.EncodeToString(nonce[:]), RequestBytes: request.ContentLength,
+		InferenceTaskDigest: transport.scope.TaskDigest, InferencePermitDigest: transport.scope.PermitDigest,
+		InferenceRequestDigest: transport.scope.RequestDigest,
 	}
 	if _, err := transport.ledger.Begin(event); err != nil {
 		return nil, errInferenceAccountingUnavailable
