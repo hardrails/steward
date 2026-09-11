@@ -68,6 +68,7 @@ release_files=(
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
 	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/task-scope.patch
 	integration/adapters/hermes-agent/fixture_connector.py
 	integration/adapters/hermes-agent/fixture_mcp.py
 	integration/adapters/hermes-agent/fixture_model.py

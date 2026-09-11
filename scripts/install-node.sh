@@ -893,6 +893,7 @@ release_files=(
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
 	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/task-scope.patch
 	integration/adapters/hermes-agent/fixture_connector.py
 	integration/adapters/hermes-agent/fixture_mcp.py
 	integration/adapters/hermes-agent/fixture_model.py
@@ -1227,7 +1228,7 @@ for file in agents/hermes/agent.json agents/developer/agent.json agents/research
 	install -o root -g root -m 0644 "$root/examples/$file" "$incoming/integration/examples/$file"
 done
 install -o root -g root -m 0644 "$root/schemas/agent.cue" "$incoming/integration/schemas/agent.cue"
-for file in Dockerfile README.md adapter.json entrypoint.py fixture_connector.py fixture_mcp.py \
+for file in Dockerfile README.md adapter.json entrypoint.py task-scope.patch fixture_connector.py fixture_mcp.py \
 	fixture_model.py fixture_secret_scan.py license-inventory.json source-inputs.sha256; do
 	install -o root -g root -m 0644 "$root/adapters/hermes-agent/$file" \
 		"$incoming/integration/adapters/hermes-agent/$file"

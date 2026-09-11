@@ -34,6 +34,7 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh \
 	adapters/hermes-agent/Dockerfile adapters/hermes-agent/README.md \
 	adapters/hermes-agent/adapter.json adapters/hermes-agent/entrypoint.py \
+	adapters/hermes-agent/task-scope.patch \
 	adapters/hermes-agent/fixture_connector.py adapters/hermes-agent/fixture_mcp.py \
 	adapters/hermes-agent/fixture_model.py adapters/hermes-agent/fixture_secret_scan.py \
 	adapters/hermes-agent/fixtures/connector-skill/SKILL.md \
