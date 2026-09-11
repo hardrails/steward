@@ -16,6 +16,8 @@ from typing import Any
 
 MAX_BODY = 1 << 20
 SCOPE_OVERLAP = threading.Barrier(2, timeout=30)
+SCOPE_TITLES = {label: threading.Event() for label in ("a", "b")}
+SCOPE_TITLE_TIMEOUT = 30
 NONCE = "steward-hermes-phase1"
 DIGEST = hashlib.sha256(NONCE.encode()).hexdigest()
 STOP_FIXTURE_COMMAND = "python3 /opt/steward/fixture_model.py --stop-fixture"
@@ -299,6 +301,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             })
+            turn = current_turn(messages)
+            opening = str(turn[0].get("content", "")) if turn else ""
+            if re.fullmatch(r"STEWARD_SCOPE_OVERLAP [ab]", opening):
+                SCOPE_TITLES[opening[-1]].set()
             return
         turn = current_turn(messages)
         last = turn[-1] if turn else {}
@@ -383,6 +389,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 SCOPE_OVERLAP.wait()
             except threading.BrokenBarrierError:
                 self._json(422, {"error": {"code": "scope_overlap_missing", "message": "both scoped tasks must overlap"}})
+                return
+            # Titling runs in a background thread. Keep this deterministic test
+            # task live until its own auxiliary request arrives; otherwise a
+            # fast answer can close authority before the title is scheduled.
+            if not SCOPE_TITLES[last_text[-1]].wait(SCOPE_TITLE_TIMEOUT):
+                self._json(422, {"error": {"code": "scope_title_missing", "message": "the task title must arrive before completion"}})
                 return
             message = {"role": "assistant", "content": "scope-overlap-" + last_text[-1]}
             finish = "stop"

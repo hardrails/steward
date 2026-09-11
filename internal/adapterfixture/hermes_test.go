@@ -1631,11 +1631,35 @@ try:
         assert json.loads(message["content"]) == {"title": "Steward acceptance fixture"}
 
     from concurrent.futures import ThreadPoolExecutor
+    overlapped = threading.Event()
+    module.SCOPE_OVERLAP = threading.Barrier(2, timeout=1, action=overlapped.set)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(complete, user("STEWARD_SCOPE_OVERLAP a"), False)
         second = pool.submit(complete, user("STEWARD_SCOPE_OVERLAP b"), False)
+        assert overlapped.wait(1)
+        assert not first.done() and not second.done()
+        complete(user("STEWARD_SCOPE_OVERLAP a"), False, response_format={
+            "type": "json_schema", "json_schema": {"name": "session_title"},
+        })
         assert json.loads(first.result()[1])["choices"][0]["message"]["content"] == "scope-overlap-a"
+        assert not second.done(), "another task's title released this task"
+        complete(user("STEWARD_SCOPE_OVERLAP b"), False, response_format={
+            "type": "json_schema", "json_schema": {"name": "session_title"},
+        })
         assert json.loads(second.result()[1])["choices"][0]["message"]["content"] == "scope-overlap-b"
+    module.SCOPE_OVERLAP = threading.Barrier(2, timeout=1)
+    module.SCOPE_TITLES = {label: threading.Event() for label in ("a", "b")}
+    module.SCOPE_TITLE_TIMEOUT = 0.1
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = [pool.submit(complete, user("STEWARD_SCOPE_OVERLAP " + label), False) for label in ("a", "b")]
+        for result in pending:
+            try:
+                result.result()
+            except urllib.error.HTTPError as error:
+                assert error.code == 422
+                assert json.loads(error.read())["error"]["code"] == "scope_title_missing"
+            else:
+                raise AssertionError("overlap fixture completed without its title")
     module.SCOPE_OVERLAP = threading.Barrier(2, timeout=0.1)
     try:
         complete(user("STEWARD_SCOPE_OVERLAP a"), False)
