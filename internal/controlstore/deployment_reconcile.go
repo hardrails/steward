@@ -384,7 +384,7 @@ func (store *Store) EnqueueDeploymentCommand(
 	deployment.UpdatedAt = canonicalTimestamp(now)
 	deployment.Phase = deploymentAggregatePhase(deployment)
 	mutations := []mutation{deploymentMutation(deployment), commandMutation(command)}
-	if err := store.applyMutationsLocked(mutations...); err != nil {
+	if err := store.applyCommandMutationsLocked(statement.TenantID, statement.NodeID, now, mutations...); err != nil {
 		if !errors.Is(err, ErrCapacityExceeded) {
 			return Deployment{}, Command{}, false, err
 		}
@@ -396,7 +396,7 @@ func (store *Store) EnqueueDeploymentCommand(
 		// only in the same WAL transaction that advances the cursor and retains
 		// the successor; never delete evidence ahead of successful advancement.
 		mutations = append([]mutation{{Kind: mutationCommandDelete, CommandRef: previous}}, mutations...)
-		if err := store.applyMutationsLocked(mutations...); err != nil {
+		if err := store.applyCommandMutationsLocked(statement.TenantID, statement.NodeID, now, mutations...); err != nil {
 			return Deployment{}, Command{}, false, err
 		}
 	}

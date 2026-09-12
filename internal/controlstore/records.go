@@ -753,27 +753,45 @@ func (store *Store) SubmitCommand(actor controlauth.Identity, tenantID, nodeID s
 	if _, err := deliveryFor(command, 1); err != nil {
 		return Command{}, false, invalidError("command cannot fit one Executor delivery", err)
 	}
-	if err := store.applyMutationsLocked(commandMutation(command)); err == nil {
-		return cloneCommand(command), true, nil
-	} else if !errors.Is(err, ErrCapacityExceeded) {
+	if err := store.applyCommandMutationsLocked(tenantID, nodeID, now, commandMutation(command)); err != nil {
 		return Command{}, false, err
 	}
+	return cloneCommand(command), true, nil
+}
+
+// applyCommandMutationsLocked reclaims only eligible terminal history and commits
+// those deletions with the new command and any associated deployment cursor. A
+// rejected transaction leaves both history and cursor unchanged.
+func (store *Store) applyCommandMutationsLocked(tenantID, nodeID string, now time.Time, changes ...mutation) error {
+	if err := store.applyMutationsLocked(changes...); !errors.Is(err, ErrCapacityExceeded) {
+		return err
+	}
 	candidates := store.prunableCommandsLocked(tenantID, nodeID, now)
-	mutations := make([]mutation, 0, minInt(len(candidates)+1, maxMutationsPerRecord))
-	for index, candidate := range candidates {
-		if index >= maxMutationsPerRecord-1 {
+	mutations := make([]mutation, 0, minInt(len(candidates)+len(changes), maxMutationsPerRecord))
+	for _, candidate := range candidates {
+		if len(mutations)+len(changes) >= maxMutationsPerRecord {
 			break
 		}
 		reference := commandReference{TenantID: candidate.TenantID, NodeID: candidate.NodeID, ID: candidate.ID}
+		alreadyDeleted := false
+		for _, change := range changes {
+			if change.Kind == mutationCommandDelete && change.CommandRef != nil && *change.CommandRef == reference {
+				alreadyDeleted = true
+				break
+			}
+		}
+		if alreadyDeleted {
+			continue
+		}
 		mutations = append(mutations, mutation{Kind: mutationCommandDelete, CommandRef: &reference})
-		attempt := append(append([]mutation(nil), mutations...), commandMutation(command))
+		attempt := append(append([]mutation(nil), mutations...), changes...)
 		if err := store.applyMutationsLocked(attempt...); err == nil {
-			return cloneCommand(command), true, nil
+			return nil
 		} else if !errors.Is(err, ErrCapacityExceeded) {
-			return Command{}, false, err
+			return err
 		}
 	}
-	return Command{}, false, ErrCapacityExceeded
+	return ErrCapacityExceeded
 }
 
 func (store *Store) GetCommand(actor controlauth.Identity, tenantID, nodeID, commandID string) (Command, bool, error) {
