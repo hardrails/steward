@@ -259,7 +259,8 @@ func (store *Store) EnqueueDeploymentCommand(
 		return Deployment{}, Command{}, false, ErrConflict
 	}
 	if instance.Phase == DeploymentInstanceFailed &&
-		!store.rejectedRenewalCleanupAllowedLocked(deployment, instance, statement) {
+		!store.rejectedRenewalCleanupAllowedLocked(deployment, instance, statement) &&
+		!store.failedStartCleanupAllowedLocked(deployment, instance, statement) {
 		return Deployment{}, Command{}, false, ErrDeploymentCleanupIneligible
 	}
 	node, found := store.current.nodes[statement.NodeID]
@@ -809,6 +810,32 @@ func (store *Store) rejectedRenewalCleanupAllowedLocked(
 		command.SignedClaimGeneration == statement.ClaimGeneration
 }
 
+// A terminal start failure may have left a running workload. An explicit removal
+// can only narrow that authority: issue a fresh stop for the exact admitted
+// identity, then require observed stop and destroy success. Never retry start,
+// skip stop, discard the uncertain predecessor, or extend this to failed cleanup.
+func (store *Store) failedStartCleanupAllowedLocked(
+	deployment Deployment, instance DeploymentInstance, statement admission.CommandStatement,
+) bool {
+	if deployment.DesiredState != DeploymentAbsent || instance.CommandOperation != "start" ||
+		statement.Kind != "stop" || instance.CommandID == "" || instance.Admission == nil ||
+		instance.Admission.RuntimeRef == "" || statement.RuntimeRef == "" ||
+		instance.Admission.Generation != instance.Generation {
+		return false
+	}
+	command, found := store.current.commands[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)]
+	physicalRuntime, runtimeErr := commandExecutorRuntimeRef(command)
+	if !found || command.CommandKind != "start" || command.State != CommandTerminal || command.Terminal == nil ||
+		runtimeErr != nil || physicalRuntime != instance.Admission.RuntimeRef ||
+		command.SignedRuntimeRef != statement.RuntimeRef ||
+		command.SignedInstanceGeneration != instance.Generation || command.SignedClaimGeneration != statement.ClaimGeneration {
+		return false
+	}
+	status := command.Terminal.Report.Status
+	return status == controlprotocol.ExecutorStatusRejected || status == controlprotocol.ExecutorStatusFailed ||
+		status == controlprotocol.ExecutorStatusOutcomeUnknown
+}
+
 // Cleanup must be able to advance even when its predecessor occupies the last
 // command slot. This is not general pruning: only a proven rejected renewal or
 // an observed successful stop/destroy can be replaced by its authorized cleanup step.
@@ -864,7 +891,7 @@ func deploymentTransitionAllowed(deployment Deployment, instance DeploymentInsta
 		return false
 	}
 	if phase == DeploymentInstanceFailed {
-		return instance.CommandOperation == "renew" && operation == "stop"
+		return (instance.CommandOperation == "renew" || instance.CommandOperation == "start") && operation == "stop"
 	}
 	return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
 		phase == DeploymentInstanceDestroying && operation == "destroy" ||
