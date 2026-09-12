@@ -731,9 +731,12 @@ installed_os = subprocess.run(
 )
 if dict(line.split("=", 1) for line in installed_os.stdout.splitlines()) != expected_os:
     raise SystemExit("installed OS security packages differ from the reviewed updates")
-if any(pathlib.Path("/tmp", "steward-" + name + ".deb").exists()
+# BEGIN HERMES_SECURITY_DOWNLOAD_CLEANUP
+# /opt is the immutable image filesystem, not hidden by runtime tmpfs mounts.
+if any(pathlib.Path("/opt", "steward-" + name + ".deb").exists()
        for name in ("gzip", "pcre2", "sqlite3", "perl")):
     raise SystemExit("OS security downloads remain in the runtime filesystem")
+# END HERMES_SECURITY_DOWNLOAD_CLEANUP
 
 root = pathlib.Path("/opt/hermes")
 for name in ("hermes_cli", "run_agent", "gateway"):

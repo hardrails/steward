@@ -776,8 +776,8 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	// Fixed distribution updates and removal of the unused installer are allowed
 	// before Hermes source is copied. Project hooks still run only inside gVisor.
 	const removePip = `RUN ["/usr/local/bin/python3", "-I", "-m", "pip", "uninstall", "--yes", "pip"]`
-	const installOS = `RUN ["dpkg", "--install", "/tmp/steward-gzip.deb", "/tmp/steward-pcre2.deb", "/tmp/steward-sqlite3.deb", "/tmp/steward-perl.deb"]`
-	const removeOS = `RUN ["rm", "/tmp/steward-gzip.deb", "/tmp/steward-pcre2.deb", "/tmp/steward-sqlite3.deb", "/tmp/steward-perl.deb"]`
+	const installOS = `RUN ["dpkg", "--install", "/opt/steward-gzip.deb", "/opt/steward-pcre2.deb", "/opt/steward-sqlite3.deb", "/opt/steward-perl.deb"]`
+	const removeOS = `RUN ["rm", "/opt/steward-gzip.deb", "/opt/steward-pcre2.deb", "/opt/steward-sqlite3.deb", "/opt/steward-perl.deb"]`
 	firstCopy := strings.Index(dockerfile, "COPY ")
 	for _, command := range []string{installOS, removeOS, removePip} {
 		if strings.Count(dockerfile, command) != 1 || strings.Index(dockerfile, command) >= firstCopy {
@@ -793,10 +793,10 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 		}
 	}
 	securityPackages := []string{
-		"74cf12212beee4ab8d473bdc0107abf9e8cef737492198e2f4944a19f142b0ac https://deb.debian.org/debian/pool/main/g/gzip/gzip_1.13-1+deb13u1_amd64.deb /tmp/steward-gzip.deb",
-		"1252b96a5bc44bb5db982bef8eb18e54f5047cede2aff641bce4f8e1edb91c3e https://deb.debian.org/debian/pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_amd64.deb /tmp/steward-pcre2.deb",
-		"0a459adaffd901109f7811ab65f58e7a957b4907d05539cf3d1184efdcde0468 https://deb.debian.org/debian/pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_amd64.deb /tmp/steward-sqlite3.deb",
-		"b795464137a0f4d443fc9284f4b93e883fb83883cb533adf300ac660807a352a https://deb.debian.org/debian/pool/main/p/perl/perl-base_5.40.1-6+deb13u1_amd64.deb /tmp/steward-perl.deb",
+		"74cf12212beee4ab8d473bdc0107abf9e8cef737492198e2f4944a19f142b0ac https://deb.debian.org/debian/pool/main/g/gzip/gzip_1.13-1+deb13u1_amd64.deb /opt/steward-gzip.deb",
+		"1252b96a5bc44bb5db982bef8eb18e54f5047cede2aff641bce4f8e1edb91c3e https://deb.debian.org/debian/pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_amd64.deb /opt/steward-pcre2.deb",
+		"0a459adaffd901109f7811ab65f58e7a957b4907d05539cf3d1184efdcde0468 https://deb.debian.org/debian/pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_amd64.deb /opt/steward-sqlite3.deb",
+		"b795464137a0f4d443fc9284f4b93e883fb83883cb533adf300ac660807a352a https://deb.debian.org/debian/pool/main/p/perl/perl-base_5.40.1-6+deb13u1_amd64.deb /opt/steward-perl.deb",
 	}
 	if strings.Count(dockerfile, "\nADD ") != len(securityPackages) {
 		t.Fatal("Dockerfile must fetch only the four reviewed OS updates")
