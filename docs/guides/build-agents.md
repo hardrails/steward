@@ -322,7 +322,18 @@ then request removal. Control retains the rejection and issues a new signed
 `stop`, followed by `destroy` only after a successful stop observation. Removal
 still requires confirmed absence. It never retries renewal or start, changes
 the instance or state lineage, or treats a failed/unknown result as a rejection.
-Missing command history and failed cleanup commands remain fenced for recovery.
+An explicitly removed deployment may also stop an exactly identified admitted
+instance after a terminal rejected, failed, or outcome-unknown **start**. This
+does not resolve the start's uncertainty or retry it: the controller issues a new
+signed stop, then requires observed successful stop and destroy before declaring
+removal. Current unexpired delegation, matching runtime/generation/claim and
+retained terminal history are required. Failed and outcome-unknown starts remain
+retained even after cleanup, and cannot be evicted to make command capacity
+available. A conclusive rejected start is protected until the cleanup stop and
+advanced cursor are durably stored, then follows ordinary terminal retention;
+it is not reclaimed early by the capacity-neutral cleanup exception. A full
+store with no safely reclaimable history still requires operator attention. Missing command history,
+uncertain renewals and failed cleanup commands remain fenced for recovery.
 At a full command-store bound, the consumed rejected renewal may be reclaimed
 atomically with its successor stop, and an observed successful stop with its
 successor destroy. A snapshot fork's observed successful destroy can likewise be
