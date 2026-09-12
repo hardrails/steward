@@ -1292,7 +1292,7 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 
 // deploymentCommandPruningCursors retains every command whose terminal
 // result has not yet been incorporated into its deployment cursor, and the
-// failed renewal cursor still needed to authorize cleanup. Without
+// failed renewal/start cursor still needed to authorize cleanup. Without
 // this protection, capacity-driven pruning could erase the only durable
 // evidence needed to decide whether a workload effect succeeded.
 func deploymentCommandPruningCursors(deployments map[string]Deployment, commands map[string]Command) map[string]struct{} {
@@ -1301,11 +1301,12 @@ func deploymentCommandPruningCursors(deployments map[string]Deployment, commands
 		for _, instance := range deployment.Instances {
 			key := commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)
 			command := commands[key]
-			needsRenewalCleanup := instance.Phase == DeploymentInstanceFailed && instance.CommandOperation == "renew" &&
-				command.CommandKind == "renew" && command.State == CommandTerminal && command.Terminal != nil &&
+			needsRejectedCleanup := instance.Phase == DeploymentInstanceFailed &&
+				(instance.CommandOperation == "renew" || instance.CommandOperation == "start") &&
+				command.CommandKind == instance.CommandOperation && command.State == CommandTerminal && command.Terminal != nil &&
 				command.Terminal.Report.Status == controlprotocol.ExecutorStatusRejected
 			if instance.CommandID == "" || instance.NodeID == "" || instance.CommandOperation == "" ||
-				!deploymentCommandInFlight(instance) && !needsRenewalCleanup {
+				!deploymentCommandInFlight(instance) && !needsRejectedCleanup {
 				continue
 			}
 			protected[key] = struct{}{}
