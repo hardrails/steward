@@ -773,15 +773,38 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	if strings.Contains(dockerfile, "# syntax=") {
 		t.Fatal("Dockerfile unexpectedly delegates parsing to an external frontend")
 	}
-	// Only the base-image installer may execute, to remove itself offline.
-	// Hermes and third-party packaging hooks still run only inside gVisor.
+	// Fixed distribution updates and removal of the unused installer are allowed
+	// before Hermes source is copied. Project hooks still run only inside gVisor.
 	const removePip = `RUN ["/usr/local/bin/python3", "-I", "-m", "pip", "uninstall", "--yes", "pip"]`
-	if strings.Count(dockerfile, removePip) != 1 {
-		t.Fatal("Dockerfile must remove the unused base pip exactly once")
+	const installOS = `RUN ["dpkg", "--install", "/opt/steward-gzip.deb", "/opt/steward-pcre2.deb", "/opt/steward-sqlite3.deb", "/opt/steward-perl.deb"]`
+	const removeOS = `RUN ["rm", "/opt/steward-gzip.deb", "/opt/steward-pcre2.deb", "/opt/steward-sqlite3.deb", "/opt/steward-perl.deb"]`
+	firstCopy := strings.Index(dockerfile, "COPY ")
+	for _, command := range []string{installOS, removeOS, removePip} {
+		if strings.Count(dockerfile, command) != 1 || strings.Index(dockerfile, command) >= firstCopy {
+			t.Fatalf("Dockerfile must execute the fixed base maintenance once before copying source: %q", command)
+		}
+	}
+	if strings.Index(dockerfile, installOS) >= strings.Index(dockerfile, removeOS) {
+		t.Fatal("Dockerfile removes security packages before installing them")
 	}
 	for _, line := range strings.Split(dockerfile, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "RUN ") && line != removePip {
+		if strings.HasPrefix(strings.TrimSpace(line), "RUN ") && line != removePip && line != installOS && line != removeOS {
 			t.Fatalf("Dockerfile contains an unexpected build command %q", line)
+		}
+	}
+	securityPackages := []string{
+		"74cf12212beee4ab8d473bdc0107abf9e8cef737492198e2f4944a19f142b0ac https://deb.debian.org/debian/pool/main/g/gzip/gzip_1.13-1+deb13u1_amd64.deb /opt/steward-gzip.deb",
+		"1252b96a5bc44bb5db982bef8eb18e54f5047cede2aff641bce4f8e1edb91c3e https://deb.debian.org/debian/pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_amd64.deb /opt/steward-pcre2.deb",
+		"0a459adaffd901109f7811ab65f58e7a957b4907d05539cf3d1184efdcde0468 https://deb.debian.org/debian/pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_amd64.deb /opt/steward-sqlite3.deb",
+		"b795464137a0f4d443fc9284f4b93e883fb83883cb533adf300ac660807a352a https://deb.debian.org/debian/pool/main/p/perl/perl-base_5.40.1-6+deb13u1_amd64.deb /opt/steward-perl.deb",
+	}
+	if strings.Count(dockerfile, "\nADD ") != len(securityPackages) {
+		t.Fatal("Dockerfile must fetch only the four reviewed OS updates")
+	}
+	for _, pkg := range securityPackages {
+		instruction := "ADD --checksum=sha256:" + pkg
+		if strings.Count(dockerfile, instruction) != 1 || strings.Index(dockerfile, instruction) >= strings.Index(dockerfile, installOS) {
+			t.Fatalf("Dockerfile must checksum the exact OS update before installation: %q", instruction)
 		}
 	}
 	for _, required := range []string{
@@ -2058,7 +2081,7 @@ func TestHermesBuilderPublicationRecoversEveryDurableState(t *testing.T) {
 			"build_recipe": map[string]any{
 				"builder_sha256": expectedBuilder,
 				"id":             "steward.hermes-adapter.docker-build.v1",
-				"network_scope":  "verified-host-wheel-fetch;gvisor-hooks-network-none",
+				"network_scope":  "verified-host-wheel-fetch;docker-checksummed-debian-fetch;gvisor-hooks-network-none",
 			},
 			"image": map[string]any{
 				"config_digest":    "sha256:" + strings.Repeat("2", 64),

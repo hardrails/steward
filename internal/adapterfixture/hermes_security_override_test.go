@@ -58,6 +58,47 @@ func TestHermesNativeQualificationRequiresInstalledSecurityVersions(t *testing.T
 	}
 }
 
+func TestHermesSecurityDownloadCleanupObservesUnmaskedImage(t *testing.T) {
+	source := string(readBounded(t, filepath.Join(hermesAdapterRoot(t), "../../scripts/hermes-feasibility.sh"), 2<<20))
+	const begin = "# BEGIN HERMES_SECURITY_DOWNLOAD_CLEANUP\n"
+	const end = "# END HERMES_SECURITY_DOWNLOAD_CLEANUP"
+	if strings.Count(source, begin) != 1 || strings.Count(source, end) != 1 {
+		t.Fatal("security download cleanup must have one extractable block")
+	}
+	block := strings.Split(strings.Split(source, begin)[1], end)[0]
+	const program = `import pathlib, sys
+from unittest.mock import patch
+real_path = pathlib.Path
+def runtime_path(root, *parts):
+    return real_path(sys.argv[1], root.lstrip("/"), *parts)
+with patch("pathlib.Path", runtime_path):
+    exec(sys.argv[2])
+`
+	for _, leftover := range []string{"", "gzip", "pcre2", "sqlite3", "perl"} {
+		t.Run("leftover-"+leftover, func(t *testing.T) {
+			root := t.TempDir()
+			// Runtime /tmp is empty tmpfs even when the image still has downloads.
+			for _, directory := range []string{"opt", "tmp"} {
+				if err := os.Mkdir(filepath.Join(root, directory), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if leftover != "" {
+				if err := os.WriteFile(filepath.Join(root, "opt", "steward-"+leftover+".deb"), []byte("retained package"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			output, err := exec.Command("python3", "-I", "-c", program, root, block).CombinedOutput()
+			if leftover == "" && err != nil {
+				t.Fatalf("clean image rejected: %v\n%s", err, output)
+			}
+			if leftover != "" && (err == nil || !strings.Contains(string(output), "OS security downloads remain")) {
+				t.Fatalf("image leftover masked by empty tmpfs: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
 func TestHermesSecurityOverridesBindTheReplacedLockAndWheelIdentity(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	builder := string(readBounded(t, filepath.Join(root, "../../scripts/build-hermes-adapter.sh"), 2<<20))

@@ -12,8 +12,10 @@ upstream dependency and packaging hooks inside a bounded gVisor container with
 `--network=none`, read-only inputs, no Docker socket, dropped capabilities,
 `no-new-privileges`, fixed resource limits, and bounded artifact output. The final
 Dockerfile assembles that validated output and the original verified source,
-with build networking disabled. Its only execution step removes the unused base
-pip installer; no project build hook runs in Docker assembly. The feasibility
+with RUN networking disabled. Docker's checksum-verified ADD fetches four exact
+Debian security packages; native dpkg installs them offline before Hermes source
+is copied. The assembly also removes those downloads and the unused base pip
+installer; no project build hook runs in Docker assembly. The feasibility
 gate then runs the hostile-runtime checks.
 The build never uses the upstream image: that image starts as root, declares a
 volume, and its Dockerfile at the selected revision names two lockfiles that are

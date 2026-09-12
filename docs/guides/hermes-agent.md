@@ -214,9 +214,11 @@ and `--network=none`. First, a networkless gVisor planner reads the verified
 `uv.lock`. A non-executing host fetcher then downloads only the planned CPython 3.13
 `linux/amd64` wheels from `files.pythonhosted.org`. It refuses redirects and proxies
 and verifies each wheel's locked SHA-256 digest and byte size. The final image
-assembles the original source and validated environment with networking disabled;
-its only execution step uninstalls the unused base pip package. Source checkout
-and a missing digest-pinned base image can still
+assembles the original source and validated environment with RUN networking disabled.
+Docker ADD downloads four exact Debian security packages with reviewed SHA-256
+checksums; dpkg installs them offline before any Hermes source is copied. Assembly
+also removes the downloaded packages and unused base pip installer. These fixed
+Debian URLs, source checkout and a missing digest-pinned base image can still
 require host-side network access. Do not place secrets or production data on the
 build host; use a disposable build machine because gVisor reduces build risk but does
 not make untrusted code harmless. From a Steward source checkout, run the interactive
