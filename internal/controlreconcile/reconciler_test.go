@@ -1619,7 +1619,7 @@ func completeDeploymentCommandNamed(t *testing.T, fixture *reconcileFixture, dep
 	runtimeDigest := sha256.Sum256([]byte(deployment.TenantID + "\x00" + instance.InstanceID))
 	runtimeRef := "executor-" + hex.EncodeToString(runtimeDigest[:])
 	reported := "stopped"
-	if operation == "start" {
+	if operation == "start" || operation == "renew" && instance.Phase == controlstore.DeploymentInstanceRunning {
 		reported = "running"
 	}
 	report := controlprotocol.ExecutorReportV4{

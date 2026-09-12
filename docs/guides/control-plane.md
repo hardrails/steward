@@ -1207,8 +1207,14 @@ credentials, 4,096 enrollment capabilities, 16,384 commands, and 1,024 desired
 deployments, with smaller per-tenant and per-node ceilings. Expired enrollment records are reclaimed when a
 new enrollment needs space. Commands with known terminal outcomes become eligible
 for reclamation after the configured minimum retention period, which defaults to
-24 hours. Pending, leased, `failed`, and `outcome_unknown` commands are not
-reclaimed automatically.
+24 hours. Settled renewals also become eligible after the maximum workload-lease
+duration plus clock skew (seven minutes), so continuous deployments do not need
+a day's worth of renewal records. Direct submissions and automatic deployment
+commands use the same retention rules. Reclamation commits atomically with the
+new command and, for deployments, its reconciliation cursor; a capacity failure
+does not discard history or advance the cursor. Unobserved deployment outcomes
+and active evidence-capture cursors stay protected. Pending, leased, generic
+`failed`, and `outcome_unknown` commands are not reclaimed automatically.
 
 The durable format separately caps its encoded snapshot and write-ahead log at 64
 MiB each. The packaged systemd service caps the process at 256 tasks, 4,096 open
