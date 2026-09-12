@@ -489,7 +489,7 @@ if (
     or adapter.get("steward_commit") != sys.argv[5]
     or adapter.get("git_tree") != sys.argv[6]
     or payload.get("build_recipe", {}).get("build_isolation") != "gvisor-runsc"
-    or payload.get("build_recipe", {}).get("network_scope") != "verified-host-wheel-fetch;gvisor-hooks-network-none"
+    or payload.get("build_recipe", {}).get("network_scope") != "verified-host-wheel-fetch;docker-checksummed-debian-fetch;gvisor-hooks-network-none"
     or payload.get("build_recipe", {}).get("upstream_build_hooks_in_final_assembly") is not False
 ):
     raise SystemExit(1)
@@ -707,6 +707,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import sys
 
 # BEGIN HERMES_INSTALLED_SECURITY
@@ -717,6 +718,22 @@ for name, version in expected.items():
     if not isinstance(version, str) or importlib.metadata.version(name) != version:
         raise SystemExit("installed security distribution differs from the reviewed override")
 # END HERMES_INSTALLED_SECURITY
+
+expected_os = {
+    "gzip": "1.13-1+deb13u1",
+    "libpcre2-8-0": "10.46-1~deb13u2",
+    "libsqlite3-0": "3.46.1-7+deb13u2",
+    "perl-base": "5.40.1-6+deb13u1",
+}
+installed_os = subprocess.run(
+    ["/usr/bin/dpkg-query", "--show", "--showformat=${Package}=${Version}\\n", *expected_os],
+    check=True, capture_output=True, text=True, timeout=5,
+)
+if dict(line.split("=", 1) for line in installed_os.stdout.splitlines()) != expected_os:
+    raise SystemExit("installed OS security packages differ from the reviewed updates")
+if any(pathlib.Path("/tmp", "steward-" + name + ".deb").exists()
+       for name in ("gzip", "pcre2", "sqlite3", "perl")):
+    raise SystemExit("OS security downloads remain in the runtime filesystem")
 
 root = pathlib.Path("/opt/hermes")
 for name in ("hermes_cli", "run_agent", "gateway"):

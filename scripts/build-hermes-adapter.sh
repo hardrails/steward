@@ -357,7 +357,7 @@ def validate_pair(archive_fd, metadata_fd, archive_entry=None, metadata_entry=No
         or not isinstance(recipe, dict)
         or recipe.get("id") != "steward.hermes-adapter.docker-build.v1"
         or recipe.get("builder_sha256") != expected_builder
-        or recipe.get("network_scope") != "verified-host-wheel-fetch;gvisor-hooks-network-none"
+        or recipe.get("network_scope") != "verified-host-wheel-fetch;docker-checksummed-debian-fetch;gvisor-hooks-network-none"
     ):
         raise SystemExit("publication attestation contract is invalid")
     if expected_adapter_source == "git-checkout":
@@ -1415,7 +1415,7 @@ payload = {
         "builder_sha256": builder,
         "dockerfile_sha256": dockerfile,
         "id": "steward.hermes-adapter.docker-build.v1",
-        "network_scope": "verified-host-wheel-fetch;gvisor-hooks-network-none",
+        "network_scope": "verified-host-wheel-fetch;docker-checksummed-debian-fetch;gvisor-hooks-network-none",
         "pull_newer_base": False,
         "runtime_executed": False,
         "source_inputs_sha256": source_inputs,

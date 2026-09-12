@@ -1,6 +1,15 @@
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.12-python3.13-trixie-slim@sha256:2ab87c099cd28eeacc2d1122e8e2e020651fdf92c68d277caa003c3bba0627cc
 FROM ${UV_IMAGE}
 
+# Debian security updates absent from the pinned upstream base. Docker verifies
+# the reviewed hashes before dpkg runs offline, before any Hermes source exists.
+ADD --checksum=sha256:74cf12212beee4ab8d473bdc0107abf9e8cef737492198e2f4944a19f142b0ac https://deb.debian.org/debian/pool/main/g/gzip/gzip_1.13-1+deb13u1_amd64.deb /tmp/steward-gzip.deb
+ADD --checksum=sha256:1252b96a5bc44bb5db982bef8eb18e54f5047cede2aff641bce4f8e1edb91c3e https://deb.debian.org/debian/pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_amd64.deb /tmp/steward-pcre2.deb
+ADD --checksum=sha256:0a459adaffd901109f7811ab65f58e7a957b4907d05539cf3d1184efdcde0468 https://deb.debian.org/debian/pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_amd64.deb /tmp/steward-sqlite3.deb
+ADD --checksum=sha256:b795464137a0f4d443fc9284f4b93e883fb83883cb533adf300ac660807a352a https://deb.debian.org/debian/pool/main/p/perl/perl-base_5.40.1-6+deb13u1_amd64.deb /tmp/steward-perl.deb
+RUN ["dpkg", "--install", "/tmp/steward-gzip.deb", "/tmp/steward-pcre2.deb", "/tmp/steward-sqlite3.deb", "/tmp/steward-perl.deb"]
+RUN ["rm", "/tmp/steward-gzip.deb", "/tmp/steward-pcre2.deb", "/tmp/steward-sqlite3.deb", "/tmp/steward-perl.deb"]
+
 # Remove the unused base-image installer and its vendored dependencies. This
 # fixed offline removal never executes Hermes source or dependency build hooks.
 RUN ["/usr/local/bin/python3", "-I", "-m", "pip", "uninstall", "--yes", "pip"]
