@@ -6,7 +6,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-revision=2237be355906fbe6065ce1815711eee52b2d646e
+revision=d337b736aa1e8ebecfab043842d13e4a2d2f48a3
 evidence_out=${HERMES_EVIDENCE_OUT:-$root/dist/acceptance/hermes/feasibility.json}
 source_dir=${HERMES_SOURCE_DIR:-}
 build_timeout=${HERMES_BUILD_TIMEOUT_SECONDS:-1800}
