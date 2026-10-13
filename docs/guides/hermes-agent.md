@@ -7,7 +7,7 @@ section: Agent compatibility
 # Hermes Agent adapter and qualification status
 
 Steward includes an adapter definition for Hermes Agent commit
-[`2237be355906fbe6065ce1815711eee52b2d646e`](https://github.com/NousResearch/hermes-agent/commit/2237be355906fbe6065ce1815711eee52b2d646e).
+[`71d34bad1045610252eda02ee79549436896e784`](https://github.com/NousResearch/hermes-agent/commit/71d34bad1045610252eda02ee79549436896e784).
 The adapter builds Hermes from that exact source revision into a hardened image that
 runs every process as UID/GID `65532:65532`. It does not use or modify the official
 upstream image. The v2 bridge provides a fixed, run-specific stop operation,

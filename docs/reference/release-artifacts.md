@@ -60,7 +60,7 @@ On an installed Linux node, the packaged interactive builder is:
 
 For unattended operation, add `--non-interactive`. Without `--source-dir`, the
 builder downloads only Hermes commit
-`2237be355906fbe6065ce1815711eee52b2d646e` into a temporary directory. An operator
+`71d34bad1045610252eda02ee79549436896e784` into a temporary directory. An operator
 can instead transfer an exact clean checkout and pass
 `--source-dir /path/to/hermes-agent`; that prevents the source download. The
 digest-pinned base image and locked build dependencies must still be present locally
