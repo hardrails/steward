@@ -115,7 +115,7 @@ Compromised host root is outside the node-local receipt trust boundary.
 ## Which agent runtime does Steward support?
 
 Steward can run its qualified, source-built Hermes adapter for exact upstream commit
-`2237be355906fbe6065ce1815711eee52b2d646e` on the qualified `linux/amd64` platform.
+`d923a5eb487a17c0a68801bba9ef0f56c81040a8` on the qualified `linux/amd64` platform.
 Other platforms require their own qualification run. The official Hermes image is still not
 admissible because it starts as root and declares a volume. Steward includes an
 interactive and non-interactive builder; it does not redistribute a prebuilt image
