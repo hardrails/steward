@@ -21,7 +21,7 @@ import threading
 import time
 from typing import Any, Callable
 
-REVISION = "2237be355906fbe6065ce1815711eee52b2d646e"
+REVISION = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
 STATE = pathlib.Path("/opt/data")
 FIXTURE = pathlib.Path("/opt/steward/skills/steward.workspace-audit")
 CONNECTOR_FIXTURE = pathlib.Path("/opt/steward/skills/steward.connector-work")
