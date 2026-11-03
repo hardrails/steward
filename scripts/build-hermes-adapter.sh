@@ -9,7 +9,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 readonly expected_repository=https://github.com/NousResearch/hermes-agent.git
-readonly expected_revision=2237be355906fbe6065ce1815711eee52b2d646e
+readonly expected_revision=f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab
 readonly default_build_timeout=3600
 readonly default_clone_timeout=600
 readonly default_save_timeout=900

@@ -6,24 +6,24 @@
   ],
   "upstream": {
     "repository": "https://github.com/NousResearch/hermes-agent.git",
-    "revision": "2237be355906fbe6065ce1815711eee52b2d646e",
+    "revision": "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab",
     "license": "MIT",
     "license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
-    "release": "v2026.9.7",
-    "version": "0.21.1"
+    "release": "v0.22.6",
+    "version": "0.0.0"
   },
   "build_inputs": [
     {
       "path": "pyproject.toml",
-      "sha256": "1f0d8d7e9e19c3a1cc25521a5cf56f3c885e4604d3081246cd42d9924a983174"
+      "sha256": "8c9de0a63a81281a24c721f45051fe9fcf8e09ac6ea4ed4ac95e3b96f049b5e3"
     },
     {
       "path": "uv.lock",
-      "sha256": "38baf65f5960e6fd930b1aaa817d4d24df312d7b9031a4197998aa9eb8512368"
+      "sha256": "e6d08c634c3f9a252a896135a9c30324776fa343ce68432e88d22f2968f257e2"
     },
     {
       "path": "package-lock.json",
-      "sha256": "83beeba3f6e7826312444c7b64067488afae9ed88ad7326ecef61ac235bab86d"
+      "sha256": "ba681cd436db12d02a82f80c19de02d94e9cd7ca7c1672c4589b37e0ece522c7"
     }
   ],
   "security_overrides": [
